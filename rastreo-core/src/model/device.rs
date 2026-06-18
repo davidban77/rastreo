@@ -107,6 +107,18 @@ mod tests {
     }
 
     #[test]
+    fn identity_key_deserialize_rejects_empty_string() {
+        let result: Result<IdentityKey, _> = serde_json::from_str("\"\"");
+        assert!(result.is_err(), "empty string must fail deserialize");
+    }
+
+    #[test]
+    fn identity_key_deserialize_rejects_whitespace_only() {
+        let result: Result<IdentityKey, _> = serde_json::from_str("\"   \"");
+        assert!(result.is_err(), "whitespace-only must fail deserialize");
+    }
+
+    #[test]
     fn confidence_accepts_zero() {
         let c = Confidence::new(0.0).expect("0.0 is valid");
         assert_eq!(c.value(), 0.0);
