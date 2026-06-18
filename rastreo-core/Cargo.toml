@@ -1,0 +1,35 @@
+[package]
+name = "rastreo-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["network-programming"]
+description = "Core engine for rastreo — enrichment-aware network discovery library"
+readme = "../README.md"
+
+[features]
+default = ["config"]
+config = ["dep:serde_yaml_ng"]
+http = []
+kafka = []
+snmp = []
+arp = []
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true, optional = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+rstest = { workspace = true }
+
+[lints]
+workspace = true

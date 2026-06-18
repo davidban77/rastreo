@@ -1,0 +1,60 @@
+version: "3"
+
+tasks:
+  # ---------------------------------------------------------------------------
+  # Build
+  # ---------------------------------------------------------------------------
+  build:
+    desc: Build the workspace (debug)
+    cmds:
+      - cargo build --workspace
+
+  build:release:
+    desc: Build rastreo and rastreo-server in release mode
+    cmds:
+      - cargo build --release -p rastreo
+      - cargo build --release -p rastreo-server
+
+  # ---------------------------------------------------------------------------
+  # Test & Lint
+  # ---------------------------------------------------------------------------
+  test:
+    desc: Run all unit and integration tests
+    cmds:
+      - cargo test --workspace
+
+  lint:
+    desc: Run clippy and format check
+    cmds:
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo fmt --all -- --check
+
+  check:
+    desc: Run full quality gate (build + test + lint)
+    cmds:
+      - task: build
+      - task: test
+      - task: lint
+
+  # ---------------------------------------------------------------------------
+  # Utilities
+  # ---------------------------------------------------------------------------
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - cargo clean
+
+  audit:
+    desc: Run cargo audit for security vulnerabilities
+    cmds:
+      - cargo audit
+
+  docs:
+    desc: Build and open Rust API documentation
+    cmds:
+      - cargo doc --workspace --no-deps --open
+
+  fmt:
+    desc: Auto-format all code
+    cmds:
+      - cargo fmt --all

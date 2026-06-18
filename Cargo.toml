@@ -1,0 +1,33 @@
+[workspace]
+members = ["rastreo-core", "rastreo", "rastreo-server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+authors = ["David Flores <davidflores77@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/davidban77/rastreo"
+homepage = "https://github.com/davidban77/rastreo"
+description = "Enrichment-aware network discovery — Kafka-first, in the spirit of Sonda."
+keywords = ["network", "discovery", "kafka", "snmp", "observability"]
+categories = ["command-line-utilities", "network-programming"]
+
+[workspace.dependencies]
+rastreo-core = { path = "rastreo-core", version = "0.0.1" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+insta = { version = "1.40", features = ["json", "yaml"] }
+rstest = "0.26"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
