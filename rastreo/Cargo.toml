@@ -1,0 +1,28 @@
+[package]
+name = "rastreo"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "network-programming"]
+description = "CLI for rastreo — enrichment-aware network discovery"
+readme = "../README.md"
+
+[features]
+default = ["config"]
+config = ["rastreo-core/config"]
+
+[[bin]]
+name = "rastreo"
+path = "src/main.rs"
+
+[dependencies]
+rastreo-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

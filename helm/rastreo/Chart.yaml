@@ -1,0 +1,19 @@
+apiVersion: v2
+name: rastreo
+description: Enrichment-aware network discovery — Kafka-first, in the spirit of Sonda
+type: application
+version: 0.0.1
+appVersion: 0.0.1
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/davidban77/rastreo
+sources:
+  - https://github.com/davidban77/rastreo
+maintainers:
+  - name: David Flores
+    email: davidflores77@gmail.com
+keywords:
+  - network
+  - discovery
+  - kafka
+  - snmp
+  - observability
