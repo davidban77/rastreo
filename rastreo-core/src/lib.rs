@@ -1,4 +1,16 @@
-/// Returns the `rastreo-core` crate version as declared in `Cargo.toml`.
+pub mod config;
+pub mod encoder;
+pub mod error;
+pub mod model;
+pub mod prober;
+pub mod sink;
+
+pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, RuntimeError};
+pub use model::{
+    Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget,
+    Signal, Target,
+};
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
