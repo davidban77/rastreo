@@ -49,6 +49,19 @@ tasks:
     cmds:
       - cargo audit
 
+  # ---------------------------------------------------------------------------
+  # Local stack
+  # ---------------------------------------------------------------------------
+  stack:up:
+    desc: Start the local development stack (Kafka, target hosts, rastreo-server)
+    cmds:
+      - docker compose up -d
+
+  stack:down:
+    desc: Stop and remove the local development stack
+    cmds:
+      - docker compose down -v
+
   docs:
     desc: Build and open Rust API documentation
     cmds:

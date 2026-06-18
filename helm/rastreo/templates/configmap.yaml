@@ -1,0 +1,13 @@
+{{- if .Values.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rastreo.fullname" . }}-config
+  labels:
+    {{- include "rastreo.labels" . | nindent 4 }}
+data:
+  {{- range $filename, $content := .Values.config }}
+  {{ $filename }}: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

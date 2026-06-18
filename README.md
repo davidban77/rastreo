@@ -16,9 +16,19 @@ This is a Cargo workspace with three crates:
 
 No business logic lives outside `rastreo-core`. If the CLI or server needs new behavior, it goes in core.
 
-## Install
+## Quickstart
 
-Build from source:
+Bring up the local development stack (rastreo-server, single-node Kafka, three alpine target hosts) with Docker Compose:
+
+```bash
+docker compose up -d
+curl http://localhost:8080/health
+# {"status":"ok"}
+```
+
+The stack runs everything on a `10.50.0.0/24` bridge network — enough to exercise the discovery pipeline end-to-end during development. Kafka is reachable on `localhost:9092` from the host, and the three alpine target containers (`10.50.0.10`–`10.50.0.12`, each serving an HTTP listener on port 80) provide a reachable surface for prober experiments. Tear the stack down with `docker compose down -v`.
+
+Build from source instead:
 
 ```bash
 cargo install --path rastreo

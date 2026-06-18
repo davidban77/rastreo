@@ -45,6 +45,7 @@ cargo fmt --all -- --check
 ```bash
 cargo build --workspace                                                # debug build
 cargo build --release --target x86_64-unknown-linux-musl -p rastreo    # static musl binary
+docker compose up -d                                                   # local dev stack (Kafka, target hosts, rastreo-server)
 ```
 
 ## Architecture

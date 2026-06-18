@@ -1,0 +1,10 @@
+rastreo has been deployed successfully.
+
+1. Get the server URL by running:
+
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "rastreo.fullname" . }} {{ .Values.server.port }}:{{ .Values.service.port }}
+
+2. Verify the server is running:
+
+  curl http://localhost:{{ .Values.server.port }}/health
+  # {"status":"ok"}
