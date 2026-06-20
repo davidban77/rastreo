@@ -5,3 +5,8 @@
 .DS_Store
 .claude/worktrees/
 .claude/sessions/
+
+# Internal planning and design artifacts — never committed.
+# User-facing docs live under docs/site/ (MkDocs) and remain tracked.
+docs/design/
+docs/plans/
