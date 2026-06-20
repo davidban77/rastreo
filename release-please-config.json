@@ -17,21 +17,6 @@
           "jsonpath": "$.workspace.dependencies.rastreo-core.version"
         },
         {
-          "type": "toml",
-          "path": "rastreo-core/Cargo.toml",
-          "jsonpath": "$.package.version"
-        },
-        {
-          "type": "toml",
-          "path": "rastreo/Cargo.toml",
-          "jsonpath": "$.package.version"
-        },
-        {
-          "type": "toml",
-          "path": "rastreo-server/Cargo.toml",
-          "jsonpath": "$.package.version"
-        },
-        {
           "type": "yaml",
           "path": "helm/rastreo/Chart.yaml",
           "jsonpath": "$.version"
