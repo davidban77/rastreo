@@ -2,8 +2,8 @@ apiVersion: v2
 name: rastreo
 description: Enrichment-aware network discovery — Kafka-first, in the spirit of Sonda
 type: application
-version: 0.0.2
-appVersion: 0.0.2
+version: 0.0.3
+appVersion: 0.0.3
 kubeVersion: '>=1.25.0-0'
 home: https://github.com/davidban77/rastreo
 sources:

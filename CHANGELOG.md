@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.3](https://github.com/davidban77/rastreo/compare/v0.0.2...v0.0.3) (2026-06-20)
+
+
+### Documentation
+
+* backfill Resolver entry to 0.0.2 changelog ([#9](https://github.com/davidban77/rastreo/issues/9)) ([194ad5f](https://github.com/davidban77/rastreo/commit/194ad5f759f84569577de439f513e51c2f0e8ca7))
+
+
+### CI/CD
+
+* bump actions/checkout from 4 to 7 ([#4](https://github.com/davidban77/rastreo/issues/4)) ([3e71a87](https://github.com/davidban77/rastreo/commit/3e71a87de061fbcddb51ae65bd7d659872d63d30))
+* bump apache/kafka from 3.9.0 to 4.2.0 ([#6](https://github.com/davidban77/rastreo/issues/6)) ([d9ba520](https://github.com/davidban77/rastreo/commit/d9ba520466c9d3984a076094e88506b38a6a3f76))
+* bump nginx from 1.27-alpine to 1.31-alpine ([#5](https://github.com/davidban77/rastreo/issues/5)) ([a87f1f2](https://github.com/davidban77/rastreo/commit/a87f1f2054bc34bf9fe83a3e056cb5bbe8b9bcd2))
+
 ## [0.0.2](https://github.com/davidban77/rastreo/compare/v0.0.1...v0.0.2) (2026-06-20)
 
 
