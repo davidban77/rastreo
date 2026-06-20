@@ -1,12 +1,13 @@
 use std::net::IpAddr;
 use std::time::SystemTime;
 
+use ipnet::IpNet;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Target {
     Ip(IpAddr),
-    // Source form for CIDR notation; parsed by the resolver, not stored as a typed network.
-    Cidr(String),
+    Cidr(IpNet),
     Range { start: IpAddr, end: IpAddr },
     DnsName(String),
 }
@@ -33,7 +34,7 @@ mod tests {
 
     #[test]
     fn target_cidr_round_trips_json() {
-        let t = Target::Cidr("10.0.0.0/24".into());
+        let t = Target::Cidr("10.0.0.0/24".parse().expect("valid cidr"));
         let s = serde_json::to_string(&t).expect("serialize");
         let back: Target = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(t, back);

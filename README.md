@@ -10,7 +10,7 @@ The name "rastreo" is Spanish for "tracking" or "sweeping" — a sibling to "son
 
 This is a Cargo workspace with three crates:
 
-- **rastreo-core** — library crate: all discovery and enrichment logic (probers, fusion, classification, encoders, sinks).
+- **rastreo-core** — library crate: all discovery and enrichment logic (target resolution, probers, fusion, classification, encoders, sinks).
 - **rastreo** — binary crate: CLI (thin layer over core, clap + YAML config).
 - **rastreo-server** — binary crate: HTTP control plane (axum).
 
