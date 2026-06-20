@@ -16,8 +16,13 @@ src/
 ├── prober/
 │   ├── mod.rs       ← Prober trait + ProberConfig + create_prober factory
 │   └── tcp_connect.rs ← TcpConnectProber
-├── encoder/mod.rs   ← Encoder trait + EncoderConfig + create_encoder factory
-├── sink/mod.rs      ← Sink trait + SinkConfig + create_sink factory
+├── encoder/
+│   ├── mod.rs       ← Encoder trait + EncoderConfig + create_encoder factory
+│   └── ndjson.rs    ← NdjsonEncoder
+├── sink/
+│   ├── mod.rs       ← Sink trait + SinkConfig + create_sink factory
+│   ├── stdout.rs    ← StdoutSink
+│   └── file.rs      ← FileSink
 ├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
