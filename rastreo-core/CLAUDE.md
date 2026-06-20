@@ -15,6 +15,7 @@ src/
 ├── prober/mod.rs    ← Prober trait + ProberConfig + create_prober factory
 ├── encoder/mod.rs   ← Encoder trait + EncoderConfig + create_encoder factory
 ├── sink/mod.rs      ← Sink trait + SinkConfig + create_sink factory
+├── resolver/mod.rs  ← Resolver trait + HickoryResolver default impl
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
 
@@ -34,7 +35,7 @@ Features beyond `config` currently have no associated code; declaring them up fr
 
 - Define errors using `thiserror`. Every public function returns `Result<T, RastreoError>`.
 - Never `unwrap()` in this crate. Use `?` propagation or explicit error mapping.
-- The structured error hierarchy uses sub-enums per failure domain (`ConfigError`, `ProbeError`, `EncoderError`, `RuntimeError`) accessed via the umbrella `RastreoError`. No blanket `From<std::io::Error>` — sink call sites map I/O failures to `RastreoError::Sink` explicitly.
+- The structured error hierarchy uses sub-enums per failure domain (`ConfigError`, `ProbeError`, `ResolverError`, `EncoderError`, `RuntimeError`) accessed via the umbrella `RastreoError`. No blanket `From<std::io::Error>` — sink call sites map I/O failures to `RastreoError::Sink` explicitly.
 
 ## Performance Guidelines
 

@@ -26,10 +26,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+hickory-resolver = { workspace = true }
+ipnet = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
 rstest = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

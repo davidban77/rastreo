@@ -7,6 +7,9 @@ pub enum RastreoError {
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
 
+    #[error("resolver error: {0}")]
+    Resolver(#[from] ResolverError),
+
     #[error("encoder error: {0}")]
     Encoder(#[from] EncoderError),
 
@@ -40,6 +43,38 @@ pub enum ProbeError {
     Timeout { timeout_ms: u64 },
     #[error("{0}")]
     Other(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ResolverError {
+    #[error("DNS lookup failed for {name}")]
+    DnsLookupFailed {
+        name: String,
+        #[source]
+        source: hickory_resolver::net::NetError,
+    },
+    #[error("DNS lookup returned no records for {name}")]
+    DnsNoRecords { name: String },
+    #[error("CIDR {cidr} expands to {hosts} hosts; exceeds the configured limit of {limit}")]
+    CidrTooLarge {
+        cidr: String,
+        hosts: u128,
+        limit: usize,
+    },
+    #[error(
+        "IP range {start}..={end} spans {hosts} addresses; exceeds the configured limit of {limit}"
+    )]
+    RangeTooLarge {
+        start: String,
+        end: String,
+        hosts: u128,
+        limit: usize,
+    },
+    #[error("IP range is invalid: start {start} > end {end}")]
+    InvalidRange { start: String, end: String },
+    #[error("IP range mixes IPv4 and IPv6: start {start} end {end}")]
+    MixedFamilyRange { start: String, end: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +134,28 @@ mod tests {
         let r = RuntimeError::TaskPanicked("worker".into());
         let err: RastreoError = r.into();
         assert!(matches!(err, RastreoError::Runtime(_)));
+    }
+
+    #[test]
+    fn resolver_error_converts_via_from() {
+        let r = ResolverError::DnsNoRecords {
+            name: "missing.lab".into(),
+        };
+        let err: RastreoError = r.into();
+        assert!(matches!(err, RastreoError::Resolver(_)));
+    }
+
+    #[test]
+    fn resolver_cidr_too_large_display_includes_fields() {
+        let err = RastreoError::Resolver(ResolverError::CidrTooLarge {
+            cidr: "10.0.0.0/8".into(),
+            hosts: 16_777_214,
+            limit: 65_536,
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("10.0.0.0/8"));
+        assert!(msg.contains("16777214"));
+        assert!(msg.contains("65536"));
     }
 
     #[test]
@@ -162,6 +219,7 @@ mod tests {
         assert_send_sync::<RastreoError>();
         assert_send_sync::<ConfigError>();
         assert_send_sync::<ProbeError>();
+        assert_send_sync::<ResolverError>();
         assert_send_sync::<EncoderError>();
         assert_send_sync::<RuntimeError>();
     }

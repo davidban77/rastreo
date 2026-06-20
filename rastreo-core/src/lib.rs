@@ -3,13 +3,15 @@ pub mod encoder;
 pub mod error;
 pub mod model;
 pub mod prober;
+pub mod resolver;
 pub mod sink;
 
-pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, RuntimeError};
+pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, ResolverError, RuntimeError};
 pub use model::{
     Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget,
     Signal, Target,
 };
+pub use resolver::{HickoryResolver, Resolver};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
