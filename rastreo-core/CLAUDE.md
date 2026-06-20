@@ -13,7 +13,9 @@ src/
 │   ├── outcome.rs   ← ProbeKind, ProbeOutcome, Signal, ProbeCtx
 │   └── device.rs    ← DeviceRecord, IdentityKey, Confidence
 ├── resolver/mod.rs  ← Resolver trait + HickoryResolver default impl
-├── prober/mod.rs    ← Prober trait + ProberConfig + create_prober factory
+├── prober/
+│   ├── mod.rs       ← Prober trait + ProberConfig + create_prober factory
+│   └── tcp_connect.rs ← TcpConnectProber
 ├── encoder/mod.rs   ← Encoder trait + EncoderConfig + create_encoder factory
 ├── sink/mod.rs      ← Sink trait + SinkConfig + create_sink factory
 ├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl

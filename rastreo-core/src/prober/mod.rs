@@ -1,3 +1,7 @@
+pub mod tcp_connect;
+
+pub use tcp_connect::TcpConnectProber;
+
 use crate::error::RastreoError;
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
 
@@ -15,10 +19,14 @@ pub trait Prober: Send + Sync {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum ProberConfig {}
+pub enum ProberConfig {
+    TcpConnect { ports: Vec<u16> },
+}
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
-    match *config {}
+    match config {
+        ProberConfig::TcpConnect { ports } => Ok(Box::new(TcpConnectProber::new(ports.clone())?)),
+    }
 }
 
 #[cfg(test)]
