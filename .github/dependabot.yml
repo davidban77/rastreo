@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5
+    target-branch: "main"
+    ignore:
+      # Major version bumps require code changes — handle manually.
+      - dependency-name: "axum"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tower-http"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "hickory-resolver"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    target-branch: "main"
+    ignore:
+      # dtolnay/rust-toolchain's tags ARE the Rust toolchain versions it installs —
+      # so auto-bumping `@1.95.0 → @1.100.0` would request a nonexistent Rust
+      # release and break the Release workflow. Bump this manually in sync with
+      # rust-toolchain.toml.
+      - dependency-name: "dtolnay/rust-toolchain"
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    target-branch: "main"
