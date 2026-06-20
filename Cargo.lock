@@ -1090,7 +1090,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rastreo"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "rastreo-core"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "hickory-resolver",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "rastreo-server"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "axum",

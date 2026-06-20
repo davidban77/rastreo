@@ -8,7 +8,7 @@ The **core library is the product**. The CLI and HTTP server are delivery mechan
 
 This is a Cargo workspace with three crates:
 
-- **rastreo-core** — library crate: all domain logic (target resolution, probers, fusion, classification, encoders, sinks).
+- **rastreo-core** — library crate: all domain logic (target resolution, scheduling, probers, fusion, classification, encoders, sinks).
 - **rastreo** — binary crate: CLI (thin layer over core, clap + YAML config).
 - **rastreo-server** — binary crate: HTTP API control plane (axum).
 

@@ -12,10 +12,11 @@ src/
 │   ├── target.rs    ← Target, ResolvedTarget
 │   ├── outcome.rs   ← ProbeKind, ProbeOutcome, Signal, ProbeCtx
 │   └── device.rs    ← DeviceRecord, IdentityKey, Confidence
+├── resolver/mod.rs  ← Resolver trait + HickoryResolver default impl
 ├── prober/mod.rs    ← Prober trait + ProberConfig + create_prober factory
 ├── encoder/mod.rs   ← Encoder trait + EncoderConfig + create_encoder factory
 ├── sink/mod.rs      ← Sink trait + SinkConfig + create_sink factory
-├── resolver/mod.rs  ← Resolver trait + HickoryResolver default impl
+├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
 
