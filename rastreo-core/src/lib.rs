@@ -7,6 +7,7 @@ pub mod resolver;
 pub mod scheduler;
 pub mod sink;
 
+pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, ResolverError, RuntimeError};
 pub use model::{
     Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget,
@@ -15,6 +16,7 @@ pub use model::{
 pub use prober::{Prober, ProberConfig, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};
+pub use sink::{FileSink, Sink, SinkConfig, StdoutSink};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
