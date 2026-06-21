@@ -12,7 +12,7 @@ pub enum ProbeKind {
     Arp,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Signal {
     OpenPort(u16),
@@ -87,6 +87,17 @@ mod tests {
         };
         assert_eq!(ctx.retries, 3);
         assert_eq!(ctx.timeout, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn signal_partial_eq_distinguishes_variants() {
+        assert_eq!(Signal::OpenPort(80), Signal::OpenPort(80));
+        assert_ne!(Signal::OpenPort(80), Signal::OpenPort(443));
+        assert_ne!(Signal::OpenPort(80), Signal::HttpBanner("80".into()));
+        assert_eq!(
+            Signal::Mac("aa:bb:cc:dd:ee:ff".into()),
+            Signal::Mac("aa:bb:cc:dd:ee:ff".into())
+        );
     }
 
     #[test]

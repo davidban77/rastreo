@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
-use crate::error::RastreoError;
+use crate::error::{ConfigError, RastreoError};
 use crate::model::device::{Confidence, DeviceRecord, IdentityKey};
 use crate::model::outcome::{ProbeOutcome, Signal};
 
@@ -71,18 +71,6 @@ impl Default for DirectFuser {
     }
 }
 
-fn signal_eq(a: &Signal, b: &Signal) -> bool {
-    match (a, b) {
-        (Signal::OpenPort(x), Signal::OpenPort(y)) => x == y,
-        (Signal::HttpBanner(x), Signal::HttpBanner(y)) => x == y,
-        (Signal::SnmpSysObjectId(x), Signal::SnmpSysObjectId(y)) => x == y,
-        (Signal::SnmpSysDescr(x), Signal::SnmpSysDescr(y)) => x == y,
-        (Signal::Mac(x), Signal::Mac(y)) => x == y,
-        (Signal::DnsHost(x), Signal::DnsHost(y)) => x == y,
-        _ => false,
-    }
-}
-
 impl Fuser for DirectFuser {
     fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
         if outcomes.is_empty() {
@@ -116,15 +104,14 @@ impl Fuser for DirectFuser {
         let mut signals: Vec<Signal> = Vec::new();
         for outcome in outcomes {
             for signal in &outcome.signals {
-                if !signals.iter().any(|existing| signal_eq(existing, signal)) {
+                if !signals.iter().any(|existing| existing == signal) {
                     signals.push(signal.clone());
                 }
             }
         }
 
         let raw = self.confidence_baseline + (signals.len() as f64) * self.confidence_per_signal;
-        let clamped = raw.clamp(0.0, 1.0);
-        let confidence = Confidence::new(clamped)?;
+        let confidence = Confidence::new(raw.min(1.0))?;
 
         let last_seen = outcomes
             .iter()
@@ -160,7 +147,37 @@ pub enum FuserConfig {
     },
 }
 
+impl FuserConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self {
+            FuserConfig::Direct {
+                confidence_baseline,
+                confidence_per_signal,
+                include_unreachable: _,
+            } => {
+                if let Some(v) = confidence_baseline {
+                    if !v.is_finite() || !(0.0..=1.0).contains(v) {
+                        return Err(ConfigError::invalid(format!(
+                            "confidence_baseline must be finite and in [0.0, 1.0], got {v}"
+                        )));
+                    }
+                }
+                if let Some(v) = confidence_per_signal {
+                    if !v.is_finite() || *v < 0.0 {
+                        return Err(ConfigError::invalid(format!(
+                            "confidence_per_signal must be finite and non-negative, got {v}"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+// `validate()` runs at the YAML-to-impl boundary; builder methods are programmatic and skip it.
 pub fn create_fuser(config: &FuserConfig) -> Result<Box<dyn Fuser>, RastreoError> {
+    config.validate()?;
     match config {
         FuserConfig::Direct {
             include_unreachable,
@@ -426,6 +443,94 @@ mod tests {
         let outcomes = vec![outcome(1, false, vec![])];
         let record = f.fuse(&outcomes).expect("ok");
         assert!(record.is_some());
+    }
+
+    fn err_msg(cfg: &FuserConfig) -> String {
+        match create_fuser(cfg) {
+            Ok(_) => panic!("expected validation error"),
+            Err(e) => {
+                assert!(matches!(
+                    e,
+                    RastreoError::Config(crate::error::ConfigError::InvalidValue(_))
+                ));
+                format!("{e}")
+            }
+        }
+    }
+
+    #[test]
+    fn create_fuser_rejects_negative_confidence_baseline() {
+        let msg = err_msg(&FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: Some(-0.5),
+            confidence_per_signal: None,
+        });
+        assert!(msg.contains("confidence_baseline"));
+        assert!(msg.contains("-0.5"));
+    }
+
+    #[test]
+    fn create_fuser_rejects_confidence_baseline_above_one() {
+        let msg = err_msg(&FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: Some(1.5),
+            confidence_per_signal: None,
+        });
+        assert!(msg.contains("1.5"));
+    }
+
+    #[test]
+    fn create_fuser_rejects_nan_confidence_baseline() {
+        let msg = err_msg(&FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: Some(f64::NAN),
+            confidence_per_signal: None,
+        });
+        assert!(msg.contains("confidence_baseline"));
+    }
+
+    #[test]
+    fn create_fuser_rejects_negative_confidence_per_signal() {
+        let msg = err_msg(&FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: None,
+            confidence_per_signal: Some(-0.1),
+        });
+        assert!(msg.contains("confidence_per_signal"));
+        assert!(msg.contains("-0.1"));
+    }
+
+    #[test]
+    fn create_fuser_rejects_infinity_confidence_per_signal() {
+        let msg = err_msg(&FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: None,
+            confidence_per_signal: Some(f64::INFINITY),
+        });
+        assert!(msg.contains("confidence_per_signal"));
+    }
+
+    #[test]
+    fn create_fuser_accepts_zero_confidence_per_signal() {
+        let cfg = FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: Some(0.3),
+            confidence_per_signal: Some(0.0),
+        };
+        assert!(create_fuser(&cfg).is_ok(), "zero per_signal is valid");
+    }
+
+    #[test]
+    fn create_fuser_accepts_baseline_one_and_per_signal_zero() {
+        let cfg = FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: Some(1.0),
+            confidence_per_signal: Some(0.0),
+        };
+        assert!(
+            create_fuser(&cfg).is_ok(),
+            "baseline 1.0 with per_signal 0.0 is valid"
+        );
     }
 
     #[cfg(feature = "config")]
