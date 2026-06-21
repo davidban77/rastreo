@@ -1,4 +1,5 @@
 use crate::encoder::EncoderConfig;
+use crate::fuser::FuserConfig;
 use crate::model::Target;
 use crate::prober::ProberConfig;
 use crate::sink::SinkConfig;
@@ -26,6 +27,7 @@ pub struct BaseProbeConfig {
     pub rate_limit: Option<u32>,
     pub timeout_ms: Option<u64>,
     pub encoder: Option<EncoderConfig>,
+    pub fuser: Option<FuserConfig>,
     pub sink: Option<SinkConfig>,
 }
 
@@ -63,7 +65,24 @@ mod tests {
         assert!(cfg.rate_limit.is_none());
         assert!(cfg.timeout_ms.is_none());
         assert!(cfg.encoder.is_none());
+        assert!(cfg.fuser.is_none());
         assert!(cfg.sink.is_none());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn base_probe_config_deserializes_with_fuser_from_yaml() {
+        let yaml = "fuser:\n  type: direct\n  confidence_baseline: 0.2\n";
+        let cfg: BaseProbeConfig = serde_yaml_ng::from_str(yaml).expect("yaml");
+        let fuser = cfg.fuser.expect("fuser present");
+        let FuserConfig::Direct {
+            include_unreachable,
+            confidence_baseline,
+            confidence_per_signal,
+        } = fuser;
+        assert!(include_unreachable.is_none());
+        assert_eq!(confidence_baseline, Some(0.2));
+        assert!(confidence_per_signal.is_none());
     }
 
     #[test]
