@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -6,10 +7,15 @@ use crate::error::RastreoError;
 
 use super::Sink;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
+struct Inner {
+    buffer: Mutex<Vec<u8>>,
+    delivered: AtomicBool,
+}
+
+#[derive(Debug, Default)]
 pub struct MemorySink {
-    inner: Arc<Mutex<Vec<u8>>>,
-    last_write_delivered: Arc<Mutex<bool>>,
+    inner: Arc<Inner>,
 }
 
 impl MemorySink {
@@ -22,20 +28,18 @@ impl MemorySink {
     pub fn handle(&self) -> MemorySinkHandle {
         MemorySinkHandle {
             inner: Arc::clone(&self.inner),
-            last_write_delivered: Arc::clone(&self.last_write_delivered),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MemorySinkHandle {
-    inner: Arc<Mutex<Vec<u8>>>,
-    last_write_delivered: Arc<Mutex<bool>>,
+    inner: Arc<Inner>,
 }
 
 impl MemorySinkHandle {
     pub fn bytes(&self) -> Vec<u8> {
-        self.inner.lock().expect("memory sink mutex").clone()
+        self.inner.buffer.lock().expect("memory sink mutex").clone()
     }
 
     pub fn ndjson_lines(&self) -> Vec<String> {
@@ -48,7 +52,7 @@ impl MemorySinkHandle {
     }
 
     pub fn last_write_delivered(&self) -> bool {
-        *self.last_write_delivered.lock().expect("memory sink mutex")
+        self.inner.delivered.load(Ordering::SeqCst)
     }
 }
 
@@ -56,10 +60,11 @@ impl MemorySinkHandle {
 impl Sink for MemorySink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.inner
+            .buffer
             .lock()
             .expect("memory sink mutex")
             .extend_from_slice(data);
-        *self.last_write_delivered.lock().expect("memory sink mutex") = true;
+        self.inner.delivered.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -69,7 +74,7 @@ impl Sink for MemorySink {
     }
 
     fn last_write_delivered(&self) -> bool {
-        *self.last_write_delivered.lock().expect("memory sink mutex")
+        self.inner.delivered.load(Ordering::SeqCst)
     }
 }
 

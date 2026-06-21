@@ -65,7 +65,7 @@ pub async fn run(args: DiscoverArgs) -> Result<()> {
     );
     if summary.records_emitted == 0 && summary.probe_attempts > 0 {
         eprintln!(
-            "hint: 0 records were emitted; targets may have been unreachable. The default fuser skips unreachable groups."
+            "hint: 0 records emitted — no probe reached an open port. Check target reachability and port list."
         );
     }
     Ok(())

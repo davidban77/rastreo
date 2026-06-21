@@ -153,7 +153,7 @@ async fn discover_emits_zero_records_hint_when_no_records() {
         "stderr missing zero-records summary: {stderr}"
     );
     assert!(
-        stderr.contains("hint: 0 records were emitted"),
+        stderr.contains("hint: 0 records emitted"),
         "stderr missing hint line: {stderr}"
     );
 }
@@ -196,7 +196,7 @@ async fn discover_no_hint_when_records_emitted_greater_than_zero() {
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        !stderr.contains("hint: 0 records were emitted"),
+        !stderr.contains("hint: 0 records emitted"),
         "stderr should not include the hint when records were emitted: {stderr}"
     );
 }
