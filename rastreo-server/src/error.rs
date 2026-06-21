@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use rastreo_core::RastreoError;
+use rastreo_core::{RastreoError, ResolverError};
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -41,7 +41,11 @@ impl IntoResponse for AppError {
 impl From<RastreoError> for AppError {
     fn from(err: RastreoError) -> Self {
         let status = match &err {
-            RastreoError::Config(_) | RastreoError::Resolver(_) => StatusCode::BAD_REQUEST,
+            RastreoError::Config(_) => StatusCode::BAD_REQUEST,
+            RastreoError::Resolver(inner) => match inner {
+                ResolverError::DnsLookupFailed { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_REQUEST,
+            },
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self {
@@ -64,13 +68,56 @@ mod tests {
     }
 
     #[test]
-    fn resolver_error_maps_to_400() {
+    fn resolver_error_dns_no_records_maps_to_400() {
         let err: AppError = RastreoError::Resolver(ResolverError::DnsNoRecords {
             name: "missing.lab".into(),
         })
         .into();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("missing.lab"));
+    }
+
+    #[test]
+    fn resolver_error_cidr_too_large_maps_to_400() {
+        let err: AppError = RastreoError::Resolver(ResolverError::CidrTooLarge {
+            cidr: "10.0.0.0/8".into(),
+            hosts: 16_777_214,
+            limit: 65_536,
+        })
+        .into();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn resolver_error_invalid_range_maps_to_400() {
+        let err: AppError = RastreoError::Resolver(ResolverError::InvalidRange {
+            start: "10.0.0.10".into(),
+            end: "10.0.0.5".into(),
+        })
+        .into();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn resolver_error_range_too_large_maps_to_400() {
+        let err: AppError = RastreoError::Resolver(ResolverError::RangeTooLarge {
+            start: "10.0.0.0".into(),
+            end: "10.255.255.255".into(),
+            hosts: 16_777_216,
+            limit: 65_536,
+        })
+        .into();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn resolver_error_mixed_family_range_maps_to_400() {
+        let err: AppError = RastreoError::Resolver(ResolverError::MixedFamilyRange {
+            start: "10.0.0.0".into(),
+            end: "::1".into(),
+        })
+        .into();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

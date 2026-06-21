@@ -1,7 +1,9 @@
 use axum::extract::State;
 use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
-use rastreo_core::{run_discovery_with_components, DeviceRecord, DiscoverySummary, MemorySink};
+use rastreo_core::{
+    run_discovery_with_components, DeviceRecord, DiscoverySummary, EncoderConfig, MemorySink,
+};
 use serde::Serialize;
 
 use crate::error::AppError;
@@ -24,6 +26,23 @@ pub async fn create_scan(
     if scenario.probers.is_empty() {
         return Err(AppError::bad_request("scenario.probers must not be empty"));
     }
+
+    let mut scenario = scenario;
+    if scenario.base.sink.is_some() {
+        tracing::warn!(
+            sink = ?scenario.base.sink,
+            "client-supplied sink ignored; server returns records via response body"
+        );
+        scenario.base.sink = None;
+    }
+    if matches!(scenario.base.encoder, Some(ref e) if !matches!(e, EncoderConfig::Ndjson)) {
+        tracing::warn!(
+            encoder = ?scenario.base.encoder,
+            "client-supplied encoder ignored; server forces NDJSON encoding"
+        );
+    }
+    // Pin the encoder server-side so the MemorySink read-back parses line-by-line as JSON.
+    scenario.base.encoder = Some(EncoderConfig::Ndjson);
 
     let memory_sink = MemorySink::new();
     let handle = memory_sink.handle();
@@ -50,7 +69,7 @@ mod tests {
 
     use axum::http::StatusCode;
     use rastreo_core::config::BaseProbeConfig;
-    use rastreo_core::{HickoryResolver, ProberConfig, Resolver, Target};
+    use rastreo_core::{HickoryResolver, ProberConfig, Resolver, SinkConfig, Target};
 
     fn state_with_system_resolver() -> AppState {
         let resolver: Arc<dyn Resolver> =
@@ -132,6 +151,72 @@ mod tests {
         assert_eq!(value["summary"]["records_emitted"], 1);
         assert!(value["records"].is_array());
         assert_eq!(value["records"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_scan_pins_encoder_to_ndjson_when_client_omits_encoder() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+        assert!(s.base.encoder.is_none(), "client omits encoder");
+
+        let Json(response) = create_scan(State(state), Json(s))
+            .await
+            .expect("create_scan");
+        assert_eq!(response.summary.records_emitted, 1);
+        assert_eq!(response.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_scan_pins_encoder_to_ndjson_when_client_supplies_ndjson() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+        s.base.encoder = Some(EncoderConfig::Ndjson);
+
+        let Json(response) = create_scan(State(state), Json(s))
+            .await
+            .expect("create_scan");
+        assert_eq!(response.summary.records_emitted, 1);
+        assert_eq!(response.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_scan_ignores_client_supplied_sink_and_returns_records() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+        s.base.sink = Some(SinkConfig::Stdout);
+
+        let Json(response) = create_scan(State(state), Json(s))
+            .await
+            .expect("create_scan");
+        assert_eq!(response.summary.records_emitted, 1);
+        assert_eq!(response.records.len(), 1);
     }
 
     #[tokio::test]
