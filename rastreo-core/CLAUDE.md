@@ -24,6 +24,7 @@ src/
 │   ├── stdout.rs    ← StdoutSink
 │   └── file.rs      ← FileSink
 ├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl
+├── fuser/mod.rs     ← Fuser trait + DirectFuser default impl
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
 
