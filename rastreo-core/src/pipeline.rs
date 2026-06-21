@@ -9,22 +9,41 @@ use crate::model::{ProbeCtx, ProbeOutcome};
 use crate::prober::create_prober;
 use crate::resolver::{HickoryResolver, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler};
-use crate::sink::{create_sink, SinkConfig};
+use crate::sink::{create_sink, Sink, SinkConfig};
 
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CONCURRENCY: u32 = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DiscoverySummary {
     pub targets_resolved: usize,
     pub probe_attempts: usize,
     pub probe_errors: usize,
     pub records_emitted: usize,
+    #[serde(rename = "elapsed_ms", serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
+}
+
+fn serialize_duration_as_millis<S: serde::Serializer>(
+    d: &Duration,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u128(d.as_millis())
 }
 
 pub async fn run_discovery(
     scenario: &DiscoverScenarioConfig,
+) -> Result<DiscoverySummary, RastreoError> {
+    let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system()?);
+    let sink_config = scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout);
+    let sink = create_sink(&sink_config).await?;
+    run_discovery_with_components(scenario, resolver, sink).await
+}
+
+pub async fn run_discovery_with_components(
+    scenario: &DiscoverScenarioConfig,
+    resolver: Arc<dyn Resolver>,
+    mut sink: Box<dyn Sink>,
 ) -> Result<DiscoverySummary, RastreoError> {
     if scenario.probers.is_empty() {
         return Err(ConfigError::invalid("scenario.probers must not be empty").into());
@@ -32,8 +51,6 @@ pub async fn run_discovery(
 
     let start = Instant::now();
 
-    // Resolve targets before scheduling so failures surface before any probe spawns.
-    let resolver = HickoryResolver::from_system()?;
     let resolved = resolver.resolve_many(&scenario.targets).await?;
     let targets_resolved = resolved.len();
 
@@ -56,9 +73,6 @@ pub async fn run_discovery(
         .clone()
         .unwrap_or(EncoderConfig::Ndjson);
     let encoder = create_encoder(&encoder_config)?;
-
-    let sink_config = scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout);
-    let mut sink = create_sink(&sink_config).await?;
 
     let fuser_config = scenario.base.fuser.clone().unwrap_or(FuserConfig::Direct {
         include_unreachable: None,
@@ -212,6 +226,104 @@ mod tests {
 
         let bytes = std::fs::read(&path).expect("read");
         assert!(bytes.is_empty(), "no records expected, got {bytes:?}");
+    }
+
+    #[tokio::test]
+    async fn run_discovery_with_components_uses_provided_resolver() {
+        use crate::model::ResolvedTarget;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingResolver {
+            inner: HickoryResolver,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl Resolver for CountingResolver {
+            async fn resolve(
+                &self,
+                target: &crate::model::Target,
+            ) -> Result<Vec<ResolvedTarget>, RastreoError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.resolve(target).await
+            }
+        }
+
+        let resolver = Arc::new(CountingResolver {
+            inner: HickoryResolver::from_system().expect("init"),
+            calls: AtomicUsize::new(0),
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        };
+
+        let resolver_dyn: Arc<dyn Resolver> = resolver.clone();
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let sink: Box<dyn Sink> = Box::new(mem);
+        let _summary = run_discovery_with_components(&scenario, resolver_dyn, sink)
+            .await
+            .expect("run_discovery_with_components");
+
+        assert!(resolver.calls.load(Ordering::SeqCst) >= 1);
+        assert!(!handle.bytes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_discovery_with_components_uses_provided_sink() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        };
+
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("run_discovery_with_components");
+        assert_eq!(summary.records_emitted, 1);
+        let lines = handle.ndjson_lines();
+        assert_eq!(lines.len(), 1);
+        let record: crate::model::DeviceRecord =
+            serde_json::from_str(&lines[0]).expect("parse json");
+        assert_eq!(record.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn discovery_summary_serializes_elapsed_as_millis_field() {
+        let summary = DiscoverySummary {
+            targets_resolved: 1,
+            probe_attempts: 2,
+            probe_errors: 0,
+            records_emitted: 1,
+            elapsed: Duration::from_millis(142),
+        };
+        let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
+        assert_eq!(json["elapsed_ms"], 142);
+        assert_eq!(json["records_emitted"], 1);
+        assert!(json.get("elapsed").is_none());
     }
 
     #[tokio::test]
