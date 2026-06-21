@@ -25,7 +25,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-std", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-std", "io-util", "fs", "signal"] }
 hickory-resolver = "0.26"
 ipnet = { version = "2", features = ["serde"] }
 rskafka = { version = "0.6.0", default-features = false, features = ["transport-tls"] }

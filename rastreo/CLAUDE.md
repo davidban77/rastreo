@@ -18,12 +18,23 @@ If you are tempted to put probing, fusion, classification, encoding, or sink log
 
 ```
 src/
-└── main.rs   ← entrypoint: clap dispatch.
+├── main.rs   ← entrypoint: tokio::main, tracing init, ctrl-c handler
+└── cli/
+    ├── mod.rs       ← Cli struct + Command enum + clap dispatch
+    └── discover.rs  ← discover subcommand handler + arg parsing
 ```
 
 ## CLI Surface
 
-The binary today resolves `--version` and `--help`. Subcommands are added as they are implemented.
+| Subcommand | Purpose                                                            |
+|------------|--------------------------------------------------------------------|
+| `discover` | Probe one or more targets and emit DeviceRecord events to a sink   |
+
+### `rastreo discover`
+
+Flags: `--target` (repeatable; IP / CIDR / range / DNS), `--port` (repeatable or comma-separated), `--sink` (`stdout` | `file` | `kafka` with `--features kafka`), `--output` (file sink path), `--brokers` and `--topic` (kafka sink), `--concurrency` (default 64), `--timeout-ms` (default 1000), and the global `-v` / `-q` verbosity flags.
+
+Output: one NDJSON `DeviceRecord` per line on the chosen sink. Tracing logs always go to stderr so a stdout sink stays clean for downstream `jq` / NDJSON consumers.
 
 ## Error Handling
 
