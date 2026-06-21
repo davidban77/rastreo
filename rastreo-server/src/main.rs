@@ -1,7 +1,10 @@
-use axum::{routing::get, Json, Router};
-use clap::Parser;
-use serde_json::{json, Value};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+
+use anyhow::Context;
+use clap::Parser;
+use rastreo_core::{HickoryResolver, Resolver};
+use rastreo_server::{build_app, state::AppState};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -17,10 +20,6 @@ struct Cli {
     bind: IpAddr,
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok" }))
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -33,9 +32,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let app = Router::new().route("/health", get(health));
+    let resolver: Arc<dyn Resolver> =
+        Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
+    let state = AppState::new(resolver);
+
+    let app = build_app(state);
     let addr = SocketAddr::new(cli.bind, cli.port);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind to {addr}"))?;
     tracing::info!(%addr, "rastreo-server listening");
     axum::serve(listener, app).await?;
     Ok(())

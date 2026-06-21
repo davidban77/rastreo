@@ -19,6 +19,10 @@ config = ["rastreo-core/config"]
 name = "rastreo-server"
 path = "src/main.rs"
 
+[lib]
+name = "rastreo_server"
+path = "src/lib.rs"
+
 [dependencies]
 rastreo-core = { workspace = true }
 axum = "0.8"
@@ -29,6 +33,11 @@ anyhow = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [lints]
 workspace = true

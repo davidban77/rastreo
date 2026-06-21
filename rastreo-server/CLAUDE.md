@@ -12,8 +12,15 @@ No business logic lives in this crate. All scenario validation and launch logic 
 
 ```
 src/
-└── main.rs   ← entrypoint: clap arg parsing, tracing init, axum router setup,
-                 tokio runtime. The only route today is `GET /health`.
+├── main.rs        ← entrypoint: clap arg parsing, tracing init, resolver
+│                    construction, tokio runtime, axum serve loop
+├── lib.rs         ← build_app(state) -> Router; reusable from tests
+├── state.rs       ← AppState { resolver: Arc<dyn Resolver> }
+├── error.rs       ← AppError + IntoResponse + RastreoError -> HTTP mapping
+└── routes/
+    ├── mod.rs     ← route module re-exports
+    ├── health.rs  ← GET /health
+    └── scans.rs   ← POST /scans handler + ScanResponse
 ```
 
 ## CLI Flags
@@ -25,14 +32,31 @@ src/
 
 ## API Surface
 
-| Method | Path     | Description                              |
-|--------|----------|------------------------------------------|
-| GET    | /health  | Health check — always returns 200 OK     |
+| Method | Path     | Description                                                                                                                                                                  |
+|--------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| GET    | /health  | Health check — always returns 200 OK                                                                                                                                         |
+| POST   | /scans   | Submit a discovery scenario; runs synchronously and returns summary + records. The client-specified `sink` field is ignored; records are always returned in the response body. |
+
+## POST /scans
+
+Request body: JSON-encoded `DiscoverScenarioConfig`. Required fields: `targets`, `probers`. The optional `sink` field is ignored — the server captures records via a server-side `MemorySink` and returns them in the response.
+
+Response body:
+- `summary`: `DiscoverySummary` — `targets_resolved`, `probe_attempts`, `probe_errors`, `records_emitted`, `elapsed_ms`.
+- `records`: array of `DeviceRecord` objects.
+
+Errors:
+- 400 — bad scenario config (empty `targets` or `probers`, malformed JSON body) or unresolvable targets.
+- 500 — probe / encode / sink / runtime errors.
+- 503 — request exceeded the 60-second server-side timeout.
+
+A request holds the HTTP connection open for the duration of the scan. The pipeline's own `BoundedScheduler` enforces per-scan concurrency via the scenario's `rate_limit`.
 
 ## Error Handling
 
 - Use `anyhow` at the binary boundary.
-- Map `rastreo-core` `RastreoError` variants to HTTP status codes when handlers are added.
+- `AppError` maps `RastreoError` to HTTP status codes via `IntoResponse`: `Config` and `Resolver` errors map to 400; `Probe`, `Encoder`, `Sink`, and `Runtime` errors map to 500.
+- Error response body is `{"error": "<message>"}`.
 - Do not panic. Recover from poisoned locks; return 500 with a JSON error body.
 
 ## Dependencies
@@ -41,6 +65,7 @@ src/
 |----------------------------------|------------------------------------------------------|
 | `rastreo-core`                   | All discovery and lifecycle logic                    |
 | `axum`                           | HTTP routing and handler infrastructure              |
+| `tower` + `tower-http`           | `TraceLayer` request/response logging, `TimeoutLayer` per-request timeout |
 | `tokio`                          | Async runtime                                        |
 | `serde` + `serde_json`           | Request and response serialization                   |
 | `anyhow`                         | Error handling at the binary boundary                |
