@@ -31,6 +31,12 @@ pub struct BaseProbeConfig {
     pub sink: Option<SinkConfig>,
 }
 
+impl BaseProbeConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "signal_type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -46,6 +52,16 @@ pub struct DiscoverScenarioConfig {
     pub targets: Vec<Target>,
     #[serde(default)]
     pub probers: Vec<ProberConfig>,
+}
+
+impl DiscoverScenarioConfig {
+    pub fn new(base: BaseProbeConfig, targets: Vec<Target>, probers: Vec<ProberConfig>) -> Self {
+        Self {
+            base,
+            targets,
+            probers,
+        }
+    }
 }
 
 #[cfg(test)]

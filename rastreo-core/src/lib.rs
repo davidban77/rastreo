@@ -3,6 +3,7 @@ pub mod encoder;
 pub mod error;
 pub mod fuser;
 pub mod model;
+pub mod pipeline;
 pub mod prober;
 pub mod resolver;
 pub mod scheduler;
@@ -15,6 +16,7 @@ pub use model::{
     Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget,
     Signal, Target,
 };
+pub use pipeline::{run_discovery, DiscoverySummary};
 pub use prober::{Prober, ProberConfig, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};

@@ -26,6 +26,7 @@ src/
 │   └── kafka.rs     ← KafkaSink (feature: kafka)
 ├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl
 ├── fuser/mod.rs     ← Fuser trait + DirectFuser default impl
+├── pipeline.rs     ← run_discovery + DiscoverySummary
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
 
