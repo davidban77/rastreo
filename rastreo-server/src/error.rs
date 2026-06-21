@@ -48,10 +48,16 @@ impl From<RastreoError> for AppError {
             },
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        Self {
-            status,
-            message: err.to_string(),
-        }
+
+        // 5xx messages are redacted; the detail is logged for operators instead.
+        let message = if status.is_client_error() {
+            err.to_string()
+        } else {
+            tracing::error!(?err, status = %status, "internal server error returned to client");
+            "internal server error".to_string()
+        };
+
+        Self { status, message }
     }
 }
 
@@ -143,6 +149,29 @@ mod tests {
         let io = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe");
         let err: AppError = RastreoError::Sink(io).into();
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn app_error_for_runtime_panic_does_not_leak_panic_message() {
+        let err: AppError = RastreoError::Runtime(RuntimeError::TaskPanicked(
+            "worker thread panicked at src/foo.rs:42".into(),
+        ))
+        .into();
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.message, "internal server error");
+        assert!(!err.message.contains("worker thread"));
+        assert!(!err.message.contains("src/foo.rs"));
+    }
+
+    #[test]
+    fn app_error_for_4xx_preserves_message_detail() {
+        let err: AppError = RastreoError::Config(ConfigError::InvalidValue(
+            "rate_limit must be positive".into(),
+        ))
+        .into();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("rate_limit"));
+        assert!(err.message.contains("must be positive"));
     }
 
     #[tokio::test]
