@@ -1,11 +1,13 @@
 pub mod file;
 #[cfg(feature = "kafka")]
 pub mod kafka;
+pub mod memory;
 pub mod stdout;
 
 pub use file::FileSink;
 #[cfg(feature = "kafka")]
 pub use kafka::KafkaSink;
+pub use memory::{MemorySink, MemorySinkHandle};
 pub use stdout::StdoutSink;
 
 use std::path::PathBuf;
@@ -32,6 +34,7 @@ pub enum SinkConfig {
     File {
         path: PathBuf,
     },
+    Memory,
     #[cfg(feature = "kafka")]
     Kafka {
         brokers: Vec<String>,
@@ -45,6 +48,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
     match config {
         SinkConfig::Stdout => Ok(Box::new(StdoutSink::new())),
         SinkConfig::File { path } => Ok(Box::new(FileSink::new(path).await?)),
+        SinkConfig::Memory => Ok(Box::new(MemorySink::new())),
         #[cfg(feature = "kafka")]
         SinkConfig::Kafka {
             brokers,
@@ -108,6 +112,15 @@ mod tests {
             .expect("create file sink");
     }
 
+    #[tokio::test]
+    async fn create_sink_memory_returns_trait_object() {
+        let mut sink: Box<dyn Sink> = create_sink(&SinkConfig::Memory)
+            .await
+            .expect("create memory sink");
+        sink.write(b"factory").await.expect("write");
+        sink.flush().await.expect("flush");
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn deserialize_stdout_sink_config_from_yaml() {
@@ -129,6 +142,17 @@ mod tests {
                 assert_eq!(path, PathBuf::from("/tmp/foo.ndjson"));
             }
             other => panic!("expected File, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn deserialize_memory_sink_config_from_yaml() {
+        let yaml = "type: memory\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize memory");
+        match config {
+            SinkConfig::Memory => {}
+            other => panic!("expected Memory, got {other:?}"),
         }
     }
 }

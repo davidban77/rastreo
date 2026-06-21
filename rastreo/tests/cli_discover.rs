@@ -117,3 +117,86 @@ fn version_flag_reports_crate_version() {
     let out = String::from_utf8(output.stdout).expect("utf-8");
     assert!(out.contains(env!("CARGO_PKG_VERSION")));
 }
+
+#[tokio::test]
+async fn discover_emits_zero_records_hint_when_no_records() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args([
+                "discover",
+                "--target",
+                "192.0.2.1",
+                "--port",
+                "1",
+                "--sink",
+                "stdout",
+                "--timeout-ms",
+                "100",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("records_emitted=0"),
+        "stderr missing zero-records summary: {stderr}"
+    );
+    assert!(
+        stderr.contains("hint: 0 records emitted"),
+        "stderr missing hint line: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn discover_no_hint_when_records_emitted_greater_than_zero() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "--sink",
+                "stdout",
+                "--timeout-ms",
+                "500",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    drop(listener);
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        !stderr.contains("hint: 0 records emitted"),
+        "stderr should not include the hint when records were emitted: {stderr}"
+    );
+}

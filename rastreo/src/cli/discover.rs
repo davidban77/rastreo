@@ -36,11 +36,11 @@ pub struct DiscoverArgs {
     pub topic: Option<String>,
 
     /// Max concurrent probes.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
     pub concurrency: u32,
 
     /// Per-probe timeout in milliseconds.
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
     pub timeout_ms: u64,
 }
 
@@ -63,6 +63,11 @@ pub async fn run(args: DiscoverArgs) -> Result<()> {
         summary.records_emitted,
         summary.elapsed.as_millis(),
     );
+    if summary.records_emitted == 0 && summary.probe_attempts > 0 {
+        eprintln!(
+            "hint: 0 records emitted — no probe reached an open port. Check target reachability and port list."
+        );
+    }
     Ok(())
 }
 
@@ -145,6 +150,7 @@ pub(crate) fn parse_target(input: &str) -> Result<Target, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::net::Ipv4Addr;
 
     fn args(target: &[&str], port: &[u16]) -> DiscoverArgs {
@@ -304,6 +310,64 @@ mod tests {
     fn default_timeout_ms_is_one_thousand() {
         let a = args(&["10.0.0.1"], &[80]);
         assert_eq!(a.timeout_ms, 1000);
+    }
+
+    #[test]
+    fn discover_rejects_concurrency_zero() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--concurrency",
+            "0",
+        ]);
+        assert!(result.is_err(), "expected --concurrency 0 to be rejected");
+    }
+
+    #[test]
+    fn discover_rejects_timeout_ms_zero() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--timeout-ms",
+            "0",
+        ]);
+        assert!(result.is_err(), "expected --timeout-ms 0 to be rejected");
+    }
+
+    #[test]
+    fn discover_accepts_concurrency_one() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--concurrency",
+            "1",
+        ])
+        .expect("--concurrency 1 should parse");
+        assert_eq!(parsed.concurrency, 1);
+    }
+
+    #[test]
+    fn discover_accepts_timeout_ms_one() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--timeout-ms",
+            "1",
+        ])
+        .expect("--timeout-ms 1 should parse");
+        assert_eq!(parsed.timeout_ms, 1);
     }
 
     #[cfg(feature = "kafka")]

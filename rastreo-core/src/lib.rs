@@ -22,7 +22,7 @@ pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};
 #[cfg(feature = "kafka")]
 pub use sink::KafkaSink;
-pub use sink::{FileSink, Sink, SinkConfig, StdoutSink};
+pub use sink::{FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, StdoutSink};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
