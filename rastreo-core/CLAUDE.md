@@ -22,7 +22,8 @@ src/
 ├── sink/
 │   ├── mod.rs       ← Sink trait + SinkConfig + create_sink factory
 │   ├── stdout.rs    ← StdoutSink
-│   └── file.rs      ← FileSink
+│   ├── file.rs      ← FileSink
+│   └── kafka.rs     ← KafkaSink (feature: kafka)
 ├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl
 ├── fuser/mod.rs     ← Fuser trait + DirectFuser default impl
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
@@ -34,11 +35,11 @@ src/
 |----------|---------|-------------|
 | `config` | yes     | Pulls in `serde_yaml_ng` for YAML scenario-file parsing. Disable for library consumers who construct configs in code and do not need YAML deserialization. |
 | `http`   | no      | Enables the HTTP prober and HTTP-based sinks. |
-| `kafka`  | no      | Enables the Kafka sink for streaming discovered records. |
+| `kafka`  | no      | Enables `KafkaSink` (rskafka producer with rustls TLS support and embedded webpki-roots). |
 | `snmp`   | no      | Enables the SNMP prober for vendor / interface fingerprinting. |
 | `arp`    | no      | Enables the ARP prober (requires raw-socket capability on the host). |
 
-Features beyond `config` currently have no associated code; declaring them up front keeps the feature surface visible from day one.
+The `http`, `snmp`, and `arp` features are declared but not yet wired to code — reserved for future probers. The `config` and `kafka` features each pull in their dependency chain.
 
 ## Error Handling
 

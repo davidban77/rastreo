@@ -18,6 +18,8 @@ pub use model::{
 pub use prober::{Prober, ProberConfig, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};
+#[cfg(feature = "kafka")]
+pub use sink::KafkaSink;
 pub use sink::{FileSink, Sink, SinkConfig, StdoutSink};
 
 pub fn version() -> &'static str {

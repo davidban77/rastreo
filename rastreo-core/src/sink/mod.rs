@@ -1,7 +1,11 @@
 pub mod file;
+#[cfg(feature = "kafka")]
+pub mod kafka;
 pub mod stdout;
 
 pub use file::FileSink;
+#[cfg(feature = "kafka")]
+pub use kafka::KafkaSink;
 pub use stdout::StdoutSink;
 
 use std::path::PathBuf;
@@ -25,13 +29,34 @@ pub trait Sink: Send + Sync {
 #[non_exhaustive]
 pub enum SinkConfig {
     Stdout,
-    File { path: PathBuf },
+    File {
+        path: PathBuf,
+    },
+    #[cfg(feature = "kafka")]
+    Kafka {
+        brokers: Vec<String>,
+        topic: String,
+        #[serde(default)]
+        buffer_threshold: Option<usize>,
+    },
 }
 
 pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoError> {
     match config {
         SinkConfig::Stdout => Ok(Box::new(StdoutSink::new())),
         SinkConfig::File { path } => Ok(Box::new(FileSink::new(path).await?)),
+        #[cfg(feature = "kafka")]
+        SinkConfig::Kafka {
+            brokers,
+            topic,
+            buffer_threshold,
+        } => {
+            let mut sink = KafkaSink::new(brokers.clone(), topic.clone()).await?;
+            if let Some(t) = buffer_threshold {
+                sink = sink.with_buffer_threshold(*t);
+            }
+            Ok(Box::new(sink))
+        }
     }
 }
 

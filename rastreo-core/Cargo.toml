@@ -15,7 +15,7 @@ readme = "../README.md"
 default = ["config"]
 config = ["dep:serde_yaml_ng"]
 http = []
-kafka = []
+kafka = ["dep:rskafka", "dep:chrono", "chrono/clock", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
 snmp = []
 arp = []
 
@@ -29,6 +29,11 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 hickory-resolver = { workspace = true }
 ipnet = { workspace = true }
+rskafka = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }
