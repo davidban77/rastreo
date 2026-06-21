@@ -23,6 +23,7 @@ src/
 │   ├── mod.rs       ← Sink trait + SinkConfig + create_sink factory
 │   ├── stdout.rs    ← StdoutSink
 │   ├── file.rs      ← FileSink
+│   ├── memory.rs    ← MemorySink + MemorySinkHandle
 │   └── kafka.rs     ← KafkaSink (feature: kafka)
 ├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl
 ├── fuser/mod.rs     ← Fuser trait + DirectFuser default impl
