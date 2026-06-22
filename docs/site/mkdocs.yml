@@ -108,7 +108,13 @@ nav:
       - probe/index.md
   - Integrate:
       - integrate/index.md
+      - Kafka: integrate/kafka.md
+      - Source of truth: integrate/source-of-truth.md
+      - Troubleshooting: integrate/troubleshooting.md
   - Deploy:
       - deploy/index.md
+      - Docker: deploy/docker.md
+      - Kubernetes: deploy/kubernetes.md
+      - Server: deploy/server.md
   - Reference:
       - reference/index.md
