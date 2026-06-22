@@ -118,3 +118,7 @@ nav:
       - Server: deploy/server.md
   - Reference:
       - reference/index.md
+      - CLI: reference/cli.md
+      - Scenario: reference/scenario.md
+      - Errors: reference/errors.md
+      - Glossary: reference/glossary.md
