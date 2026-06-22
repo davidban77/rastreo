@@ -10,3 +10,7 @@
 # User-facing docs live under docs/site/ (MkDocs) and remain tracked.
 docs/design/
 docs/plans/
+
+# MkDocs build output and local uv venv
+docs/site/.venv/
+docs/site/site/
