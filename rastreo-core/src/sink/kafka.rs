@@ -22,6 +22,38 @@ fn should_flush_after_append(buffer_len: usize, threshold: usize) -> bool {
     buffer_len >= threshold
 }
 
+fn default_batch_threshold() -> usize {
+    KafkaSink::DEFAULT_BUFFER_THRESHOLD
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum KafkaFlushMode {
+    PerRecord,
+    Batched {
+        #[serde(default = "default_batch_threshold")]
+        threshold_bytes: usize,
+    },
+}
+
+impl KafkaFlushMode {
+    fn to_threshold(&self) -> usize {
+        match self {
+            Self::PerRecord => 1,
+            Self::Batched { threshold_bytes } => clamp_threshold(*threshold_bytes),
+        }
+    }
+}
+
+impl Default for KafkaFlushMode {
+    fn default() -> Self {
+        Self::Batched {
+            threshold_bytes: KafkaSink::DEFAULT_BUFFER_THRESHOLD,
+        }
+    }
+}
+
 pub struct KafkaSink {
     topic: String,
     brokers: Vec<String>,
@@ -92,8 +124,8 @@ impl KafkaSink {
         })
     }
 
-    pub fn with_buffer_threshold(mut self, bytes: usize) -> Self {
-        self.buffer_threshold = clamp_threshold(bytes);
+    pub fn with_flush_mode(mut self, mode: KafkaFlushMode) -> Self {
+        self.buffer_threshold = mode.to_threshold();
         self
     }
 
@@ -240,36 +272,101 @@ mod tests {
             SinkConfig::Kafka {
                 brokers,
                 topic,
-                buffer_threshold,
+                flush_mode,
             } => {
                 assert_eq!(brokers, vec!["kafka:9092".to_string()]);
                 assert_eq!(topic, "rastreo.devices");
-                assert!(buffer_threshold.is_none());
+                match flush_mode {
+                    KafkaFlushMode::Batched { threshold_bytes } => {
+                        assert_eq!(threshold_bytes, KafkaSink::DEFAULT_BUFFER_THRESHOLD);
+                    }
+                    other => panic!("expected default Batched flush mode, got {other:?}"),
+                }
             }
             other => panic!("expected Kafka, got {other:?}"),
         }
     }
 
+    #[test]
+    fn kafka_flush_mode_default_is_batched_64_kib() {
+        match KafkaFlushMode::default() {
+            KafkaFlushMode::Batched { threshold_bytes } => {
+                assert_eq!(threshold_bytes, 64 * 1024);
+            }
+            other => panic!("expected Batched default, got {other:?}"),
+        }
+    }
+
     #[cfg(feature = "config")]
     #[test]
-    fn deserialize_kafka_sink_config_with_buffer_threshold() {
-        use crate::sink::SinkConfig;
+    fn kafka_flush_mode_per_record_deserializes_from_yaml() {
+        let yaml = "type: per_record\n";
+        let mode: KafkaFlushMode = serde_yaml_ng::from_str(yaml).expect("deserialize per_record");
+        assert!(matches!(mode, KafkaFlushMode::PerRecord));
+    }
 
-        let yaml =
-            "type: kafka\nbrokers: [\"a:9092\", \"b:9092\"]\ntopic: t\nbuffer_threshold: 1024\n";
-        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
-        match config {
-            SinkConfig::Kafka {
-                brokers,
-                topic,
-                buffer_threshold,
-            } => {
-                assert_eq!(brokers, vec!["a:9092".to_string(), "b:9092".to_string()]);
-                assert_eq!(topic, "t");
-                assert_eq!(buffer_threshold, Some(1024));
-            }
-            other => panic!("expected Kafka, got {other:?}"),
+    #[cfg(feature = "config")]
+    #[test]
+    fn kafka_flush_mode_batched_with_threshold_deserializes() {
+        let yaml = "type: batched\nthreshold_bytes: 1024\n";
+        let mode: KafkaFlushMode = serde_yaml_ng::from_str(yaml).expect("deserialize batched");
+        match mode {
+            KafkaFlushMode::Batched { threshold_bytes } => assert_eq!(threshold_bytes, 1024),
+            other => panic!("expected Batched, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn kafka_flush_mode_batched_default_threshold_deserializes() {
+        let yaml = "type: batched\n";
+        let mode: KafkaFlushMode =
+            serde_yaml_ng::from_str(yaml).expect("deserialize batched no threshold");
+        match mode {
+            KafkaFlushMode::Batched { threshold_bytes } => {
+                assert_eq!(threshold_bytes, 64 * 1024);
+            }
+            other => panic!("expected Batched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flush_mode_per_record_maps_to_threshold_one() {
+        assert_eq!(KafkaFlushMode::PerRecord.to_threshold(), 1);
+    }
+
+    #[test]
+    fn flush_mode_batched_maps_to_clamped_threshold() {
+        assert_eq!(
+            KafkaFlushMode::Batched { threshold_bytes: 0 }.to_threshold(),
+            1
+        );
+        assert_eq!(
+            KafkaFlushMode::Batched {
+                threshold_bytes: 1024
+            }
+            .to_threshold(),
+            1024
+        );
+    }
+
+    #[test]
+    fn flush_mode_batched_with_threshold_one_flushes_after_every_byte() {
+        let threshold = KafkaFlushMode::PerRecord.to_threshold();
+        assert!(should_flush_after_append(1, threshold));
+        assert!(should_flush_after_append(2, threshold));
+    }
+
+    #[test]
+    fn flush_mode_batched_holds_until_threshold_reached() {
+        let threshold = KafkaFlushMode::Batched {
+            threshold_bytes: 1024,
+        }
+        .to_threshold();
+        assert!(!should_flush_after_append(0, threshold));
+        assert!(!should_flush_after_append(1023, threshold));
+        assert!(should_flush_after_append(1024, threshold));
+        assert!(should_flush_after_append(2048, threshold));
     }
 
     #[cfg(feature = "config")]
