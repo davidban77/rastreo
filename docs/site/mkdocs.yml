@@ -97,8 +97,13 @@ nav:
   - Home: index.md
   - Get started:
       - get-started/index.md
+      - Install: get-started/install.md
+      - First scan: get-started/first-scan.md
   - Discover:
       - discover/index.md
+      - CLI: discover/cli.md
+      - Targets: discover/targets.md
+      - Sinks: discover/sinks.md
   - Probe:
       - probe/index.md
   - Integrate:
