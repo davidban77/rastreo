@@ -1,6 +1,6 @@
 # rastreo
 
-rastreo is an enrichment-aware network discovery engine written in Rust. It probes a network across TCP, UDP, HTTP, DNS, SNMP, and ARP, fuses OUI vendor data with active fingerprints into a deduplicated, classified `DeviceRecord`, and emits each record as a Kafka event (or NDJSON / CSV file, or stdout). Reconciliation into NetBox, Nautobot, or Infrahub is performed by independent topic consumers — out of core scope.
+rastreo is an enrichment-aware network discovery engine written in Rust. It probes a network across TCP, UDP, HTTP, DNS, SNMP, and ARP, fuses OUI vendor data with active fingerprints into a deduplicated, classified `DeviceRecord`, and emits each record to a configurable Kafka, file, or stdout sink (NDJSON wire format). Reconciliation into NetBox, Nautobot, or Infrahub is performed by independent topic consumers — out of core scope.
 
 The **core library is the product**. The CLI and HTTP server are delivery mechanisms built on top of it.
 
