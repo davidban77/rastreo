@@ -95,3 +95,15 @@ extra:
 
 nav:
   - Home: index.md
+  - Get started:
+      - get-started/index.md
+  - Discover:
+      - discover/index.md
+  - Probe:
+      - probe/index.md
+  - Integrate:
+      - integrate/index.md
+  - Deploy:
+      - deploy/index.md
+  - Reference:
+      - reference/index.md
