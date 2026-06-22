@@ -50,6 +50,38 @@ tasks:
       - cargo audit
 
   # ---------------------------------------------------------------------------
+  # Documentation site
+  # ---------------------------------------------------------------------------
+  site:setup:
+    desc: Install MkDocs Material in a local venv (uv-managed)
+    cmds:
+      - |
+        echo "Using uv to create venv and install dependencies..."
+        uv venv docs/site/.venv
+        uv pip install -r docs/site/requirements.txt --python docs/site/.venv/bin/python
+        echo ""
+        echo "Done! Run 'task site:serve' to preview the docs locally."
+
+  site:build:
+    desc: Build the MkDocs site (strict mode)
+    deps: [site:setup]
+    cmds:
+      - docs/site/.venv/bin/mkdocs build --strict -f docs/site/mkdocs.yml
+
+  site:serve:
+    desc: Start local MkDocs dev server with live reload
+    deps: [site:setup]
+    cmds:
+      - |
+        echo "Docs site: http://localhost:8000"
+        docs/site/.venv/bin/mkdocs serve -f docs/site/mkdocs.yml
+
+  site:clean:
+    desc: Remove the MkDocs build output and venv
+    cmds:
+      - rm -rf docs/site/site docs/site/.venv
+
+  # ---------------------------------------------------------------------------
   # Local stack
   # ---------------------------------------------------------------------------
   stack:up:
