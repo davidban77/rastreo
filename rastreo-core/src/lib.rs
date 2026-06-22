@@ -20,9 +20,9 @@ pub use pipeline::{run_discovery, run_discovery_with_components, DiscoverySummar
 pub use prober::{Prober, ProberConfig, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};
-#[cfg(feature = "kafka")]
-pub use sink::KafkaSink;
 pub use sink::{FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, StdoutSink};
+#[cfg(feature = "kafka")]
+pub use sink::{KafkaFlushMode, KafkaSink};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

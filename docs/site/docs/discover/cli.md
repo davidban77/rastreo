@@ -34,6 +34,8 @@ rastreo discover --target 1.1.1.1 --port 22,80,443
 | `--output <PATH>` | — | Output file path for `--sink file`. Required when the file sink is selected. |
 | `--brokers <BROKERS>` | — | Comma-separated Kafka brokers for `--sink kafka`. Requires the `kafka` build feature. |
 | `--topic <TOPIC>` | — | Kafka topic for `--sink kafka`. Requires the `kafka` build feature. |
+| `--kafka-flush-per-record` | — | Flush every `DeviceRecord` to Kafka as a separate message. Mutually exclusive with `--kafka-batch-threshold`. Only meaningful with `--sink kafka`. |
+| `--kafka-batch-threshold <BYTES>` | `65536` (64 KiB) | Batch threshold in bytes. Records accumulate until the buffer reaches this size, then flush as a single Kafka message. Minimum 1. Only meaningful with `--sink kafka`. |
 | `--concurrency <N>` | `64` | Maximum number of in-flight probes. Minimum value is 1. |
 | `--timeout-ms <MS>` | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum value is 1. |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |

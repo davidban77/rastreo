@@ -32,7 +32,7 @@ rastreo discover \
 
 ## Kafka
 
-The Kafka sink publishes `DeviceRecord` events to a Kafka topic, encoded as NDJSON. Brokers are comma-separated; the topic is a single name. The detailed wire contract (how records are batched, how to tune the batch threshold) is covered in [Integrate](../integrate/index.md).
+The Kafka sink publishes `DeviceRecord` events to a Kafka topic, encoded as NDJSON. Brokers are comma-separated; the topic is a single name. Two flush modes are available: batched (the default, accumulates records into one Kafka message at a configurable byte threshold) and per-record (one Kafka message per `DeviceRecord`). Use `--kafka-flush-per-record` or `--kafka-batch-threshold <BYTES>` on the CLI; see [Integrate](../integrate/index.md) for the full wire contract.
 
 !!! warning "Requires the `kafka` build feature"
     The `kafka` value for `--sink` only exists when the binary is built with the `kafka` Cargo feature. The default build does not include it. To build with Kafka support:

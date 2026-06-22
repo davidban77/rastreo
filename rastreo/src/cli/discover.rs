@@ -6,6 +6,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use ipnet::IpNet;
 use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
+#[cfg(feature = "kafka")]
+use rastreo_core::KafkaFlushMode;
 use rastreo_core::{run_discovery, ConfigError, ProberConfig, SinkConfig, Target};
 
 #[derive(Parser, Debug)]
@@ -35,6 +37,16 @@ pub struct DiscoverArgs {
     #[arg(long)]
     pub topic: Option<String>,
 
+    /// Flush every DeviceRecord to Kafka as a separate message. Only meaningful with --sink kafka.
+    #[cfg(feature = "kafka")]
+    #[arg(long, conflicts_with = "kafka_batch_threshold")]
+    pub kafka_flush_per_record: bool,
+
+    /// Kafka batch threshold in bytes; records accumulate until the buffer reaches this size. Defaults to 65536 (64 KiB). Only meaningful with --sink kafka.
+    #[cfg(feature = "kafka")]
+    #[arg(long, value_parser = parse_positive_usize)]
+    pub kafka_batch_threshold: Option<usize>,
+
     /// Max concurrent probes.
     #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..))]
     pub concurrency: u32,
@@ -42,6 +54,17 @@ pub struct DiscoverArgs {
     /// Per-probe timeout in milliseconds.
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
     pub timeout_ms: u64,
+}
+
+#[cfg(feature = "kafka")]
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|e| format!("not a non-negative integer: {e}"))?;
+    if n == 0 {
+        return Err("must be >= 1".into());
+    }
+    Ok(n)
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,10 +136,19 @@ fn build_sink_config(args: &DiscoverArgs) -> Result<SinkConfig> {
                 .topic
                 .clone()
                 .ok_or_else(|| anyhow!("--sink kafka requires --topic <name>"))?;
+            let flush_mode = if args.kafka_flush_per_record {
+                KafkaFlushMode::PerRecord
+            } else if let Some(bytes) = args.kafka_batch_threshold {
+                KafkaFlushMode::Batched {
+                    threshold_bytes: bytes,
+                }
+            } else {
+                KafkaFlushMode::default()
+            };
             Ok(SinkConfig::Kafka {
                 brokers: args.brokers.clone(),
                 topic,
-                buffer_threshold: None,
+                flush_mode,
             })
         }
     }
@@ -161,6 +193,10 @@ mod tests {
             output: None,
             brokers: Vec::new(),
             topic: None,
+            #[cfg(feature = "kafka")]
+            kafka_flush_per_record: false,
+            #[cfg(feature = "kafka")]
+            kafka_batch_threshold: None,
             concurrency: 64,
             timeout_ms: 1000,
         }
@@ -401,11 +437,102 @@ mod tests {
         a.topic = Some("rastreo.devices".into());
         let scenario = build_scenario(&a).expect("scenario");
         match scenario.base.sink {
-            Some(SinkConfig::Kafka { brokers, topic, .. }) => {
+            Some(SinkConfig::Kafka {
+                brokers,
+                topic,
+                flush_mode,
+            }) => {
                 assert_eq!(brokers, vec!["localhost:9092".to_string()]);
                 assert_eq!(topic, "rastreo.devices");
+                assert!(matches!(
+                    flush_mode,
+                    KafkaFlushMode::Batched {
+                        threshold_bytes: 65536
+                    }
+                ));
             }
             other => panic!("expected Kafka sink, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn build_scenario_kafka_flush_per_record_sets_per_record_mode() {
+        let mut a = args(&["10.0.0.1"], &[80]);
+        a.sink = SinkKind::Kafka;
+        a.brokers = vec!["localhost:9092".into()];
+        a.topic = Some("t".into());
+        a.kafka_flush_per_record = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        match scenario.base.sink {
+            Some(SinkConfig::Kafka { flush_mode, .. }) => {
+                assert!(matches!(flush_mode, KafkaFlushMode::PerRecord));
+            }
+            other => panic!("expected Kafka sink, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn build_scenario_kafka_batch_threshold_sets_batched_mode() {
+        let mut a = args(&["10.0.0.1"], &[80]);
+        a.sink = SinkKind::Kafka;
+        a.brokers = vec!["localhost:9092".into()];
+        a.topic = Some("t".into());
+        a.kafka_batch_threshold = Some(16384);
+        let scenario = build_scenario(&a).expect("scenario");
+        match scenario.base.sink {
+            Some(SinkConfig::Kafka { flush_mode, .. }) => match flush_mode {
+                KafkaFlushMode::Batched { threshold_bytes } => {
+                    assert_eq!(threshold_bytes, 16384);
+                }
+                other => panic!("expected Batched, got {other:?}"),
+            },
+            other => panic!("expected Kafka sink, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn build_scenario_kafka_default_uses_batched_64_kib() {
+        let mut a = args(&["10.0.0.1"], &[80]);
+        a.sink = SinkKind::Kafka;
+        a.brokers = vec!["localhost:9092".into()];
+        a.topic = Some("t".into());
+        let scenario = build_scenario(&a).expect("scenario");
+        match scenario.base.sink {
+            Some(SinkConfig::Kafka { flush_mode, .. }) => match flush_mode {
+                KafkaFlushMode::Batched { threshold_bytes } => {
+                    assert_eq!(threshold_bytes, 65536);
+                }
+                other => panic!("expected Batched default, got {other:?}"),
+            },
+            other => panic!("expected Kafka sink, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn discover_rejects_kafka_flush_per_record_with_batch_threshold() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--sink",
+            "kafka",
+            "--brokers",
+            "localhost:9092",
+            "--topic",
+            "t",
+            "--kafka-flush-per-record",
+            "--kafka-batch-threshold",
+            "1024",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected --kafka-flush-per-record + --kafka-batch-threshold to be rejected"
+        );
     }
 }

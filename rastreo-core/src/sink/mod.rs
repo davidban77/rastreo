@@ -6,7 +6,7 @@ pub mod stdout;
 
 pub use file::FileSink;
 #[cfg(feature = "kafka")]
-pub use kafka::KafkaSink;
+pub use kafka::{KafkaFlushMode, KafkaSink};
 pub use memory::{MemorySink, MemorySinkHandle};
 pub use stdout::StdoutSink;
 
@@ -40,7 +40,7 @@ pub enum SinkConfig {
         brokers: Vec<String>,
         topic: String,
         #[serde(default)]
-        buffer_threshold: Option<usize>,
+        flush_mode: KafkaFlushMode,
     },
 }
 
@@ -53,13 +53,10 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
         SinkConfig::Kafka {
             brokers,
             topic,
-            buffer_threshold,
+            flush_mode,
         } => {
-            let mut sink = KafkaSink::new(brokers.clone(), topic.clone()).await?;
-            if let Some(t) = buffer_threshold {
-                sink = sink.with_buffer_threshold(*t);
-            }
-            Ok(Box::new(sink))
+            let sink = KafkaSink::new(brokers.clone(), topic.clone()).await?;
+            Ok(Box::new(sink.with_flush_mode(flush_mode.clone())))
         }
     }
 }
@@ -153,6 +150,42 @@ mod tests {
         match config {
             SinkConfig::Memory => {}
             other => panic!("expected Memory, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "kafka"))]
+    #[test]
+    fn deserialize_kafka_sink_config_with_per_record_flush_mode() {
+        let yaml =
+            "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\nflush_mode:\n  type: per_record\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka {
+                brokers,
+                topic,
+                flush_mode,
+            } => {
+                assert_eq!(brokers, vec!["k:9092".to_string()]);
+                assert_eq!(topic, "t");
+                assert!(matches!(flush_mode, KafkaFlushMode::PerRecord));
+            }
+            other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "kafka"))]
+    #[test]
+    fn deserialize_kafka_sink_config_with_batched_flush_mode_and_threshold() {
+        let yaml = "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\nflush_mode:\n  type: batched\n  threshold_bytes: 2048\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka { flush_mode, .. } => match flush_mode {
+                KafkaFlushMode::Batched { threshold_bytes } => {
+                    assert_eq!(threshold_bytes, 2048);
+                }
+                other => panic!("expected Batched, got {other:?}"),
+            },
+            other => panic!("expected Kafka, got {other:?}"),
         }
     }
 }
