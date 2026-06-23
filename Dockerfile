@@ -61,7 +61,7 @@ RUN mkdir -p rastreo-core/src rastreo/src rastreo-server/src && \
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" -p rastreo -p rastreo-server 2>/dev/null || true
+    cargo build --release --target "${RUST_TARGET}" --features kafka -p rastreo -p rastreo-server 2>/dev/null || true
 
 # Copy real source and build
 COPY rastreo-core/ rastreo-core/
@@ -73,7 +73,7 @@ RUN touch rastreo-core/src/lib.rs rastreo/src/main.rs rastreo-server/src/main.rs
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" -p rastreo -p rastreo-server
+    cargo build --release --target "${RUST_TARGET}" --features kafka -p rastreo -p rastreo-server
 
 # Copy binaries to a known location regardless of target triple
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
