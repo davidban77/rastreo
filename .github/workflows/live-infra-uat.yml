@@ -1,0 +1,62 @@
+# Informational gate — failures show in PR checks but do not block merge.
+# Promote to required after measured stability (2-4 weeks of green runs).
+#
+# Runs the e2e coverage matrix against live container backends. Catches the
+# bug class unit tests with mocks cannot: did the encoder / sink actually
+# deliver records to the live Kafka broker / through the live HTTP server?
+#
+# Local equivalent (assumes Docker is up):
+#   python3 scripts/live_infra_uat.py
+
+name: Live Infra UAT
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: live-infra-uat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-infra-uat:
+    name: Live Infra UAT (e2e matrix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Stdlib-only Python harness — no requirements.txt, no pip install.
+      # The compose stack builds the rastreo image from the Dockerfile; the
+      # harness invokes `rastreo` via `docker run --entrypoint /rastreo` and
+      # `rastreo-server` via HTTP, so no host-side cargo build is needed.
+      - name: Run live-infra UAT harness
+        run: python3 scripts/live_infra_uat.py
+
+      # Best-effort: dump container logs for post-mortem when the harness
+      # fails. The harness already attaches per-row log tails to stderr,
+      # but full logs uploaded as an artifact are easier to read in the UI.
+      - name: Collect compose logs (on failure)
+        if: failure()
+        run: |
+          mkdir -p compose-logs
+          docker compose -f docker-compose.yml ps > compose-logs/ps.txt 2>&1 || true
+          for svc in kafka rastreo-server target-1 target-2 target-3; do
+            docker compose -f docker-compose.yml \
+              logs --no-color --tail 500 "$svc" \
+              > "compose-logs/${svc}.log" 2>&1 || true
+          done
+
+      - name: Upload compose logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-logs
+          path: compose-logs/
+          retention-days: 7
+          if-no-files-found: ignore

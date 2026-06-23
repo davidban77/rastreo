@@ -14,3 +14,4 @@ docs/plans/
 # MkDocs build output and local uv venv
 docs/site/.venv/
 docs/site/site/
+__pycache__/
