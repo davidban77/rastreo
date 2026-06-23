@@ -10,7 +10,7 @@ authors = ["David Flores <davidflores77@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/davidban77/rastreo"
 homepage = "https://github.com/davidban77/rastreo"
-description = "Enrichment-aware network discovery — Kafka-first, in the spirit of Sonda."
+description = "Enrichment-aware network discovery in Rust — TCP, UDP, HTTP, DNS, SNMP, and ARP probes fused into deduplicated DeviceRecord events on Kafka, file, or stdout."
 keywords = ["network", "discovery", "kafka", "snmp", "observability"]
 categories = ["command-line-utilities", "network-programming"]
 

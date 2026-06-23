@@ -1,0 +1,62 @@
+name: Publish to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (validate rastreo-core packaging only, skip actual publish)"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+
+      # Dry-run only validates rastreo-core. The other two crates depend on
+      # rastreo-core being on crates.io at the exact version, so their dry-run
+      # will always fail until rastreo-core is published first.
+      - name: Dry-run publish rastreo-core
+        run: cargo publish --dry-run -p rastreo-core
+
+      - name: Publish rastreo-core
+        if: ${{ inputs.dry_run == false }}
+        run: cargo publish -p rastreo-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index to update
+        if: ${{ inputs.dry_run == false }}
+        run: sleep 30
+
+      - name: Publish rastreo
+        if: ${{ inputs.dry_run == false }}
+        run: cargo publish -p rastreo
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index to update
+        if: ${{ inputs.dry_run == false }}
+        run: sleep 15
+
+      - name: Publish rastreo-server
+        if: ${{ inputs.dry_run == false }}
+        run: cargo publish -p rastreo-server
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
