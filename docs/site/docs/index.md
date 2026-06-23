@@ -1,5 +1,5 @@
 ---
-description: An open-source network discovery engine in the spirit of Sonda. Probes a network across multiple protocols, fuses OUI vendor data with active fingerprints into a deduplicated device record, and emits each as a Kafka event.
+description: An open-source network discovery engine in Rust. Probes a network across multiple protocols, fuses OUI vendor data with active fingerprints into a deduplicated DeviceRecord, and emits each to a Kafka topic, NDJSON file, or stdout.
 hide:
   - navigation
   - toc

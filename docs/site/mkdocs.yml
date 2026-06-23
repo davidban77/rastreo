@@ -1,5 +1,5 @@
 site_name: rastreo
-site_description: Enrichment-aware network discovery — Kafka-first, in the spirit of Sonda.
+site_description: Enrichment-aware network discovery in Rust — TCP, UDP, HTTP, DNS, SNMP, and ARP probes fused into deduplicated DeviceRecord events on Kafka, file, or stdout.
 site_url: https://davidban77.github.io/rastreo/
 repo_url: https://github.com/davidban77/rastreo
 repo_name: davidban77/rastreo
@@ -9,6 +9,7 @@ copyright: Copyright &copy; 2026 David Flores · Built with Material for MkDocs
 theme:
   name: material
   language: en
+  favicon: assets/favicon.svg
   font:
     text: Inter
     code: JetBrains Mono
@@ -92,6 +93,9 @@ extra:
       link: https://github.com/davidban77/rastreo
       name: rastreo on GitHub
   generator: false
+
+extra_css:
+  - assets/extra.css
 
 nav:
   - Home: index.md

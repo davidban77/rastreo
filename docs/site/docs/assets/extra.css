@@ -1,0 +1,20 @@
+/* Tighter rows for the long reference tables (CLI flags, scenario fields, errors). */
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.45em 0.9em;
+}
+
+/* Underline left-nav links on hover so the active path is easier to track. */
+.md-nav__link:hover {
+  text-decoration: underline;
+}
+
+/* Slightly lighter code-fence background in light mode for less visual weight. */
+:root {
+  --md-code-bg-color: hsla(0, 0%, 96%, 1);
+}
+
+/* Slightly deeper code-fence background in dark mode to separate from page chrome. */
+[data-md-color-scheme="slate"] {
+  --md-code-bg-color: hsla(232, 15%, 18%, 1);
+}
