@@ -1,3 +1,15 @@
+<p align="center">
+  <img src=".github/assets/rastreo-banner.png" alt="rastreo — asset tracking and reconnaissance toolkit" width="320">
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/rastreo"><img alt="crates.io" src="https://badgen.net/crates/v/rastreo?icon=rust"></a>
+  <a href="https://crates.io/crates/rastreo-core"><img alt="rastreo-core on crates.io" src="https://badgen.net/crates/v/rastreo-core?label=rastreo-core"></a>
+  <a href="https://github.com/davidban77/rastreo/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/davidban77/rastreo/ci.yml?branch=main&color=1e40af"></a>
+  <a href="https://github.com/davidban77/rastreo/blob/main/Cargo.toml"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.88-3b82f6"></a>
+  <a href="https://github.com/davidban77/rastreo/blob/main/LICENSE-MIT"><img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-f97316"></a>
+</p>
+
 # rastreo
 
 rastreo is an enrichment-aware network discovery engine written in Rust. It probes a network across TCP, UDP, HTTP, DNS, SNMP, and ARP, fuses OUI vendor data with active fingerprints into a deduplicated, classified `DeviceRecord`, and emits each record to a configurable Kafka, file, or stdout sink (NDJSON wire format). Reconciliation into NetBox, Nautobot, or Infrahub is performed by independent topic consumers — out of core scope.

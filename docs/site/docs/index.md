@@ -5,8 +5,28 @@ hide:
   - toc
 ---
 
-# rastreo
+<p align="center" markdown>
+  ![rastreo banner](assets/rastreo-banner.png){ width="320" }
+</p>
 
-Rastreo is a network discovery engine. It probes a network across TCP, UDP, HTTP, DNS, SNMP, and ARP, fuses OUI vendor data with active fingerprints into a deduplicated, classified device record, and emits each record as a Kafka event — or as NDJSON to a file or stdout. Reconciliation into a source of truth such as NetBox, Nautobot, or Infrahub is done by independent topic consumers.
+<p align="center" markdown>
+  Enrichment-aware network discovery in Rust. Probes a network across TCP, UDP, HTTP, DNS, SNMP, and ARP, fuses OUI vendor data with active fingerprints into deduplicated `DeviceRecord` events, and emits each one to Kafka, an NDJSON file, or stdout. Reconciliation into NetBox, Nautobot, or Infrahub runs in independent topic consumers.
+</p>
 
-For installation and a quickstart, see the [project README](https://github.com/davidban77/rastreo); for what is planned, see the [issue tracker](https://github.com/davidban77/rastreo/issues).
+<div class="grid cards" markdown>
+
+-   :material-rocket-launch:{ .lg .middle } **[Get started](get-started/index.md)**
+
+    Install rastreo and run a first discovery scan against a local target.
+
+-   :material-magnify-scan:{ .lg .middle } **[Discover](discover/index.md)**
+
+    CLI flags, target syntax, scenario configuration, and sink options.
+
+-   :material-relation-many-to-many:{ .lg .middle } **[Integrate](integrate/index.md)**
+
+    Kafka consumers feeding NetBox, Nautobot, and Infrahub.
+
+</div>
+
+For the project README, the issue tracker, and contribution guidelines, see [github.com/davidban77/rastreo](https://github.com/davidban77/rastreo).
