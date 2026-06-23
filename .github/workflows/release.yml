@@ -1,0 +1,194 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            asset_name: linux-amd64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            asset_name: linux-arm64
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            asset_name: macos-amd64
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            asset_name: macos-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        # Match the version pinned in rust-toolchain.toml. Using `@stable` installs
+        # rust-std for the matrix target under the "stable" rustup install, but
+        # rust-toolchain.toml then activates the "1.95.0" install (a separate
+        # rustup name) which does not have the target std — surfacing as
+        # `error[E0463]: can't find crate for core`. Bumping rust-toolchain.toml
+        # requires bumping this version too.
+        #
+        # DO NOT let Dependabot bump this. The `dtolnay/rust-toolchain` action's
+        # tag IS the Rust toolchain version it installs — `@1.100.0` would request
+        # a nonexistent Rust release. Dependabot is configured to ignore this
+        # action (see .github/dependabot.yml) for exactly this reason.
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross-compilation tools (Linux arm64)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          cargo install cross --locked
+
+      - name: Build binaries (native)
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --features kafka -p rastreo
+          cargo build --release --target ${{ matrix.target }} --features kafka -p rastreo-server
+
+      - name: Build binaries (cross)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          cross build --release --target ${{ matrix.target }} --features kafka -p rastreo
+          cross build --release --target ${{ matrix.target }} --features kafka -p rastreo-server
+
+      - name: Create tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          TARGET="${{ matrix.target }}"
+          TARBALL="rastreo-${VERSION}-${TARGET}.tar.gz"
+
+          mkdir -p staging
+          cp "target/${TARGET}/release/rastreo" staging/
+          cp "target/${TARGET}/release/rastreo-server" staging/
+
+          tar czf "${TARBALL}" -C staging rastreo rastreo-server
+          echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tarball-${{ matrix.target }}
+          path: ${{ env.TARBALL }}
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all tarball artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: sha256sum rastreo-*.tar.gz > SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            **Download a prebuilt binary:**
+
+            Pick the tarball matching your platform from the assets below, then verify the checksum and extract:
+
+            ```
+            curl -fsSLO https://github.com/davidban77/rastreo/releases/download/${{ github.ref_name }}/rastreo-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz
+            curl -fsSLO https://github.com/davidban77/rastreo/releases/download/${{ github.ref_name }}/SHA256SUMS
+            sha256sum --check --ignore-missing SHA256SUMS
+            tar xzf rastreo-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz
+            ```
+
+            Platforms: `linux/amd64`, `linux/arm64`, `macos/amd64`, `macos/arm64`. Binaries are built with the `kafka` feature enabled.
+
+            **Docker:**
+            ```
+            docker pull ghcr.io/davidban77/rastreo:${{ github.ref_name }}
+            ```
+
+            The image is multi-arch (`linux/amd64` + `linux/arm64`) and ships with both binaries: `rastreo-server` (the default entrypoint, port 8080) and `rastreo` at `/rastreo`. The `rastreo` CLI is built with the `kafka` feature enabled — override the entrypoint to run a discovery scan with the Kafka sink:
+
+            ```
+            docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:${{ github.ref_name }} \
+              discover --target 10.0.0.0/24 --port 80 --sink kafka --brokers kafka:9092 --topic discovery
+            ```
+          files: |
+            rastreo-*.tar.gz
+            SHA256SUMS
+
+  docker:
+    name: Build & Push Multi-arch Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

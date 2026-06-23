@@ -14,6 +14,7 @@ readme = "../README.md"
 [features]
 default = ["config"]
 config = ["rastreo-core/config"]
+kafka = ["rastreo-core/kafka"]
 
 [[bin]]
 name = "rastreo-server"
