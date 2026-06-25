@@ -9,7 +9,7 @@ copyright: Copyright &copy; 2026 David Flores · Built with Material for MkDocs
 theme:
   name: material
   language: en
-  favicon: assets/favicon.svg
+  favicon: assets/favicon.png
   font:
     text: Inter
     code: JetBrains Mono
