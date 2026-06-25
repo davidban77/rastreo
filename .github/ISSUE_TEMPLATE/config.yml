@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/davidban77/rastreo/discussions
+    about: For questions, ideas, and general discussion. Not a bug or feature request? Start here.

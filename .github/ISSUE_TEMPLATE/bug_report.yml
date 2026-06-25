@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a defect in rastreo so we can reproduce and fix it.
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Filling this out helps us reproduce and fix it faster.
+  - type: input
+    id: version
+    attributes:
+      label: rastreo version
+      description: Output of `rastreo --version`.
+      placeholder: rastreo 0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal sequence that reproduces the bug.
+      placeholder: |
+        1. Run `rastreo ...`
+        2. Observe ...
+        3. Expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Scenario YAML or CLI flags
+      description: The configuration used when the bug occurred.
+      render: yaml
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Include the full output of `--verbose` runs when possible.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        OS:
+        Rust version (if built from source):
+        Docker image tag (if applicable):
+    validations:
+      required: true
+  - type: checkboxes
+    id: coc
+    attributes:
+      label: Code of Conduct
+      options:
+        - label: I agree to follow this project's [Code of Conduct](../CODE_OF_CONDUCT.md).
+          required: true
