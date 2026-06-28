@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Stdlib-only Python harness — no requirements.txt, no pip install.
       # The compose stack builds the rastreo image from the Dockerfile; the
