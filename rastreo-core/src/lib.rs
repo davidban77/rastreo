@@ -16,7 +16,10 @@ pub use model::{
     Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget,
     Signal, Target,
 };
-pub use pipeline::{run_discovery, run_discovery_with_components, DiscoverySummary};
+pub use pipeline::{
+    run_discovery, run_discovery_cancellable, run_discovery_with_components,
+    run_discovery_with_components_cancellable, DiscoverySummary,
+};
 pub use prober::{Prober, ProberConfig, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};

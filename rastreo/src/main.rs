@@ -7,12 +7,42 @@ async fn main() -> anyhow::Result<()> {
     let parsed = cli::Cli::parse();
     init_tracing(parsed.verbose, parsed.quiet);
 
-    tokio::select! {
-        result = cli::run(parsed) => result,
-        _ = tokio::signal::ctrl_c() => {
-            tracing::warn!("interrupted, shutting down");
-            Ok(())
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+    let signal_tx = cancel_tx.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        let _ = signal_tx.send(true);
+    });
+
+    cli::run(parsed, cancel_rx).await
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let sigint = tokio::signal::ctrl_c();
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(?e, "could not install SIGTERM handler; SIGINT only");
+            sigint.await.ok();
+            tracing::warn!("SIGINT received, draining and flushing sink");
+            return;
         }
+    };
+
+    tokio::select! {
+        _ = sigint => tracing::warn!("SIGINT received, draining and flushing sink"),
+        _ = sigterm.recv() => tracing::warn!("SIGTERM received, draining and flushing sink"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_ok() {
+        tracing::warn!("SIGINT received, draining and flushing sink");
     }
 }
 

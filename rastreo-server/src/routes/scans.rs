@@ -47,6 +47,8 @@ pub async fn create_scan(
     let memory_sink = MemorySink::new();
     let handle = memory_sink.handle();
 
+    // MemorySink has no buffer to flush; TimeoutLayer handles request-lifecycle drop, so the
+    // non-cancellable wrapper is correct here.
     let summary =
         run_discovery_with_components(&scenario, state.resolver.clone(), Box::new(memory_sink))
             .await?;
@@ -142,6 +144,7 @@ mod tests {
                 probe_attempts: 1,
                 probe_errors: 0,
                 records_emitted: 1,
+                cancelled: false,
                 elapsed: Duration::from_millis(42),
             },
             records: Vec::new(),
