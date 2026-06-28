@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0](https://github.com/davidban77/rastreo/compare/v0.1.0...v0.2.0) (2026-06-28)
+
+
+### Features
+
+* **ci:** add crates.io publish workflow ([#32](https://github.com/davidban77/rastreo/issues/32)) ([f7da1b8](https://github.com/davidban77/rastreo/commit/f7da1b8c8c5655dd71a7ea52171fdcc24510e326))
+* **ci:** add live-infra UAT gate against the compose stack ([#33](https://github.com/davidban77/rastreo/issues/33)) ([238a1df](https://github.com/davidban77/rastreo/commit/238a1dfe9536fd787aba58f5fc4f27393dadeb23))
+* **ci:** add multi-arch release workflow ([#30](https://github.com/davidban77/rastreo/issues/30)) ([4bb6306](https://github.com/davidban77/rastreo/commit/4bb6306677324ce93895be4c839b3715383cbe79))
+
+
+### Documentation
+
+* add brand assets, README badges, and docs home hero ([#34](https://github.com/davidban77/rastreo/issues/34)) ([d36cbf7](https://github.com/davidban77/rastreo/commit/d36cbf740eb339d179f6c3c9de937792c8c75ae4))
+
+
+### Miscellaneous
+
+* add community scaffolding and editorconfig ([#35](https://github.com/davidban77/rastreo/issues/35)) ([a93c92a](https://github.com/davidban77/rastreo/commit/a93c92af9d9a9f416044eff8783e0237528bbc97))
+
+
+### CI/CD
+
+* bump actions/cache from 5 to 6 ([#38](https://github.com/davidban77/rastreo/issues/38)) ([20753f1](https://github.com/davidban77/rastreo/commit/20753f1216e895c71af7821ea7045f5555e229cf))
+* bump actions/checkout from 6 to 7 ([#39](https://github.com/davidban77/rastreo/issues/39)) ([7f1af73](https://github.com/davidban77/rastreo/commit/7f1af7358738d9b51e51772a9cb1a37bd462be65))
+* bump actions/upload-artifact from 4 to 7 ([#36](https://github.com/davidban77/rastreo/issues/36)) ([6ff35ab](https://github.com/davidban77/rastreo/commit/6ff35abea545f162e951e015da880a3dd9146fb5))
+* bump apache/kafka from 4.2.0 to 4.3.1 ([#37](https://github.com/davidban77/rastreo/issues/37)) ([0a9f652](https://github.com/davidban77/rastreo/commit/0a9f6529791e1b953f89be38530f8e13d67a480f))
+
 ## [0.1.0](https://github.com/davidban77/rastreo/compare/v0.0.3...v0.1.0) (2026-06-23)
 
 
