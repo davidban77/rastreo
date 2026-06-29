@@ -8,7 +8,8 @@ use ipnet::IpNet;
 use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
-use rastreo_core::{run_discovery, ConfigError, ProberConfig, SinkConfig, Target};
+use rastreo_core::{run_discovery_cancellable, ConfigError, ProberConfig, SinkConfig, Target};
+use tokio::sync::watch;
 
 #[derive(Parser, Debug)]
 pub struct DiscoverArgs {
@@ -75,18 +76,24 @@ pub enum SinkKind {
     Kafka,
 }
 
-pub async fn run(args: DiscoverArgs) -> Result<()> {
+pub async fn run(args: DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
     let scenario = build_scenario(&args)?;
-    let summary = run_discovery(&scenario).await?;
+    let summary = run_discovery_cancellable(&scenario, cancel).await?;
+    let status = if summary.cancelled {
+        "cancelled"
+    } else {
+        "complete"
+    };
     eprintln!(
-        "discovery complete: targets_resolved={} probe_attempts={} probe_errors={} records_emitted={} elapsed_ms={}",
+        "discovery {}: targets_resolved={} probe_attempts={} probe_errors={} records_emitted={} elapsed_ms={}",
+        status,
         summary.targets_resolved,
         summary.probe_attempts,
         summary.probe_errors,
         summary.records_emitted,
         summary.elapsed.as_millis(),
     );
-    if summary.records_emitted == 0 && summary.probe_attempts > 0 {
+    if !summary.cancelled && summary.records_emitted == 0 && summary.probe_attempts > 0 {
         eprintln!(
             "hint: 0 records emitted — no probe reached an open port. Check target reachability and port list."
         );

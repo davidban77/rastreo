@@ -30,8 +30,8 @@ pub enum Command {
     Discover(DiscoverArgs),
 }
 
-pub async fn run(cli: Cli) -> Result<()> {
+pub async fn run(cli: Cli, cancel: tokio::sync::watch::Receiver<bool>) -> Result<()> {
     match cli.command {
-        Command::Discover(args) => discover::run(args).await,
+        Command::Discover(args) => discover::run(args, cancel).await,
     }
 }
