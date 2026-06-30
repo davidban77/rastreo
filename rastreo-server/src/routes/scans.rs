@@ -20,10 +20,14 @@ pub async fn create_scan(
     State(state): State<AppState>,
     Json(scenario): Json<DiscoverScenarioConfig>,
 ) -> Result<Json<ScanResponse>, AppError> {
+    let start = std::time::Instant::now();
+
     if scenario.targets.is_empty() {
+        state.metrics.record_scan_error(start.elapsed(), false);
         return Err(AppError::bad_request("scenario.targets must not be empty"));
     }
     if scenario.probers.is_empty() {
+        state.metrics.record_scan_error(start.elapsed(), false);
         return Err(AppError::bad_request("scenario.probers must not be empty"));
     }
 
@@ -49,17 +53,28 @@ pub async fn create_scan(
 
     // MemorySink has no buffer to flush; TimeoutLayer handles request-lifecycle drop, so the
     // non-cancellable wrapper is correct here.
-    let summary =
+    let summary_result =
         run_discovery_with_components(&scenario, state.resolver.clone(), Box::new(memory_sink))
-            .await?;
+            .await;
 
-    let records: Vec<DeviceRecord> = handle
-        .ndjson_lines()
-        .into_iter()
-        .filter_map(|line| serde_json::from_str(&line).ok())
-        .collect();
-
-    Ok(Json(ScanResponse { summary, records }))
+    match summary_result {
+        Ok(summary) => {
+            state.metrics.record_scan_completion(&summary);
+            let records: Vec<DeviceRecord> = handle
+                .ndjson_lines()
+                .into_iter()
+                .filter_map(|line| serde_json::from_str(&line).ok())
+                .collect();
+            Ok(Json(ScanResponse { summary, records }))
+        }
+        Err(err) => {
+            let is_sink_error = matches!(err, rastreo_core::RastreoError::Sink(_));
+            state
+                .metrics
+                .record_scan_error(start.elapsed(), is_sink_error);
+            Err(err.into())
+        }
+    }
 }
 
 #[cfg(test)]

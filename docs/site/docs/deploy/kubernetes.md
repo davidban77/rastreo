@@ -1,5 +1,5 @@
 ---
-description: Install rastreo-server on Kubernetes with the bundled Helm chart — key values, image-source caveat, ServiceMonitor caveat, and chart-default security context.
+description: Install rastreo-server on Kubernetes with the bundled Helm chart — key values, image-source caveat, ServiceMonitor for Prometheus scraping, and chart-default security context.
 ---
 
 # Kubernetes
@@ -33,7 +33,7 @@ The most useful `values.yaml` knobs are:
 | `autoscaling.enabled`            | `false`                       | Enable an HPA scaling between `minReplicas` and `maxReplicas`. |
 | `podDisruptionBudget.enabled`    | `false`                       | Create a PDB with `minAvailable: 1`.                      |
 | `ingress.enabled`                | `false`                       | Create an `Ingress` for the service.                      |
-| `serviceMonitor.enabled`         | `false`                       | Create a Prometheus Operator `ServiceMonitor`. See the caveat below. |
+| `serviceMonitor.enabled`         | `false`                       | Create a Prometheus Operator `ServiceMonitor` that scrapes `/metrics`. |
 | `config`                         | `{}`                          | Inline YAML mounted at `/etc/rastreo` as a `ConfigMap`.   |
 
 A worked example of `config`:
@@ -62,10 +62,19 @@ helm install rastreo ./helm/rastreo \
   --set image.tag=0.0.3
 ```
 
-## ServiceMonitor caveat
+## ServiceMonitor
 
-!!! warning "`serviceMonitor.enabled: true` will produce 404 scrape errors today"
-    The chart's `serviceMonitor.path` defaults to `/metrics`, but `rastreo-server` does not expose a `/metrics` endpoint today — the route table is `/health` and `/scans` only. The ServiceMonitor is forward-prepared for a future metrics endpoint; leave `serviceMonitor.enabled: false` (the default) until that endpoint exists.
+Enable Prometheus scraping by setting `serviceMonitor.enabled: true`. `rastreo-server` exposes Prometheus-format metrics at `GET /metrics` — scan counts and outcomes, probe success/error totals, records emitted, sink errors, a request-duration histogram, uptime, and build info. The chart's default `serviceMonitor.path: /metrics` matches.
+
+```yaml
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  path: "/metrics"
+```
+
+All metric names use the `rastreo_server_` prefix. See [rastreo-server · GET /metrics](server.md#get-metrics) for the per-metric table.
 
 ## Security context
 

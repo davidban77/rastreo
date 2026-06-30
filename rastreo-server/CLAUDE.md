@@ -15,11 +15,12 @@ src/
 ├── main.rs        ← entrypoint: clap arg parsing, tracing init, resolver
 │                    construction, tokio runtime, axum serve loop
 ├── lib.rs         ← build_app(state) -> Router; reusable from tests
-├── state.rs       ← AppState { resolver: Arc<dyn Resolver> }
+├── state.rs       ← AppState { resolver, metrics } + HistogramShard + Metrics
 ├── error.rs       ← AppError + IntoResponse + RastreoError -> HTTP mapping
 └── routes/
     ├── mod.rs     ← route module re-exports
     ├── health.rs  ← GET /health
+    ├── metrics.rs ← GET /metrics (Prometheus text format)
     └── scans.rs   ← POST /scans handler + ScanResponse
 ```
 
@@ -36,6 +37,7 @@ src/
 | Method | Path     | Description                                                                                                                                                                  |
 |--------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | GET    | /health  | Health check — always returns 200 OK                                                                                                                                         |
+| GET    | /metrics | Prometheus text format with operational signals (scan / probe counters, records emitted, sink errors, request-duration histogram, uptime, build info). Namespace: `rastreo_server_`. |
 | POST   | /scans   | Submit a discovery scenario; runs synchronously and returns summary + records. The client-specified `sink` field is ignored; records are always returned in the response body. |
 
 ## POST /scans

@@ -1,5 +1,5 @@
 ---
-description: The rastreo-server HTTP control plane — routes, request and response shape for /scans, request-timeout configuration, and when to choose the server over the CLI.
+description: The rastreo-server HTTP control plane — routes, request and response shape for /scans, Prometheus metrics at /metrics, request-timeout configuration, and when to choose the server over the CLI.
 ---
 
 # rastreo-server
@@ -43,6 +43,28 @@ curl -sS http://localhost:8080/health
 ```json
 {"status":"ok"}
 ```
+
+## GET /metrics
+
+`GET /metrics` returns operational signals in Prometheus text format (`text/plain; version=0.0.4`). Point a Prometheus Operator `ServiceMonitor` at it, scrape it directly with `prometheus.yml`, or pull it manually with `curl` for ad-hoc inspection. The endpoint is unauthenticated; gate access at the network or ingress layer if needed.
+
+```bash
+curl -sS http://localhost:8080/metrics | head
+```
+
+Metrics exposed:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. |
+| `rastreo_server_probes_total` | counter | `outcome="success"\|"error"` | Probes executed across all scans. `success` is computed as `attempted - errored`. |
+| `rastreo_server_records_emitted_total` | counter | — | `DeviceRecord` events emitted across all scans. |
+| `rastreo_server_sink_errors_total` | counter | — | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant). |
+| `rastreo_server_scan_duration_seconds` | histogram | — | `POST /scans` request handling duration. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. |
+| `rastreo_server_uptime_seconds` | gauge | — | Seconds since the server process started. |
+| `rastreo_server_build_info` | gauge | `version` | Static `1`; the `version` label carries the binary's `CARGO_PKG_VERSION`. |
+
+All counters are monotonic across the server process's lifetime and reset only on restart. The histogram observes the same elapsed time the handler measures from the moment the request body is parsed to the moment the response is built.
 
 ## POST /scans
 
