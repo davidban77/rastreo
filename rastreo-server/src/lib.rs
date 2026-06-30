@@ -22,6 +22,7 @@ pub fn build_app_with_timeout(state: AppState, request_timeout: Duration) -> Rou
     // Layer order matters: TraceLayer is added last so it wraps TimeoutLayer and logs timeouts.
     Router::new()
         .route("/health", get(routes::health::health))
+        .route("/metrics", get(routes::metrics::get_metrics))
         .route("/scans", post(routes::scans::create_scan))
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(
