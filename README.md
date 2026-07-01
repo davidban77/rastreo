@@ -28,6 +28,14 @@ This is a Cargo workspace with three crates:
 
 No business logic lives outside `rastreo-core`. If the CLI or server needs new behavior, it goes in core.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
+```
+
+Detects your OS/architecture, verifies the release checksum, and drops `rastreo` + `rastreo-server` into `/usr/local/bin`. Also available as a multi-arch Docker image (`ghcr.io/davidban77/rastreo`) and a Helm chart (`oci://ghcr.io/davidban77/charts/rastreo`). Full options at [Install](https://davidban77.github.io/rastreo/get-started/install/).
+
 ## Quickstart
 
 Bring up the local development stack (rastreo-server, single-node Kafka, three alpine target hosts) with Docker Compose:

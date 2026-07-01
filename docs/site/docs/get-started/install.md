@@ -1,16 +1,51 @@
 ---
-description: Install the rastreo CLI and the rastreo-server HTTP control plane from source or Docker.
+description: Install the rastreo CLI and the rastreo-server HTTP control plane via the install.sh script, prebuilt Docker image, Helm chart, or Cargo.
 ---
 
 # Install
 
-Installing rastreo gives you two binaries: `rastreo`, the CLI used to run one-shot discovery scans, and `rastreo-server`, the HTTP control plane that drives scans over an API. Most readers want the CLI; install the server when you need a long-running process other systems can call.
+Installing rastreo gives you two binaries: `rastreo`, the CLI used to run one-shot discovery scans, and `rastreo-server`, the HTTP control plane that drives scans over an API. Pick the install path that matches how you'll run it.
 
-There is no published crate on crates.io and no published Docker image yet, so every install path below builds from the source tree.
+## Quick install (Linux/macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
+```
+
+The installer detects your OS and architecture, downloads the matching tarball plus the release's `SHA256SUMS`, verifies the checksum, and drops `rastreo` + `rastreo-server` into `/usr/local/bin`. Supported: linux amd64/arm64, macOS amd64/arm64.
+
+Pin a specific version or install to a different directory via environment variables:
+
+```bash
+RASTREO_VERSION=v0.3.0 curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
+RASTREO_INSTALL_DIR=$HOME/.local/bin curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
+```
+
+## Docker
+
+```bash
+docker pull ghcr.io/davidban77/rastreo:latest
+```
+
+The image is multi-arch (linux amd64 + arm64) and ships both binaries. The default `ENTRYPOINT` is `rastreo-server` (port 8080); override to run the CLI:
+
+```bash
+docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:latest discover --target 1.1.1.1 --port 443
+```
+
+Pinned tags (`0.3.0`, `0.3`, `0`) are available on every release. See [Docker](../deploy/docker.md) for the full surface.
+
+## Helm chart (Kubernetes)
+
+```bash
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0
+```
+
+The chart deploys `rastreo-server` as a Deployment with sensible defaults (non-root UID, read-only rootfs, dropped capabilities). See [Kubernetes](../deploy/kubernetes.md) for values reference and ServiceMonitor setup.
 
 ## From source (Cargo)
 
-Clone the repository and use `cargo install` to put the binaries on your `$PATH`. The CLI and the server are separate crates, so they install independently.
+Clone the repository and use `cargo install` to put the binaries on your `$PATH`. The CLI and the server are separate crates.
 
 ```bash
 git clone https://github.com/davidban77/rastreo
@@ -19,26 +54,11 @@ cargo install --path rastreo            # installs the `rastreo` CLI
 cargo install --path rastreo-server     # installs `rastreo-server`
 ```
 
-Both binaries are installed into `~/.cargo/bin/`. If `cargo` was set up by `rustup`, that directory is already on your `$PATH`. If `rastreo --version` is not found after the install, add `~/.cargo/bin` to your shell `$PATH`.
-
-## With Docker
-
-The repository ships a multi-arch `Dockerfile` that builds static musl binaries for `linux/amd64` and `linux/arm64`. The image bundles both `rastreo` and `rastreo-server`. The default `ENTRYPOINT` is `rastreo-server` — to run the CLI inside a container, override the entrypoint.
-
-```bash
-docker build -t rastreo .
-
-# run the CLI by overriding the entrypoint
-docker run --rm --entrypoint /rastreo rastreo --version
-docker run --rm --entrypoint /rastreo rastreo discover --target 1.1.1.1 --port 443
-
-# build for both architectures with buildx
-docker buildx build --platform linux/amd64,linux/arm64 -t rastreo .
-```
+Both binaries are installed into `~/.cargo/bin/`. If `cargo` was set up by `rustup`, that directory is already on your `$PATH`.
 
 ## For development
 
-When you are changing rastreo itself, build the whole workspace and run the debug binary directly out of `target/`. There is no install step.
+When you are changing rastreo itself, build the whole workspace and run the debug binary directly out of `target/`.
 
 ```bash
 cargo build --workspace
@@ -53,7 +73,7 @@ rastreo --version
 rastreo discover --help
 ```
 
-`rastreo --version` should print a version line such as `rastreo 0.0.3`. `rastreo discover --help` prints the full flag reference for the discovery subcommand — see [CLI](../discover/cli.md) for the same surface in long form.
+`rastreo --version` prints a version line such as `rastreo 0.3.0`. `rastreo discover --help` prints the full flag reference for the discovery subcommand — see [CLI](../discover/cli.md) for the same surface in long form.
 
 ## See also
 
