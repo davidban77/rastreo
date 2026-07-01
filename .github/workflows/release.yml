@@ -120,7 +120,19 @@ jobs:
           body: |
             ## Installation
 
-            **Download a prebuilt binary:**
+            **Quick install (Linux/macOS):**
+            ```
+            curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
+            ```
+
+            **Pin a specific version:**
+            ```
+            RASTREO_VERSION=${{ github.ref_name }} curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
+            ```
+
+            The installer auto-detects the platform, downloads the matching tarball + `SHA256SUMS`, verifies the checksum, and drops `rastreo` + `rastreo-server` into `/usr/local/bin`. Override the target directory with `RASTREO_INSTALL_DIR=$HOME/.local/bin`.
+
+            **Manual download:**
 
             Pick the tarball matching your platform from the assets below, then verify the checksum and extract:
 
