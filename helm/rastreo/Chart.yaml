@@ -1,9 +1,12 @@
 apiVersion: v2
 name: rastreo
-description: Enrichment-aware network discovery in Rust — TCP, UDP, HTTP, DNS, SNMP, and ARP probes fused into deduplicated DeviceRecord events on Kafka, file, or stdout
+description: >-
+  Enrichment-aware network discovery in Rust — TCP, UDP, HTTP, DNS, SNMP, and
+  ARP probes fused into deduplicated DeviceRecord events on Kafka, file, or
+  stdout
 type: application
-version: 0.2.0
-appVersion: 0.2.0
+version: 0.3.0
+appVersion: 0.3.0
 kubeVersion: '>=1.25.0-0'
 home: https://github.com/davidban77/rastreo
 sources:
