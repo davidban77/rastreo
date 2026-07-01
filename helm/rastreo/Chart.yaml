@@ -1,6 +1,6 @@
 apiVersion: v2
 name: rastreo
-description: Enrichment-aware network discovery — Kafka-first, in the spirit of Sonda
+description: Enrichment-aware network discovery in Rust — TCP, UDP, HTTP, DNS, SNMP, and ARP probes fused into deduplicated DeviceRecord events on Kafka, file, or stdout
 type: application
 version: 0.2.0
 appVersion: 0.2.0

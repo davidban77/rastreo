@@ -8,6 +8,14 @@ The repository ships a Helm chart at `helm/rastreo/` that installs `rastreo-serv
 
 ## Install
 
+The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. Pin the version explicitly so upgrades are intentional.
+
+```bash
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0
+```
+
+Or install from the checked-out source tree without pulling from the registry:
+
 ```bash
 helm install rastreo ./helm/rastreo
 ```
@@ -15,7 +23,7 @@ helm install rastreo ./helm/rastreo
 Use `--values myvalues.yaml` to override defaults without forking the chart.
 
 ```bash
-helm install rastreo ./helm/rastreo --values myvalues.yaml
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0 --values myvalues.yaml
 ```
 
 ## Key values
@@ -52,14 +60,14 @@ Each key under `config` becomes a file at `/etc/rastreo/<key>`. The Deployment t
 
 ## Image source
 
-The chart's default `image.repository` is `ghcr.io/davidban77/rastreo`, but **no image is published to ghcr.io today**. The chart references the eventual published image; until then, build the image locally and push it to a registry your cluster can pull from, then override `image.repository` and `image.tag`.
+The chart's default `image.repository` is `ghcr.io/davidban77/rastreo` — a multi-arch image built from the same source tree, published on every `v*` tag. `image.tag` defaults to the chart's `appVersion`, so `helm install ... --version 0.3.0` pulls `ghcr.io/davidban77/rastreo:0.3.0` out of the box.
+
+To pin to a different image (a fork in a private registry, a mid-cycle build, or a specific SHA), override `image.repository` and `image.tag`:
 
 ```bash
-docker build -t my-registry.example.com/rastreo:0.0.3 .
-docker push my-registry.example.com/rastreo:0.0.3
-helm install rastreo ./helm/rastreo \
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0 \
   --set image.repository=my-registry.example.com/rastreo \
-  --set image.tag=0.0.3
+  --set image.tag=0.3.0
 ```
 
 ## ServiceMonitor

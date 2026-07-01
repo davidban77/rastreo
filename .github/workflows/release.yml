@@ -144,6 +144,11 @@ jobs:
             docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:${{ github.ref_name }} \
               discover --target 10.0.0.0/24 --port 80 --sink kafka --brokers kafka:9092 --topic discovery
             ```
+
+            **Helm chart:**
+            ```
+            helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version ${{ github.ref_name }}
+            ```
           files: |
             rastreo-*.tar.gz
             SHA256SUMS
@@ -192,3 +197,33 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  helm:
+    name: Package & Push Helm Chart
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.2
+
+      - name: Lint chart
+        run: helm lint helm/rastreo
+
+      - name: Package chart
+        run: helm package helm/rastreo --destination .
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} \
+            --username ${{ github.actor }} \
+            --password-stdin
+
+      - name: Push chart to OCI registry
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          helm push "rastreo-${VERSION}.tgz" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
