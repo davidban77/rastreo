@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0](https://github.com/davidban77/rastreo/compare/v0.2.0...v0.3.0) (2026-07-01)
+
+
+### Features
+
+* **ci:** publish the Helm chart to ghcr.io on tag push ([#45](https://github.com/davidban77/rastreo/issues/45)) ([0853689](https://github.com/davidban77/rastreo/commit/08536894511a219198620014a0dd8ef2c02d97fc))
+* **install:** add install.sh curl-pipe installer ([#46](https://github.com/davidban77/rastreo/issues/46)) ([1d458bb](https://github.com/davidban77/rastreo/commit/1d458bb99bbb40d684962e74b2fe5c44cbd4472a))
+* **pipeline:** graceful sink flush on SIGINT/SIGTERM ([#42](https://github.com/davidban77/rastreo/issues/42)) ([0666d30](https://github.com/davidban77/rastreo/commit/0666d30df7c8ec5ed74b1b2bdf8b63c431458e8b))
+* **server:** expose Prometheus metrics at GET /metrics ([#44](https://github.com/davidban77/rastreo/issues/44)) ([639fbd4](https://github.com/davidban77/rastreo/commit/639fbd43f8bb8d0e34065909853235cada63937f))
+
 ## [0.2.0](https://github.com/davidban77/rastreo/compare/v0.1.0...v0.2.0) (2026-06-28)
 
 
