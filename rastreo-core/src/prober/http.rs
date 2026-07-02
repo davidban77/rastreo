@@ -27,24 +27,19 @@ impl HttpProber {
     pub fn new(
         ports: Vec<u16>,
         scheme: HttpScheme,
-        path: Option<String>,
-        tls_verify: Option<bool>,
-        user_agent: Option<String>,
+        path: String,
+        tls_verify: bool,
+        user_agent: String,
     ) -> Result<Self, RastreoError> {
         if ports.is_empty() {
             return Err(ConfigError::invalid("http prober requires at least one port").into());
         }
-        let path = path.unwrap_or_else(|| "/".to_string());
         if !path.starts_with('/') {
             return Err(ConfigError::invalid("http prober path must start with /").into());
         }
         let mut ports = ports;
         ports.sort_unstable();
         ports.dedup();
-
-        let user_agent =
-            user_agent.unwrap_or_else(|| format!("rastreo/{}", env!("CARGO_PKG_VERSION")));
-        let tls_verify = tls_verify.unwrap_or(false);
 
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -64,6 +59,24 @@ impl HttpProber {
     pub fn ports(&self) -> &[u16] {
         &self.ports
     }
+}
+
+/// Serde default for `ProberConfig::Http.path` — `"/"`.
+pub fn default_path() -> String {
+    "/".to_string()
+}
+
+/// Serde default for `ProberConfig::Http.tls_verify` — `false`.
+///
+/// rastreo probes unknown networks where self-signed and expired certificates are common.
+/// Users on trusted networks opt into strict verification via `tls_verify: true`.
+pub fn default_tls_verify() -> bool {
+    false
+}
+
+/// Serde default for `ProberConfig::Http.user_agent` — `"rastreo/<version>"`.
+pub fn default_user_agent() -> String {
+    format!("rastreo/{}", env!("CARGO_PKG_VERSION"))
 }
 
 fn scheme_for_port(port: u16, scheme: HttpScheme) -> &'static str {
@@ -293,8 +306,14 @@ mod tests {
                 .expect("response")
         }))
         .await;
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
@@ -315,8 +334,14 @@ mod tests {
                 .expect("response")
         }))
         .await;
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
@@ -335,8 +360,14 @@ mod tests {
                 .expect("response")
         }))
         .await;
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
@@ -352,8 +383,14 @@ mod tests {
             .expect("bind");
         let port = listener.local_addr().expect("addr").port();
         drop(listener);
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let err = prober
             .probe(&loopback_target(), &ctx_with_timeout(500))
             .await
@@ -375,8 +412,14 @@ mod tests {
     #[tokio::test]
     async fn http_prober_maps_timeout_to_timeout_error() {
         let port = spawn_hanging_server().await;
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let err = prober
             .probe(&loopback_target(), &ctx_with_timeout(100))
             .await
@@ -399,8 +442,14 @@ mod tests {
                 .expect("response")
         });
         let port = spawn_server(responder).await;
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
@@ -422,8 +471,14 @@ mod tests {
                 .expect("response")
         }))
         .await;
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
@@ -454,8 +509,14 @@ mod tests {
             original: Target::Ip(ip),
             resolved_at: SystemTime::UNIX_EPOCH,
         };
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Http, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let outcome = prober
             .probe(&target, &ctx_with_timeout(2_000))
             .await
@@ -480,8 +541,14 @@ mod tests {
                 .expect("response")
         }))
         .await;
-        let prober =
-            HttpProber::new(vec![port], HttpScheme::Https, None, None, None).expect("valid");
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Https,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         let err = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
@@ -520,7 +587,13 @@ mod tests {
 
     #[test]
     fn new_rejects_empty_port_list() {
-        match HttpProber::new(Vec::new(), HttpScheme::Auto, None, None, None) {
+        match HttpProber::new(
+            Vec::new(),
+            HttpScheme::Auto,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        ) {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
                 assert!(msg.contains("at least one port"), "got: {msg}");
             }
@@ -534,9 +607,9 @@ mod tests {
         match HttpProber::new(
             vec![80],
             HttpScheme::Auto,
-            Some("no-slash".into()),
-            None,
-            None,
+            "no-slash".to_string(),
+            default_tls_verify(),
+            default_user_agent(),
         ) {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
                 assert!(msg.contains("start with /"), "got: {msg}");
@@ -551,9 +624,9 @@ mod tests {
         let p = HttpProber::new(
             vec![80, 22, 80, 443, 22],
             HttpScheme::Auto,
-            None,
-            None,
-            None,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
         )
         .expect("valid");
         assert_eq!(p.ports(), &[22, 80, 443]);
@@ -561,7 +634,14 @@ mod tests {
 
     #[test]
     fn kind_returns_http() {
-        let p = HttpProber::new(vec![80], HttpScheme::Auto, None, None, None).expect("valid");
+        let p = HttpProber::new(
+            vec![80],
+            HttpScheme::Auto,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
         assert_eq!(p.kind(), ProbeKind::Http);
     }
 

@@ -17,7 +17,7 @@ probers:
     scheme: auto
     path: /
     tls_verify: false
-    user_agent: rastreo/0.2.0
+    user_agent: rastreo/0.3.0
 ```
 
 | Field | Type | Required | Default | Notes |
