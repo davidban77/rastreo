@@ -113,6 +113,7 @@ nav:
       - HTTP: probe/http.md
       - DNS: probe/dns.md
       - UDP: probe/udp.md
+      - SNMP: probe/snmp.md
   - Integrate:
       - integrate/index.md
       - Kafka: integrate/kafka.md

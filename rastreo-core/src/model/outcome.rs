@@ -25,6 +25,7 @@ pub enum Signal {
     SipUserAgent(String),
     MemcachedVersion(String),
     StunMappedAddress(String),
+    SnmpSysName(String),
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +116,19 @@ mod tests {
             let s = serde_json::to_string(&signal).expect("serialize");
             let back: Signal = serde_json::from_str(&s).expect("deserialize");
             assert_eq!(signal, back);
+        }
+    }
+
+    #[test]
+    fn snmp_signal_variants_round_trip_json() {
+        for signal in [
+            Signal::SnmpSysDescr("Linux zeus 4.8.6.5-smp".to_string()),
+            Signal::SnmpSysObjectId("1.3.6.1.4.1.8072.3.2.10".to_string()),
+            Signal::SnmpSysName("zeus.snmplabs.com".to_string()),
+        ] {
+            let json = serde_json::to_string(&signal).expect("serialize");
+            let round_trip: Signal = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(signal, round_trip);
         }
     }
 

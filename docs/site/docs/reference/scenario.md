@@ -51,7 +51,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Four probers are available today: `tcp_connect`, `http`, `dns`, and `udp`. The `http` variant is gated behind the `http` Cargo feature on `rastreo-core` (bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Five probers are available today: `tcp_connect`, `http`, `dns`, `udp`, and `snmp`. The `http` and `snmp` variants are gated behind the `http` and `snmp` Cargo features on `rastreo-core` respectively (both bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
 
 ### `tcp_connect`
 
@@ -112,6 +112,21 @@ Speaks one of four UDP protocols against each configured port and emits a typed 
 
 ```json
 {"type": "udp", "ports": [123], "protocol": "ntp"}
+```
+
+### `snmp`
+
+Issues an SNMPv1 or SNMPv2c `GetRequest` against each configured port for three MIB-II system-group OIDs (`sysDescr`, `sysObjectID`, `sysName`) and emits each returned varbind as a typed signal. See the [SNMP prober page](../probe/snmp.md) for version behaviour, OID mapping, and the security caveat around cleartext community strings.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"snmp"`. |
+| `ports` | array of u16 | no | `[161]` | Ports to probe. |
+| `version` | string | no | `v2c` | One of `v1`, `v2c`. |
+| `community` | string | no | `public` | SNMP community string. Transmitted in cleartext on v1 and v2c. |
+
+```json
+{"type": "snmp", "ports": [161], "version": "v2c", "community": "public"}
 ```
 
 ## Encoders
