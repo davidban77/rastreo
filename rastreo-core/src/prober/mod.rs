@@ -2,11 +2,13 @@ pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod tcp_connect;
+pub mod udp;
 
 pub use dns::{DnsProber, DnsQueryType, DnsTransport};
 #[cfg(feature = "http")]
 pub use http::{HttpProber, HttpScheme};
 pub use tcp_connect::TcpConnectProber;
+pub use udp::{UdpProber, UdpProtocol};
 
 use crate::error::RastreoError;
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
@@ -52,6 +54,10 @@ pub enum ProberConfig {
         #[serde(default = "dns::default_recursion_desired")]
         recursion_desired: bool,
     },
+    Udp {
+        ports: Vec<u16>,
+        protocol: UdpProtocol,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -84,6 +90,9 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
             *transport,
             *recursion_desired,
         )?)),
+        ProberConfig::Udp { ports, protocol } => {
+            Ok(Box::new(UdpProber::new(ports.clone(), *protocol)?))
+        }
     }
 }
 
@@ -270,6 +279,43 @@ mod tests {
             Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(_))) => {}
             Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
             Ok(_) => panic!("empty query_names must error"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn prober_config_deserializes_udp_variant_from_yaml() {
+        let yaml = "type: udp\nports: [123]\nprotocol: ntp\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize udp");
+        match config {
+            ProberConfig::Udp { ports, protocol } => {
+                assert_eq!(ports, vec![123]);
+                assert_eq!(protocol, UdpProtocol::Ntp);
+            }
+            other => panic!("expected Udp variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_prober_udp_produces_udp_prober() {
+        let config = ProberConfig::Udp {
+            ports: vec![5060],
+            protocol: UdpProtocol::SipOptions,
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Udp);
+    }
+
+    #[test]
+    fn create_prober_udp_propagates_empty_ports_error() {
+        let config = ProberConfig::Udp {
+            ports: Vec::new(),
+            protocol: UdpProtocol::Ntp,
+        };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(_))) => {}
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("empty ports must error"),
         }
     }
 
