@@ -51,7 +51,11 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). One prober is available today: `tcp_connect`. It establishes a TCP connection to each listed port on each resolved target IP; an open port produces an `OpenPort(<port>)` signal.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Two probers are available today: `tcp_connect` and `http`. The `http` variant is gated behind the `http` Cargo feature on `rastreo-core` (bundled with the published binaries and Docker image).
+
+### `tcp_connect`
+
+Establishes a TCP connection to each listed port on each resolved target IP; an open port produces an `OpenPort(<port>)` signal.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -60,6 +64,23 @@ The `probers` array contains internally-tagged objects (each carries a `type` fi
 
 ```json
 {"type": "tcp_connect", "ports": [22, 80, 443]}
+```
+
+### `http`
+
+Issues a `GET` request against each configured port and emits the response `Server:` header as an `HttpBanner(<value>)` signal. See the [HTTP prober page](../probe/http.md) for TLS behaviour and scheme resolution rules.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"http"`. |
+| `ports` | array of u16 | yes | — | List of ports to probe. |
+| `scheme` | string | no | `auto` | One of `auto`, `http`, `https`. Under `auto`, ports 443 and 8443 use HTTPS; all others use HTTP. |
+| `path` | string | no | `/` | Request path. Must start with `/`. |
+| `tls_verify` | bool | no | `false` | When `false`, accepts self-signed and expired certificates. |
+| `user_agent` | string | no | `rastreo/<version>` | Sent as the `User-Agent` header on every probe. |
+
+```json
+{"type": "http", "ports": [80, 443], "scheme": "auto", "tls_verify": false}
 ```
 
 ## Encoders

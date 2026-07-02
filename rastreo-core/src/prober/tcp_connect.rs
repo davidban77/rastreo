@@ -224,6 +224,8 @@ mod tests {
             ProberConfig::TcpConnect { ports } => {
                 assert_eq!(ports, vec![22, 80]);
             }
+            #[allow(unreachable_patterns)]
+            _ => panic!("expected TcpConnect variant"),
         }
     }
 
