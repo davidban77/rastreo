@@ -111,6 +111,7 @@ nav:
   - Probe:
       - probe/index.md
       - HTTP: probe/http.md
+      - DNS: probe/dns.md
   - Integrate:
       - integrate/index.md
       - Kafka: integrate/kafka.md
