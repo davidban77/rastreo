@@ -32,12 +32,12 @@ pub enum ProberConfig {
         ports: Vec<u16>,
         #[serde(default)]
         scheme: HttpScheme,
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        tls_verify: Option<bool>,
-        #[serde(default)]
-        user_agent: Option<String>,
+        #[serde(default = "http::default_path")]
+        path: String,
+        #[serde(default = "http::default_tls_verify")]
+        tls_verify: bool,
+        #[serde(default = "http::default_user_agent")]
+        user_agent: String,
     },
 }
 
@@ -112,7 +112,7 @@ mod tests {
     #[cfg(all(feature = "config", feature = "http"))]
     #[test]
     fn prober_config_deserializes_http_variant_from_yaml() {
-        let yaml = "type: http\nports: [80, 443]\nscheme: auto\ntls_verify: false\n";
+        let yaml = "type: http\nports: [80, 443]\nscheme: auto\ntls_verify: true\npath: /health\nuser_agent: probe/1.0\n";
         let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize http");
         match config {
             ProberConfig::Http {
@@ -124,9 +124,9 @@ mod tests {
             } => {
                 assert_eq!(ports, vec![80, 443]);
                 assert!(matches!(scheme, HttpScheme::Auto));
-                assert!(path.is_none());
-                assert_eq!(tls_verify, Some(false));
-                assert!(user_agent.is_none());
+                assert_eq!(path, "/health");
+                assert!(tls_verify);
+                assert_eq!(user_agent, "probe/1.0");
             }
             other => panic!("expected Http variant, got {other:?}"),
         }
@@ -147,9 +147,9 @@ mod tests {
             } => {
                 assert_eq!(ports, vec![80]);
                 assert!(matches!(scheme, HttpScheme::Auto));
-                assert!(path.is_none());
-                assert!(tls_verify.is_none());
-                assert!(user_agent.is_none());
+                assert_eq!(path, "/");
+                assert!(!tls_verify);
+                assert_eq!(user_agent, format!("rastreo/{}", env!("CARGO_PKG_VERSION")));
             }
             other => panic!("expected Http variant, got {other:?}"),
         }
@@ -161,9 +161,9 @@ mod tests {
         let config = ProberConfig::Http {
             ports: Vec::new(),
             scheme: HttpScheme::Auto,
-            path: None,
-            tls_verify: None,
-            user_agent: None,
+            path: crate::prober::http::default_path(),
+            tls_verify: crate::prober::http::default_tls_verify(),
+            user_agent: crate::prober::http::default_user_agent(),
         };
         match create_prober(&config) {
             Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(_))) => {}
@@ -178,9 +178,9 @@ mod tests {
         let config = ProberConfig::Http {
             ports: vec![80],
             scheme: HttpScheme::Auto,
-            path: Some("no-leading-slash".into()),
-            tls_verify: None,
-            user_agent: None,
+            path: "no-leading-slash".to_string(),
+            tls_verify: crate::prober::http::default_tls_verify(),
+            user_agent: crate::prober::http::default_user_agent(),
         };
         match create_prober(&config) {
             Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
