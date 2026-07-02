@@ -1,7 +1,9 @@
+pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod tcp_connect;
 
+pub use dns::{DnsProber, DnsQueryType, DnsTransport};
 #[cfg(feature = "http")]
 pub use http::{HttpProber, HttpScheme};
 pub use tcp_connect::TcpConnectProber;
@@ -39,6 +41,17 @@ pub enum ProberConfig {
         #[serde(default = "http::default_user_agent")]
         user_agent: String,
     },
+    Dns {
+        #[serde(default = "dns::default_ports")]
+        ports: Vec<u16>,
+        query_names: Vec<String>,
+        #[serde(default)]
+        query_type: DnsQueryType,
+        #[serde(default)]
+        transport: DnsTransport,
+        #[serde(default = "dns::default_recursion_desired")]
+        recursion_desired: bool,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -57,6 +70,19 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
             path.clone(),
             *tls_verify,
             user_agent.clone(),
+        )?)),
+        ProberConfig::Dns {
+            ports,
+            query_names,
+            query_type,
+            transport,
+            recursion_desired,
+        } => Ok(Box::new(DnsProber::new(
+            ports.clone(),
+            query_names.clone(),
+            *query_type,
+            *transport,
+            *recursion_desired,
         )?)),
     }
 }
@@ -169,6 +195,81 @@ mod tests {
             Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(_))) => {}
             Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
             Ok(_) => panic!("empty ports must error"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn prober_config_deserializes_dns_variant_with_defaults() {
+        let yaml = "type: dns\nquery_names: [example.com.]\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize dns");
+        match config {
+            ProberConfig::Dns {
+                ports,
+                query_names,
+                query_type,
+                transport,
+                recursion_desired,
+            } => {
+                assert_eq!(ports, vec![53]);
+                assert_eq!(query_names, vec!["example.com.".to_string()]);
+                assert_eq!(query_type, DnsQueryType::A);
+                assert_eq!(transport, DnsTransport::Udp);
+                assert!(recursion_desired);
+            }
+            other => panic!("expected Dns variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn prober_config_deserializes_dns_variant_fully_populated() {
+        let yaml = "type: dns\nports: [53, 5353]\nquery_names: [a.example.com., b.example.com.]\nquery_type: mx\ntransport: tcp\nrecursion_desired: false\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize dns");
+        match config {
+            ProberConfig::Dns {
+                ports,
+                query_names,
+                query_type,
+                transport,
+                recursion_desired,
+            } => {
+                assert_eq!(ports, vec![53, 5353]);
+                assert_eq!(query_names.len(), 2);
+                assert_eq!(query_type, DnsQueryType::Mx);
+                assert_eq!(transport, DnsTransport::Tcp);
+                assert!(!recursion_desired);
+            }
+            other => panic!("expected Dns variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_prober_dns_variant_produces_dns_prober() {
+        let config = ProberConfig::Dns {
+            ports: vec![53],
+            query_names: vec!["example.com.".to_string()],
+            query_type: DnsQueryType::A,
+            transport: DnsTransport::Udp,
+            recursion_desired: true,
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Dns);
+    }
+
+    #[test]
+    fn create_prober_dns_variant_propagates_empty_query_names_error() {
+        let config = ProberConfig::Dns {
+            ports: vec![53],
+            query_names: Vec::new(),
+            query_type: DnsQueryType::A,
+            transport: DnsTransport::Udp,
+            recursion_desired: true,
+        };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(_))) => {}
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("empty query_names must error"),
         }
     }
 

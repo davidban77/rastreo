@@ -51,7 +51,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Two probers are available today: `tcp_connect` and `http`. The `http` variant is gated behind the `http` Cargo feature on `rastreo-core` (bundled with the published binaries and Docker image).
+The `probers` array contains internally-tagged objects (each carries a `type` field). Three probers are available today: `tcp_connect`, `http`, and `dns`. The `http` variant is gated behind the `http` Cargo feature on `rastreo-core` (bundled with the published binaries and Docker image); `tcp_connect` and `dns` are always available.
 
 ### `tcp_connect`
 
@@ -81,6 +81,23 @@ Issues a `GET` request against each configured port and emits the response `Serv
 
 ```json
 {"type": "http", "ports": [80, 443], "scheme": "auto", "tls_verify": false}
+```
+
+### `dns`
+
+Treats each resolved target as a DNS server, sends a query for each configured `query_name` over the chosen transport, and emits each answer record as a `DnsHost(<value>)` signal. See the [DNS prober page](../probe/dns.md) for the full signal-format table and reachability semantics.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"dns"`. |
+| `ports` | array of u16 | no | `[53]` | Ports to probe. |
+| `query_names` | array of string | yes | — | DNS names to query. Each name is validated: non-empty labels, each label at most 63 bytes, total length at most 253 bytes. |
+| `query_type` | string | no | `a` | One of `a`, `aaaa`, `mx`, `txt`, `ptr`, `ns`, `cname`. |
+| `transport` | string | no | `udp` | One of `udp`, `tcp`. |
+| `recursion_desired` | bool | no | `true` | Sets the RD bit on the outgoing query. |
+
+```json
+{"type": "dns", "ports": [53], "query_names": ["example.com"], "query_type": "a"}
 ```
 
 ## Encoders
