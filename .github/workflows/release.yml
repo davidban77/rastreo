@@ -70,14 +70,14 @@ jobs:
       - name: Build binaries (native)
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: |
-          cargo build --release --target ${{ matrix.target }} --features kafka -p rastreo
-          cargo build --release --target ${{ matrix.target }} --features kafka -p rastreo-server
+          cargo build --release --target ${{ matrix.target }} --features kafka,http -p rastreo
+          cargo build --release --target ${{ matrix.target }} --features kafka,http -p rastreo-server
 
       - name: Build binaries (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          cross build --release --target ${{ matrix.target }} --features kafka -p rastreo
-          cross build --release --target ${{ matrix.target }} --features kafka -p rastreo-server
+          cross build --release --target ${{ matrix.target }} --features kafka,http -p rastreo
+          cross build --release --target ${{ matrix.target }} --features kafka,http -p rastreo-server
 
       - name: Create tarball
         run: |

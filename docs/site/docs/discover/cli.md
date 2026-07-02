@@ -6,6 +6,9 @@ description: Reference for the rastreo discover subcommand — required flags, o
 
 `rastreo discover` is the entry point for one-shot discovery scans. It is flag-driven — there is no config file flag on the CLI today. The command probes each target on each port using the TCP-connect prober and emits one NDJSON `DeviceRecord` per discovered device to the chosen sink.
 
+!!! note "HTTP prober is scenario-only"
+    The HTTP prober (`type: http` in a scenario) is not reachable from `rastreo discover` flags today; use `rastreo-server`'s `POST /scans` endpoint with a JSON scenario body instead. See [Scenario schema — `http`](../reference/scenario.md#http).
+
 ## Usage
 
 ```text
