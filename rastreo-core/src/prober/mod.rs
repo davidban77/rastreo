@@ -1,12 +1,19 @@
 pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
+mod redacted;
+#[cfg(feature = "snmp")]
+pub mod snmp;
 pub mod tcp_connect;
 pub mod udp;
 
 pub use dns::{DnsProber, DnsQueryType, DnsTransport};
 #[cfg(feature = "http")]
 pub use http::{HttpProber, HttpScheme};
+#[cfg(feature = "snmp")]
+pub use redacted::Community;
+#[cfg(feature = "snmp")]
+pub use snmp::{SnmpProber, SnmpVersion};
 pub use tcp_connect::TcpConnectProber;
 pub use udp::{UdpProber, UdpProtocol};
 
@@ -58,6 +65,15 @@ pub enum ProberConfig {
         ports: Vec<u16>,
         protocol: UdpProtocol,
     },
+    #[cfg(feature = "snmp")]
+    Snmp {
+        #[serde(default = "snmp::default_ports")]
+        ports: Vec<u16>,
+        #[serde(default)]
+        version: SnmpVersion,
+        #[serde(default = "snmp::default_community")]
+        community: Community,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -93,6 +109,16 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
         ProberConfig::Udp { ports, protocol } => {
             Ok(Box::new(UdpProber::new(ports.clone(), *protocol)?))
         }
+        #[cfg(feature = "snmp")]
+        ProberConfig::Snmp {
+            ports,
+            version,
+            community,
+        } => Ok(Box::new(SnmpProber::new(
+            ports.clone(),
+            *version,
+            community.0.clone(),
+        )?)),
     }
 }
 
@@ -336,5 +362,102 @@ mod tests {
             Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
             Ok(_) => panic!("bad path must error"),
         }
+    }
+
+    #[cfg(all(feature = "config", feature = "snmp"))]
+    #[test]
+    fn prober_config_deserializes_snmp_variant_from_yaml() {
+        let yaml = "type: snmp\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize snmp");
+        match config {
+            ProberConfig::Snmp {
+                ports,
+                version,
+                community,
+            } => {
+                assert_eq!(ports, vec![161]);
+                assert_eq!(version, SnmpVersion::V2c);
+                assert_eq!(&*community, "public");
+            }
+            other => panic!("expected Snmp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "snmp"))]
+    #[test]
+    fn prober_config_deserializes_snmp_variant_fully_populated() {
+        let yaml = "type: snmp\nports: [161, 1161]\nversion: v1\ncommunity: rocommunity\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize snmp");
+        match config {
+            ProberConfig::Snmp {
+                ports,
+                version,
+                community,
+            } => {
+                assert_eq!(ports, vec![161, 1161]);
+                assert_eq!(version, SnmpVersion::V1);
+                assert_eq!(&*community, "rocommunity");
+            }
+            other => panic!("expected Snmp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn create_prober_snmp_produces_snmp_prober() {
+        let config = ProberConfig::Snmp {
+            ports: crate::prober::snmp::default_ports(),
+            version: SnmpVersion::V2c,
+            community: crate::prober::snmp::default_community(),
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Snmp);
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn create_prober_snmp_propagates_empty_ports_error() {
+        let config = ProberConfig::Snmp {
+            ports: Vec::new(),
+            version: SnmpVersion::V2c,
+            community: crate::prober::snmp::default_community(),
+        };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("port"), "got: {msg}");
+            }
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("empty ports must error"),
+        }
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn create_prober_snmp_propagates_empty_community_error() {
+        let config = ProberConfig::Snmp {
+            ports: crate::prober::snmp::default_ports(),
+            version: SnmpVersion::V2c,
+            community: crate::prober::Community(String::new()),
+        };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("community"), "got: {msg}");
+            }
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("empty community must error"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "snmp"))]
+    #[test]
+    fn prober_config_snmp_debug_redacts_community() {
+        let yaml = "type: snmp\ncommunity: secret-community\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize snmp");
+        let debug_output = format!("{config:?}");
+        assert!(
+            !debug_output.contains("secret-community"),
+            "community leaked in Debug: {debug_output}"
+        );
+        assert!(debug_output.contains("<redacted>"));
     }
 }

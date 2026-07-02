@@ -16,6 +16,7 @@ default = ["config"]
 config = ["rastreo-core/config"]
 http = ["rastreo-core/http"]
 kafka = ["rastreo-core/kafka"]
+snmp = ["rastreo-core/snmp"]
 
 [[bin]]
 name = "rastreo"

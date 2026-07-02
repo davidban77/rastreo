@@ -16,7 +16,7 @@ default = ["config"]
 config = ["dep:serde_yaml_ng"]
 http = ["dep:reqwest"]
 kafka = ["dep:rskafka", "dep:chrono", "chrono/clock", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
-snmp = []
+snmp = ["dep:rasn", "dep:rasn-snmp", "dep:rasn-smi"]
 arp = []
 
 [dependencies]
@@ -35,6 +35,9 @@ chrono = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
+rasn = { version = "0.28", default-features = false, optional = true }
+rasn-snmp = { version = "0.28", optional = true }
+rasn-smi = { version = "0.28", optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }

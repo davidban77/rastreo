@@ -70,14 +70,14 @@ jobs:
       - name: Build binaries (native)
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: |
-          cargo build --release --target ${{ matrix.target }} --features kafka,http -p rastreo
-          cargo build --release --target ${{ matrix.target }} --features kafka,http -p rastreo-server
+          cargo build --release --target ${{ matrix.target }} --features kafka,http,snmp -p rastreo
+          cargo build --release --target ${{ matrix.target }} --features kafka,http,snmp -p rastreo-server
 
       - name: Build binaries (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          cross build --release --target ${{ matrix.target }} --features kafka,http -p rastreo
-          cross build --release --target ${{ matrix.target }} --features kafka,http -p rastreo-server
+          cross build --release --target ${{ matrix.target }} --features kafka,http,snmp -p rastreo
+          cross build --release --target ${{ matrix.target }} --features kafka,http,snmp -p rastreo-server
 
       - name: Create tarball
         run: |
@@ -143,14 +143,14 @@ jobs:
             tar xzf rastreo-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz
             ```
 
-            Platforms: `linux/amd64`, `linux/arm64`, `macos/amd64`, `macos/arm64`. Binaries are built with the `kafka` feature enabled.
+            Platforms: `linux/amd64`, `linux/arm64`, `macos/amd64`, `macos/arm64`. Binaries are built with the `kafka`, `http`, and `snmp` features enabled.
 
             **Docker:**
             ```
             docker pull ghcr.io/davidban77/rastreo:${{ github.ref_name }}
             ```
 
-            The image is multi-arch (`linux/amd64` + `linux/arm64`) and ships with both binaries: `rastreo-server` (the default entrypoint, port 8080) and `rastreo` at `/rastreo`. The `rastreo` CLI is built with the `kafka` feature enabled — override the entrypoint to run a discovery scan with the Kafka sink:
+            The image is multi-arch (`linux/amd64` + `linux/arm64`) and ships with both binaries: `rastreo-server` (the default entrypoint, port 8080) and `rastreo` at `/rastreo`. The `rastreo` CLI is built with the `kafka`, `http`, and `snmp` features enabled — override the entrypoint to run a discovery scan with the Kafka sink:
 
             ```
             docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:${{ github.ref_name }} \
