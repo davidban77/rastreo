@@ -51,7 +51,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Three probers are available today: `tcp_connect`, `http`, and `dns`. The `http` variant is gated behind the `http` Cargo feature on `rastreo-core` (bundled with the published binaries and Docker image); `tcp_connect` and `dns` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Four probers are available today: `tcp_connect`, `http`, `dns`, and `udp`. The `http` variant is gated behind the `http` Cargo feature on `rastreo-core` (bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
 
 ### `tcp_connect`
 
@@ -98,6 +98,20 @@ Treats each resolved target as a DNS server, sends a query for each configured `
 
 ```json
 {"type": "dns", "ports": [53], "query_names": ["example.com"], "query_type": "a"}
+```
+
+### `udp`
+
+Speaks one of four UDP protocols against each configured port and emits a typed signal per protocol. See the [UDP prober page](../probe/udp.md) for the per-protocol request shape, response parsing, and signal formats.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Must be `"udp"`. |
+| `ports` | array of u16 | yes | List of ports to probe. |
+| `protocol` | string | yes | One of `ntp`, `sip_options`, `memcached_stats`, `stun_binding`. |
+
+```json
+{"type": "udp", "ports": [123], "protocol": "ntp"}
 ```
 
 ## Encoders

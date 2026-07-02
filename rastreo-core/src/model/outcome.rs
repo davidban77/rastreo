@@ -21,6 +21,10 @@ pub enum Signal {
     SnmpSysDescr(String),
     Mac(String),
     DnsHost(String),
+    NtpBanner(String),
+    SipUserAgent(String),
+    MemcachedVersion(String),
+    StunMappedAddress(String),
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +102,20 @@ mod tests {
             Signal::Mac("aa:bb:cc:dd:ee:ff".into()),
             Signal::Mac("aa:bb:cc:dd:ee:ff".into())
         );
+    }
+
+    #[test]
+    fn udp_signal_variants_round_trip_json() {
+        for signal in [
+            Signal::NtpBanner("stratum=2 ref=203.0.113.1".into()),
+            Signal::SipUserAgent("Kamailio/5.6.5 (x86_64/linux)".into()),
+            Signal::MemcachedVersion("1.6.24".into()),
+            Signal::StunMappedAddress("203.0.113.42:54321".into()),
+        ] {
+            let s = serde_json::to_string(&signal).expect("serialize");
+            let back: Signal = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(signal, back);
+        }
     }
 
     #[test]

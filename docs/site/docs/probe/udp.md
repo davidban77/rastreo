@@ -1,0 +1,138 @@
+---
+description: The UDP prober — speaks protocol-specific payloads over UDP (NTP, SIP OPTIONS, memcached stats, STUN Binding) and emits a typed signal per protocol.
+---
+
+# UDP prober
+
+The UDP prober speaks one protocol at a time against configured ports on every resolved target. Unlike TCP, an unanswered UDP datagram cannot distinguish "port closed" from "packet lost", so a bytes-only "did anything reply?" prober would produce noisy results. The prober therefore drives one of four protocols end-to-end: NTP, SIP OPTIONS, memcached `stats`, or STUN Binding. Each protocol builds its own request, parses its own response, and emits a typed signal that reflects what the server actually reported (stratum and reference ID, SIP `Server:` header, memcached version, or observed public address).
+
+## Configuration
+
+Add a `udp` entry to a scenario's `probers` array. Both fields are mandatory — every protocol runs on a different well-known port, so there is no sensible default for either.
+
+```yaml
+probers:
+  - type: udp
+    ports: [123]
+    protocol: ntp
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Must be `"udp"`. |
+| `ports` | array of u16 | yes | Ports to probe. Must not be empty; sorted and deduplicated at construction. |
+| `protocol` | string | yes | One of `ntp`, `sip_options`, `memcached_stats`, `stun_binding`. See [Supported protocols](#supported-protocols). |
+
+The prober issues one datagram per port. It uses an ephemeral UDP socket per port, sends the protocol's request, waits for a response until the scenario-level `timeout_ms` expires, and parses whatever came back. Datagrams received from a peer that isn't the target address are ignored — the prober keeps waiting until the target answers or the timeout fires.
+
+## Supported protocols
+
+| `protocol` | Typical port | Signal | What the prober extracts |
+|---|---|---|---|
+| `ntp` | 123 | `NtpBanner(stratum=<n> ref=<id>)` | The server's stratum and reference identifier from a 48-byte NTPv3 response. For stratum 0 or 1, the 4-character reference code (`GPS `, `PPS `, `LOCL`); for stratum 2+, the reference IP as a dotted quad. |
+| `sip_options` | 5060 | `SipUserAgent(<value>)` | The `Server:` header (preferred) or `User-Agent:` header from the response to a `SIP/2.0 OPTIONS` request. Trimmed and capped at 256 bytes. |
+| `memcached_stats` | 11211 | `MemcachedVersion(<value>)` | The value of the `STAT version` line in a memcached `stats` response. Capped at 64 bytes. |
+| `stun_binding` | 3478 | `StunMappedAddress(<ip>:<port>)` | The `XOR-MAPPED-ADDRESS` attribute of a Binding Success Response. Emits IPv4 as `1.2.3.4:port` and IPv6 as `[::1]:port`. |
+
+Only one protocol runs per prober entry. Add a second `udp` entry to a scenario when you want to probe more than one protocol against the same target.
+
+## Signals emitted
+
+| Signal | When produced |
+|---|---|
+| `NtpBanner(<value>)` | Valid 48-byte NTP server response (Mode=4) on an NTP prober. |
+| `SipUserAgent(<value>)` | SIP response beginning with `SIP/2.0` that carries a `Server:` or `User-Agent:` header. |
+| `MemcachedVersion(<value>)` | memcached response containing a `STAT version <value>` line. |
+| `StunMappedAddress(<ip>:<port>)` | STUN Binding Success Response whose transaction ID matches the request and which carries `XOR-MAPPED-ADDRESS`. |
+
+A response the parser doesn't recognise (garbage bytes, wrong magic cookie, missing header) still marks the target as reachable — a datagram came back — but produces no signal for that port. Distinguishing "server responded but we couldn't parse it" from "nothing came back" is what makes the UDP prober usable for discovery even when the responding service is a slightly nonstandard implementation.
+
+If every configured port fails to respond, the probe returns an error. UDP `recv_from` errors that surface as `ConnectionRefused`, `ConnectionReset`, or `HostUnreachable` map to `Unreachable`; timeouts map to `Timeout`; other I/O errors surface as `Other` with the underlying cause.
+
+## Build feature
+
+The UDP prober is always available — no Cargo feature is required. It uses only `tokio::net::UdpSocket` and hand-rolled protocol parsers, so it is present in every build of `rastreo-core`, including builds with `--no-default-features`.
+
+## Example scenarios
+
+Probe a public NTP pool for a stratum reading:
+
+```json
+{
+  "targets": [{"DnsName": "pool.ntp.org"}],
+  "probers": [
+    {"type": "udp", "ports": [123], "protocol": "ntp"}
+  ]
+}
+```
+
+A record produced against a stratum-2 server contains one `NtpBanner` signal:
+
+```json
+{
+  "signals": [{"NtpBanner": "stratum=2 ref=203.0.113.1"}]
+}
+```
+
+Probe a Kamailio SIP proxy on port 5060:
+
+```json
+{
+  "targets": [{"Ip": "10.50.0.20"}],
+  "probers": [
+    {"type": "udp", "ports": [5060], "protocol": "sip_options"}
+  ]
+}
+```
+
+The response's `Server:` header lands in a `SipUserAgent` signal:
+
+```json
+{
+  "signals": [{"SipUserAgent": "Kamailio/5.6.5 (x86_64/linux)"}]
+}
+```
+
+Probe a memcached instance on port 11211 for the running version:
+
+```json
+{
+  "targets": [{"Ip": "10.50.0.30"}],
+  "probers": [
+    {"type": "udp", "ports": [11211], "protocol": "memcached_stats"}
+  ]
+}
+```
+
+The `STAT version` line is captured as `MemcachedVersion`:
+
+```json
+{
+  "signals": [{"MemcachedVersion": "1.6.24"}]
+}
+```
+
+Probe a STUN server to learn the observed public address of the probing host:
+
+```json
+{
+  "targets": [{"DnsName": "stun.l.google.com"}],
+  "probers": [
+    {"type": "udp", "ports": [19302], "protocol": "stun_binding"}
+  ]
+}
+```
+
+The parsed `XOR-MAPPED-ADDRESS` attribute lands as `StunMappedAddress`:
+
+```json
+{
+  "signals": [{"StunMappedAddress": "203.0.113.42:54321"}]
+}
+```
+
+## See also
+
+- [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Probe index](index.md) — pointers to every prober.
+- [Discover CLI](../discover/cli.md) — building scenarios from the command line.
