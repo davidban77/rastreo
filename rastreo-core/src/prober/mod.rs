@@ -11,9 +11,9 @@ pub use dns::{DnsProber, DnsQueryType, DnsTransport};
 #[cfg(feature = "http")]
 pub use http::{HttpProber, HttpScheme};
 #[cfg(feature = "snmp")]
-pub use redacted::Community;
+pub use redacted::{Community, Password};
 #[cfg(feature = "snmp")]
-pub use snmp::{SnmpProber, SnmpVersion};
+pub use snmp::{SnmpProber, SnmpVersion, UsmAuth, UsmCredentials, UsmPrivacy};
 pub use tcp_connect::TcpConnectProber;
 pub use udp::{UdpProber, UdpProtocol};
 
@@ -73,6 +73,8 @@ pub enum ProberConfig {
         version: SnmpVersion,
         #[serde(default = "snmp::default_community")]
         community: Community,
+        #[serde(default)]
+        credentials: UsmCredentials,
     },
 }
 
@@ -114,10 +116,12 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
             ports,
             version,
             community,
+            credentials,
         } => Ok(Box::new(SnmpProber::new(
             ports.clone(),
             *version,
             community.0.clone(),
+            credentials.clone(),
         )?)),
     }
 }
@@ -374,10 +378,14 @@ mod tests {
                 ports,
                 version,
                 community,
+                credentials,
             } => {
                 assert_eq!(ports, vec![161]);
                 assert_eq!(version, SnmpVersion::V2c);
                 assert_eq!(&*community, "public");
+                assert!(credentials.username.is_empty());
+                assert!(matches!(credentials.auth, UsmAuth::None));
+                assert!(matches!(credentials.privacy, UsmPrivacy::None));
             }
             other => panic!("expected Snmp variant, got {other:?}"),
         }
@@ -393,10 +401,31 @@ mod tests {
                 ports,
                 version,
                 community,
+                credentials: _,
             } => {
                 assert_eq!(ports, vec![161, 1161]);
                 assert_eq!(version, SnmpVersion::V1);
                 assert_eq!(&*community, "rocommunity");
+            }
+            other => panic!("expected Snmp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "snmp"))]
+    #[test]
+    fn prober_config_deserializes_snmp_v3_with_authpriv() {
+        let yaml = "type: snmp\nversion: v3\ncredentials:\n  username: probe\n  auth:\n    algorithm: sha256\n    password: authpw\n  privacy:\n    algorithm: aes128\n    password: privpw\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize snmp v3");
+        match config {
+            ProberConfig::Snmp {
+                version,
+                credentials,
+                ..
+            } => {
+                assert_eq!(version, SnmpVersion::V3);
+                assert_eq!(credentials.username, "probe");
+                assert!(matches!(credentials.auth, UsmAuth::Sha256 { .. }));
+                assert!(matches!(credentials.privacy, UsmPrivacy::Aes128 { .. }));
             }
             other => panic!("expected Snmp variant, got {other:?}"),
         }
@@ -409,6 +438,7 @@ mod tests {
             ports: crate::prober::snmp::default_ports(),
             version: SnmpVersion::V2c,
             community: crate::prober::snmp::default_community(),
+            credentials: UsmCredentials::default(),
         };
         let prober = create_prober(&config).expect("factory ok");
         assert_eq!(prober.kind(), ProbeKind::Snmp);
@@ -421,6 +451,7 @@ mod tests {
             ports: Vec::new(),
             version: SnmpVersion::V2c,
             community: crate::prober::snmp::default_community(),
+            credentials: UsmCredentials::default(),
         };
         match create_prober(&config) {
             Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
@@ -438,6 +469,7 @@ mod tests {
             ports: crate::prober::snmp::default_ports(),
             version: SnmpVersion::V2c,
             community: crate::prober::Community(String::new()),
+            credentials: UsmCredentials::default(),
         };
         match create_prober(&config) {
             Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
@@ -445,6 +477,24 @@ mod tests {
             }
             Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
             Ok(_) => panic!("empty community must error"),
+        }
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn create_prober_snmp_v3_propagates_empty_username_error() {
+        let config = ProberConfig::Snmp {
+            ports: crate::prober::snmp::default_ports(),
+            version: SnmpVersion::V3,
+            community: crate::prober::snmp::default_community(),
+            credentials: UsmCredentials::default(),
+        };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("username"), "got: {msg}");
+            }
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("v3 empty username must error"),
         }
     }
 
@@ -457,6 +507,19 @@ mod tests {
         assert!(
             !debug_output.contains("secret-community"),
             "community leaked in Debug: {debug_output}"
+        );
+        assert!(debug_output.contains("<redacted>"));
+    }
+
+    #[cfg(all(feature = "config", feature = "snmp"))]
+    #[test]
+    fn prober_config_snmp_v3_debug_redacts_password() {
+        let yaml = "type: snmp\nversion: v3\ncredentials:\n  username: probe\n  auth:\n    algorithm: sha256\n    password: supersecretauth\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize v3");
+        let debug_output = format!("{config:?}");
+        assert!(
+            !debug_output.contains("supersecretauth"),
+            "password leaked in Debug: {debug_output}"
         );
         assert!(debug_output.contains("<redacted>"));
     }

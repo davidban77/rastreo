@@ -25,6 +25,26 @@ impl From<Community> for String {
     }
 }
 
+#[cfg(feature = "snmp")]
+#[derive(Clone, Default, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Password(pub String);
+
+#[cfg(feature = "snmp")]
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+#[cfg(feature = "snmp")]
+impl std::ops::Deref for Password {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
 #[cfg(all(test, feature = "snmp"))]
 mod tests {
     use super::*;
@@ -52,5 +72,29 @@ mod tests {
         let c = Community("public".to_string());
         let s: String = c.into();
         assert_eq!(s, "public");
+    }
+
+    #[test]
+    fn password_debug_is_redacted() {
+        let p = Password("maplesyrup".to_string());
+        assert_eq!(format!("{p:?}"), "<redacted>");
+    }
+
+    #[test]
+    fn password_deserializes_transparently_from_string() {
+        let p: Password = serde_json::from_str("\"authpass\"").expect("deserialize");
+        assert_eq!(&*p, "authpass");
+    }
+
+    #[test]
+    fn password_deref_exposes_str() {
+        let p = Password("privpass".to_string());
+        assert_eq!(&*p, "privpass");
+    }
+
+    #[test]
+    fn password_default_is_empty() {
+        let p = Password::default();
+        assert!(p.is_empty());
     }
 }
