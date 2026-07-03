@@ -116,17 +116,33 @@ Speaks one of four UDP protocols against each configured port and emits a typed 
 
 ### `snmp`
 
-Issues an SNMPv1 or SNMPv2c `GetRequest` against each configured port for three MIB-II system-group OIDs (`sysDescr`, `sysObjectID`, `sysName`) and emits each returned varbind as a typed signal. See the [SNMP prober page](../probe/snmp.md) for version behaviour, OID mapping, and the security caveat around cleartext community strings.
+Issues an SNMPv1, SNMPv2c, or SNMPv3 `GetRequest` against each configured port for three MIB-II system-group OIDs (`sysDescr`, `sysObjectID`, `sysName`) and emits each returned varbind as a typed signal. See the [SNMP prober page](../probe/snmp.md) for version behaviour, USM credential shape, OID mapping, and the security caveat around cleartext community strings.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"snmp"`. |
 | `ports` | array of u16 | no | `[161]` | Ports to probe. |
-| `version` | string | no | `v2c` | One of `v1`, `v2c`. |
-| `community` | string | no | `public` | SNMP community string. Transmitted in cleartext on v1 and v2c. |
+| `version` | string | no | `v2c` | One of `v1`, `v2c`, `v3`. |
+| `community` | string | no | `public` | SNMP community string. Transmitted in cleartext on v1 and v2c. Ignored on v3. |
+| `credentials` | object | no | `{}` | USM credentials. Required on `v3` (username must be non-empty). Ignored on v1 and v2c. See [SNMPv3 credentials](../probe/snmp.md#snmpv3-credentials). |
 
 ```json
 {"type": "snmp", "ports": [161], "version": "v2c", "community": "public"}
+```
+
+An SNMPv3 example with `authPriv`, SHA-256, and AES-128:
+
+```yaml
+type: snmp
+version: v3
+credentials:
+  username: probe
+  auth:
+    algorithm: sha256
+    password: authpassword
+  privacy:
+    algorithm: aes128
+    password: privpassword
 ```
 
 ## Encoders
