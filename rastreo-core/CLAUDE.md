@@ -39,9 +39,10 @@ src/
 | `http`   | no      | Enables the HTTP prober (`reqwest` + rustls-webpki-roots). |
 | `kafka`  | no      | Enables `KafkaSink` (rskafka producer with rustls TLS support and embedded webpki-roots). |
 | `snmp`   | no      | Enables the SNMP prober for vendor / interface fingerprinting. |
-| `arp`    | no      | Enables the ARP prober (requires raw-socket capability on the host). |
+| `arp`    | no      | Enables the ARP prober for IPv4 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
+| `ndp`    | no      | Enables the NDP prober for IPv6 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
 
-The `snmp` and `arp` features are declared but not yet wired to code — reserved for future probers. The `config`, `http`, and `kafka` features each pull in their own dependency chain when enabled.
+The `config`, `http`, `kafka`, `snmp`, `arp`, and `ndp` features each pull in their own dependency chain when enabled. `arp` and `ndp` share the `pnet_datalink` + `pnet_packet` + `ipnetwork` dep chain — enabling either pulls the full set in.
 
 ## Prober Config Conventions
 

@@ -30,7 +30,8 @@ snmp = [
     "dep:cfb-mode",
     "dep:des",
 ]
-arp = []
+arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
+ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
 
 [dependencies]
 serde = { workspace = true }
@@ -60,6 +61,9 @@ aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", optional = true, features = ["alloc", "block-padding"] }
 cfb-mode = { version = "0.8", optional = true }
 des = { version = "0.8", optional = true }
+pnet_datalink = { version = "0.35", default-features = false, features = ["std"], optional = true }
+pnet_packet = { version = "0.35", optional = true }
+ipnetwork = { version = "0.20", optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }

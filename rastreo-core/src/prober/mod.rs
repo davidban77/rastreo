@@ -1,15 +1,23 @@
+#[cfg(feature = "arp")]
+pub mod arp;
 pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
+#[cfg(feature = "ndp")]
+pub mod ndp;
 mod redacted;
 #[cfg(feature = "snmp")]
 pub mod snmp;
 pub mod tcp_connect;
 pub mod udp;
 
+#[cfg(feature = "arp")]
+pub use arp::ArpProber;
 pub use dns::{DnsProber, DnsQueryType, DnsTransport};
 #[cfg(feature = "http")]
 pub use http::{HttpProber, HttpScheme};
+#[cfg(feature = "ndp")]
+pub use ndp::NdpProber;
 #[cfg(feature = "snmp")]
 pub use redacted::{Community, Password};
 #[cfg(feature = "snmp")]
@@ -76,6 +84,16 @@ pub enum ProberConfig {
         #[serde(default)]
         credentials: UsmCredentials,
     },
+    #[cfg(feature = "arp")]
+    Arp {
+        #[serde(default = "arp::default_interface")]
+        interface: String,
+    },
+    #[cfg(feature = "ndp")]
+    Ndp {
+        #[serde(default = "ndp::default_interface")]
+        interface: String,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -123,6 +141,10 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
             community.0.clone(),
             credentials.clone(),
         )?)),
+        #[cfg(feature = "arp")]
+        ProberConfig::Arp { interface } => Ok(Box::new(ArpProber::new(interface.clone())?)),
+        #[cfg(feature = "ndp")]
+        ProberConfig::Ndp { interface } => Ok(Box::new(NdpProber::new(interface.clone())?)),
     }
 }
 
@@ -509,6 +531,78 @@ mod tests {
             "community leaked in Debug: {debug_output}"
         );
         assert!(debug_output.contains("<redacted>"));
+    }
+
+    #[cfg(all(feature = "config", feature = "arp"))]
+    #[test]
+    fn prober_config_deserializes_arp_variant_with_defaults() {
+        let yaml = "type: arp\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize arp");
+        match config {
+            ProberConfig::Arp { interface } => {
+                assert!(interface.is_empty());
+            }
+            other => panic!("expected Arp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "arp"))]
+    #[test]
+    fn prober_config_deserializes_arp_variant_with_explicit_interface() {
+        let yaml = "type: arp\ninterface: eth0\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize arp");
+        match config {
+            ProberConfig::Arp { interface } => {
+                assert_eq!(interface, "eth0");
+            }
+            other => panic!("expected Arp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "arp")]
+    #[test]
+    fn create_prober_arp_variant_produces_arp_prober() {
+        let config = ProberConfig::Arp {
+            interface: crate::prober::arp::default_interface(),
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Arp);
+    }
+
+    #[cfg(all(feature = "config", feature = "ndp"))]
+    #[test]
+    fn prober_config_deserializes_ndp_variant_with_defaults() {
+        let yaml = "type: ndp\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize ndp");
+        match config {
+            ProberConfig::Ndp { interface } => {
+                assert!(interface.is_empty());
+            }
+            other => panic!("expected Ndp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "ndp"))]
+    #[test]
+    fn prober_config_deserializes_ndp_variant_with_explicit_interface() {
+        let yaml = "type: ndp\ninterface: eth1\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize ndp");
+        match config {
+            ProberConfig::Ndp { interface } => {
+                assert_eq!(interface, "eth1");
+            }
+            other => panic!("expected Ndp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "ndp")]
+    #[test]
+    fn create_prober_ndp_variant_produces_prober() {
+        let config = ProberConfig::Ndp {
+            interface: crate::prober::ndp::default_interface(),
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Ndp);
     }
 
     #[cfg(all(feature = "config", feature = "snmp"))]

@@ -59,6 +59,15 @@ securityContext:
     drop:
       - ALL
 
+# Opt-in Linux capabilities. Off by default because many clusters disallow
+# capability additions (Pod Security Standards `restricted`).
+podSecurity:
+  # Grants NET_RAW to the container. Required for the ARP and NDP probers,
+  # which open AF_PACKET raw sockets to send Ethernet frames directly. Only
+  # enable when the operator submits scenarios that use `type: arp` or
+  # `type: ndp`.
+  netRaw: false
+
 # Optional inline configuration mounted at /etc/rastreo as a ConfigMap.
 # Each key becomes a file under the mount path. Leave empty to skip the ConfigMap.
 # Example:

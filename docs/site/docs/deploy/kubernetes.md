@@ -42,6 +42,7 @@ The most useful `values.yaml` knobs are:
 | `podDisruptionBudget.enabled`    | `false`                       | Create a PDB with `minAvailable: 1`.                      |
 | `ingress.enabled`                | `false`                       | Create an `Ingress` for the service.                      |
 | `serviceMonitor.enabled`         | `false`                       | Create a Prometheus Operator `ServiceMonitor` that scrapes `/metrics`. |
+| `podSecurity.netRaw`             | `false`                       | Add `NET_RAW` to the container capabilities. Required for the ARP and NDP probers. See [`podSecurity.netRaw`](#podsecuritynetraw-arp-and-ndp-probers). |
 | `config`                         | `{}`                          | Inline YAML mounted at `/etc/rastreo` as a `ConfigMap`.   |
 
 A worked example of `config`:
@@ -83,6 +84,21 @@ serviceMonitor:
 ```
 
 All metric names use the `rastreo_server_` prefix. See [rastreo-server · GET /metrics](server.md#get-metrics) for the per-metric table.
+
+## `podSecurity.netRaw` — ARP and NDP probers
+
+The ARP and NDP probers open `AF_PACKET` raw sockets to send Ethernet frames directly, which requires the `CAP_NET_RAW` Linux capability. The chart does NOT grant this by default because Pod Security Standards `restricted` and most managed Kubernetes distributions disallow capability additions. Opt in by setting `podSecurity.netRaw: true`:
+
+```yaml
+podSecurity:
+  netRaw: true
+```
+
+When enabled, the rendered container `securityContext.capabilities.add` includes `NET_RAW` alongside the default `drop: [ALL]`. The Pod Security Standards `baseline` profile permits this; `restricted` does not — check the target namespace's Pod Security admission mode with `kubectl get ns <ns> -o yaml` before enabling. Some managed clusters (GKE Autopilot, EKS Fargate) prohibit capability additions cluster-wide and cannot run the ARP or NDP probers regardless of chart values.
+
+The image ships with `cap_net_raw+ep` set on both `/rastreo` and `/rastreo-server` as a file capability, so the non-root runtime user picks the capability up automatically when the container has `NET_RAW` in its bounding set — no ambient-capability juggling required. Keeping `capabilities.add: [NET_RAW]` on the container is still what grants that bounding set, so the Helm toggle remains the load-bearing knob.
+
+Without this toggle, scenarios that reference `type: arp` or `type: ndp` will fail at probe time with `raw socket permission denied; ARP requires CAP_NET_RAW` (or the analogous NDP message). The pod itself continues running; only those specific probes fail.
 
 ## Security context
 

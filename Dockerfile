@@ -19,8 +19,10 @@ ARG TARGETARCH
 # Install cross-compilation toolchain based on target architecture.
 # For amd64: musl-tools provides the native musl-gcc wrapper.
 # For arm64: we use gcc-aarch64-linux-gnu as the linker.
+# libcap2-bin provides `setcap`, applied to the release binaries so non-root
+# users in the runtime container can open AF_PACKET raw sockets for ARP/NDP.
 RUN apt-get update && \
-    apt-get install -y musl-tools && \
+    apt-get install -y musl-tools libcap2-bin && \
     if [ "${TARGETARCH}" = "arm64" ]; then \
       apt-get install -y gcc-aarch64-linux-gnu; \
     fi && \
@@ -61,7 +63,7 @@ RUN mkdir -p rastreo-core/src rastreo/src rastreo-server/src && \
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp -p rastreo -p rastreo-server 2>/dev/null || true
+    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp -p rastreo -p rastreo-server 2>/dev/null || true
 
 # Copy real source and build
 COPY rastreo-core/ rastreo-core/
@@ -73,13 +75,18 @@ RUN touch rastreo-core/src/lib.rs rastreo/src/main.rs rastreo-server/src/main.rs
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp -p rastreo -p rastreo-server
+    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp -p rastreo -p rastreo-server
 
-# Copy binaries to a known location regardless of target triple
+# Copy binaries to a known location regardless of target triple and grant
+# CAP_NET_RAW as a file capability so non-root users can open AF_PACKET raw
+# sockets. File capabilities live in xattrs on the binary and are preserved
+# through the `COPY --from=builder` into the scratch runtime stage.
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     mkdir -p /out && \
     cp "target/${RUST_TARGET}/release/rastreo" /out/rastreo && \
-    cp "target/${RUST_TARGET}/release/rastreo-server" /out/rastreo-server
+    cp "target/${RUST_TARGET}/release/rastreo-server" /out/rastreo-server && \
+    setcap cap_net_raw+ep /out/rastreo && \
+    setcap cap_net_raw+ep /out/rastreo-server
 
 # UID 65532 = upstream "nonroot" convention (distroless/nonroot, chainguard)
 RUN echo 'rastreo:x:65532:65532::/:' > /tmp/passwd.rastreo
@@ -94,5 +101,11 @@ COPY --from=builder /tmp/passwd.rastreo /etc/passwd
 USER 65532:65532
 
 EXPOSE 8080
+
+# The ARP and NDP probers use AF_PACKET raw sockets and require CAP_NET_RAW.
+# The binaries ship with `cap_net_raw+ep` set on them (via `setcap` in the
+# builder stage), so non-root users can use raw sockets — but the container
+# still needs the capability granted at runtime:
+#   docker run --cap-add=NET_RAW rastreo
 
 ENTRYPOINT ["/rastreo-server"]

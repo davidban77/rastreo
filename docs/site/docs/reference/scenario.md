@@ -51,7 +51,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Five probers are available today: `tcp_connect`, `http`, `dns`, `udp`, and `snmp`. The `http` and `snmp` variants are gated behind the `http` and `snmp` Cargo features on `rastreo-core` respectively (both bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Seven probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, and `ndp`. The `http`, `snmp`, `arp`, and `ndp` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
 
 ### `tcp_connect`
 
@@ -143,6 +143,42 @@ credentials:
   privacy:
     algorithm: aes128
     password: privpassword
+```
+
+### `arp`
+
+Sends an ARP Request (RFC 826) as a broadcast Ethernet frame on the local IPv4 subnet and emits the target's MAC address as a `Mac(<address>)` signal. Requires `CAP_NET_RAW` at runtime — the raw socket is refused otherwise. Only works for targets on a locally-reachable L2 segment. See the [ARP prober page](../probe/arp.md) for interface auto-selection rules, degenerate-case handling, and per-runtime capability instructions.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"arp"`. |
+| `interface` | string | no | `""` (auto-select) | Name of the sending interface, e.g. `eth0`. Empty string means auto-select based on the target IP's subnet. |
+
+```json
+{"type": "arp"}
+```
+
+```yaml
+type: arp
+interface: eth1
+```
+
+### `ndp`
+
+Sends an ICMPv6 Neighbor Solicitation (RFC 4861 §4.3) on the local IPv6 subnet, expects a Neighbor Advertisement in return, and emits the target's MAC address as a `Mac(<address>)` signal. Requires `CAP_NET_RAW` at runtime. Only works for targets on a locally-reachable IPv6 L2 segment. See the [NDP prober page](../probe/ndp.md) for solicited-node multicast address computation, checksum semantics, and per-runtime capability instructions.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"ndp"`. |
+| `interface` | string | no | `""` (auto-select) | Name of the sending interface. Empty string means auto-select based on the target's subnet and scope. |
+
+```json
+{"type": "ndp"}
+```
+
+```yaml
+type: ndp
+interface: eth0
 ```
 
 ## Encoders

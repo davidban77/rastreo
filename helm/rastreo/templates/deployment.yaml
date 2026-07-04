@@ -32,9 +32,16 @@ spec:
         - name: {{ .Chart.Name }}
           image: {{ include "rastreo.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- with .Values.securityContext }}
+          {{- if .Values.securityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
+            {{- $ctx := deepCopy .Values.securityContext }}
+            {{- if .Values.podSecurity.netRaw }}
+            {{- $caps := (get $ctx "capabilities") | default (dict) }}
+            {{- $add := (get $caps "add") | default (list) }}
+            {{- $_ := set $caps "add" (append $add "NET_RAW") }}
+            {{- $_ := set $ctx "capabilities" $caps }}
+            {{- end }}
+            {{- toYaml $ctx | nindent 12 }}
           {{- end }}
           args:
             - "--port"
