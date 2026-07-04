@@ -13,7 +13,7 @@ readme = "../README.md"
 
 [features]
 default = ["config"]
-config = ["rastreo-core/config", "dep:serde_yaml_ng"]
+config = ["rastreo-core/config"]
 http = ["rastreo-core/http"]
 kafka = ["rastreo-core/kafka"]
 snmp = ["rastreo-core/snmp"]
@@ -33,7 +33,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ipnet = { workspace = true }
-serde_yaml_ng = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
