@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0](https://github.com/davidban77/rastreo/compare/v0.3.0...v0.4.0) (2026-07-04)
+
+
+### Features
+
+* **fuser:** add OUI vendor enrichment behind oui feature ([#55](https://github.com/davidban77/rastreo/issues/55)) ([ebca82f](https://github.com/davidban77/rastreo/commit/ebca82f105a9a7fd86a87199ee3449e80eec7c5b))
+* **prober:** add ARP and NDP link-layer neighbor probers ([#54](https://github.com/davidban77/rastreo/issues/54)) ([cb47293](https://github.com/davidban77/rastreo/commit/cb472937702641603eac3557ac30c4034927aa7a))
+* **prober:** add DNS prober against target-as-DNS-server ([#50](https://github.com/davidban77/rastreo/issues/50)) ([3433db0](https://github.com/davidban77/rastreo/commit/3433db0f69d1aa34448d5696484f1f40f532c00c))
+* **prober:** add HTTP prober behind the http Cargo feature ([#47](https://github.com/davidban77/rastreo/issues/47)) ([19af93e](https://github.com/davidban77/rastreo/commit/19af93e72062254d4ace847a7ba73c73a51fde18))
+* **prober:** add SNMP prober for v1 and v2c behind snmp feature ([#52](https://github.com/davidban77/rastreo/issues/52)) ([f02a4e1](https://github.com/davidban77/rastreo/commit/f02a4e1537b0a453849768c259a945d88938e3fe))
+* **prober:** add SNMPv3 with USM authentication and privacy ([#53](https://github.com/davidban77/rastreo/issues/53)) ([56c4ad7](https://github.com/davidban77/rastreo/commit/56c4ad7d167b9edeac852dea021e0fd894635340))
+* **prober:** add UDP prober with NTP, SIP, memcached, and STUN protocols ([#51](https://github.com/davidban77/rastreo/issues/51)) ([fa33729](https://github.com/davidban77/rastreo/commit/fa337295e1c6f2829304f870b8b84e47bd62b04c))
+
+
+### Refactoring
+
+* **prober:** drop Option wrappers on HTTP config, document conventions ([#49](https://github.com/davidban77/rastreo/issues/49)) ([ab1cc85](https://github.com/davidban77/rastreo/commit/ab1cc85629891cdaec3e57f451cb9274eb837cdd))
+
 ## [0.3.0](https://github.com/davidban77/rastreo/compare/v0.2.0...v0.3.0) (2026-07-01)
 
 
