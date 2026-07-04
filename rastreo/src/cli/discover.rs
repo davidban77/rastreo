@@ -7,9 +7,9 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use ipnet::IpNet;
-use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
 #[cfg(feature = "config")]
-use rastreo_core::config::{ScenarioEntry, ScenarioFile, ScenarioKind};
+use rastreo_core::config::{parse_scenario_file, ScenarioEntry, ScenarioFile, ScenarioKind};
+use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
 use rastreo_core::{run_discovery_cancellable, ConfigError, ProberConfig, SinkConfig, Target};
@@ -22,30 +22,28 @@ const DEFAULT_TIMEOUT_MS: u64 = 1000;
 pub struct DiscoverArgs {
     /// Target to probe. CIDR (10.0.0.0/24), single IP (10.0.0.1), range
     /// (10.0.0.1-10.0.0.5), or DNS name. Repeat to add multiple targets.
-    #[cfg(feature = "config")]
-    #[arg(long, num_args = 1.., required_unless_present = "file", conflicts_with = "file")]
-    pub target: Vec<String>,
-
-    /// Target to probe. CIDR (10.0.0.0/24), single IP (10.0.0.1), range
-    /// (10.0.0.1-10.0.0.5), or DNS name. Repeat to add multiple targets.
-    #[cfg(not(feature = "config"))]
-    #[arg(long, num_args = 1.., required = true)]
-    pub target: Vec<String>,
-
-    /// Port to probe. Repeat or comma-separate for multiple.
-    #[cfg(feature = "config")]
-    #[arg(
-        short,
-        long,
-        value_delimiter = ',',
-        required_unless_present = "file",
-        conflicts_with = "file"
+    #[cfg_attr(
+        feature = "config",
+        arg(long, num_args = 1.., required_unless_present = "file", conflicts_with = "file")
     )]
-    pub port: Vec<u16>,
+    #[cfg_attr(not(feature = "config"), arg(long, num_args = 1.., required = true))]
+    pub target: Vec<String>,
 
     /// Port to probe. Repeat or comma-separate for multiple.
-    #[cfg(not(feature = "config"))]
-    #[arg(short, long, value_delimiter = ',', required = true)]
+    #[cfg_attr(
+        feature = "config",
+        arg(
+            short,
+            long,
+            value_delimiter = ',',
+            required_unless_present = "file",
+            conflicts_with = "file"
+        )
+    )]
+    #[cfg_attr(
+        not(feature = "config"),
+        arg(short, long, value_delimiter = ',', required = true)
+    )]
     pub port: Vec<u16>,
 
     /// YAML scenario file to load. When present, --target and --port are not permitted; each scenario in the file is executed in order.
@@ -118,7 +116,7 @@ pub async fn run(args: DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()
 async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
     let scenario = build_scenario(args)?;
     let summary = run_discovery_cancellable(&scenario, cancel).await?;
-    print_summary(&scenario, &summary);
+    print_summary("discovery", &summary);
     if !summary.cancelled && summary.records_emitted == 0 && summary.probe_attempts > 0 {
         eprintln!(
             "hint: 0 records emitted — no probe reached an open port. Check target reachability and port list."
@@ -171,20 +169,20 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
         if idx > 0 {
             eprintln!();
         }
-        eprintln!("running scenario {label}");
+        eprintln!("running {label}");
 
         if cfg.probers.is_empty() {
-            eprintln!("scenario {label}: no probers configured, skipping");
+            eprintln!("{label}: no probers configured, skipping");
             continue;
         }
 
         match run_discovery_cancellable(&cfg, cancel.clone()).await {
             Ok(summary) => {
-                print_summary(&cfg, &summary);
+                print_summary(&label, &summary);
             }
             Err(err) => {
                 errors += 1;
-                eprintln!("scenario {label} failed: {err:#}");
+                eprintln!("{label} failed: {err:#}");
             }
         }
     }
@@ -201,8 +199,43 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
 fn load_scenario_file(path: &Path) -> Result<ScenarioFile> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read scenario file '{}'", path.display()))?;
-    serde_yaml_ng::from_str::<ScenarioFile>(&contents)
-        .with_context(|| format!("failed to parse scenario file '{}'", path.display()))
+    match parse_scenario_file(&contents) {
+        Ok(file) => Ok(file),
+        Err(err) => {
+            if let Some(hint) = enrich_feature_hint(&err.to_string()) {
+                eprintln!("{hint}");
+            }
+            Err(anyhow::Error::new(err).context(format!(
+                "failed to parse scenario file '{}'",
+                path.display()
+            )))
+        }
+    }
+}
+
+#[cfg(feature = "config")]
+const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
+    ("http", "http"),
+    ("snmp", "snmp"),
+    ("arp", "arp"),
+    ("ndp", "ndp"),
+    ("oui_enrichment", "oui"),
+];
+
+#[cfg(feature = "config")]
+fn enrich_feature_hint(error_msg: &str) -> Option<String> {
+    const NEEDLE: &str = "unknown variant `";
+    let start = error_msg.find(NEEDLE)? + NEEDLE.len();
+    let rest = &error_msg[start..];
+    let end = rest.find('`')?;
+    let variant = &rest[..end];
+    let feature = FEATURE_GATED_VARIANTS
+        .iter()
+        .find(|(name, _)| *name == variant)
+        .map(|(_, feat)| *feat)?;
+    Some(format!(
+        "hint: '{variant}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles kafka, http, snmp, arp, ndp, oui."
+    ))
 }
 
 #[cfg(feature = "config")]
@@ -258,23 +291,19 @@ fn build_cli_sink_override(args: &DiscoverArgs) -> Result<Option<SinkConfig>> {
 #[cfg(feature = "config")]
 fn scenario_label(base: &BaseProbeConfig, idx: usize, total: usize) -> String {
     match &base.name {
-        Some(n) => format!("{} ({} of {total})", n, idx + 1),
-        None => format!("{} of {total}", idx + 1),
+        Some(n) => format!("scenario '{n}' ({} of {total})", idx + 1),
+        None => format!("scenario {} of {total}", idx + 1),
     }
 }
 
-fn print_summary(scenario: &DiscoverScenarioConfig, summary: &rastreo_core::DiscoverySummary) {
+fn print_summary(label: &str, summary: &rastreo_core::DiscoverySummary) {
     let status = if summary.cancelled {
         "cancelled"
     } else {
         "complete"
     };
-    let prefix = match &scenario.base.name {
-        Some(n) => format!("scenario '{n}' "),
-        None => String::new(),
-    };
     eprintln!(
-        "{prefix}discovery {}: targets_resolved={} probe_attempts={} probe_errors={} records_emitted={} elapsed_ms={}",
+        "{label} {}: targets_resolved={} probe_attempts={} probe_errors={} records_emitted={} elapsed_ms={}",
         status,
         summary.targets_resolved,
         summary.probe_attempts,
@@ -842,5 +871,74 @@ mod tests {
             result.is_err(),
             "expected --kafka-flush-per-record + --kafka-batch-threshold to be rejected"
         );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_matches_http_variant() {
+        let msg = "scenarios: unknown variant `http`, expected one of `tcp_connect`, `dns` at line 4 column 3";
+        let hint = enrich_feature_hint(msg).expect("hint");
+        assert!(hint.contains("--features http"), "hint: {hint}");
+        assert!(hint.contains("'http'"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_matches_snmp_variant() {
+        let msg = "unknown variant `snmp`, expected one of `tcp_connect`";
+        let hint = enrich_feature_hint(msg).expect("hint");
+        assert!(hint.contains("--features snmp"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_matches_arp_variant() {
+        let hint = enrich_feature_hint("unknown variant `arp`, expected one of ...").expect("hint");
+        assert!(hint.contains("--features arp"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_matches_ndp_variant() {
+        let hint = enrich_feature_hint("unknown variant `ndp`, expected one of ...").expect("hint");
+        assert!(hint.contains("--features ndp"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_maps_oui_enrichment_variant_to_oui_feature() {
+        let hint =
+            enrich_feature_hint("unknown variant `oui_enrichment`, expected one of `direct`")
+                .expect("hint");
+        assert!(hint.contains("--features oui"), "hint: {hint}");
+        assert!(hint.contains("'oui_enrichment'"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_does_not_fire_for_typo_variant() {
+        let msg = "unknown variant `htttp`, expected one of `tcp_connect`";
+        assert!(enrich_feature_hint(msg).is_none());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_does_not_fire_when_no_unknown_variant_marker() {
+        assert!(enrich_feature_hint("missing field `targets`").is_none());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn scenario_label_named_scenario_uses_quoted_name_and_index() {
+        let mut base = BaseProbeConfig::new();
+        base.name = Some("first".into());
+        assert_eq!(scenario_label(&base, 0, 2), "scenario 'first' (1 of 2)");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn scenario_label_unnamed_scenario_uses_bare_index() {
+        let base = BaseProbeConfig::new();
+        assert_eq!(scenario_label(&base, 1, 3), "scenario 2 of 3");
     }
 }

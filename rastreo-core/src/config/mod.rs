@@ -1,8 +1,17 @@
 use crate::encoder::EncoderConfig;
+#[cfg(feature = "config")]
+use crate::error::{ConfigError, RastreoError};
 use crate::fuser::FuserConfig;
 use crate::model::Target;
 use crate::prober::ProberConfig;
 use crate::sink::SinkConfig;
+
+/// Parse a YAML scenario file from a UTF-8 string into a `ScenarioFile`. Shape is validated by serde; semantic acceptance of `version` and `kind` is the caller's responsibility.
+#[cfg(feature = "config")]
+pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
+    serde_yaml_ng::from_str::<ScenarioFile>(input)
+        .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")).into())
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ScenarioFile {
@@ -142,6 +151,29 @@ mod tests {
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         assert_eq!(d.targets.len(), 1);
         assert!(d.probers.is_empty());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_round_trips_minimal_yaml() {
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let file = parse_scenario_file(yaml).expect("parse");
+        assert_eq!(file.version, 1);
+        assert_eq!(file.kind, ScenarioKind::Discovery);
+        assert_eq!(file.scenarios.len(), 1);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_maps_serde_error_to_config_error() {
+        let yaml = "version: 1\nkind: [invalid\n";
+        let err = parse_scenario_file(yaml).expect_err("bad yaml");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid YAML"), "msg: {msg}");
     }
 
     #[test]
