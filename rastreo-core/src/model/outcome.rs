@@ -10,6 +10,7 @@ pub enum ProbeKind {
     Dns,
     Snmp,
     Arp,
+    Ndp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -57,6 +58,7 @@ mod tests {
             ProbeKind::Dns,
             ProbeKind::Snmp,
             ProbeKind::Arp,
+            ProbeKind::Ndp,
         ] {
             let s = serde_json::to_string(&kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
