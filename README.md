@@ -8,6 +8,7 @@
   <a href="https://github.com/davidban77/rastreo/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/davidban77/rastreo/ci.yml?branch=main&color=1e40af"></a>
   <a href="https://github.com/davidban77/rastreo/blob/main/Cargo.toml"><img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.88-3b82f6"></a>
   <a href="https://github.com/davidban77/rastreo/blob/main/LICENSE-MIT"><img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-f97316"></a>
+  <a href="https://davidban77.github.io/rastreo/"><img alt="Documentation" src="https://img.shields.io/badge/docs-latest-06b6d4?logo=materialformkdocs&logoColor=white"></a>
 </p>
 
 # rastreo
@@ -17,6 +18,8 @@ rastreo is an enrichment-aware network discovery engine written in Rust. It prob
 The **core library is the product**. The CLI and HTTP server are delivery mechanisms built on top of it.
 
 The name "rastreo" is Spanish for "tracking" or "sweeping" — a sibling to "sonda" ("sounding probe").
+
+**Documentation:** [davidban77.github.io/rastreo](https://davidban77.github.io/rastreo/) — get-started guide, per-prober reference, scenario schema, deployment recipes, and integration walkthroughs.
 
 ## Workspace Structure
 
