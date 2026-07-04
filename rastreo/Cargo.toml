@@ -19,6 +19,7 @@ kafka = ["rastreo-core/kafka"]
 snmp = ["rastreo-core/snmp"]
 arp = ["rastreo-core/arp"]
 ndp = ["rastreo-core/ndp"]
+oui = ["rastreo-core/oui"]
 
 [[bin]]
 name = "rastreo"
