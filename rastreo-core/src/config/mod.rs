@@ -91,14 +91,19 @@ mod tests {
         let yaml = "fuser:\n  type: direct\n  confidence_baseline: 0.2\n";
         let cfg: BaseProbeConfig = serde_yaml_ng::from_str(yaml).expect("yaml");
         let fuser = cfg.fuser.expect("fuser present");
-        let FuserConfig::Direct {
-            include_unreachable,
-            confidence_baseline,
-            confidence_per_signal,
-        } = fuser;
-        assert!(include_unreachable.is_none());
-        assert_eq!(confidence_baseline, Some(0.2));
-        assert!(confidence_per_signal.is_none());
+        match fuser {
+            FuserConfig::Direct {
+                include_unreachable,
+                confidence_baseline,
+                confidence_per_signal,
+            } => {
+                assert!(include_unreachable.is_none());
+                assert_eq!(confidence_baseline, Some(0.2));
+                assert!(confidence_per_signal.is_none());
+            }
+            #[allow(unreachable_patterns)]
+            other => panic!("expected Direct fuser, got {other:?}"),
+        }
     }
 
     #[test]

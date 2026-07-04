@@ -41,8 +41,9 @@ src/
 | `snmp`   | no      | Enables the SNMP prober for vendor / interface fingerprinting. |
 | `arp`    | no      | Enables the ARP prober for IPv4 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
 | `ndp`    | no      | Enables the NDP prober for IPv6 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
+| `oui`    | no      | Enables the `oui_enrichment` fuser and bundles a compressed Wireshark manuf snapshot (`data/manuf.gz`, ~800 KB in-binary). Populates `DeviceRecord::manufacturer` from a MAC-address OUI lookup. |
 
-The `config`, `http`, `kafka`, `snmp`, `arp`, and `ndp` features each pull in their own dependency chain when enabled. `arp` and `ndp` share the `pnet_datalink` + `pnet_packet` + `ipnetwork` dep chain — enabling either pulls the full set in.
+The `config`, `http`, `kafka`, `snmp`, `arp`, `ndp`, and `oui` features each pull in their own dependency chain when enabled. `arp` and `ndp` share the `pnet_datalink` + `pnet_packet` + `ipnetwork` dep chain — enabling either pulls the full set in.
 
 ## Prober Config Conventions
 

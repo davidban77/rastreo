@@ -240,7 +240,11 @@ The `flush_mode` field is itself an internally-tagged object with two variants. 
 
 ## Fusers
 
-The `fuser` field is an internally-tagged object. One fuser is available today: `direct`. It groups probe outcomes by target IP, dedups signals, and emits one `DeviceRecord` per group. Confidence is computed as `confidence_baseline + (signals_observed * confidence_per_signal)`, clamped to `1.0`.
+The `fuser` field is an internally-tagged object. Two fusers are available: `direct` (always) and `oui_enrichment` (with the `oui` build feature).
+
+### direct
+
+`direct` groups probe outcomes by target IP, dedups signals, and emits one `DeviceRecord` per group. Confidence is computed as `confidence_baseline + (signals_observed * confidence_per_signal)`, clamped to `1.0`.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -257,6 +261,32 @@ The `fuser` field is an internally-tagged object. One fuser is available today: 
   "confidence_per_signal": 0.2
 }
 ```
+
+### oui_enrichment
+
+`oui_enrichment` wraps another fuser: it delegates fusion to `inner`, then looks up the returned record's MAC address in an OUI database and populates `DeviceRecord.manufacturer` with the vendor name. Records without a MAC are returned unchanged. Records whose MAC prefix is not in the database are also returned unchanged (`manufacturer` stays `null`).
+
+Requires the `oui` build feature. The bundled OUI database is a Wireshark manuf snapshot embedded at compile time (see the [OUI enrichment page](../discover/enrichment.md) for provenance and refresh cadence). Set `data_path` to load an alternative manuf-format file from disk instead.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"oui_enrichment"`. |
+| `data_path` | string | no | `""` | Path to a manuf-format file. Empty string loads the compiled-in bundled snapshot. |
+| `inner` | object | yes | — | Nested fuser config (typically `direct`). Validated recursively. |
+
+```json
+{
+  "type": "oui_enrichment",
+  "data_path": "",
+  "inner": {
+    "type": "direct",
+    "confidence_baseline": 0.1,
+    "confidence_per_signal": 0.1
+  }
+}
+```
+
+Longest-prefix wins on lookup: a /36 MA-S allocation takes precedence over a /28 MA-M, which takes precedence over a /24 MA-L. Vendor names come from the manuf file's long-name column, falling back to the short-name column when the long name is empty.
 
 ## Example: minimal POST /scans body
 

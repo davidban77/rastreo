@@ -108,6 +108,7 @@ nav:
       - CLI: discover/cli.md
       - Targets: discover/targets.md
       - Sinks: discover/sinks.md
+      - Enrichment: discover/enrichment.md
   - Probe:
       - probe/index.md
       - HTTP: probe/http.md

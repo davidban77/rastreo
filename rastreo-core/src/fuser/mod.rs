@@ -6,6 +6,12 @@ use crate::error::{ConfigError, RastreoError};
 use crate::model::device::{Confidence, DeviceRecord, IdentityKey};
 use crate::model::outcome::{ProbeOutcome, Signal};
 
+#[cfg(feature = "oui")]
+pub mod oui;
+
+#[cfg(feature = "oui")]
+pub use oui::{OuiEnrichmentFuser, OuiTable};
+
 pub trait Fuser: Send + Sync {
     fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError>;
 
@@ -145,6 +151,12 @@ pub enum FuserConfig {
         #[serde(default)]
         confidence_per_signal: Option<f64>,
     },
+    #[cfg(feature = "oui")]
+    OuiEnrichment {
+        #[serde(default = "oui::default_data_path")]
+        data_path: String,
+        inner: Box<FuserConfig>,
+    },
 }
 
 impl FuserConfig {
@@ -171,6 +183,8 @@ impl FuserConfig {
                 }
                 Ok(())
             }
+            #[cfg(feature = "oui")]
+            FuserConfig::OuiEnrichment { inner, .. } => inner.validate(),
         }
     }
 }
@@ -195,6 +209,16 @@ pub fn create_fuser(config: &FuserConfig) -> Result<Box<dyn Fuser>, RastreoError
                 f = f.with_confidence_per_signal(*v);
             }
             Ok(Box::new(f))
+        }
+        #[cfg(feature = "oui")]
+        FuserConfig::OuiEnrichment { data_path, inner } => {
+            let inner_fuser = create_fuser(inner)?;
+            let table = if data_path.is_empty() {
+                OuiTable::from_bundled()?
+            } else {
+                OuiTable::from_path(data_path)?
+            };
+            Ok(Box::new(OuiEnrichmentFuser::new(inner_fuser, table)))
         }
     }
 }
@@ -538,14 +562,19 @@ mod tests {
     fn deserialize_direct_fuser_config_from_yaml() {
         let yaml = "type: direct\ninclude_unreachable: true\n";
         let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        let FuserConfig::Direct {
-            include_unreachable,
-            confidence_baseline,
-            confidence_per_signal,
-        } = cfg;
-        assert_eq!(include_unreachable, Some(true));
-        assert!(confidence_baseline.is_none());
-        assert!(confidence_per_signal.is_none());
+        match cfg {
+            FuserConfig::Direct {
+                include_unreachable,
+                confidence_baseline,
+                confidence_per_signal,
+            } => {
+                assert_eq!(include_unreachable, Some(true));
+                assert!(confidence_baseline.is_none());
+                assert!(confidence_per_signal.is_none());
+            }
+            #[allow(unreachable_patterns)]
+            other => panic!("expected Direct, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "config")]
@@ -553,14 +582,19 @@ mod tests {
     fn deserialize_direct_fuser_config_full_yaml() {
         let yaml = "type: direct\ninclude_unreachable: false\nconfidence_baseline: 0.2\nconfidence_per_signal: 0.15\n";
         let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        let FuserConfig::Direct {
-            include_unreachable,
-            confidence_baseline,
-            confidence_per_signal,
-        } = cfg;
-        assert_eq!(include_unreachable, Some(false));
-        assert_eq!(confidence_baseline, Some(0.2));
-        assert_eq!(confidence_per_signal, Some(0.15));
+        match cfg {
+            FuserConfig::Direct {
+                include_unreachable,
+                confidence_baseline,
+                confidence_per_signal,
+            } => {
+                assert_eq!(include_unreachable, Some(false));
+                assert_eq!(confidence_baseline, Some(0.2));
+                assert_eq!(confidence_per_signal, Some(0.15));
+            }
+            #[allow(unreachable_patterns)]
+            other => panic!("expected Direct, got {other:?}"),
+        }
     }
 
     #[test]
@@ -569,5 +603,121 @@ mod tests {
         assert_send_sync::<DirectFuser>();
         assert_send_sync::<dyn Fuser>();
         assert_send_sync::<Box<dyn Fuser>>();
+    }
+
+    #[cfg(all(feature = "config", feature = "oui"))]
+    #[test]
+    fn fuser_config_deserializes_oui_enrichment_with_bundled_data() {
+        let yaml = "type: oui_enrichment\ndata_path: \"\"\ninner:\n  type: direct\n";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            FuserConfig::OuiEnrichment { data_path, inner } => {
+                assert_eq!(data_path, "");
+                assert!(matches!(*inner, FuserConfig::Direct { .. }));
+            }
+            other => panic!("expected OuiEnrichment, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "oui"))]
+    #[test]
+    fn fuser_config_deserializes_oui_enrichment_with_data_path() {
+        let yaml =
+            "type: oui_enrichment\ndata_path: /etc/rastreo/manuf.txt\ninner:\n  type: direct\n";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            FuserConfig::OuiEnrichment { data_path, .. } => {
+                assert_eq!(data_path, "/etc/rastreo/manuf.txt");
+            }
+            other => panic!("expected OuiEnrichment, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "oui"))]
+    #[test]
+    fn fuser_config_deserializes_oui_enrichment_defaults_data_path_to_empty() {
+        let yaml = "type: oui_enrichment\ninner:\n  type: direct\n";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            FuserConfig::OuiEnrichment { data_path, .. } => {
+                assert_eq!(data_path, "");
+            }
+            other => panic!("expected OuiEnrichment, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "oui"))]
+    #[test]
+    fn fuser_config_oui_enrichment_wraps_direct_fuser() {
+        let yaml = "type: oui_enrichment\ninner:\n  type: direct\n  confidence_baseline: 0.5\n";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        let FuserConfig::OuiEnrichment { inner, .. } = cfg else {
+            panic!("expected OuiEnrichment");
+        };
+        match *inner {
+            FuserConfig::Direct {
+                confidence_baseline,
+                ..
+            } => assert_eq!(confidence_baseline, Some(0.5)),
+            other => panic!("expected inner Direct, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn create_fuser_oui_enrichment_with_bundled_data_returns_fuser() {
+        let cfg = FuserConfig::OuiEnrichment {
+            data_path: String::new(),
+            inner: Box::new(FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            }),
+        };
+        let f = create_fuser(&cfg).expect("create");
+        let outcomes = vec![outcome(
+            1,
+            true,
+            vec![
+                Signal::Mac("00:04:AC:11:22:33".into()),
+                Signal::OpenPort(22),
+            ],
+        )];
+        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        assert_eq!(record.manufacturer.as_deref(), Some("IBM Corp"));
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn create_fuser_oui_enrichment_propagates_inner_validation() {
+        let cfg = FuserConfig::OuiEnrichment {
+            data_path: String::new(),
+            inner: Box::new(FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: Some(-1.0),
+                confidence_per_signal: None,
+            }),
+        };
+        match create_fuser(&cfg) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(format!("{e}").contains("confidence_baseline")),
+        }
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn create_fuser_oui_enrichment_returns_error_for_nonexistent_data_path() {
+        let cfg = FuserConfig::OuiEnrichment {
+            data_path: "/does/not/exist/manuf.txt".into(),
+            inner: Box::new(FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            }),
+        };
+        match create_fuser(&cfg) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(format!("{e}").contains("not found")),
+        }
     }
 }

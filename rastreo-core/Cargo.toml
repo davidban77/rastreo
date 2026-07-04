@@ -32,6 +32,7 @@ snmp = [
 ]
 arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
 ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
+oui = ["dep:flate2"]
 
 [dependencies]
 serde = { workspace = true }
@@ -64,6 +65,7 @@ des = { version = "0.8", optional = true }
 pnet_datalink = { version = "0.35", default-features = false, features = ["std"], optional = true }
 pnet_packet = { version = "0.35", optional = true }
 ipnetwork = { version = "0.20", optional = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }
