@@ -118,5 +118,6 @@ probers:
 
 - [NDP prober](ndp.md) — the IPv6 equivalent of ARP.
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the ARP prober from the CLI via `--file`.
 - [Kubernetes deployment](../deploy/kubernetes.md#podsecuritynetraw-arp-and-ndp-probers) — the `podSecurity.netRaw` toggle for granting the capability in-cluster.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

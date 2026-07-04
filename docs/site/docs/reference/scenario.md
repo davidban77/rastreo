@@ -4,9 +4,12 @@ description: The DiscoverScenarioConfig JSON shape used by POST /scans and by li
 
 # Scenario schema
 
-A scenario describes one discovery run: which targets to probe, which probers to use, how to encode the results, and where to send them. The `rastreo-server` HTTP API accepts a scenario as the JSON body of `POST /scans`; library callers construct the same shape in code. The `rastreo` CLI does not load this file directly today — the CLI flags build an equivalent scenario in memory.
+A scenario describes one discovery run: which targets to probe, which probers to use, how to encode the results, and where to send them. The `rastreo-server` HTTP API accepts a scenario as the JSON body of `POST /scans`; library callers construct the same shape in code. The `rastreo` CLI loads a `ScenarioFile` (one or more scenarios plus a top-level `version` / `kind` / `defaults` header) from disk via `rastreo discover --file <path>`.
 
 This page documents the JSON form. Field names match the wire shape exactly (the underlying Rust type is `rastreo_core::config::DiscoverScenarioConfig`).
+
+!!! tip "Loading from the CLI"
+    `rastreo discover --file scan.yml` loads a YAML `ScenarioFile` and runs each `scenarios[]` entry sequentially. The file must set `version: 1` and `kind: discovery`. See the [CLI reference](../discover/cli.md#yaml-driven-mode) for the full mode surface, including CLI flag overrides on YAML values.
 
 ## Top-level fields
 

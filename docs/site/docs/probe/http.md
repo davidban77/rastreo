@@ -66,7 +66,7 @@ cargo build -p rastreo-server --features http
 
 ## Example scenario
 
-The following `POST /scans` body probes an nginx target on port 80 with the HTTP prober:
+The following scenario probes an nginx target on port 80 with the HTTP prober. Load it via `rastreo discover --file scan.yml` on the CLI, or send the equivalent JSON as the `POST /scans` body to `rastreo-server`:
 
 ```json
 {
@@ -88,5 +88,6 @@ A record produced against a default nginx install contains at least one `HttpBan
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the HTTP prober from the CLI via `--file`.
 - [Probe index](index.md) — pointers to every prober.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.
