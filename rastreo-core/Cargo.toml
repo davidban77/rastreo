@@ -64,7 +64,7 @@ cfb-mode = { version = "0.8", optional = true }
 des = { version = "0.8", optional = true }
 pnet_datalink = { version = "0.35", default-features = false, features = ["std"], optional = true }
 pnet_packet = { version = "0.35", optional = true }
-ipnetwork = { version = "0.20", optional = true }
+ipnetwork = { version = "0.21", optional = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 
 [dev-dependencies]
