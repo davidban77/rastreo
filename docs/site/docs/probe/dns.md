@@ -71,7 +71,7 @@ The DNS prober is always available — no Cargo feature is required. The `hickor
 
 ## Example scenario
 
-The following `POST /scans` body probes a public resolver for the `A` record of `example.com`:
+The following scenario probes a public resolver for the `A` record of `example.com`. Load it via `rastreo discover --file scan.yml` on the CLI, or send the equivalent JSON as the `POST /scans` body to `rastreo-server`:
 
 ```json
 {
@@ -100,5 +100,5 @@ Probing an authoritative name server for the same zone would use `recursion_desi
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
-- [Discover CLI](../discover/cli.md) — building scenarios from the command line.
+- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the DNS prober from the CLI via `--file`.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

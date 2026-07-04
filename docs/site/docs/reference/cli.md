@@ -64,11 +64,13 @@ Several CLI surfaces appear conditionally based on which Cargo features were ena
 
 | Feature | Default | Effect on CLI |
 |---|---|---|
-| `config` | yes | Enables YAML scenario-file parsing in `rastreo-core`. No direct CLI surface today — the `rastreo` CLI does not load YAML files. Library and HTTP-API consumers benefit. |
+| `config` | yes | Enables YAML scenario-file parsing. Required for `rastreo discover --file <path>`. Without it, `--target` / `--port` remain the only discovery entry point. |
 | `kafka` | no | Adds `kafka` as a valid value for `--sink`, plus the `--kafka-flush-per-record` and `--kafka-batch-threshold` flags. The default build does not include it; build with `cargo build --features kafka` to enable. |
-| `http` | no | Declared but not implemented. Reserved for a future HTTP prober. |
-| `snmp` | no | Declared but not implemented. Reserved for a future SNMP prober. |
-| `arp` | no | Declared but not implemented. Reserved for a future ARP prober. |
+| `http` | no | Enables the HTTP prober. Accepted as `type: http` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
+| `snmp` | no | Enables the SNMP prober (v1 / v2c / v3 with USM). Accepted as `type: snmp` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
+| `arp` | no | Enables the ARP prober for IPv4 link-layer neighbor discovery. Requires `CAP_NET_RAW` at runtime. Accepted as `type: arp` in YAML scenarios loaded via `--file`. |
+| `ndp` | no | Enables the NDP prober for IPv6 link-layer neighbor discovery. Requires `CAP_NET_RAW` at runtime. Accepted as `type: ndp` in YAML scenarios loaded via `--file`. |
+| `oui` | no | Enables the OUI vendor enrichment fuser. Accepted as `type: oui_enrichment` in the `fuser` block of YAML scenarios loaded via `--file`. |
 
 ## Exit codes
 

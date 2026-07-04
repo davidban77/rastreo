@@ -1,3 +1,5 @@
+#[cfg(feature = "config")]
+use std::io::Write;
 use std::process::Command;
 
 #[tokio::test]
@@ -82,6 +84,7 @@ fn discover_help_lists_required_flags() {
     for needle in [
         "--target",
         "--port",
+        "--file",
         "--sink",
         "--output",
         "--concurrency",
@@ -198,5 +201,297 @@ async fn discover_no_hint_when_records_emitted_greater_than_zero() {
     assert!(
         !stderr.contains("hint: 0 records emitted"),
         "stderr should not include the hint when records were emitted: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+fn write_yaml(dir: &tempfile::TempDir, name: &str, contents: &str) -> std::path::PathBuf {
+    let path = dir.path().join(name);
+    let mut f = std::fs::File::create(&path).expect("create yaml");
+    f.write_all(contents.as_bytes()).expect("write yaml");
+    path
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn run_from_file_loads_minimal_tcp_scenario() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = format!(
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n    timeout_ms: 500\n    sink:\n      type: stdout\n"
+    );
+    let path = write_yaml(&dir, "tcp.yml", &yaml);
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    drop(listener);
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected one NDJSON line, got {lines:#?}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("records_emitted=1"),
+        "stderr missing records_emitted=1: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn run_from_file_rejects_unsupported_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_yaml(
+        &dir,
+        "bad.yml",
+        "version: 2\nkind: discovery\nscenarios: []\n",
+    );
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(!output.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("unsupported scenario file version 2"),
+        "stderr missing version rejection: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn run_from_file_rejects_missing_file() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args([
+                "discover",
+                "--file",
+                "/tmp/definitely-not-a-real-rastreo-file-xyz.yml",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(!output.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("failed to read scenario file"),
+        "stderr missing read-error message: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn run_from_file_rejects_malformed_yaml() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_yaml(&dir, "broken.yml", "version: 1\n  kind: [\n");
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(!output.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("failed to parse scenario file"),
+        "stderr missing parse-error message: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn run_from_file_reports_all_scenarios_in_multi_scenario_file() {
+    let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a");
+    let port_a = listener_a.local_addr().expect("local_addr a").port();
+    let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind b");
+    let port_b = listener_b.local_addr().expect("local_addr b").port();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = format!(
+        "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: stdout\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port_a}]\n  - signal_type: discover\n    name: second\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port_b}]\n"
+    );
+    let path = write_yaml(&dir, "multi.yml", &yaml);
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    drop(listener_a);
+    drop(listener_b);
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected one NDJSON line per scenario, got {lines:#?}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("scenario 'first'"),
+        "stderr missing first scenario label: {stderr}"
+    );
+    assert!(
+        stderr.contains("scenario 'second'"),
+        "stderr missing second scenario label: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn concurrency_flag_overrides_yaml_rate_limit() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = format!(
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    rate_limit: 2\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n"
+    );
+    let path = write_yaml(&dir, "rate.yml", &yaml);
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .args(["--concurrency", "16"])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    drop(listener);
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("records_emitted=1"),
+        "expected one record with overridden concurrency: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn sink_flag_overrides_yaml_sink() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml_path = write_yaml(
+        &dir,
+        "sink.yml",
+        &format!(
+            "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n"
+        ),
+    );
+    let output_ndjson = dir.path().join("out.ndjson");
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output_path = output_ndjson.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&yaml_path)
+            .args(["--sink", "file", "--output"])
+            .arg(&output_path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    drop(listener);
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = std::fs::read(&output_ndjson).expect("read out.ndjson");
+    let lines: Vec<&[u8]> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "sink override must direct records to the file"
+    );
+    assert!(
+        String::from_utf8(output.stdout).expect("utf-8").is_empty(),
+        "stdout must be empty when sink overridden to file"
     );
 }

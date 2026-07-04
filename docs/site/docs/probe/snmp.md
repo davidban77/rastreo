@@ -223,5 +223,6 @@ probers:
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the SNMP prober from the CLI via `--file`.
 - [UDP prober](udp.md) — for non-SNMP UDP fingerprinting (NTP, SIP, memcached, STUN).
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

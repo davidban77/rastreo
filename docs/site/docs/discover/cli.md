@@ -4,18 +4,18 @@ description: Reference for the rastreo discover subcommand — required flags, o
 
 # CLI
 
-`rastreo discover` is the entry point for one-shot discovery scans. It is flag-driven — there is no config file flag on the CLI today. The command probes each target on each port using the TCP-connect prober and emits one NDJSON `DeviceRecord` per discovered device to the chosen sink.
-
-!!! note "HTTP prober is scenario-only"
-    The HTTP prober (`type: http` in a scenario) is not reachable from `rastreo discover` flags today; use `rastreo-server`'s `POST /scans` endpoint with a JSON scenario body instead. See [Scenario schema — `http`](../reference/scenario.md#http).
+`rastreo discover` is the entry point for one-shot discovery scans. It runs in two modes: **flag-driven** (`--target` + `--port`) for a quick TCP-connect sweep, or **YAML-driven** (`--file`) to execute a full `ScenarioFile` — the only CLI path that reaches the HTTP, DNS, UDP, SNMP, ARP, NDP probers and the OUI-enrichment fuser. Both modes emit one NDJSON `DeviceRecord` per discovered device to the chosen sink.
 
 ## Usage
 
 ```text
 rastreo discover [OPTIONS] --target <TARGET>... --port <PORT>
+rastreo discover [OPTIONS] --file <SCENARIO.yml>
 ```
 
-## Required flags
+`--target` / `--port` and `--file` are mutually exclusive. Exactly one of the two modes must be selected — clap rejects the command otherwise.
+
+## Flag-driven mode
 
 `--target` is the target to probe. It accepts a single IP, a CIDR block, an IP range, or a DNS name; the form is detected from the string shape. Repeat the flag to add more targets, or pass several values after one `--target`. See [Targets](targets.md) for the exact detection rules.
 
@@ -29,18 +29,81 @@ rastreo discover --target 10.0.0.1 --target 192.0.2.0/29 --port 80
 rastreo discover --target 1.1.1.1 --port 22,80,443
 ```
 
+Flag-driven mode always uses the TCP-connect prober. To reach the HTTP, DNS, UDP, SNMP, ARP, or NDP probers from the CLI, use `--file` with a scenario YAML.
+
+## YAML-driven mode
+
+`--file <PATH>` (`-f <PATH>`) loads a `ScenarioFile` and runs every scenario entry in order. The file must set `version: 1` and `kind: discovery`; other values are rejected. See [Scenario schema](../reference/scenario.md) for the full field list. `@name` catalog references are not supported yet — only file paths.
+
+A single-scenario file that probes an HTTP target and a DNS resolver:
+
+```yaml
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: web-and-dns
+    timeout_ms: 500
+    sink:
+      type: stdout
+    targets:
+      - Ip: "192.0.2.10"
+      - Ip: "1.1.1.1"
+    probers:
+      - type: http
+        ports: [80, 443]
+      - type: dns
+        query_names: ["example.com"]
+```
+
+```bash
+rastreo discover --file /etc/rastreo/scan.yml
+```
+
+A multi-scenario file that runs two independent probes sequentially. The `defaults:` block applies to every scenario unless the scenario re-declares the field.
+
+```yaml
+version: 1
+kind: discovery
+defaults:
+  timeout_ms: 1000
+  sink:
+    type: file
+    path: /var/log/rastreo.ndjson
+scenarios:
+  - signal_type: discover
+    name: routers
+    targets:
+      - Cidr: "10.0.0.0/29"
+    probers:
+      - type: snmp
+        ports: [161]
+        version: v2c
+        community: public
+  - signal_type: discover
+    name: web-tier
+    rate_limit: 32
+    targets:
+      - Cidr: "10.1.0.0/28"
+    probers:
+      - type: http
+        ports: [80, 443]
+```
+
+Each scenario prints its own status line to stderr. If ANY single scenario fails, the CLI continues to the next; the process exits non-zero only when the file itself is invalid, or when every scenario fails.
+
 ## Optional flags
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--sink <SINK>` | `stdout` | Where records are emitted. Possible values: `stdout`, `file`. `kafka` is available when the binary is built with `--features kafka`. See [Sinks](sinks.md). |
+| `--sink <SINK>` | `stdout` (flag-driven) / YAML `sink` (YAML-driven) | Where records are emitted. Possible values: `stdout`, `file`. `kafka` is available when the binary is built with `--features kafka`. In YAML-driven mode, setting `--sink` overrides the sink configured in the file. See [Sinks](sinks.md). |
 | `--output <PATH>` | — | Output file path for `--sink file`. Required when the file sink is selected. |
 | `--brokers <BROKERS>` | — | Comma-separated Kafka brokers for `--sink kafka`. Requires the `kafka` build feature. |
 | `--topic <TOPIC>` | — | Kafka topic for `--sink kafka`. Requires the `kafka` build feature. |
 | `--kafka-flush-per-record` | — | Flush every `DeviceRecord` to Kafka as a separate message. Mutually exclusive with `--kafka-batch-threshold`. Only meaningful with `--sink kafka`. |
 | `--kafka-batch-threshold <BYTES>` | `65536` (64 KiB) | Batch threshold in bytes. Records accumulate until the buffer reaches this size, then flush as a single Kafka message. Minimum 1. Only meaningful with `--sink kafka`. |
-| `--concurrency <N>` | `64` | Maximum number of in-flight probes. Minimum value is 1. |
-| `--timeout-ms <MS>` | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum value is 1. |
+| `--concurrency <N>` | `64` (flag-driven) / YAML `rate_limit` (YAML-driven) | Maximum number of in-flight probes. Minimum value is 1. In YAML-driven mode, setting `--concurrency` overrides the scenario's `rate_limit`. |
+| `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
 | `-q`, `--quiet` | — | Drop the log level to `error`. Mutually exclusive in spirit with `-v`. |
 
@@ -85,6 +148,16 @@ rastreo discover \
   --topic rastreo.devices
 ```
 
+## Override precedence in YAML-driven mode
+
+CLI flags override YAML values. Merge order per scenario, lowest to highest:
+
+1. `defaults:` block in the scenario file.
+2. Per-scenario fields (`rate_limit`, `timeout_ms`, `sink`, `encoder`, `fuser`, `name`).
+3. CLI flags (`--concurrency`, `--timeout-ms`, `--sink` + `--output` / Kafka flags).
+
+Only fields the CLI flag was explicitly set for are overridden. `rastreo discover --file scan.yml --concurrency 32` overrides the YAML `rate_limit`, but leaves the sink and timeout untouched. Omitting a flag entirely lets the YAML value win.
+
 ## Cancellation
 
 On `SIGINT` (ctrl-c) or `SIGTERM`, `rastreo discover` finishes any in-flight probes that have already started, fuses the outcomes collected so far, emits the resulting records to the sink, and flushes the sink before exiting. The summary line on stderr reads `discovery cancelled:` instead of `discovery complete:` when this path runs. The exit code is still `0` for a clean shutdown — non-zero is reserved for errors.
@@ -97,5 +170,6 @@ Records that hadn't been emitted yet at the moment of cancellation are still wri
 
 ## See also
 
+- [Scenario schema](../reference/scenario.md) — the full YAML shape accepted by `--file`.
 - [Targets](targets.md) — the four target forms and how the CLI detects each one.
 - [Sinks](sinks.md) — stdout, file, and Kafka output in depth.

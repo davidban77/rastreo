@@ -1851,13 +1851,14 @@ dependencies = [
 
 [[package]]
 name = "rastreo"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
  "ipnet",
  "rastreo-core",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "tokio",
  "tracing",
@@ -1866,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "rastreo-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes",
  "async-trait",
@@ -1909,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "rastreo-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
