@@ -135,4 +135,4 @@ The parsed `XOR-MAPPED-ADDRESS` attribute lands as `StunMappedAddress`:
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
 - [Probe index](index.md) — pointers to every prober.
-- [Discover CLI](../discover/cli.md) — building scenarios from the command line.
+- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the UDP prober from the CLI via `--file`.
