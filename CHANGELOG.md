@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0](https://github.com/davidban77/rastreo/compare/v0.4.0...v0.5.0) (2026-07-05)
+
+
+### Features
+
+* **cli:** load scenarios from YAML files via --file ([#64](https://github.com/davidban77/rastreo/issues/64)) ([1835527](https://github.com/davidban77/rastreo/commit/183552744e75020dd6ea32ff6bf3509bf3c02304))
+
+
+### Documentation
+
+* **readme:** add link to hosted documentation site ([#56](https://github.com/davidban77/rastreo/issues/56)) ([db79d01](https://github.com/davidban77/rastreo/commit/db79d01b17e9edc0c310bfdcfc78a565d37de0fc))
+
+
+### Miscellaneous
+
+* **ci:** monthly cron to refresh bundled OUI snapshot ([#67](https://github.com/davidban77/rastreo/issues/67)) ([31ce8aa](https://github.com/davidban77/rastreo/commit/31ce8aa18d337b3435d5befdb80964cbefbfe9a3))
+
+
+### CI/CD
+
+* bump azure/setup-helm from 4 to 5 ([#58](https://github.com/davidban77/rastreo/issues/58)) ([56f735c](https://github.com/davidban77/rastreo/commit/56f735cc4e1c83af5612ee3edf442cda6f0a804d))
+
+
+### Refactoring
+
+* **cli:** address follow-ups from PR [#64](https://github.com/davidban77/rastreo/issues/64) review ([#65](https://github.com/davidban77/rastreo/issues/65)) ([99e4c32](https://github.com/davidban77/rastreo/commit/99e4c3239e46b72b30cef409565105b71055f15b))
+* **fuser:** tighten OUI enrichment internals ([#66](https://github.com/davidban77/rastreo/issues/66)) ([0e0f7aa](https://github.com/davidban77/rastreo/commit/0e0f7aa5cdf38672f51650bbd9b6315eb5854434))
+
 ## [0.4.0](https://github.com/davidban77/rastreo/compare/v0.3.0...v0.4.0) (2026-07-04)
 
 
