@@ -49,7 +49,9 @@ impl Default for ScanMetadata {
 // Credentials (`Community`, `Password`) have hand-rolled `Serialize` impls emitting
 // `<redacted:xxxxxxxx>` (sha256-derived), so credential rotation changes the hash
 // without leaking plaintext. `expect` is defensible: every reachable type derives
-// `Serialize` and none has a fallible impl on well-formed data.
+// `Serialize` and none has a fallible impl on well-formed data. NaN / Inf floats
+// round-trip through serde_json as `null`; downstream `create_fuser` validation
+// rejects them before they can collide with a real `None`.
 fn hash_scenario(scenario: &DiscoverScenarioConfig) -> Option<String> {
     let bytes =
         serde_json::to_vec(scenario).expect("DiscoverScenarioConfig serialization is infallible");

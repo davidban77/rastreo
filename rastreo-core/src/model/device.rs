@@ -84,9 +84,9 @@ pub struct DeviceRecord {
     pub mac: Option<String>,
     /// Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser. `null` when the OUI is not in the bundled Wireshark manuf database.
     pub manufacturer: Option<String>,
-    /// Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated in Phase 2.
+    /// Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated once platform classification lands.
     pub platform: Option<String>,
-    /// Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated in Phase 2.
+    /// Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated once role classification lands.
     pub role: Option<String>,
     /// Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.
     pub confidence: Confidence,
@@ -336,6 +336,17 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("epoch positive");
         assert_eq!(elapsed.subsec_nanos(), 123_456_789);
+    }
+
+    #[test]
+    fn rfc3339_deserializer_accepts_non_utc_offset() {
+        let json = r#"{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.1,"last_seen":"2024-07-03T15:16:40+05:30","signals":[],"schema_version":"v1","schema_id":"https://schemas.rastreo.dev/device-record/v1.json","alt_ips":[],"possible_alias_of":null,"scan_metadata":{"scan_id":"","scenario_name":null,"initiated_at":"1970-01-01T00:00:00Z","source_config_hash":null}}"#;
+        let back: DeviceRecord = serde_json::from_str(json).expect("deserialize offset-input");
+        let elapsed = back
+            .last_seen
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("epoch positive");
+        assert_eq!(elapsed.as_secs(), 1_720_000_000);
     }
 
     #[test]

@@ -62,7 +62,7 @@
       "format": "ip"
     },
     "platform": {
-      "description": "Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated in Phase 2.",
+      "description": "Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated once platform classification lands.",
       "type": [
         "string",
         "null"
@@ -81,7 +81,7 @@
       ]
     },
     "role": {
-      "description": "Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated in Phase 2.",
+      "description": "Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated once role classification lands.",
       "type": [
         "string",
         "null"
