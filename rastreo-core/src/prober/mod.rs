@@ -39,7 +39,7 @@ pub trait Prober: Send + Sync {
     ) -> Result<ProbeOutcome, RastreoError>;
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ProberConfig {
@@ -530,7 +530,7 @@ mod tests {
             !debug_output.contains("secret-community"),
             "community leaked in Debug: {debug_output}"
         );
-        assert!(debug_output.contains("<redacted>"));
+        assert!(debug_output.contains("<redacted:"));
     }
 
     #[cfg(all(feature = "config", feature = "arp"))]
@@ -615,6 +615,6 @@ mod tests {
             !debug_output.contains("supersecretauth"),
             "password leaked in Debug: {debug_output}"
         );
-        assert!(debug_output.contains("<redacted>"));
+        assert!(debug_output.contains("<redacted:"));
     }
 }

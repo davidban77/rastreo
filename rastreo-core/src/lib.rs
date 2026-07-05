@@ -14,7 +14,7 @@ pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, ResolverErr
 pub use fuser::{DirectFuser, Fuser, FuserConfig};
 pub use model::{
     Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget,
-    Signal, Target,
+    ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
 };
 pub use pipeline::{
     run_discovery, run_discovery_cancellable, run_discovery_with_components,

@@ -34,7 +34,7 @@ Stdout (one line, formatted here across multiple lines for reading):
   "platform": null,
   "role": null,
   "confidence": 0.2,
-  "last_seen": { "secs_since_epoch": 1782158571, "nanos_since_epoch": 423959000 },
+  "last_seen": "2026-07-05T11:22:51.423959000Z",
   "signals": [ { "OpenPort": 443 } ]
 }
 ```

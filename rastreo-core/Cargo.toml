@@ -15,7 +15,7 @@ readme = "../README.md"
 default = ["config"]
 config = ["dep:serde_yaml_ng"]
 http = ["dep:reqwest"]
-kafka = ["dep:rskafka", "dep:chrono", "chrono/clock", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
+kafka = ["dep:rskafka", "chrono/clock", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
 snmp = [
     "dep:rasn",
     "dep:rasn-snmp",
@@ -24,7 +24,6 @@ snmp = [
     "dep:hmac",
     "dep:md-5",
     "dep:sha1",
-    "dep:sha2",
     "dep:aes",
     "dep:cbc",
     "dep:cfb-mode",
@@ -44,9 +43,12 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 hickory-resolver = { workspace = true }
 ipnet = { workspace = true }
+schemars = { workspace = true }
+ulid = { workspace = true }
+sha2 = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"], optional = true }
 rskafka = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
+chrono = { workspace = true }
 rustls = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
@@ -57,7 +59,6 @@ digest = { version = "0.11", optional = true }
 hmac = { version = "0.13", optional = true }
 md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
-sha2 = { version = "0.11", optional = true }
 aes = { version = "0.9", optional = true }
 cbc = { version = "0.2", optional = true, features = ["alloc", "block-padding"] }
 cfb-mode = { version = "0.9", optional = true }

@@ -17,7 +17,7 @@ The minimum upsert flow is:
 3. If it exists, replace populated fields and bump `last_seen`. If it does not, create it.
 4. Acknowledge the Kafka offset (or advance the NDJSON cursor) only after the upsert succeeds.
 
-`last_seen` is `{secs_since_epoch, nanos_since_epoch}` — the Unix timestamp at which the last probe touched the device. Consumers should keep the most recent value seen for a given `identity_key` and use it to drive staleness policies (for example, a device that has not been seen in 30 days could be flagged or retired).
+`last_seen` is an RFC 3339 UTC timestamp string (e.g. `"2026-07-05T11:22:51.423959000Z"`) marking the last probe that touched the device. Consumers should keep the most recent value seen for a given `identity_key` and use it to drive staleness policies (for example, a device that has not been seen in 30 days could be flagged or retired).
 
 ## Confidence filtering
 

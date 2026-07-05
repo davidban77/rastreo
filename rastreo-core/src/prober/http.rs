@@ -6,7 +6,7 @@ use crate::prober::Prober;
 
 const BANNER_MAX_BYTES: usize = 256;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpScheme {
     #[default]

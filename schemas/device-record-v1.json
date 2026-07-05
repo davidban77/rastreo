@@ -1,0 +1,292 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DeviceRecord",
+  "description": "Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Legacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize; consumers should tag legacy records with an explicit v0 marker before ingest.",
+  "type": "object",
+  "required": [
+    "confidence",
+    "identity_key",
+    "last_seen",
+    "schema_id",
+    "schema_version",
+    "signals"
+  ],
+  "properties": {
+    "alt_ips": {
+      "description": "Additional IPs the fuser correlated to the same identity — empty until a correlator fuser populates it.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "ip"
+      }
+    },
+    "confidence": {
+      "description": "Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.",
+      "type": "number",
+      "format": "double"
+    },
+    "identity_key": {
+      "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary correlation key across scans.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/IdentityKey"
+        }
+      ]
+    },
+    "last_seen": {
+      "description": "RFC 3339 UTC timestamp of the most recent probe that produced signals for this device.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "mac": {
+      "description": "First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "manufacturer": {
+      "description": "Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser. `null` when the OUI is not in the bundled Wireshark manuf database.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mgmt_ip": {
+      "description": "Management IP the device was probed on. For multi-IP devices merged by the correlation fuser, this is the first target IP that survived resolution.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "ip"
+    },
+    "platform": {
+      "description": "Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated once platform classification lands.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "possible_alias_of": {
+      "description": "When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.",
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/IdentityKey"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "role": {
+      "description": "Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated once role classification lands.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scan_metadata": {
+      "description": "Provenance stamped by the pipeline at scan entry.",
+      "default": {
+        "initiated_at": "1970-01-01T00:00:00Z",
+        "scan_id": "",
+        "scenario_name": null,
+        "source_config_hash": null
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ScanMetadata"
+        }
+      ]
+    },
+    "schema_id": {
+      "description": "Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build.",
+      "type": "string"
+    },
+    "signals": {
+      "description": "Deduplicated list of every observable fact collected from every prober that targeted this device.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Signal"
+      }
+    }
+  },
+  "definitions": {
+    "IdentityKey": {
+      "type": "string"
+    },
+    "ScanMetadata": {
+      "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",
+      "type": "object",
+      "required": [
+        "initiated_at",
+        "scan_id"
+      ],
+      "properties": {
+        "initiated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "scan_id": {
+          "type": "string"
+        },
+        "scenario_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_config_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Signal": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "OpenPort"
+          ],
+          "properties": {
+            "OpenPort": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "HttpBanner"
+          ],
+          "properties": {
+            "HttpBanner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "SnmpSysObjectId"
+          ],
+          "properties": {
+            "SnmpSysObjectId": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "SnmpSysDescr"
+          ],
+          "properties": {
+            "SnmpSysDescr": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "Mac"
+          ],
+          "properties": {
+            "Mac": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "DnsHost"
+          ],
+          "properties": {
+            "DnsHost": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "NtpBanner"
+          ],
+          "properties": {
+            "NtpBanner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "SipUserAgent"
+          ],
+          "properties": {
+            "SipUserAgent": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "MemcachedVersion"
+          ],
+          "properties": {
+            "MemcachedVersion": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "StunMappedAddress"
+          ],
+          "properties": {
+            "StunMappedAddress": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "SnmpSysName"
+          ],
+          "properties": {
+            "SnmpSysName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

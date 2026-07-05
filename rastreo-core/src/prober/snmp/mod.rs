@@ -21,7 +21,7 @@ use crate::prober::Prober;
 
 const RECV_BUF_LEN: usize = 8192;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SnmpVersion {

@@ -1,7 +1,11 @@
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+use schemars::JsonSchema;
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, JsonSchema,
+)]
 #[non_exhaustive]
 pub enum ProbeKind {
     TcpConnect,
@@ -13,7 +17,7 @@ pub enum ProbeKind {
     Ndp,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub enum Signal {
     OpenPort(u16),
@@ -35,7 +39,7 @@ pub struct ProbeCtx {
     pub retries: u32,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct ProbeOutcome {
     pub kind: ProbeKind,
     pub target_ip: IpAddr,

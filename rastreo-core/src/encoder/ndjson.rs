@@ -32,7 +32,9 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::SystemTime;
 
-    use crate::model::{Confidence, IdentityKey, Signal};
+    use crate::model::{
+        Confidence, IdentityKey, ScanMetadata, Signal, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
+    };
 
     fn sample_record(name: &str) -> DeviceRecord {
         DeviceRecord {
@@ -45,6 +47,11 @@ mod tests {
             confidence: Confidence::new(0.75).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
             signals: vec![Signal::OpenPort(22)],
+            schema_version: CURRENT_SCHEMA_VERSION.to_string(),
+            schema_id: CURRENT_SCHEMA_ID.to_string(),
+            alt_ips: Vec::new(),
+            possible_alias_of: None,
+            scan_metadata: ScanMetadata::default(),
         }
     }
 
