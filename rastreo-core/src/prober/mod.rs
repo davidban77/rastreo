@@ -39,7 +39,7 @@ pub trait Prober: Send + Sync {
     ) -> Result<ProbeOutcome, RastreoError>;
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ProberConfig {

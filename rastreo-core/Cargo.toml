@@ -15,7 +15,7 @@ readme = "../README.md"
 default = ["config"]
 config = ["dep:serde_yaml_ng"]
 http = ["dep:reqwest"]
-kafka = ["dep:rskafka", "dep:chrono", "chrono/clock", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
+kafka = ["dep:rskafka", "chrono/clock", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
 snmp = [
     "dep:rasn",
     "dep:rasn-snmp",
@@ -48,7 +48,7 @@ ulid = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"], optional = true }
 rskafka = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
+chrono = { workspace = true }
 rustls = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }

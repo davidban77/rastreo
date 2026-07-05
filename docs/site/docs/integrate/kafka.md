@@ -13,9 +13,9 @@ A Kafka message value is a sequence of NDJSON-encoded `DeviceRecord` objects, ea
 In `Batched` mode (default), records accumulate in an in-memory buffer until the buffer length reaches `threshold_bytes` (default 65536, override with `--kafka-batch-threshold <BYTES>`). When the threshold is reached, the buffer is produced as one Kafka message. When the discovery scan ends, any remaining buffered records are produced as one final message on `flush()`. A typical `Batched`-mode Kafka message value with three records looks like:
 
 ```text
-{"identity_key":"ip:10.50.0.10","mgmt_ip":"10.50.0.10","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":{"secs_since_epoch":1782167242,"nanos_since_epoch":678133082},"signals":[{"OpenPort":80}]}
-{"identity_key":"ip:10.50.0.11","mgmt_ip":"10.50.0.11","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":{"secs_since_epoch":1782167242,"nanos_since_epoch":681947013},"signals":[{"OpenPort":80}]}
-{"identity_key":"ip:10.50.0.12","mgmt_ip":"10.50.0.12","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":{"secs_since_epoch":1782167242,"nanos_since_epoch":684201874},"signals":[{"OpenPort":80}]}
+{"identity_key":"ip:10.50.0.10","mgmt_ip":"10.50.0.10","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T13:47:22.678133082Z","signals":[{"OpenPort":80}]}
+{"identity_key":"ip:10.50.0.11","mgmt_ip":"10.50.0.11","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T13:47:22.681947013Z","signals":[{"OpenPort":80}]}
+{"identity_key":"ip:10.50.0.12","mgmt_ip":"10.50.0.12","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T13:47:22.684201874Z","signals":[{"OpenPort":80}]}
 ```
 
 In `PerRecord` mode (opt in via `--kafka-flush-per-record`), the sink calls `produce()` after every record, so every Kafka message value contains exactly one NDJSON-encoded `DeviceRecord` followed by a single `\n` byte.

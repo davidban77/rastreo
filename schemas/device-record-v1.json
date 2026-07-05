@@ -22,28 +22,39 @@
       }
     },
     "confidence": {
+      "description": "Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.",
       "type": "number",
       "format": "double"
     },
     "identity_key": {
-      "$ref": "#/definitions/IdentityKey"
+      "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary correlation key across scans.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/IdentityKey"
+        }
+      ]
     },
     "last_seen": {
-      "$ref": "#/definitions/SystemTime"
+      "description": "RFC 3339 UTC timestamp of the most recent probe that produced signals for this device.",
+      "type": "string",
+      "format": "date-time"
     },
     "mac": {
+      "description": "First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex.",
       "type": [
         "string",
         "null"
       ]
     },
     "manufacturer": {
+      "description": "Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser. `null` when the OUI is not in the bundled Wireshark manuf database.",
       "type": [
         "string",
         "null"
       ]
     },
     "mgmt_ip": {
+      "description": "Management IP the device was probed on. For multi-IP devices merged by the correlation fuser, this is the first target IP that survived resolution.",
       "type": [
         "string",
         "null"
@@ -51,6 +62,7 @@
       "format": "ip"
     },
     "platform": {
+      "description": "Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated in Phase 2.",
       "type": [
         "string",
         "null"
@@ -69,6 +81,7 @@
       ]
     },
     "role": {
+      "description": "Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated in Phase 2.",
       "type": [
         "string",
         "null"
@@ -77,10 +90,7 @@
     "scan_metadata": {
       "description": "Provenance stamped by the pipeline at scan entry.",
       "default": {
-        "initiated_at": {
-          "nanos_since_epoch": 0,
-          "secs_since_epoch": 0
-        },
+        "initiated_at": "1970-01-01T00:00:00Z",
         "scan_id": "",
         "scenario_name": null,
         "source_config_hash": null
@@ -100,6 +110,7 @@
       "type": "string"
     },
     "signals": {
+      "description": "Deduplicated list of every observable fact collected from every prober that targeted this device.",
       "type": "array",
       "items": {
         "$ref": "#/definitions/Signal"
@@ -119,7 +130,8 @@
       ],
       "properties": {
         "initiated_at": {
-          "$ref": "#/definitions/SystemTime"
+          "type": "string",
+          "format": "date-time"
         },
         "scan_id": {
           "type": "string"
@@ -275,25 +287,6 @@
           "additionalProperties": false
         }
       ]
-    },
-    "SystemTime": {
-      "type": "object",
-      "required": [
-        "nanos_since_epoch",
-        "secs_since_epoch"
-      ],
-      "properties": {
-        "nanos_since_epoch": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0.0
-        },
-        "secs_since_epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        }
-      }
     }
   }
 }

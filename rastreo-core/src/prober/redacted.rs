@@ -11,6 +11,13 @@ impl std::fmt::Debug for Community {
 }
 
 #[cfg(feature = "snmp")]
+impl serde::Serialize for Community {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(&format_args!("<redacted:{}>", short_hash(&self.0)))
+    }
+}
+
+#[cfg(feature = "snmp")]
 impl std::ops::Deref for Community {
     type Target = str;
     fn deref(&self) -> &str {
@@ -34,6 +41,13 @@ pub struct Password(pub String);
 impl std::fmt::Debug for Password {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<redacted:{}>", short_hash(&self.0))
+    }
+}
+
+#[cfg(feature = "snmp")]
+impl serde::Serialize for Password {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(&format_args!("<redacted:{}>", short_hash(&self.0)))
     }
 }
 
@@ -149,5 +163,35 @@ mod tests {
     fn short_hash_of_empty_string_is_stable() {
         // sha256("") = e3b0c442... — first 8 hex chars are "e3b0c442"
         assert_eq!(short_hash(""), "e3b0c442");
+    }
+
+    #[test]
+    fn community_serialize_is_redacted() {
+        let c = Community("supersecret".to_string());
+        let json = serde_json::to_string(&c).expect("serialize");
+        assert!(!json.contains("supersecret"), "plaintext leaked: {json}");
+        assert_eq!(json, format!("\"{:?}\"", c));
+    }
+
+    #[test]
+    fn community_serialize_is_distinct_per_value() {
+        let a = serde_json::to_string(&Community("public".to_string())).expect("serialize a");
+        let b = serde_json::to_string(&Community("prod-r0".to_string())).expect("serialize b");
+        assert_ne!(a, b, "different secrets must serialize distinctly");
+    }
+
+    #[test]
+    fn password_serialize_is_redacted() {
+        let p = Password("maplesyrup".to_string());
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(!json.contains("maplesyrup"), "plaintext leaked: {json}");
+        assert_eq!(json, format!("\"{:?}\"", p));
+    }
+
+    #[test]
+    fn password_serialize_is_distinct_per_value() {
+        let a = serde_json::to_string(&Password("authpass".to_string())).expect("serialize a");
+        let b = serde_json::to_string(&Password("privpass".to_string())).expect("serialize b");
+        assert_ne!(a, b);
     }
 }

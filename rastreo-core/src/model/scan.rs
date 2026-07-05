@@ -12,6 +12,8 @@ use crate::config::DiscoverScenarioConfig;
 pub struct ScanMetadata {
     pub scan_id: String,
     pub scenario_name: Option<String>,
+    #[serde(with = "crate::model::serde_iso8601")]
+    #[schemars(schema_with = "crate::model::serde_iso8601::date_time_schema")]
     pub initiated_at: SystemTime,
     pub source_config_hash: Option<String>,
 }
@@ -43,14 +45,16 @@ impl Default for ScanMetadata {
     }
 }
 
-// Credentials in the scenario (SNMP `Community`, USM `Password`) have hand-rolled
-// `Debug` impls that emit `<redacted:xxxxxxxx>` where the suffix is the first 8 hex
-// chars of sha256(secret). Rotating a credential therefore changes the Debug output
-// and, transitively, this hash — without leaking plaintext.
+// Canonical JSON serialization keeps the hash stable across Rust toolchain upgrades.
+// Credentials (`Community`, `Password`) have hand-rolled `Serialize` impls emitting
+// `<redacted:xxxxxxxx>` (sha256-derived), so credential rotation changes the hash
+// without leaking plaintext. `expect` is defensible: every reachable type derives
+// `Serialize` and none has a fallible impl on well-formed data.
 fn hash_scenario(scenario: &DiscoverScenarioConfig) -> Option<String> {
-    let s = format!("{scenario:?}");
+    let bytes =
+        serde_json::to_vec(scenario).expect("DiscoverScenarioConfig serialization is infallible");
     let mut hasher = Sha256::new();
-    hasher.update(s.as_bytes());
+    hasher.update(&bytes);
     let digest = hasher.finalize();
     Some(format!("sha256:{}", hex_lower(&digest)))
 }
@@ -197,6 +201,35 @@ mod tests {
             a.source_config_hash, b.source_config_hash,
             "credential rotation must change source_config_hash"
         );
+    }
+
+    #[test]
+    fn source_config_hash_is_stable_across_debug_impl_churn() {
+        // Serde-based hashing does not include Rust struct/variant names in the byte
+        // stream, unlike Debug output ("DiscoverScenarioConfig { base: BaseProbeConfig { ... } }").
+        // If a hash still contained those strings, a Rust toolchain upgrade that tweaked
+        // Debug formatting would rotate hashes; asserting their absence is the closest
+        // in-process proxy for "not Debug-based".
+        let meta = ScanMetadata::new(&scenario_with_name(Some("lab")));
+        let hash = meta.source_config_hash.expect("hash present");
+        for token in [
+            "DiscoverScenarioConfig",
+            "BaseProbeConfig",
+            "ProberConfig",
+            "TcpConnect",
+        ] {
+            assert!(
+                !hash.contains(token),
+                "hash unexpectedly contains {token}: {hash}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_config_hash_stable_for_equivalent_scenarios() {
+        let a = ScanMetadata::new(&scenario_with_name(Some("lab")));
+        let b = ScanMetadata::new(&scenario_with_name(Some("lab")));
+        assert_eq!(a.source_config_hash, b.source_config_hash);
     }
 
     #[cfg(feature = "snmp")]

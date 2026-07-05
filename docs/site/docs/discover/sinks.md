@@ -58,7 +58,7 @@ rastreo discover \
 The stdout and file sinks emit one `DeviceRecord` per NDJSON line. Each line is a complete JSON object — no surrounding array, no trailing comma. The Kafka sink uses the same NDJSON encoding for its payload bytes; see the [Integrate](../integrate/index.md) section for how those bytes map to Kafka records.
 
 ```json
-{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":{"secs_since_epoch":1782158571,"nanos_since_epoch":423959000},"signals":[{"OpenPort":443}]}
+{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T11:22:51.423959000Z","signals":[{"OpenPort":443}]}
 ```
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).

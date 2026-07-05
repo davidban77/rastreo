@@ -99,7 +99,7 @@ The response is `{summary, records}`. `summary` is a `DiscoverySummary` with cou
       "platform": null,
       "role": null,
       "confidence": 0.2,
-      "last_seen": { "secs_since_epoch": 1782167242, "nanos_since_epoch": 678133082 },
+      "last_seen": "2026-07-05T13:47:22.678133082Z",
       "signals": [ { "OpenPort": 80 } ]
     }
   ]

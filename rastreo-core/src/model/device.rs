@@ -76,14 +76,25 @@ impl Confidence {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DeviceRecord {
+    /// Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary correlation key across scans.
     pub identity_key: IdentityKey,
+    /// Management IP the device was probed on. For multi-IP devices merged by the correlation fuser, this is the first target IP that survived resolution.
     pub mgmt_ip: Option<IpAddr>,
+    /// First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex.
     pub mac: Option<String>,
+    /// Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser. `null` when the OUI is not in the bundled Wireshark manuf database.
     pub manufacturer: Option<String>,
+    /// Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated in Phase 2.
     pub platform: Option<String>,
+    /// Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated in Phase 2.
     pub role: Option<String>,
+    /// Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.
     pub confidence: Confidence,
+    /// RFC 3339 UTC timestamp of the most recent probe that produced signals for this device.
+    #[serde(with = "crate::model::serde_iso8601")]
+    #[schemars(schema_with = "crate::model::serde_iso8601::date_time_schema")]
     pub last_seen: SystemTime,
+    /// Deduplicated list of every observable fact collected from every prober that targeted this device.
     pub signals: Vec<Signal>,
     /// Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build.
     pub schema_version: String,
@@ -278,5 +289,66 @@ mod tests {
         assert_send_sync::<IdentityKey>();
         assert_send_sync::<Confidence>();
         assert_send_sync::<DeviceRecord>();
+    }
+
+    #[test]
+    fn system_time_serializes_as_rfc3339_string() {
+        use std::time::Duration;
+        let record = DeviceRecord {
+            last_seen: SystemTime::UNIX_EPOCH + Duration::from_secs(1_720_000_000),
+            ..fresh_record()
+        };
+        let json = serde_json::to_value(&record).expect("serialize");
+        let s = json["last_seen"].as_str().expect("last_seen is a string");
+        assert_eq!(s, "2024-07-03T09:46:40Z", "unexpected rfc3339: {s}");
+    }
+
+    #[test]
+    fn rfc3339_deserializes_to_system_time() {
+        let json = serde_json::to_value(fresh_record()).expect("serialize");
+        let mut object = json.as_object().expect("obj").clone();
+        object.insert(
+            "last_seen".to_string(),
+            serde_json::Value::String("2024-07-03T09:46:40Z".to_string()),
+        );
+        let back: DeviceRecord =
+            serde_json::from_value(serde_json::Value::Object(object)).expect("deserialize");
+        let elapsed = back
+            .last_seen
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("epoch positive");
+        assert_eq!(elapsed.as_secs(), 1_720_000_000);
+        assert_eq!(elapsed.subsec_nanos(), 0);
+    }
+
+    #[test]
+    fn rfc3339_handles_sub_second_precision() {
+        use std::time::Duration;
+        let ts = SystemTime::UNIX_EPOCH + Duration::new(1_720_000_000, 123_456_789);
+        let record = DeviceRecord {
+            last_seen: ts,
+            ..fresh_record()
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: DeviceRecord = serde_json::from_str(&json).expect("deserialize");
+        let elapsed = back
+            .last_seen
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("epoch positive");
+        assert_eq!(elapsed.subsec_nanos(), 123_456_789);
+    }
+
+    #[test]
+    fn json_schema_marks_last_seen_as_date_time_string() {
+        let schema = schemars::schema_for!(DeviceRecord);
+        let json = serde_json::to_value(&schema).expect("schema serializes");
+        assert_eq!(
+            json["properties"]["last_seen"]["type"], "string",
+            "last_seen must be typed as string"
+        );
+        assert_eq!(
+            json["properties"]["last_seen"]["format"], "date-time",
+            "last_seen must carry format: date-time"
+        );
     }
 }

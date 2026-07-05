@@ -9,7 +9,8 @@
   ],
   "properties": {
     "initiated_at": {
-      "$ref": "#/definitions/SystemTime"
+      "type": "string",
+      "format": "date-time"
     },
     "scan_id": {
       "type": "string"
@@ -25,27 +26,6 @@
         "string",
         "null"
       ]
-    }
-  },
-  "definitions": {
-    "SystemTime": {
-      "type": "object",
-      "required": [
-        "nanos_since_epoch",
-        "secs_since_epoch"
-      ],
-      "properties": {
-        "nanos_since_epoch": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0.0
-        },
-        "secs_since_epoch": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
-        }
-      }
     }
   }
 }
