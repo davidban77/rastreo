@@ -717,7 +717,7 @@ mod tests {
         };
         match create_fuser(&cfg) {
             Ok(_) => panic!("expected error"),
-            Err(e) => assert!(format!("{e}").contains("not found")),
+            Err(e) => assert!(format!("{e}").contains("could not be opened")),
         }
     }
 }

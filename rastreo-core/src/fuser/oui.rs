@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::BufRead;
 
 use crate::error::{ConfigError, RastreoError};
@@ -50,6 +51,31 @@ const MASK_24: u64 = 0xFFFF_FF00_0000_0000;
 const MASK_28: u64 = 0xFFFF_FFF0_0000_0000;
 const MASK_36: u64 = 0xFFFF_FFFF_F000_0000;
 
+#[derive(Clone, Copy)]
+enum PrefixKind {
+    L,
+    M,
+    S,
+}
+
+impl PrefixKind {
+    fn mask(self) -> u64 {
+        match self {
+            Self::L => MASK_24,
+            Self::M => MASK_28,
+            Self::S => MASK_36,
+        }
+    }
+
+    fn byte_len(self) -> usize {
+        match self {
+            Self::L => 3,
+            Self::M => 4,
+            Self::S => 5,
+        }
+    }
+}
+
 impl OuiTable {
     pub fn from_bundled() -> Result<Self, RastreoError> {
         use flate2::read::GzDecoder;
@@ -68,7 +94,7 @@ impl OuiTable {
     pub fn from_path(path: &str) -> Result<Self, RastreoError> {
         let file = std::fs::File::open(path).map_err(|e| {
             RastreoError::Config(ConfigError::invalid(format!(
-                "OUI data file '{path}' not found: {e}"
+                "OUI data file '{path}' could not be opened: {e}"
             )))
         })?;
         let reader = std::io::BufReader::new(file);
@@ -101,6 +127,10 @@ impl OuiTable {
     pub fn entry_count(&self) -> usize {
         self.entries_24.len() + self.entries_28.len() + self.entries_36.len()
     }
+
+    pub fn vendor_count(&self) -> usize {
+        self.vendors.len()
+    }
 }
 
 fn search_prefix(sorted: &[(u64, u32)], key: u64) -> Option<u32> {
@@ -121,6 +151,7 @@ fn parse_manuf<R: BufRead>(reader: R) -> Result<OuiTable, ParseError> {
     let mut entries_28: Vec<(u64, u32)> = Vec::new();
     let mut entries_36: Vec<(u64, u32)> = Vec::new();
     let mut vendors: Vec<String> = Vec::new();
+    let mut seen: HashMap<String, u32> = HashMap::new();
 
     for (line_no_zero, raw) in reader.lines().enumerate() {
         let line_no = line_no_zero + 1;
@@ -138,27 +169,25 @@ fn parse_manuf<R: BufRead>(reader: R) -> Result<OuiTable, ParseError> {
         let short_name = cols.next().unwrap_or("");
         let long_name = cols.next().unwrap_or("");
 
-        let (packed, bits) =
+        let (packed, kind) =
             parse_prefix_column(prefix_raw).map_err(|message| ParseError::Line {
                 line: line_no,
                 message,
             })?;
 
-        let vendor = if !long_name.is_empty() {
-            long_name.to_string()
+        let vendor_name = if !long_name.is_empty() {
+            long_name
         } else if !short_name.is_empty() {
-            short_name.to_string()
+            short_name
         } else {
             continue;
         };
 
-        let idx = vendors.len() as u32;
-        vendors.push(vendor);
-        match bits {
-            24 => entries_24.push((packed, idx)),
-            28 => entries_28.push((packed, idx)),
-            36 => entries_36.push((packed, idx)),
-            _ => unreachable!("parse_prefix_column returns only 24/28/36"),
+        let idx = intern_vendor(&mut vendors, &mut seen, vendor_name);
+        match kind {
+            PrefixKind::L => entries_24.push((packed, idx)),
+            PrefixKind::M => entries_28.push((packed, idx)),
+            PrefixKind::S => entries_36.push((packed, idx)),
         }
     }
 
@@ -174,46 +203,55 @@ fn parse_manuf<R: BufRead>(reader: R) -> Result<OuiTable, ParseError> {
     })
 }
 
-fn parse_prefix_column(raw: &str) -> Result<(u64, u32), String> {
-    let (mac_part, bits) = match raw.split_once('/') {
+fn intern_vendor(vendors: &mut Vec<String>, seen: &mut HashMap<String, u32>, name: &str) -> u32 {
+    if let Some(&idx) = seen.get(name) {
+        return idx;
+    }
+    let idx = vendors.len() as u32;
+    let owned = name.to_string();
+    vendors.push(owned.clone());
+    seen.insert(owned, idx);
+    idx
+}
+
+fn parse_prefix_column(raw: &str) -> Result<(u64, PrefixKind), String> {
+    let (mac_part, kind) = match raw.split_once('/') {
         Some((mac, mask)) => {
             let bits: u32 = mask
                 .parse()
                 .map_err(|_| format!("invalid prefix mask '{mask}'"))?;
-            if bits != 28 && bits != 36 {
-                return Err(format!(
-                    "unsupported prefix mask '/{bits}' (expected /28 or /36)"
-                ));
-            }
-            (mac, bits)
+            let kind = match bits {
+                28 => PrefixKind::M,
+                36 => PrefixKind::S,
+                _ => {
+                    return Err(format!(
+                        "unsupported prefix mask '/{bits}' (expected /28 or /36)"
+                    ))
+                }
+            };
+            (mac, kind)
         }
-        None => (raw, 24u32),
+        None => (raw, PrefixKind::L),
     };
 
     let bytes = parse_mac_bytes(mac_part)?;
-    let expected = match bits {
-        24 => 3,
-        28 => 4,
-        36 => 5,
-        _ => unreachable!(),
-    };
+    let expected = kind.byte_len();
     if bytes.len() != expected {
         return Err(format!(
-            "prefix '{mac_part}' has {} bytes but /{bits} needs {expected}",
-            bytes.len()
+            "prefix '{mac_part}' has {} bytes but /{} needs {expected}",
+            bytes.len(),
+            match kind {
+                PrefixKind::L => 24,
+                PrefixKind::M => 28,
+                PrefixKind::S => 36,
+            }
         ));
     }
 
     let mut buf = [0u8; 8];
     buf[..bytes.len()].copy_from_slice(&bytes);
-    let mut packed = u64::from_be_bytes(buf);
-    packed &= match bits {
-        24 => MASK_24,
-        28 => MASK_28,
-        36 => MASK_36,
-        _ => unreachable!(),
-    };
-    Ok((packed, bits))
+    let packed = u64::from_be_bytes(buf) & kind.mask();
+    Ok((packed, kind))
 }
 
 fn parse_mac_bytes(s: &str) -> Result<Vec<u8>, String> {
@@ -234,18 +272,26 @@ fn parse_mac_bytes(s: &str) -> Result<Vec<u8>, String> {
 }
 
 fn parse_mac_to_u64(mac: &str) -> Option<u64> {
-    let cleaned: String = mac.chars().filter(|c| *c != ':' && *c != '-').collect();
-    if cleaned.len() != 12 {
+    let mut acc: u64 = 0;
+    let mut nibble_count: u32 = 0;
+    for byte in mac.bytes() {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => 10 + (byte - b'a'),
+            b'A'..=b'F' => 10 + (byte - b'A'),
+            b':' | b'-' => continue,
+            _ => return None,
+        };
+        if nibble_count == 12 {
+            return None;
+        }
+        acc = (acc << 4) | (nibble as u64);
+        nibble_count += 1;
+    }
+    if nibble_count != 12 {
         return None;
     }
-    let bytes = cleaned.as_bytes();
-    let mut buf = [0u8; 8];
-    for i in 0..6 {
-        let hi = hex_nibble(bytes[i * 2])?;
-        let lo = hex_nibble(bytes[i * 2 + 1])?;
-        buf[i] = (hi << 4) | lo;
-    }
-    Some(u64::from_be_bytes(buf))
+    Some(acc << 16)
 }
 
 fn hex_nibble(c: u8) -> Option<u8> {
@@ -413,6 +459,13 @@ mod tests {
     }
 
     #[test]
+    fn lookup_returns_none_for_too_many_hex_digits() {
+        let table = parse_str("00:04:AC\tIBM\tIBM Corp\n");
+        assert_eq!(table.lookup("00:04:AC:11:22:33:44"), None);
+        assert_eq!(table.lookup("0004AC1122334455"), None);
+    }
+
+    #[test]
     fn bundled_data_loads_and_contains_known_ouis() {
         let table = OuiTable::from_bundled().expect("bundled loads");
         assert_eq!(
@@ -445,6 +498,34 @@ mod tests {
             "bundled manuf.gz has {} entries; expected > 40000 (IEEE has assigned >50k OUIs; a lower count suggests a truncated refresh — re-run scripts/refresh-oui.sh)",
             table.entry_count()
         );
+    }
+
+    #[test]
+    fn bundled_data_dedups_vendor_strings() {
+        let table = OuiTable::from_bundled().expect("bundled loads");
+        assert!(
+            table.vendor_count() < table.entry_count(),
+            "vendors ({}) should be fewer than entries ({}) — dedup should collapse repeated names",
+            table.vendor_count(),
+            table.entry_count()
+        );
+        let saved = table.entry_count() - table.vendor_count();
+        assert!(
+            saved > table.entry_count() / 5,
+            "dedup should save at least 20% of entries; saved {} of {} entries",
+            saved,
+            table.entry_count()
+        );
+    }
+
+    #[test]
+    fn small_input_dedups_repeated_vendor_across_prefixes() {
+        let input = "00:00:0C\tCisco\tCisco Systems, Inc\n\
+                     00:00:0D\tCisco\tCisco Systems, Inc\n\
+                     00:00:0E\tCisco\tCisco Systems, Inc\n";
+        let table = parse_str(input);
+        assert_eq!(table.entry_count(), 3);
+        assert_eq!(table.vendor_count(), 1);
     }
 
     fn outcome_with_mac(mac: &str) -> ProbeOutcome {
@@ -523,7 +604,7 @@ mod tests {
             Err(err) => {
                 let msg = format!("{err}");
                 assert!(msg.contains("/does/not/exist/manuf.txt"), "msg was: {msg}");
-                assert!(msg.contains("not found"), "msg was: {msg}");
+                assert!(msg.contains("could not be opened"), "msg was: {msg}");
             }
         }
     }
