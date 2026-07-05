@@ -91,6 +91,36 @@ jobs:
       - name: Test with kafka,http,snmp,arp,ndp,oui features
         run: cargo test --workspace --features kafka,http,snmp,arp,ndp,oui
 
+  schema-drift:
+    name: Schema drift check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate schemas
+        run: cargo run -p xtask -- generate
+
+      - name: Render docs
+        run: cargo run -p xtask -- render
+
+      - name: Verify no drift
+        run: |
+          if ! git diff --exit-code schemas/ docs/site/docs/reference/schema/; then
+            echo "::error::Committed schemas or rendered docs are out of sync with the Rust type derives."
+            echo "Run \`task schema:all\` locally and commit the result."
+            exit 1
+          fi
+
   test-no-default-features:
     name: Test rastreo-core without default features
     runs-on: ubuntu-latest
