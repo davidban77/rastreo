@@ -1,7 +1,6 @@
-use aes::cipher::{AsyncStreamCipher, KeyIvInit};
 use cbc::cipher::block_padding::NoPadding;
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut};
-use digest::{Digest, Mac};
+use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
+use digest::{Digest, KeyInit, Mac};
 use hmac::Hmac;
 use md5::Md5;
 use sha1::Sha1;
@@ -113,32 +112,32 @@ fn hash_localized(digest: &[u8], engine_id: &[u8], algo: AuthAlgo) -> Vec<u8> {
 pub fn hmac_truncated(algo: AuthAlgo, key: &[u8], message: &[u8]) -> Vec<u8> {
     let full = match algo {
         AuthAlgo::Md5 => {
-            let mut m = <Hmac<Md5> as Mac>::new_from_slice(key).expect("hmac key len");
+            let mut m = <Hmac<Md5> as KeyInit>::new_from_slice(key).expect("hmac key len");
             m.update(message);
             m.finalize().into_bytes().to_vec()
         }
         AuthAlgo::Sha1 => {
-            let mut m = <Hmac<Sha1> as Mac>::new_from_slice(key).expect("hmac key len");
+            let mut m = <Hmac<Sha1> as KeyInit>::new_from_slice(key).expect("hmac key len");
             m.update(message);
             m.finalize().into_bytes().to_vec()
         }
         AuthAlgo::Sha224 => {
-            let mut m = <Hmac<Sha224> as Mac>::new_from_slice(key).expect("hmac key len");
+            let mut m = <Hmac<Sha224> as KeyInit>::new_from_slice(key).expect("hmac key len");
             m.update(message);
             m.finalize().into_bytes().to_vec()
         }
         AuthAlgo::Sha256 => {
-            let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac key len");
+            let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("hmac key len");
             m.update(message);
             m.finalize().into_bytes().to_vec()
         }
         AuthAlgo::Sha384 => {
-            let mut m = <Hmac<Sha384> as Mac>::new_from_slice(key).expect("hmac key len");
+            let mut m = <Hmac<Sha384> as KeyInit>::new_from_slice(key).expect("hmac key len");
             m.update(message);
             m.finalize().into_bytes().to_vec()
         }
         AuthAlgo::Sha512 => {
-            let mut m = <Hmac<Sha512> as Mac>::new_from_slice(key).expect("hmac key len");
+            let mut m = <Hmac<Sha512> as KeyInit>::new_from_slice(key).expect("hmac key len");
             m.update(message);
             m.finalize().into_bytes().to_vec()
         }
@@ -283,7 +282,7 @@ fn des_cbc_encrypt(key: &[u8; 8], iv: &[u8; 8], plaintext: &[u8]) -> Vec<u8> {
         padded.resize(padded.len() + (8 - rem), 0);
     }
     let cipher = DesCbcEnc::new(key.into(), iv.into());
-    cipher.encrypt_padded_vec_mut::<NoPadding>(&padded)
+    cipher.encrypt_padded_vec::<NoPadding>(&padded)
 }
 
 fn des_cbc_decrypt(key: &[u8; 8], iv: &[u8; 8], ciphertext: &[u8]) -> Option<Vec<u8>> {
@@ -291,7 +290,7 @@ fn des_cbc_decrypt(key: &[u8; 8], iv: &[u8; 8], ciphertext: &[u8]) -> Option<Vec
         return None;
     }
     let cipher = DesCbcDec::new(key.into(), iv.into());
-    cipher.decrypt_padded_vec_mut::<NoPadding>(ciphertext).ok()
+    cipher.decrypt_padded_vec::<NoPadding>(ciphertext).ok()
 }
 
 type Aes128Cfb = cfb_mode::Encryptor<aes::Aes128>;
@@ -304,9 +303,15 @@ type Aes256CfbDec = cfb_mode::Decryptor<aes::Aes256>;
 fn aes_cfb_encrypt(algo: PrivAlgo, key: &[u8], iv: &[u8; 16], plaintext: &[u8]) -> Vec<u8> {
     let mut out = plaintext.to_vec();
     match algo {
-        PrivAlgo::Aes128 => Aes128Cfb::new(key.into(), iv.into()).encrypt(&mut out),
-        PrivAlgo::Aes192 => Aes192Cfb::new(key.into(), iv.into()).encrypt(&mut out),
-        PrivAlgo::Aes256 => Aes256Cfb::new(key.into(), iv.into()).encrypt(&mut out),
+        PrivAlgo::Aes128 => Aes128Cfb::new_from_slices(key, iv)
+            .expect("aes-128 key/iv len")
+            .encrypt(&mut out),
+        PrivAlgo::Aes192 => Aes192Cfb::new_from_slices(key, iv)
+            .expect("aes-192 key/iv len")
+            .encrypt(&mut out),
+        PrivAlgo::Aes256 => Aes256Cfb::new_from_slices(key, iv)
+            .expect("aes-256 key/iv len")
+            .encrypt(&mut out),
         PrivAlgo::Des => unreachable!("aes_cfb_encrypt called with Des"),
     }
     out
@@ -315,9 +320,15 @@ fn aes_cfb_encrypt(algo: PrivAlgo, key: &[u8], iv: &[u8; 16], plaintext: &[u8]) 
 fn aes_cfb_decrypt(algo: PrivAlgo, key: &[u8], iv: &[u8; 16], ciphertext: &[u8]) -> Vec<u8> {
     let mut out = ciphertext.to_vec();
     match algo {
-        PrivAlgo::Aes128 => Aes128CfbDec::new(key.into(), iv.into()).decrypt(&mut out),
-        PrivAlgo::Aes192 => Aes192CfbDec::new(key.into(), iv.into()).decrypt(&mut out),
-        PrivAlgo::Aes256 => Aes256CfbDec::new(key.into(), iv.into()).decrypt(&mut out),
+        PrivAlgo::Aes128 => Aes128CfbDec::new_from_slices(key, iv)
+            .expect("aes-128 key/iv len")
+            .decrypt(&mut out),
+        PrivAlgo::Aes192 => Aes192CfbDec::new_from_slices(key, iv)
+            .expect("aes-192 key/iv len")
+            .decrypt(&mut out),
+        PrivAlgo::Aes256 => Aes256CfbDec::new_from_slices(key, iv)
+            .expect("aes-256 key/iv len")
+            .decrypt(&mut out),
         PrivAlgo::Des => unreachable!("aes_cfb_decrypt called with Des"),
     }
     out
