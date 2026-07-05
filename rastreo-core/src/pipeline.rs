@@ -753,6 +753,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pipeline_correlates_multi_ip_device_via_shared_sysname_and_mac() {
+        use crate::fuser::CorrelationHints;
+        use crate::model::outcome::{ProbeKind, Signal};
+        use std::time::SystemTime;
+
+        // Stand up a CorrelationFuser directly and drive it with hand-built outcomes.
+        // The full run_discovery path is exercised elsewhere; here we assert the fuser
+        // composes correctly at the pipeline boundary.
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let mac = "aa:bb:cc:11:22:33";
+        let outcomes = vec![
+            ProbeOutcome {
+                kind: ProbeKind::Snmp,
+                target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable: true,
+                signals: vec![Signal::Mac(mac.into()), sysname.clone()],
+            },
+            ProbeOutcome {
+                kind: ProbeKind::Snmp,
+                target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable: true,
+                signals: vec![Signal::Mac(mac.into()), sysname.clone()],
+            },
+            ProbeOutcome {
+                kind: ProbeKind::Snmp,
+                target_ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable: true,
+                signals: vec![Signal::Mac(mac.into()), sysname.clone()],
+            },
+        ];
+        let fuser_cfg = FuserConfig::Correlation {
+            correlation_hints: CorrelationHints::default(),
+            inner: Box::new(FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            }),
+        };
+        let f = create_fuser(&fuser_cfg).expect("create");
+        let records = f.fuse_many(outcomes).expect("fuse_many");
+        assert_eq!(records.len(), 1, "three IPs share sysName+MAC, one record");
+        let r = &records[0];
+        assert_eq!(r.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert_eq!(
+            r.alt_ips,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            ]
+        );
+        assert!(r.possible_alias_of.is_none());
+    }
+
+    #[tokio::test]
     async fn run_discovery_stamps_scan_metadata_on_every_record() {
         let port_a = open_loopback_port().await;
         let port_b = open_loopback_port().await;

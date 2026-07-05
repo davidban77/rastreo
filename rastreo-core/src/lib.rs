@@ -11,7 +11,7 @@ pub mod sink;
 
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, ResolverError, RuntimeError};
-pub use fuser::{DirectFuser, Fuser, FuserConfig};
+pub use fuser::{CorrelationFuser, CorrelationHints, DirectFuser, Fuser, FuserConfig, VrrpGroup};
 pub use model::{
     Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget,
     ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
