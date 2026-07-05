@@ -12,6 +12,6 @@ Topics covered here include the full `rastreo` and `rastreo-server` CLI flag ref
 
 - [CLI reference](cli.md) — every flag for `rastreo` and `rastreo-server`.
 - [Scenario schema](scenario.md) — the `DiscoverScenarioConfig` JSON shape.
-- [Record schema](schema.md) — the emitted `DeviceRecord` JSON Schema, versioning policy.
+- [Record schema](schema/index.md) — the emitted `DeviceRecord` JSON Schema, versioning policy, and the streaming API description.
 - [Error reference](errors.md) — every `RastreoError` variant and its likely fix.
 - [Glossary](glossary.md) — domain terms used across the docs.

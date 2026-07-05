@@ -42,7 +42,17 @@ tasks:
   schema:generate:
     desc: Regenerate JSON Schema files from Rust type definitions
     cmds:
-      - cargo run -p xtask
+      - cargo run -p xtask -- generate
+
+  schema:render:
+    desc: Render JSON Schema files into MkDocs pages
+    cmds:
+      - cargo run -p xtask -- render
+
+  schema:all:
+    desc: Regenerate schemas and render docs in one shot
+    cmds:
+      - cargo run -p xtask -- all
 
   # ---------------------------------------------------------------------------
   # Utilities

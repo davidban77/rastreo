@@ -132,6 +132,10 @@ nav:
       - reference/index.md
       - CLI: reference/cli.md
       - Scenario: reference/scenario.md
-      - Schema: reference/schema.md
+      - Schema:
+          - reference/schema/index.md
+          - DeviceRecord: reference/schema/device-record.md
+          - ScanMetadata: reference/schema/scan-metadata.md
+          - Streaming API: reference/schema/streaming-api.md
       - Errors: reference/errors.md
       - Glossary: reference/glossary.md

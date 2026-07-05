@@ -1,0 +1,77 @@
+asyncapi: 3.0.0
+
+info:
+  title: rastreo discovery streaming API
+  version: v1
+  description: |
+    Transport-neutral description of the rastreo discovery streaming API.
+    Every scan emits one `DeviceRecord` message per discovered device onto a
+    versioned topic (Kafka) or subject (NATS). The wire payload is the same
+    JSON Schema at `schemas/device-record-v1.json` regardless of transport;
+    consumers can validate incoming records against the URL embedded in each
+    record's `schema_id` field.
+  license:
+    name: MIT OR Apache-2.0
+
+defaultContentType: application/json
+
+servers:
+  kafka:
+    host: kafka:9092
+    protocol: kafka
+    description: |
+      Kafka broker(s) advertised to rastreo via `--kafka-brokers` or the
+      `RASTREO_KAFKA_BROKERS` environment variable. The default lab stack
+      exposes `kafka:9092` on the docker-compose network.
+  nats:
+    host: nats:4222
+    protocol: nats
+    description: |
+      NATS server(s) advertised to rastreo via `--nats-url` or the
+      `RASTREO_NATS_URL` environment variable. The default lab stack
+      exposes `nats:4222` on the docker-compose network.
+
+channels:
+  discoveryRecords:
+    address: rastreo.discovery.records.v1
+    title: DeviceRecord stream
+    description: |
+      Discovered device records, one message per fused `DeviceRecord`.
+      The channel address is used verbatim as the Kafka topic name and
+      as the NATS subject. The `v1` suffix pins the wire schema; a
+      breaking change ships a new channel (`rastreo.discovery.records.v2`)
+      and both run in parallel for one release cycle.
+    servers:
+      - $ref: '#/servers/kafka'
+      - $ref: '#/servers/nats'
+    messages:
+      deviceRecord:
+        $ref: '#/components/messages/deviceRecord'
+
+operations:
+  emitDiscoveryRecord:
+    action: send
+    channel:
+      $ref: '#/channels/discoveryRecords'
+    summary: Emit a single fused DeviceRecord.
+    description: |
+      rastreo emits one message per unique device fused during a scan.
+      Consumers should key correlation off `scan_metadata.scan_id` (a
+      ULID) to reconstruct per-scan batches.
+    messages:
+      - $ref: '#/channels/discoveryRecords/messages/deviceRecord'
+
+components:
+  messages:
+    deviceRecord:
+      name: DeviceRecord
+      title: DeviceRecord
+      summary: A single fused, deduplicated device observation.
+      contentType: application/json
+      payload:
+        $ref: './device-record-v1.json'
+      correlationId:
+        location: $message.payload#/scan_metadata/scan_id
+        description: |
+          ULID stamped per scan. Consumers use it to group messages
+          belonging to the same scan into a single batch.
