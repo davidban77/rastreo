@@ -9,9 +9,11 @@ use crate::model::device::{
 use crate::model::outcome::{ProbeOutcome, Signal};
 use crate::model::scan::ScanMetadata;
 
+pub mod correlation;
 #[cfg(feature = "oui")]
 pub mod oui;
 
+pub use correlation::{CorrelationFuser, CorrelationHints, VrrpGroup};
 #[cfg(feature = "oui")]
 pub use oui::{OuiEnrichmentFuser, OuiTable};
 
@@ -168,6 +170,11 @@ pub enum FuserConfig {
         data_path: String,
         inner: Box<FuserConfig>,
     },
+    Correlation {
+        #[serde(default)]
+        correlation_hints: CorrelationHints,
+        inner: Box<FuserConfig>,
+    },
 }
 
 impl FuserConfig {
@@ -196,6 +203,7 @@ impl FuserConfig {
             }
             #[cfg(feature = "oui")]
             FuserConfig::OuiEnrichment { inner, .. } => inner.validate(),
+            FuserConfig::Correlation { inner, .. } => inner.validate(),
         }
     }
 }
@@ -230,6 +238,16 @@ pub fn create_fuser(config: &FuserConfig) -> Result<Box<dyn Fuser>, RastreoError
                 OuiTable::from_path(data_path)?
             };
             Ok(Box::new(OuiEnrichmentFuser::new(inner_fuser, table)))
+        }
+        FuserConfig::Correlation {
+            correlation_hints,
+            inner,
+        } => {
+            let inner_fuser = create_fuser(inner)?;
+            Ok(Box::new(CorrelationFuser::new(
+                inner_fuser,
+                correlation_hints.clone(),
+            )?))
         }
     }
 }
@@ -713,6 +731,89 @@ mod tests {
             Ok(_) => panic!("expected error"),
             Err(e) => assert!(format!("{e}").contains("confidence_baseline")),
         }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn fuser_config_deserializes_correlation_variant_with_defaults() {
+        let yaml = "type: correlation\ninner:\n  type: direct\n";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            FuserConfig::Correlation {
+                correlation_hints,
+                inner,
+            } => {
+                assert!(correlation_hints.vrrp_groups.is_empty());
+                assert!(matches!(*inner, FuserConfig::Direct { .. }));
+            }
+            other => panic!("expected Correlation, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn fuser_config_deserializes_correlation_with_vrrp_hints() {
+        let yaml = "\
+type: correlation
+correlation_hints:
+  vrrp_groups:
+    - virtual_ip: 10.0.0.1
+      virtual_mac: '00:00:5e:00:01:01'
+      members:
+        - 10.0.0.2
+        - 10.0.0.3
+inner:
+  type: direct
+";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            FuserConfig::Correlation {
+                correlation_hints, ..
+            } => {
+                assert_eq!(correlation_hints.vrrp_groups.len(), 1);
+                let g = &correlation_hints.vrrp_groups[0];
+                assert_eq!(g.virtual_mac, "00:00:5e:00:01:01");
+                assert_eq!(g.members.len(), 2);
+            }
+            other => panic!("expected Correlation, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "oui"))]
+    #[test]
+    fn fuser_config_correlation_wraps_oui_enrichment_wrapping_direct() {
+        let yaml = "\
+type: correlation
+inner:
+  type: oui_enrichment
+  data_path: ''
+  inner:
+    type: direct
+";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        let FuserConfig::Correlation { inner, .. } = cfg else {
+            panic!("expected Correlation");
+        };
+        let FuserConfig::OuiEnrichment { inner, .. } = *inner else {
+            panic!("expected inner OuiEnrichment");
+        };
+        assert!(matches!(*inner, FuserConfig::Direct { .. }));
+    }
+
+    #[test]
+    fn create_fuser_correlation_produces_correlation_fuser() {
+        let cfg = FuserConfig::Correlation {
+            correlation_hints: CorrelationHints::default(),
+            inner: Box::new(FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            }),
+        };
+        let f = create_fuser(&cfg).expect("create");
+        let outcomes = vec![outcome(1, true, vec![Signal::OpenPort(22)])];
+        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        assert_eq!(record.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
     }
 
     #[cfg(feature = "oui")]

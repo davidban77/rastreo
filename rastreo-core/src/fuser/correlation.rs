@@ -1,0 +1,1222 @@
+use std::collections::HashSet;
+use std::net::IpAddr;
+
+use schemars::JsonSchema;
+
+use crate::error::{ConfigError, RastreoError};
+use crate::fuser::Fuser;
+use crate::model::device::{Confidence, DeviceRecord};
+use crate::model::outcome::{ProbeOutcome, Signal};
+
+const HIGH_BAND_THRESHOLD: f64 = 0.8;
+const MEDIUM_BAND_THRESHOLD: f64 = 0.4;
+const MERGE_CONFIDENCE_BONUS: f64 = 0.1;
+
+const WEIGHT_SHARED_MAC: f64 = 0.5;
+const WEIGHT_SHARED_SYSNAME: f64 = 0.5;
+const PENALTY_CONFLICTING_MANUFACTURER: f64 = 0.3;
+const VRRP_MEMBER_WEIGHT_CAP: f64 = 0.4;
+
+const VRRP_V2_IPV4_PREFIX: [u8; 5] = [0x00, 0x00, 0x5E, 0x00, 0x01];
+const VRRP_V3_IPV6_PREFIX: [u8; 5] = [0x00, 0x00, 0x5E, 0x00, 0x02];
+const HSRP_PREFIX: [u8; 5] = [0x00, 0x00, 0x0C, 0x07, 0xAC];
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct CorrelationHints {
+    #[serde(default)]
+    pub vrrp_groups: Vec<VrrpGroup>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct VrrpGroup {
+    pub virtual_ip: IpAddr,
+    pub virtual_mac: String,
+    #[serde(default)]
+    pub members: Vec<IpAddr>,
+}
+
+impl CorrelationHints {
+    pub fn new(vrrp_groups: Vec<VrrpGroup>) -> Self {
+        Self { vrrp_groups }
+    }
+}
+
+impl VrrpGroup {
+    pub fn new(
+        virtual_ip: IpAddr,
+        virtual_mac: String,
+        members: Vec<IpAddr>,
+    ) -> Result<Self, RastreoError> {
+        if parse_mac_prefix(&virtual_mac).is_none() {
+            return Err(ConfigError::invalid(format!(
+                "vrrp_groups virtual_mac '{virtual_mac}' is not a valid MAC address"
+            ))
+            .into());
+        }
+        Ok(Self {
+            virtual_ip,
+            virtual_mac,
+            members,
+        })
+    }
+}
+
+/// Wraps another `Fuser`, delegates per-IP fusion, then merges records that share identity signals.
+pub struct CorrelationFuser {
+    inner: Box<dyn Fuser>,
+    hints: CorrelationHints,
+}
+
+impl CorrelationFuser {
+    pub fn new(inner: Box<dyn Fuser>, hints: CorrelationHints) -> Result<Self, RastreoError> {
+        for group in &hints.vrrp_groups {
+            if parse_mac_prefix(&group.virtual_mac).is_none() {
+                return Err(ConfigError::invalid(format!(
+                    "vrrp_groups virtual_mac '{}' is not a valid MAC address",
+                    group.virtual_mac
+                ))
+                .into());
+            }
+        }
+        Ok(Self { inner, hints })
+    }
+
+    fn correlate(&self, records: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
+        if records.len() <= 1 {
+            return records;
+        }
+        let n = records.len();
+        let weights = self.compute_pair_weights(&records);
+        let mut uf = UnionFind::new(n);
+        for (i, j, w) in weights.iter().copied() {
+            if w >= HIGH_BAND_THRESHOLD {
+                uf.union(i, j);
+            }
+        }
+        let medium_peers = collect_medium_peers(n, &weights, &uf);
+        let components = uf.components();
+        merge_components(records, &components, &medium_peers)
+    }
+
+    fn compute_pair_weights(&self, records: &[DeviceRecord]) -> Vec<(usize, usize, f64)> {
+        let mut out = Vec::new();
+        for i in 0..records.len() {
+            for j in (i + 1)..records.len() {
+                let w = self.pair_weight(&records[i], &records[j]);
+                if w > 0.0 {
+                    out.push((i, j, w));
+                }
+            }
+        }
+        out
+    }
+
+    fn pair_weight(&self, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
+        let mut w = 0.0;
+
+        let mac_a = a.mac.as_deref();
+        let mac_b = b.mac.as_deref();
+        if let (Some(ma), Some(mb)) = (mac_a, mac_b) {
+            if mac_equal(ma, mb) && !is_virtual_mac(ma) && !self.hint_says_virtual(ma) {
+                w += WEIGHT_SHARED_MAC;
+            }
+        }
+
+        let sys_a = find_sysname(&a.signals);
+        let sys_b = find_sysname(&b.signals);
+        if let (Some(sa), Some(sb)) = (sys_a, sys_b) {
+            if !sa.is_empty() && sa.eq_ignore_ascii_case(sb) {
+                w += WEIGHT_SHARED_SYSNAME;
+            }
+        }
+
+        if let (Some(mfa), Some(mfb)) = (a.manufacturer.as_deref(), b.manufacturer.as_deref()) {
+            if !mfa.eq_ignore_ascii_case(mfb) {
+                w -= PENALTY_CONFLICTING_MANUFACTURER;
+            }
+        }
+
+        if self.pair_is_declared_vrrp_members(a, b) && w > VRRP_MEMBER_WEIGHT_CAP {
+            w = VRRP_MEMBER_WEIGHT_CAP;
+        }
+
+        w
+    }
+
+    fn hint_says_virtual(&self, mac: &str) -> bool {
+        self.hints
+            .vrrp_groups
+            .iter()
+            .any(|g| mac_equal(&g.virtual_mac, mac))
+    }
+
+    fn pair_is_declared_vrrp_members(&self, a: &DeviceRecord, b: &DeviceRecord) -> bool {
+        let ip_a = match a.mgmt_ip {
+            Some(ip) => ip,
+            None => return false,
+        };
+        let ip_b = match b.mgmt_ip {
+            Some(ip) => ip,
+            None => return false,
+        };
+        self.hints
+            .vrrp_groups
+            .iter()
+            .any(|g| g.members.contains(&ip_a) && g.members.contains(&ip_b))
+    }
+}
+
+impl Fuser for CorrelationFuser {
+    /// Delegates to the inner fuser. Correlation across records happens in `fuse_many`.
+    fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
+        self.inner.fuse(outcomes)
+    }
+
+    fn fuse_many(&self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError> {
+        let per_ip = self.inner.fuse_many(outcomes)?;
+        Ok(self.correlate(per_ip))
+    }
+}
+
+fn find_sysname(signals: &[Signal]) -> Option<&str> {
+    signals.iter().find_map(|s| match s {
+        Signal::SnmpSysName(n) => Some(n.as_str()),
+        _ => None,
+    })
+}
+
+fn collect_medium_peers(
+    n: usize,
+    weights: &[(usize, usize, f64)],
+    uf: &UnionFind,
+) -> Vec<Vec<MediumPeer>> {
+    let mut out: Vec<Vec<MediumPeer>> = vec![Vec::new(); n];
+    for &(i, j, w) in weights {
+        if w >= HIGH_BAND_THRESHOLD {
+            continue;
+        }
+        if w < MEDIUM_BAND_THRESHOLD {
+            continue;
+        }
+        // Skip peers that end up in the same merged component anyway.
+        if uf.find(i) == uf.find(j) {
+            continue;
+        }
+        out[i].push(MediumPeer {
+            peer_index: j,
+            weight: w,
+        });
+        out[j].push(MediumPeer {
+            peer_index: i,
+            weight: w,
+        });
+    }
+    out
+}
+
+fn merge_components(
+    records: Vec<DeviceRecord>,
+    components: &[usize],
+    medium_peers: &[Vec<MediumPeer>],
+) -> Vec<DeviceRecord> {
+    let n = records.len();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut root_to_group: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+
+    for (i, &root) in components.iter().enumerate().take(n) {
+        let idx = *root_to_group.entry(root).or_insert_with(|| {
+            let g = groups.len();
+            groups.push(Vec::new());
+            g
+        });
+        groups[idx].push(i);
+    }
+
+    // Snapshot identity keys + confidences up-front: merges consume records, so peer
+    // lookups later in the loop would otherwise see holes.
+    let snapshot: Vec<(crate::model::device::IdentityKey, f64)> = records
+        .iter()
+        .map(|r| (r.identity_key.clone(), r.confidence.value()))
+        .collect();
+
+    let mut opt_records: Vec<Option<DeviceRecord>> = records.into_iter().map(Some).collect();
+
+    let mut out = Vec::with_capacity(groups.len());
+    for members in &groups {
+        if members.len() == 1 {
+            let idx = members[0];
+            let mut r = opt_records[idx].take().expect("record present");
+            if let Some(peer) = pick_best_medium_peer(&medium_peers[idx], &snapshot) {
+                r.possible_alias_of = Some(peer);
+            }
+            out.push(r);
+        } else {
+            let merged = merge_group(&mut opt_records, members);
+            out.push(merged);
+        }
+    }
+    out
+}
+
+fn pick_best_medium_peer(
+    peers: &[MediumPeer],
+    snapshot: &[(crate::model::device::IdentityKey, f64)],
+) -> Option<crate::model::device::IdentityKey> {
+    let mut best: Option<(usize, f64, f64)> = None;
+    for peer in peers {
+        let (_, peer_conf) = &snapshot[peer.peer_index];
+        let peer_conf = *peer_conf;
+        let candidate = (peer.peer_index, peer_conf, peer.weight);
+        best = Some(match best {
+            None => candidate,
+            Some(current) => {
+                let (_, cur_conf, cur_weight) = current;
+                let take = peer_conf > cur_conf
+                    || (peer_conf == cur_conf && peer.weight > cur_weight)
+                    || (peer_conf == cur_conf
+                        && peer.weight == cur_weight
+                        && candidate.0 < current.0);
+                if take {
+                    candidate
+                } else {
+                    current
+                }
+            }
+        });
+    }
+    best.map(|(idx, _, _)| snapshot[idx].0.clone())
+}
+
+fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -> DeviceRecord {
+    // Highest-confidence record wins on non-list fields; ties broken by first-appearance order.
+    let mut best_idx = member_indices[0];
+    let mut best_conf = records[best_idx]
+        .as_ref()
+        .expect("record present")
+        .confidence
+        .value();
+    for &i in &member_indices[1..] {
+        let c = records[i]
+            .as_ref()
+            .expect("record present")
+            .confidence
+            .value();
+        if c > best_conf {
+            best_conf = c;
+            best_idx = i;
+        }
+    }
+
+    let first_idx = member_indices[0];
+    let mgmt_ip = records[first_idx].as_ref().and_then(|r| r.mgmt_ip);
+
+    let mut alt_ips: Vec<IpAddr> = Vec::new();
+    let mut seen_ips: HashSet<IpAddr> = HashSet::new();
+    if let Some(ip) = mgmt_ip {
+        seen_ips.insert(ip);
+    }
+    for &i in member_indices {
+        if i == first_idx {
+            continue;
+        }
+        if let Some(r) = records[i].as_ref() {
+            if let Some(ip) = r.mgmt_ip {
+                if !seen_ips.contains(&ip) {
+                    seen_ips.insert(ip);
+                    alt_ips.push(ip);
+                }
+            }
+        }
+    }
+
+    let mac = records[best_idx]
+        .as_ref()
+        .and_then(|r| r.mac.clone())
+        .or_else(|| {
+            for &i in member_indices {
+                if let Some(r) = records[i].as_ref() {
+                    if r.mac.is_some() {
+                        return r.mac.clone();
+                    }
+                }
+            }
+            None
+        });
+
+    let (manufacturer, platform, role) = {
+        let best = records[best_idx].as_ref().expect("record present");
+        (
+            best.manufacturer
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.manufacturer.clone())),
+            best.platform
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.platform.clone())),
+            best.role
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.role.clone())),
+        )
+    };
+
+    let raw_conf = (best_conf + MERGE_CONFIDENCE_BONUS).clamp(0.0, 1.0);
+    let confidence = Confidence::new(raw_conf).expect("clamped confidence is valid");
+
+    let mut last_seen = records[best_idx]
+        .as_ref()
+        .expect("record present")
+        .last_seen;
+    for &i in member_indices {
+        if let Some(r) = records[i].as_ref() {
+            if r.last_seen > last_seen {
+                last_seen = r.last_seen;
+            }
+        }
+    }
+
+    let mut signals: Vec<Signal> = Vec::new();
+    for &i in member_indices {
+        if let Some(r) = records[i].as_ref() {
+            for s in &r.signals {
+                if !signals.iter().any(|existing| existing == s) {
+                    signals.push(s.clone());
+                }
+            }
+        }
+    }
+
+    let best = records[best_idx].take().expect("record present");
+
+    DeviceRecord {
+        identity_key: best.identity_key,
+        mgmt_ip,
+        mac,
+        manufacturer,
+        platform,
+        role,
+        confidence,
+        last_seen,
+        signals,
+        schema_version: best.schema_version,
+        schema_id: best.schema_id,
+        alt_ips,
+        possible_alias_of: None,
+        scan_metadata: best.scan_metadata,
+    }
+}
+
+fn first_non_none<F>(
+    records: &[Option<DeviceRecord>],
+    member_indices: &[usize],
+    f: F,
+) -> Option<String>
+where
+    F: Fn(&DeviceRecord) -> Option<String>,
+{
+    for &i in member_indices {
+        if let Some(r) = records[i].as_ref() {
+            if let Some(v) = f(r) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MediumPeer {
+    peer_index: usize,
+    weight: f64,
+}
+
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
+    }
+
+    fn find(&self, x: usize) -> usize {
+        let mut cur = x;
+        while self.parent[cur] != cur {
+            cur = self.parent[cur];
+        }
+        cur
+    }
+
+    fn find_mut(&mut self, x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut cur = x;
+        while self.parent[cur] != root {
+            let next = self.parent[cur];
+            self.parent[cur] = root;
+            cur = next;
+        }
+        root
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find_mut(a);
+        let rb = self.find_mut(b);
+        if ra == rb {
+            return;
+        }
+        if self.rank[ra] < self.rank[rb] {
+            self.parent[ra] = rb;
+        } else if self.rank[ra] > self.rank[rb] {
+            self.parent[rb] = ra;
+        } else {
+            self.parent[rb] = ra;
+            self.rank[ra] += 1;
+        }
+    }
+
+    fn components(&self) -> Vec<usize> {
+        (0..self.parent.len()).map(|i| self.find(i)).collect()
+    }
+}
+
+pub(crate) fn is_virtual_mac(mac: &str) -> bool {
+    let bytes = match parse_mac_prefix(mac) {
+        Some(b) => b,
+        None => return false,
+    };
+    bytes == VRRP_V2_IPV4_PREFIX || bytes == VRRP_V3_IPV6_PREFIX || bytes == HSRP_PREFIX
+}
+
+fn parse_mac_prefix(mac: &str) -> Option<[u8; 5]> {
+    let hex_count = mac.chars().filter(|ch| *ch != ':' && *ch != '-').count();
+    if hex_count != 12 {
+        return None;
+    }
+    let mut bytes = [0u8; 5];
+    let mut hi: Option<u8> = None;
+    let mut byte_idx = 0;
+    for c in mac.chars() {
+        if c == ':' || c == '-' {
+            continue;
+        }
+        let nibble = c.to_digit(16)? as u8;
+        match hi {
+            None => hi = Some(nibble),
+            Some(h) => {
+                if byte_idx == 5 {
+                    return Some(bytes);
+                }
+                bytes[byte_idx] = (h << 4) | nibble;
+                byte_idx += 1;
+                hi = None;
+            }
+        }
+    }
+    if byte_idx != 5 || hi.is_some() {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn mac_equal(a: &str, b: &str) -> bool {
+    let na: String = a
+        .chars()
+        .filter(|c| *c != ':' && *c != '-')
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    let nb: String = b
+        .chars()
+        .filter(|c| *c != ':' && *c != '-')
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    na == nb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::net::Ipv4Addr;
+    use std::time::{Duration, SystemTime};
+
+    use crate::fuser::DirectFuser;
+    use crate::model::device::{IdentityKey, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION};
+    use crate::model::scan::ScanMetadata;
+
+    fn base_record(
+        ip_last_octet: u8,
+        mac: Option<&str>,
+        signals: Vec<Signal>,
+        confidence: f64,
+    ) -> DeviceRecord {
+        let identity_value = match mac {
+            Some(m) => format!("mac:{m}"),
+            None => format!("ip:10.0.0.{ip_last_octet}"),
+        };
+        DeviceRecord {
+            identity_key: IdentityKey::new(identity_value).expect("valid key"),
+            mgmt_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, ip_last_octet))),
+            mac: mac.map(str::to_string),
+            manufacturer: None,
+            platform: None,
+            role: None,
+            confidence: Confidence::new(confidence).expect("confidence"),
+            last_seen: SystemTime::UNIX_EPOCH,
+            signals,
+            schema_version: CURRENT_SCHEMA_VERSION.to_string(),
+            schema_id: CURRENT_SCHEMA_ID.to_string(),
+            alt_ips: Vec::new(),
+            possible_alias_of: None,
+            scan_metadata: ScanMetadata::default(),
+        }
+    }
+
+    fn make_fuser(hints: CorrelationHints) -> CorrelationFuser {
+        CorrelationFuser::new(Box::new(DirectFuser::new()), hints).expect("new fuser")
+    }
+
+    fn correlate(records: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
+        let f = make_fuser(CorrelationHints::default());
+        f.correlate(records)
+    }
+
+    #[test]
+    fn is_virtual_mac_detects_prefix_case_insensitive() {
+        assert!(is_virtual_mac("00:00:5e:00:01:0A"));
+        assert!(is_virtual_mac("00:00:5E:00:01:0a"));
+        assert!(is_virtual_mac("00-00-5E-00-01-0A"));
+        assert!(is_virtual_mac("00005E00010A"));
+        assert!(!is_virtual_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(!is_virtual_mac("not-a-mac"));
+    }
+
+    #[test]
+    fn vrrp_ipv4_virtual_mac_detected_and_ignored() {
+        let records = vec![
+            base_record(
+                1,
+                Some("00:00:5e:00:01:0a"),
+                vec![Signal::Mac("00:00:5e:00:01:0a".into())],
+                0.2,
+            ),
+            base_record(
+                2,
+                Some("00:00:5e:00:01:0a"),
+                vec![Signal::Mac("00:00:5e:00:01:0a".into())],
+                0.2,
+            ),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2, "virtual MAC alone must not merge");
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn vrrp_ipv6_virtual_mac_detected_and_ignored() {
+        let records = vec![
+            base_record(1, Some("00:00:5e:00:02:0a"), vec![], 0.2),
+            base_record(2, Some("00:00:5e:00:02:0a"), vec![], 0.2),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn hsrp_virtual_mac_detected_and_ignored() {
+        let records = vec![
+            base_record(1, Some("00:00:0c:07:ac:01"), vec![], 0.2),
+            base_record(2, Some("00:00:0c:07:ac:01"), vec![], 0.2),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn single_record_pass_through() {
+        let records = vec![base_record(1, Some("aa:bb:cc:dd:ee:ff"), vec![], 0.3)];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].alt_ips.is_empty());
+        assert!(out[0].possible_alias_of.is_none());
+    }
+
+    #[test]
+    fn two_records_shared_mac_and_sysname_merge() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let records = vec![
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.4,
+            ),
+            base_record(
+                2,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1, "high band should merge");
+        let r = &out[0];
+        assert_eq!(r.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert_eq!(r.alt_ips, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))]);
+        assert!(r.possible_alias_of.is_none());
+    }
+
+    #[test]
+    fn two_records_shared_mac_only_stays_separate() {
+        let mac = "aa:bb:cc:11:22:33";
+        let records = vec![
+            base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3),
+            base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2, "shared MAC alone: medium band, not merged");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn two_records_shared_sysname_only_stays_separate() {
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let records = vec![
+            base_record(1, None, vec![sysname.clone()], 0.3),
+            base_record(2, None, vec![sysname.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn two_records_virtual_vrrp_mac_stays_separate() {
+        let mac = "00:00:5e:00:01:0a";
+        let records = vec![
+            base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3),
+            base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn two_records_virtual_vrrp_mac_plus_sysname_medium_band() {
+        let mac = "00:00:5e:00:01:0a";
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let records = vec![
+            base_record(1, Some(mac), vec![sysname.clone()], 0.3),
+            base_record(2, Some(mac), vec![sysname.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2, "sysName alone = 0.5, medium band");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn two_records_shared_mac_but_conflicting_manufacturer_stays_separate() {
+        let mac = "aa:bb:cc:11:22:33";
+        let mut a = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        a.manufacturer = Some("Cisco Systems, Inc".into());
+        let mut b = base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        b.manufacturer = Some("Juniper Networks".into());
+        let out = correlate(vec![a, b]);
+        assert_eq!(out.len(), 2);
+        assert!(
+            out.iter().all(|r| r.possible_alias_of.is_none()),
+            "0.5 - 0.3 = 0.2, below medium band"
+        );
+    }
+
+    #[test]
+    fn two_records_shared_mac_and_sysname_but_conflicting_manufacturer_medium_band() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let mut a = base_record(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        a.manufacturer = Some("Cisco Systems, Inc".into());
+        let mut b = base_record(
+            2,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        b.manufacturer = Some("Juniper Networks".into());
+        let out = correlate(vec![a, b]);
+        assert_eq!(out.len(), 2, "1.0 - 0.3 = 0.7, medium band, no merge");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn three_records_transitive_merge() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let a = base_record(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let b = base_record(
+            2,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let c = base_record(
+            3,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let out = correlate(vec![a, b, c]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].alt_ips.len(), 2);
+    }
+
+    #[test]
+    fn merged_record_takes_first_target_ip_as_mgmt_ip() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let out = correlate(vec![
+            base_record(
+                7,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))));
+    }
+
+    #[test]
+    fn merged_record_populates_alt_ips_in_source_order() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let out = correlate(vec![
+            base_record(
+                7,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+            base_record(
+                5,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+        ]);
+        assert_eq!(
+            out[0].alt_ips,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn merged_record_gets_confidence_bonus() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let out = correlate(vec![
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+            base_record(
+                2,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.5,
+            ),
+        ]);
+        assert!((out[0].confidence.value() - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merged_record_confidence_clamps_at_one() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let out = correlate(vec![
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.95,
+            ),
+            base_record(
+                2,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.95,
+            ),
+        ]);
+        assert_eq!(out[0].confidence.value(), 1.0);
+    }
+
+    #[test]
+    fn merged_record_merges_signals_deduplicated() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let a = base_record(
+            1,
+            Some(mac),
+            vec![
+                Signal::Mac(mac.into()),
+                sysname.clone(),
+                Signal::OpenPort(22),
+            ],
+            0.3,
+        );
+        let b = base_record(
+            2,
+            Some(mac),
+            vec![
+                Signal::Mac(mac.into()),
+                sysname.clone(),
+                Signal::OpenPort(80),
+            ],
+            0.3,
+        );
+        let out = correlate(vec![a, b]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].signals.len(), 4);
+    }
+
+    #[test]
+    fn merged_record_takes_max_last_seen() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let mut a = base_record(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let mut b = base_record(
+            2,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let t_late = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        a.last_seen = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        b.last_seen = t_late;
+        let out = correlate(vec![a, b]);
+        assert_eq!(out[0].last_seen, t_late);
+    }
+
+    #[test]
+    fn medium_band_pair_populates_possible_alias_of_bidirectionally() {
+        let mac = "aa:bb:cc:11:22:33";
+        let records = vec![
+            base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3),
+            base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3),
+        ];
+        let out = correlate(records);
+        let key0 = &out[0].possible_alias_of.as_ref().expect("bi-directional");
+        let key1 = &out[1].possible_alias_of.as_ref().expect("bi-directional");
+        assert_eq!(key0.as_str(), out[1].identity_key.as_str());
+        assert_eq!(key1.as_str(), out[0].identity_key.as_str());
+    }
+
+    #[test]
+    fn possible_alias_of_picks_highest_confidence_peer_on_ties() {
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let low = base_record(1, None, vec![sysname.clone()], 0.2);
+        let peer_high = base_record(
+            2,
+            Some("aa:bb:cc:11:22:33"),
+            vec![Signal::Mac("aa:bb:cc:11:22:33".into()), sysname.clone()],
+            0.7,
+        );
+        let peer_low = base_record(
+            3,
+            Some("dd:ee:ff:44:55:66"),
+            vec![Signal::Mac("dd:ee:ff:44:55:66".into()), sysname.clone()],
+            0.5,
+        );
+        let out = correlate(vec![low, peer_high, peer_low]);
+        assert_eq!(out.len(), 3);
+        let identities: Vec<&str> = out.iter().map(|r| r.identity_key.as_str()).collect();
+        assert_eq!(
+            identities,
+            vec![
+                "ip:10.0.0.1",
+                "mac:aa:bb:cc:11:22:33",
+                "mac:dd:ee:ff:44:55:66"
+            ],
+            "peers must have distinct identity keys so the tiebreak is observable",
+        );
+        let alias_low = out[0].possible_alias_of.as_ref().expect("some");
+        assert_eq!(alias_low.as_str(), "mac:aa:bb:cc:11:22:33");
+    }
+
+    #[test]
+    fn user_declared_vrrp_virtual_mac_ignored_via_hints() {
+        let mac = "de:ad:be:ef:00:01";
+        let sysname = Signal::SnmpSysName("core".into());
+        let hints = CorrelationHints {
+            vrrp_groups: vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                virtual_mac: mac.into(),
+                members: vec![],
+            }],
+        };
+        let f = CorrelationFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
+        let records = vec![
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+            base_record(
+                2,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+        ];
+        let out = f.correlate(records);
+        assert_eq!(out.len(), 2, "user-declared virtual MAC contributes 0");
+        assert!(
+            out[0].possible_alias_of.is_some(),
+            "sysName alone = 0.5, medium band"
+        );
+    }
+
+    #[test]
+    fn user_declared_vrrp_members_stay_separate_via_hints_even_with_matching_mac() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let hints = CorrelationHints {
+            vrrp_groups: vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                virtual_mac: "00:00:5e:00:01:0a".into(),
+                members: vec![
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                ],
+            }],
+        };
+        let f = CorrelationFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
+        let records = vec![
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+            base_record(
+                2,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), sysname.clone()],
+                0.3,
+            ),
+        ];
+        let out = f.correlate(records);
+        assert_eq!(out.len(), 2, "member cap keeps them below medium");
+    }
+
+    #[test]
+    fn constructor_rejects_invalid_virtual_mac_hint() {
+        let hints = CorrelationHints {
+            vrrp_groups: vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                virtual_mac: "not-a-mac".into(),
+                members: vec![],
+            }],
+        };
+        match CorrelationFuser::new(Box::new(DirectFuser::new()), hints) {
+            Ok(_) => panic!("must reject invalid MAC"),
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(msg.contains("virtual_mac"), "msg was: {msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_records_returns_empty_vec() {
+        let out = correlate(vec![]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn records_without_mac_or_sysname_stay_separate() {
+        let out = correlate(vec![
+            base_record(1, None, vec![Signal::OpenPort(22)], 0.2),
+            base_record(2, None, vec![Signal::OpenPort(80)], 0.2),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn correlation_fuser_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CorrelationFuser>();
+        assert_send_sync::<CorrelationHints>();
+        assert_send_sync::<VrrpGroup>();
+    }
+
+    #[test]
+    fn parse_mac_prefix_rejects_ten_hex_chars() {
+        assert!(parse_mac_prefix("00:00:5e:00:01").is_none());
+        assert!(parse_mac_prefix("0000:5e00:01").is_none());
+        assert!(parse_mac_prefix("0000-5e00-01").is_none());
+        assert!(parse_mac_prefix("00005e0001").is_none());
+    }
+
+    #[test]
+    fn parse_mac_prefix_rejects_eleven_hex_chars() {
+        assert!(parse_mac_prefix("00:00:5e:00:01:0").is_none());
+        assert!(parse_mac_prefix("0000-5e0001-0").is_none());
+        assert!(parse_mac_prefix("00005e00010").is_none());
+    }
+
+    #[test]
+    fn parse_mac_prefix_accepts_twelve_hex_chars() {
+        assert_eq!(
+            parse_mac_prefix("00:00:5e:00:01:0a"),
+            Some([0x00, 0x00, 0x5e, 0x00, 0x01])
+        );
+        assert_eq!(
+            parse_mac_prefix("00-00-5e-00-01-0a"),
+            Some([0x00, 0x00, 0x5e, 0x00, 0x01])
+        );
+        assert_eq!(
+            parse_mac_prefix("00005e00010a"),
+            Some([0x00, 0x00, 0x5e, 0x00, 0x01])
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_short_virtual_mac_hint() {
+        let hints = CorrelationHints {
+            vrrp_groups: vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                virtual_mac: "00:00:5e:00:01".to_string(),
+                members: Vec::new(),
+            }],
+        };
+        let result = CorrelationFuser::new(Box::new(DirectFuser::new()), hints);
+        match result {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("virtual_mac"), "msg was: {msg}");
+            }
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("expected ConfigError::InvalidValue, got Ok"),
+        }
+    }
+
+    #[test]
+    fn is_virtual_mac_rejects_short_input() {
+        assert!(!is_virtual_mac("00:00:5e:00:01"));
+        assert!(!is_virtual_mac("00:00:5e:00:01:0"));
+        assert!(!is_virtual_mac("00005e0001"));
+    }
+
+    #[test]
+    fn vrrp_group_new_rejects_invalid_mac() {
+        let err = VrrpGroup::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "not-a-mac".to_string(),
+            Vec::new(),
+        )
+        .expect_err("must reject");
+        match err {
+            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                assert!(msg.contains("virtual_mac"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vrrp_group_new_accepts_valid_mac() {
+        let group = VrrpGroup::new(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "00:00:5e:00:01:0a".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+        )
+        .expect("valid");
+        assert_eq!(group.virtual_mac, "00:00:5e:00:01:0a");
+    }
+
+    #[test]
+    fn correlation_hints_new_accepts_empty_vec() {
+        let hints = CorrelationHints::new(Vec::new());
+        assert!(hints.vrrp_groups.is_empty());
+    }
+
+    #[test]
+    fn merge_output_preserves_first_constituent_position() {
+        let mac_ac = "aa:bb:cc:11:22:33";
+        let sysname_ac = Signal::SnmpSysName("core-sw01".into());
+        let a = base_record(
+            1,
+            Some(mac_ac),
+            vec![Signal::Mac(mac_ac.into()), sysname_ac.clone()],
+            0.3,
+        );
+        let b = base_record(
+            2,
+            Some("dd:ee:ff:44:55:66"),
+            vec![
+                Signal::Mac("dd:ee:ff:44:55:66".into()),
+                Signal::SnmpSysName("other-host".into()),
+            ],
+            0.3,
+        );
+        let mut c = base_record(
+            9,
+            Some(mac_ac),
+            vec![Signal::Mac(mac_ac.into()), sysname_ac.clone()],
+            0.3,
+        );
+        c.mgmt_ip = Some("1.1.1.1".parse().unwrap());
+
+        let out = correlate(vec![a, b, c]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert_eq!(out[0].alt_ips, vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
+        assert_eq!(out[1].mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    }
+}
