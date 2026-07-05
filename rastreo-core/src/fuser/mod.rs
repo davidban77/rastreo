@@ -3,8 +3,11 @@ use std::net::IpAddr;
 use std::time::SystemTime;
 
 use crate::error::{ConfigError, RastreoError};
-use crate::model::device::{Confidence, DeviceRecord, IdentityKey};
+use crate::model::device::{
+    Confidence, DeviceRecord, IdentityKey, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
+};
 use crate::model::outcome::{ProbeOutcome, Signal};
+use crate::model::scan::ScanMetadata;
 
 #[cfg(feature = "oui")]
 pub mod oui;
@@ -15,6 +18,9 @@ pub use oui::{OuiEnrichmentFuser, OuiTable};
 pub trait Fuser: Send + Sync {
     fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError>;
 
+    /// The pipeline stamps `scan_metadata` on every returned record after fusion;
+    /// values set by the fuser are silently overwritten. Fuser implementers should
+    /// leave `scan_metadata` at its default; provenance is the pipeline's concern.
     fn fuse_many(&self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError> {
         // Preserve first-occurrence IP order so consumers see deterministic record order.
         let mut groups: HashMap<IpAddr, Vec<ProbeOutcome>> = HashMap::new();
@@ -135,6 +141,11 @@ impl Fuser for DirectFuser {
             confidence,
             last_seen,
             signals,
+            schema_version: CURRENT_SCHEMA_VERSION.to_string(),
+            schema_id: CURRENT_SCHEMA_ID.to_string(),
+            alt_ips: Vec::new(),
+            possible_alias_of: None,
+            scan_metadata: ScanMetadata::default(),
         }))
     }
 }

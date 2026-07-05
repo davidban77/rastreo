@@ -2,10 +2,20 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use schemars::JsonSchema;
+
 use crate::error::ConfigError;
 use crate::model::outcome::Signal;
+use crate::model::scan::ScanMetadata;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Version tag stamped on every emitted `DeviceRecord`. Increment when the wire shape changes in a backward-incompatible way.
+pub const CURRENT_SCHEMA_VERSION: &str = "v1";
+
+/// Canonical URL for the current `DeviceRecord` JSON Schema. Consumers may fetch the schema at this URL for validation.
+pub const CURRENT_SCHEMA_ID: &str = "https://schemas.rastreo.dev/device-record/v1.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[schemars(with = "String")]
 pub struct IdentityKey(Arc<str>);
 
 impl IdentityKey {
@@ -37,7 +47,10 @@ impl<'de> serde::Deserialize<'de> for IdentityKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize, JsonSchema,
+)]
+#[schemars(transparent)]
 pub struct Confidence(f64);
 
 impl Confidence {
@@ -57,7 +70,10 @@ impl Confidence {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`.
+/// Legacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize;
+/// consumers should tag legacy records with an explicit v0 marker before ingest.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DeviceRecord {
     pub identity_key: IdentityKey,
@@ -69,6 +85,19 @@ pub struct DeviceRecord {
     pub confidence: Confidence,
     pub last_seen: SystemTime,
     pub signals: Vec<Signal>,
+    /// Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build.
+    pub schema_version: String,
+    /// Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.
+    pub schema_id: String,
+    /// Additional IPs the fuser correlated to the same identity — empty until a correlator fuser populates it.
+    #[serde(default)]
+    pub alt_ips: Vec<IpAddr>,
+    /// When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.
+    #[serde(default)]
+    pub possible_alias_of: Option<IdentityKey>,
+    /// Provenance stamped by the pipeline at scan entry.
+    #[serde(default)]
+    pub scan_metadata: ScanMetadata,
 }
 
 #[cfg(test)]
@@ -169,6 +198,11 @@ mod tests {
             confidence: Confidence::new(0.8).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
             signals: vec![Signal::Mac("aa:bb:cc:dd:ee:ff".into())],
+            schema_version: CURRENT_SCHEMA_VERSION.to_string(),
+            schema_id: CURRENT_SCHEMA_ID.to_string(),
+            alt_ips: Vec::new(),
+            possible_alias_of: None,
+            scan_metadata: ScanMetadata::default(),
         };
         let s = serde_json::to_string(&record).expect("serialize");
         let back: DeviceRecord = serde_json::from_str(&s).expect("deserialize");
@@ -176,6 +210,66 @@ mod tests {
         assert_eq!(back.mgmt_ip, record.mgmt_ip);
         assert_eq!(back.confidence.value(), 0.8);
         assert_eq!(back.signals.len(), 1);
+    }
+
+    #[test]
+    fn device_record_carries_current_schema_version() {
+        let record = fresh_record();
+        assert_eq!(record.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(record.schema_version, "v1");
+    }
+
+    #[test]
+    fn device_record_schema_id_matches_published_url() {
+        let record = fresh_record();
+        assert_eq!(record.schema_id, CURRENT_SCHEMA_ID);
+        assert!(record.schema_id.starts_with("https://"));
+    }
+
+    #[test]
+    fn device_record_alt_ips_defaults_to_empty() {
+        let record = fresh_record();
+        assert!(record.alt_ips.is_empty());
+    }
+
+    #[test]
+    fn device_record_possible_alias_of_defaults_to_none() {
+        let record = fresh_record();
+        assert!(record.possible_alias_of.is_none());
+    }
+
+    #[test]
+    fn schemars_derives_produce_valid_json_schema() {
+        let schema = schemars::schema_for!(DeviceRecord);
+        let json = serde_json::to_value(&schema).expect("schema serializes");
+        assert!(json.get("$schema").is_some(), "top-level $schema missing");
+        assert_eq!(
+            json["properties"]["schema_version"]["type"], "string",
+            "schema_version property must be typed as string"
+        );
+        assert!(
+            json["properties"].get("scan_metadata").is_some(),
+            "scan_metadata property must be present"
+        );
+    }
+
+    fn fresh_record() -> DeviceRecord {
+        DeviceRecord {
+            identity_key: IdentityKey::new("id").expect("identity"),
+            mgmt_ip: None,
+            mac: None,
+            manufacturer: None,
+            platform: None,
+            role: None,
+            confidence: Confidence::new(0.0).expect("confidence"),
+            last_seen: SystemTime::UNIX_EPOCH,
+            signals: Vec::new(),
+            schema_version: CURRENT_SCHEMA_VERSION.to_string(),
+            schema_id: CURRENT_SCHEMA_ID.to_string(),
+            alt_ips: Vec::new(),
+            possible_alias_of: None,
+            scan_metadata: ScanMetadata::default(),
+        }
     }
 
     #[test]

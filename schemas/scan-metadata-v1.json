@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ScanMetadata",
+  "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",
+  "type": "object",
+  "required": [
+    "initiated_at",
+    "scan_id"
+  ],
+  "properties": {
+    "initiated_at": {
+      "$ref": "#/definitions/SystemTime"
+    },
+    "scan_id": {
+      "type": "string"
+    },
+    "scenario_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_config_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "SystemTime": {
+      "type": "object",
+      "required": [
+        "nanos_since_epoch",
+        "secs_since_epoch"
+      ],
+      "properties": {
+        "nanos_since_epoch": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "secs_since_epoch": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

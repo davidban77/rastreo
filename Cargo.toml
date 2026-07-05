@@ -1,5 +1,6 @@
 [workspace]
-members = ["rastreo-core", "rastreo", "rastreo-server"]
+members = ["rastreo-core", "rastreo", "rastreo-server", "xtask"]
+default-members = ["rastreo-core", "rastreo", "rastreo-server"]
 resolver = "2"
 
 [workspace.package]
@@ -36,6 +37,9 @@ webpki-roots = "1"
 insta = { version = "1.40", features = ["json", "yaml"] }
 rstest = "0.26"
 tempfile = "3"
+schemars = "0.8"
+ulid = "1"
+sha2 = "0.11"
 
 [workspace.lints.clippy]
 await_holding_lock = "deny"

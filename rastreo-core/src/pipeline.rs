@@ -7,7 +7,7 @@ use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, EncoderConfig};
 use crate::error::{ConfigError, RastreoError};
 use crate::fuser::{create_fuser, FuserConfig};
-use crate::model::{ProbeCtx, ProbeOutcome};
+use crate::model::{ProbeCtx, ProbeOutcome, ScanMetadata};
 use crate::prober::create_prober;
 use crate::resolver::{HickoryResolver, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler};
@@ -75,6 +75,7 @@ pub async fn run_discovery_with_components_cancellable(
     }
 
     let start = Instant::now();
+    let scan_metadata = ScanMetadata::new(scenario);
 
     let resolved = resolver.resolve_many(&scenario.targets).await?;
     let targets_resolved = resolved.len();
@@ -134,7 +135,10 @@ pub async fn run_discovery_with_components_cancellable(
         cancelled = true;
     }
 
-    let records = fuser.fuse_many(all_outcomes)?;
+    let mut records = fuser.fuse_many(all_outcomes)?;
+    for record in &mut records {
+        record.scan_metadata = scan_metadata.clone();
+    }
 
     let mut buf: Vec<u8> = Vec::new();
     let mut records_emitted: usize = 0;
@@ -746,5 +750,61 @@ mod tests {
             .expect("run_discovery_with_components");
         assert!(!summary.cancelled);
         assert_eq!(summary.records_emitted, 1);
+    }
+
+    #[tokio::test]
+    async fn run_discovery_stamps_scan_metadata_on_every_record() {
+        let port_a = open_loopback_port().await;
+        let port_b = open_loopback_port().await;
+
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                name: Some("integration-lab".into()),
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![
+                ProberConfig::TcpConnect {
+                    ports: vec![port_a],
+                },
+                ProberConfig::TcpConnect {
+                    ports: vec![port_b],
+                },
+            ],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("run_discovery_with_components");
+        assert!(summary.records_emitted >= 1);
+
+        let lines = handle.ndjson_lines();
+        assert!(!lines.is_empty());
+        let records: Vec<crate::model::DeviceRecord> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("parse record"))
+            .collect();
+        let first = &records[0];
+        assert_eq!(first.scan_metadata.scan_id.len(), 26);
+        assert_eq!(
+            first.scan_metadata.scenario_name.as_deref(),
+            Some("integration-lab")
+        );
+        for r in &records {
+            assert_eq!(
+                r.scan_metadata.scan_id, first.scan_metadata.scan_id,
+                "all records must share the same scan_id"
+            );
+            assert_eq!(
+                r.scan_metadata.initiated_at, first.scan_metadata.initiated_at,
+                "all records must share the same initiated_at"
+            );
+            assert_eq!(r.schema_version, crate::model::CURRENT_SCHEMA_VERSION);
+            assert_eq!(r.schema_id, crate::model::CURRENT_SCHEMA_ID);
+        }
     }
 }

@@ -54,21 +54,28 @@ COPY Cargo.toml Cargo.lock ./
 COPY rastreo-core/Cargo.toml rastreo-core/Cargo.toml
 COPY rastreo/Cargo.toml rastreo/Cargo.toml
 COPY rastreo-server/Cargo.toml rastreo-server/Cargo.toml
+COPY xtask/Cargo.toml xtask/Cargo.toml
 
-# Create dummy source files so cargo can fetch and cache dependencies
-RUN mkdir -p rastreo-core/src rastreo/src rastreo-server/src && \
+# Create dummy source files so cargo can fetch and cache dependencies.
+# xtask is a workspace member but excluded from default-members, so it isn't
+# compiled here — the dummy main.rs just satisfies the manifest resolution.
+RUN mkdir -p rastreo-core/src rastreo/src rastreo-server/src xtask/src && \
     echo "pub fn dummy() {}" > rastreo-core/src/lib.rs && \
     echo "fn main() {}" > rastreo/src/main.rs && \
-    echo "fn main() {}" > rastreo-server/src/main.rs
+    echo "fn main() {}" > rastreo-server/src/main.rs && \
+    echo "fn main() {}" > xtask/src/main.rs
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
     cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp,oui -p rastreo -p rastreo-server 2>/dev/null || true
 
-# Copy real source and build
+# Copy real source and build. xtask is a workspace member but excluded from
+# default-members and not passed to `-p`, so it isn't compiled — the manifest
+# is still required for workspace resolution.
 COPY rastreo-core/ rastreo-core/
 COPY rastreo/ rastreo/
 COPY rastreo-server/ rastreo-server/
+COPY xtask/ xtask/
 
 # Touch source files to invalidate the dummy build cache
 RUN touch rastreo-core/src/lib.rs rastreo/src/main.rs rastreo-server/src/main.rs

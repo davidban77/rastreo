@@ -6,7 +6,7 @@ pub struct Community(pub String);
 #[cfg(feature = "snmp")]
 impl std::fmt::Debug for Community {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("<redacted>")
+        write!(f, "<redacted:{}>", short_hash(&self.0))
     }
 }
 
@@ -33,7 +33,7 @@ pub struct Password(pub String);
 #[cfg(feature = "snmp")]
 impl std::fmt::Debug for Password {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("<redacted>")
+        write!(f, "<redacted:{}>", short_hash(&self.0))
     }
 }
 
@@ -45,6 +45,23 @@ impl std::ops::Deref for Password {
     }
 }
 
+// Distinct-per-value redacted marker: credential rotation must change `source_config_hash`.
+#[cfg(feature = "snmp")]
+fn short_hash(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let digest = hasher.finalize();
+    let bytes = &digest[..4];
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(all(test, feature = "snmp"))]
 mod tests {
     use super::*;
@@ -52,7 +69,27 @@ mod tests {
     #[test]
     fn community_debug_is_redacted() {
         let c = Community("supersecret".to_string());
-        assert_eq!(format!("{c:?}"), "<redacted>");
+        let s = format!("{c:?}");
+        assert!(s.starts_with("<redacted:"), "got: {s}");
+        assert!(s.ends_with('>'), "got: {s}");
+        assert!(!s.contains("supersecret"), "plaintext leaked: {s}");
+    }
+
+    #[test]
+    fn community_debug_is_distinct_per_value() {
+        let a = format!("{:?}", Community("public".to_string()));
+        let b = format!("{:?}", Community("prod-r0".to_string()));
+        assert_ne!(
+            a, b,
+            "different secrets must produce different Debug output"
+        );
+    }
+
+    #[test]
+    fn community_debug_is_stable_for_same_value() {
+        let a = format!("{:?}", Community("public".to_string()));
+        let b = format!("{:?}", Community("public".to_string()));
+        assert_eq!(a, b);
     }
 
     #[test]
@@ -77,7 +114,17 @@ mod tests {
     #[test]
     fn password_debug_is_redacted() {
         let p = Password("maplesyrup".to_string());
-        assert_eq!(format!("{p:?}"), "<redacted>");
+        let s = format!("{p:?}");
+        assert!(s.starts_with("<redacted:"), "got: {s}");
+        assert!(s.ends_with('>'), "got: {s}");
+        assert!(!s.contains("maplesyrup"), "plaintext leaked: {s}");
+    }
+
+    #[test]
+    fn password_debug_is_distinct_per_value() {
+        let a = format!("{:?}", Password("authpass".to_string()));
+        let b = format!("{:?}", Password("privpass".to_string()));
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -96,5 +143,11 @@ mod tests {
     fn password_default_is_empty() {
         let p = Password::default();
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn short_hash_of_empty_string_is_stable() {
+        // sha256("") = e3b0c442... — first 8 hex chars are "e3b0c442"
+        assert_eq!(short_hash(""), "e3b0c442");
     }
 }
