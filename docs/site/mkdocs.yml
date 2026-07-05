@@ -121,6 +121,7 @@ nav:
   - Integrate:
       - integrate/index.md
       - Kafka: integrate/kafka.md
+      - NATS: integrate/nats.md
       - Source of truth: integrate/source-of-truth.md
       - Troubleshooting: integrate/troubleshooting.md
   - Deploy:

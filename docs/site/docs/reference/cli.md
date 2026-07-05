@@ -66,6 +66,7 @@ Several CLI surfaces appear conditionally based on which Cargo features were ena
 |---|---|---|
 | `config` | yes | Enables YAML scenario-file parsing. Required for `rastreo discover --file <path>`. Without it, `--target` / `--port` remain the only discovery entry point. |
 | `kafka` | no | Adds `kafka` as a valid value for `--sink`, plus the `--kafka-flush-per-record` and `--kafka-batch-threshold` flags. The default build does not include it; build with `cargo build --features kafka` to enable. |
+| `nats` | no | Enables the NATS JetStream sink. Configured only through YAML scenarios loaded via `--file` or the `POST /scans` body (`type: nats`); no dedicated CLI flags. Also available via `POST /scans`. |
 | `http` | no | Enables the HTTP prober. Accepted as `type: http` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 | `snmp` | no | Enables the SNMP prober (v1 / v2c / v3 with USM). Accepted as `type: snmp` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 | `arp` | no | Enables the ARP prober for IPv4 link-layer neighbor discovery. Requires `CAP_NET_RAW` at runtime. Accepted as `type: arp` in YAML scenarios loaded via `--file`. |

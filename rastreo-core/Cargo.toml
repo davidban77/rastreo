@@ -31,6 +31,7 @@ snmp = [
 ]
 arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
 ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
+nats = ["dep:async-nats", "dep:bytes", "dep:futures"]
 oui = ["dep:flate2"]
 
 [dependencies]
@@ -67,6 +68,9 @@ pnet_datalink = { version = "0.35", default-features = false, features = ["std"]
 pnet_packet = { version = "0.35", optional = true }
 ipnetwork = { version = "0.20", optional = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
+async-nats = { version = "0.49", default-features = false, features = ["ring", "jetstream", "nkeys"], optional = true }
+bytes = { version = "1", optional = true }
+futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }

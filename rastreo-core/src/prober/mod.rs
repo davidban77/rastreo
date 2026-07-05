@@ -19,7 +19,9 @@ pub use http::{HttpProber, HttpScheme};
 #[cfg(feature = "ndp")]
 pub use ndp::NdpProber;
 #[cfg(feature = "snmp")]
-pub use redacted::{Community, Password};
+pub use redacted::Community;
+#[cfg(any(feature = "snmp", feature = "nats"))]
+pub use redacted::Password;
 #[cfg(feature = "snmp")]
 pub use snmp::{SnmpProber, SnmpVersion, UsmAuth, UsmCredentials, UsmPrivacy};
 pub use tcp_connect::TcpConnectProber;

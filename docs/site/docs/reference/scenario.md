@@ -194,7 +194,7 @@ The `encoder` field is an internally-tagged object. One encoder is available tod
 
 ## Sinks
 
-The `sink` field is an internally-tagged object. Four variants exist; the `kafka` variant is only available when `rastreo-core` is built with the `kafka` Cargo feature. The `memory` variant is reachable from the library API and is what the HTTP server uses internally to capture records for the response body. Clients can submit a `memory` sink on `POST /scans`, but the server strips and replaces any client-supplied sink either way.
+The `sink` field is an internally-tagged object. Five variants exist; the `kafka` variant is only available when `rastreo-core` is built with the `kafka` Cargo feature and the `nats` variant is only available with the `nats` Cargo feature. The `memory` variant is reachable from the library API and is what the HTTP server uses internally to capture records for the response body. Clients can submit a `memory` sink on `POST /scans`, but the server strips and replaces any client-supplied sink either way.
 
 Write each NDJSON line to standard output:
 
@@ -239,6 +239,55 @@ The `flush_mode` field is itself an internally-tagged object with two variants. 
 
 ```json
 {"type": "batched", "threshold_bytes": 65536}
+```
+
+Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requires the `nats` build feature on `rastreo-core` and on the consuming binary. The JetStream stream that binds the subject must be created out of band (`nats stream add` or Terraform); construction fails fast if the stream is missing so records never silently drop.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `servers` | array of string | yes | NATS server URLs, e.g. `["nats://nats-01:4222"]`. |
+| `subject` | string | yes | Subject to publish to. |
+| `stream` | string | yes | JetStream stream name bound to the subject. |
+| `credentials` | object | no | Auth details. Defaults to anonymous. See below. |
+| `delivery` | object | no | Delivery / flush mode. Defaults to `per_record`. See below. |
+
+```json
+{
+  "type": "nats",
+  "servers": ["nats://nats:4222"],
+  "subject": "rastreo.discovery.records.v1",
+  "stream": "rastreo",
+  "credentials": {"auth_type": "user_pass", "username": "admin", "password": "sekret"},
+  "delivery": {"mode": "per_record"}
+}
+```
+
+The `credentials` field is an internally-tagged object with four variants distinguished by `auth_type`. `anonymous` connects with no auth (lab / dev only). `user_pass` sends a username and password. `token` sends a bearer token. `creds` reads a NATS `.creds` file (JWT + nkey seed) from disk. Password and token values are redacted in Debug output and in `source_config_hash` — rotation still changes the hash, plaintext never leaks.
+
+```json
+{"auth_type": "anonymous"}
+```
+
+```json
+{"auth_type": "user_pass", "username": "admin", "password": "sekret"}
+```
+
+```json
+{"auth_type": "token", "token": "bearer-xyz"}
+```
+
+```json
+{"auth_type": "creds", "creds_file": "/etc/rastreo/nats.creds"}
+```
+
+The `delivery` field is an internally-tagged object with two variants. `per_record` publishes each record and waits for the JetStream ack — the simplest at-least-once model. `batched` accumulates NDJSON bytes until the buffer reaches `threshold_bytes` (default 65536) before publishing one JetStream message; pending acks are drained on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch.
+
+```json
+{"mode": "per_record"}
+```
+
+```json
+{"mode": "batched", "threshold_bytes": 65536}
 ```
 
 ## Fusers

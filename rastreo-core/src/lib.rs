@@ -26,6 +26,8 @@ pub use scheduler::{BoundedScheduler, Scheduler};
 pub use sink::{FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, StdoutSink};
 #[cfg(feature = "kafka")]
 pub use sink::{KafkaFlushMode, KafkaSink};
+#[cfg(feature = "nats")]
+pub use sink::{NatsCredentials, NatsDelivery, NatsSink};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
