@@ -1,0 +1,47 @@
+name: Refresh OUI snapshot
+
+on:
+  schedule:
+    - cron: '0 3 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refresh bundled manuf snapshot
+        run: scripts/refresh-oui.sh 2>&1 | tee /tmp/refresh.log
+
+      - name: Prepare PR body
+        id: prep
+        run: |
+          {
+            echo 'body<<PRBODY'
+            echo 'Automated monthly refresh of the bundled Wireshark OUI snapshot at `rastreo-core/data/manuf.gz`.'
+            echo ''
+            echo '## Provenance'
+            echo ''
+            echo '```'
+            grep -E '^  (source|last-modified|line count|gz size|sha-256):' /tmp/refresh.log || cat /tmp/refresh.log
+            echo '```'
+            echo ''
+            echo 'The `bundled_manuf_gz_is_not_stale` test (asserts entry count > 40 000) fails CI on a truncated refresh. Merge once every gate is green.'
+            echo 'PRBODY'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: 'chore(data): refresh bundled OUI snapshot'
+          title: 'chore(data): refresh bundled OUI snapshot'
+          body: ${{ steps.prep.outputs.body }}
+          branch: oui/refresh-${{ github.run_id }}
+          delete-branch: true
+          labels: dependencies
+          add-paths: rastreo-core/data/manuf.gz

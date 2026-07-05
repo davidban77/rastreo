@@ -43,7 +43,7 @@ MAC input is tolerant on format: colons, hyphens, or no separators; upper- or lo
 
 The bundled snapshot is the Wireshark `manuf` file, canonically at <https://www.wireshark.org/download/automated/data/manuf>. Wireshark regenerates it once a week from IEEE registration data. The file's own license is CC0-1.0.
 
-The snapshot currently checked in is dated `2026-07-03` and contains 57 510 entries covering MA-L / MA-M / MA-S allocations. Refresh cadence is roughly monthly — old entries are stable, but new registrations trickle in for a fast-moving industry. Run `scripts/refresh-oui.sh` to download the latest, gzip it, and drop it into `rastreo-core/data/manuf.gz`; commit the result as a normal PR.
+The snapshot currently checked in is dated `2026-07-03` and contains 57 510 entries covering MA-L / MA-M / MA-S allocations. Refresh cadence is roughly monthly — old entries are stable, but new registrations trickle in for a fast-moving industry. A GitHub Actions cron (`.github/workflows/refresh-oui.yml`) runs on the first of every month, downloads the latest snapshot, gzips it into `rastreo-core/data/manuf.gz`, and opens a PR labelled `dependencies` with the source URL, upstream `Last-Modified`, entry count, and SHA-256 in the body. The staleness guard test `bundled_manuf_gz_is_not_stale` (asserts entry count > 40 000) fails CI on a truncated refresh. To trigger an out-of-band refresh, run `scripts/refresh-oui.sh` locally and commit the result as a normal PR, or run the workflow via `Actions → Refresh OUI snapshot → Run workflow`.
 
 ### Overriding the bundled snapshot
 
