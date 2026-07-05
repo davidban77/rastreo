@@ -16,6 +16,18 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "hickory-resolver"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "clap"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "rustls"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "rskafka"
+        update-types: ["version-update:semver-major"]
+      # ipnetwork is coupled to `pnet_datalink`'s pinned major — bumping standalone
+      # produces two versions of `ipnetwork::IpNetwork` in the ARP/NDP interface-select
+      # code path and fails to compile. Un-ignore when `pnet_datalink` upstream bumps
+      # its own `ipnetwork` dep.
+      - dependency-name: "ipnetwork"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
