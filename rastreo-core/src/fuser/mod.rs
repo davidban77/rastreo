@@ -9,11 +9,11 @@ use crate::model::device::{
 use crate::model::outcome::{ProbeOutcome, Signal};
 use crate::model::scan::ScanMetadata;
 
-pub mod correlation;
+pub mod identity;
 #[cfg(feature = "oui")]
 pub mod oui;
 
-pub use correlation::{CorrelationFuser, CorrelationHints, VrrpGroup};
+pub use identity::{IdentityFuser, IdentityHints, VrrpGroup};
 #[cfg(feature = "oui")]
 pub use oui::{OuiEnrichmentFuser, OuiTable};
 
@@ -170,9 +170,9 @@ pub enum FuserConfig {
         data_path: String,
         inner: Box<FuserConfig>,
     },
-    Correlation {
+    Identity {
         #[serde(default)]
-        correlation_hints: CorrelationHints,
+        identity_hints: IdentityHints,
         inner: Box<FuserConfig>,
     },
 }
@@ -203,7 +203,7 @@ impl FuserConfig {
             }
             #[cfg(feature = "oui")]
             FuserConfig::OuiEnrichment { inner, .. } => inner.validate(),
-            FuserConfig::Correlation { inner, .. } => inner.validate(),
+            FuserConfig::Identity { inner, .. } => inner.validate(),
         }
     }
 }
@@ -239,14 +239,14 @@ pub fn create_fuser(config: &FuserConfig) -> Result<Box<dyn Fuser>, RastreoError
             };
             Ok(Box::new(OuiEnrichmentFuser::new(inner_fuser, table)))
         }
-        FuserConfig::Correlation {
-            correlation_hints,
+        FuserConfig::Identity {
+            identity_hints,
             inner,
         } => {
             let inner_fuser = create_fuser(inner)?;
-            Ok(Box::new(CorrelationFuser::new(
+            Ok(Box::new(IdentityFuser::new(
                 inner_fuser,
-                correlation_hints.clone(),
+                identity_hints.clone(),
             )?))
         }
     }
@@ -735,27 +735,27 @@ mod tests {
 
     #[cfg(feature = "config")]
     #[test]
-    fn fuser_config_deserializes_correlation_variant_with_defaults() {
-        let yaml = "type: correlation\ninner:\n  type: direct\n";
+    fn fuser_config_deserializes_identity_variant_with_defaults() {
+        let yaml = "type: identity\ninner:\n  type: direct\n";
         let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         match cfg {
-            FuserConfig::Correlation {
-                correlation_hints,
+            FuserConfig::Identity {
+                identity_hints,
                 inner,
             } => {
-                assert!(correlation_hints.vrrp_groups.is_empty());
+                assert!(identity_hints.vrrp_groups.is_empty());
                 assert!(matches!(*inner, FuserConfig::Direct { .. }));
             }
-            other => panic!("expected Correlation, got {other:?}"),
+            other => panic!("expected Identity, got {other:?}"),
         }
     }
 
     #[cfg(feature = "config")]
     #[test]
-    fn fuser_config_deserializes_correlation_with_vrrp_hints() {
+    fn fuser_config_deserializes_identity_with_vrrp_hints() {
         let yaml = "\
-type: correlation
-correlation_hints:
+type: identity
+identity_hints:
   vrrp_groups:
     - virtual_ip: 10.0.0.1
       virtual_mac: '00:00:5e:00:01:01'
@@ -767,23 +767,34 @@ inner:
 ";
         let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         match cfg {
-            FuserConfig::Correlation {
-                correlation_hints, ..
-            } => {
-                assert_eq!(correlation_hints.vrrp_groups.len(), 1);
-                let g = &correlation_hints.vrrp_groups[0];
+            FuserConfig::Identity { identity_hints, .. } => {
+                assert_eq!(identity_hints.vrrp_groups.len(), 1);
+                let g = &identity_hints.vrrp_groups[0];
                 assert_eq!(g.virtual_mac, "00:00:5e:00:01:01");
                 assert_eq!(g.members.len(), 2);
             }
-            other => panic!("expected Correlation, got {other:?}"),
+            other => panic!("expected Identity, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn fuser_config_rejects_legacy_correlation_discriminant() {
+        let yaml = "type: correlation\ninner:\n  type: direct\n";
+        let err = serde_yaml_ng::from_str::<FuserConfig>(yaml)
+            .expect_err("legacy discriminant must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown variant") && msg.contains("correlation"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[cfg(all(feature = "config", feature = "oui"))]
     #[test]
-    fn fuser_config_correlation_wraps_oui_enrichment_wrapping_direct() {
+    fn fuser_config_identity_wraps_oui_enrichment_wrapping_direct() {
         let yaml = "\
-type: correlation
+type: identity
 inner:
   type: oui_enrichment
   data_path: ''
@@ -791,8 +802,8 @@ inner:
     type: direct
 ";
         let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        let FuserConfig::Correlation { inner, .. } = cfg else {
-            panic!("expected Correlation");
+        let FuserConfig::Identity { inner, .. } = cfg else {
+            panic!("expected Identity");
         };
         let FuserConfig::OuiEnrichment { inner, .. } = *inner else {
             panic!("expected inner OuiEnrichment");
@@ -801,9 +812,9 @@ inner:
     }
 
     #[test]
-    fn create_fuser_correlation_produces_correlation_fuser() {
-        let cfg = FuserConfig::Correlation {
-            correlation_hints: CorrelationHints::default(),
+    fn create_fuser_identity_produces_identity_fuser() {
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
             inner: Box::new(FuserConfig::Direct {
                 include_unreachable: None,
                 confidence_baseline: None,

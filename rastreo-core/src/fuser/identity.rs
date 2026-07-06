@@ -23,7 +23,7 @@ const HSRP_PREFIX: [u8; 5] = [0x00, 0x00, 0x0C, 0x07, 0xAC];
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
-pub struct CorrelationHints {
+pub struct IdentityHints {
     #[serde(default)]
     pub vrrp_groups: Vec<VrrpGroup>,
 }
@@ -37,7 +37,7 @@ pub struct VrrpGroup {
     pub members: Vec<IpAddr>,
 }
 
-impl CorrelationHints {
+impl IdentityHints {
     pub fn new(vrrp_groups: Vec<VrrpGroup>) -> Self {
         Self { vrrp_groups }
     }
@@ -64,13 +64,13 @@ impl VrrpGroup {
 }
 
 /// Wraps another `Fuser`, delegates per-IP fusion, then merges records that share identity signals.
-pub struct CorrelationFuser {
+pub struct IdentityFuser {
     inner: Box<dyn Fuser>,
-    hints: CorrelationHints,
+    hints: IdentityHints,
 }
 
-impl CorrelationFuser {
-    pub fn new(inner: Box<dyn Fuser>, hints: CorrelationHints) -> Result<Self, RastreoError> {
+impl IdentityFuser {
+    pub fn new(inner: Box<dyn Fuser>, hints: IdentityHints) -> Result<Self, RastreoError> {
         for group in &hints.vrrp_groups {
             if parse_mac_prefix(&group.virtual_mac).is_none() {
                 return Err(ConfigError::invalid(format!(
@@ -168,8 +168,8 @@ impl CorrelationFuser {
     }
 }
 
-impl Fuser for CorrelationFuser {
-    /// Delegates to the inner fuser. Correlation across records happens in `fuse_many`.
+impl Fuser for IdentityFuser {
+    /// Delegates to the inner fuser. Cross-record identity fusion happens in `fuse_many`.
     fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
         self.inner.fuse(outcomes)
     }
@@ -579,12 +579,12 @@ mod tests {
         }
     }
 
-    fn make_fuser(hints: CorrelationHints) -> CorrelationFuser {
-        CorrelationFuser::new(Box::new(DirectFuser::new()), hints).expect("new fuser")
+    fn make_fuser(hints: IdentityHints) -> IdentityFuser {
+        IdentityFuser::new(Box::new(DirectFuser::new()), hints).expect("new fuser")
     }
 
     fn correlate(records: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
-        let f = make_fuser(CorrelationHints::default());
+        let f = make_fuser(IdentityHints::default());
         f.correlate(records)
     }
 
@@ -991,14 +991,14 @@ mod tests {
     fn user_declared_vrrp_virtual_mac_ignored_via_hints() {
         let mac = "de:ad:be:ef:00:01";
         let sysname = Signal::SnmpSysName("core".into());
-        let hints = CorrelationHints {
+        let hints = IdentityHints {
             vrrp_groups: vec![VrrpGroup {
                 virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
                 virtual_mac: mac.into(),
                 members: vec![],
             }],
         };
-        let f = CorrelationFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
+        let f = IdentityFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
         let records = vec![
             base_record(
                 1,
@@ -1025,7 +1025,7 @@ mod tests {
     fn user_declared_vrrp_members_stay_separate_via_hints_even_with_matching_mac() {
         let mac = "aa:bb:cc:11:22:33";
         let sysname = Signal::SnmpSysName("core".into());
-        let hints = CorrelationHints {
+        let hints = IdentityHints {
             vrrp_groups: vec![VrrpGroup {
                 virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
                 virtual_mac: "00:00:5e:00:01:0a".into(),
@@ -1035,7 +1035,7 @@ mod tests {
                 ],
             }],
         };
-        let f = CorrelationFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
+        let f = IdentityFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
         let records = vec![
             base_record(
                 1,
@@ -1056,14 +1056,14 @@ mod tests {
 
     #[test]
     fn constructor_rejects_invalid_virtual_mac_hint() {
-        let hints = CorrelationHints {
+        let hints = IdentityHints {
             vrrp_groups: vec![VrrpGroup {
                 virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
                 virtual_mac: "not-a-mac".into(),
                 members: vec![],
             }],
         };
-        match CorrelationFuser::new(Box::new(DirectFuser::new()), hints) {
+        match IdentityFuser::new(Box::new(DirectFuser::new()), hints) {
             Ok(_) => panic!("must reject invalid MAC"),
             Err(e) => {
                 let msg = format!("{e}");
@@ -1089,10 +1089,10 @@ mod tests {
     }
 
     #[test]
-    fn correlation_fuser_is_send_and_sync() {
+    fn identity_fuser_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<CorrelationFuser>();
-        assert_send_sync::<CorrelationHints>();
+        assert_send_sync::<IdentityFuser>();
+        assert_send_sync::<IdentityHints>();
         assert_send_sync::<VrrpGroup>();
     }
 
@@ -1129,14 +1129,14 @@ mod tests {
 
     #[test]
     fn constructor_rejects_short_virtual_mac_hint() {
-        let hints = CorrelationHints {
+        let hints = IdentityHints {
             vrrp_groups: vec![VrrpGroup {
                 virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 virtual_mac: "00:00:5e:00:01".to_string(),
                 members: Vec::new(),
             }],
         };
-        let result = CorrelationFuser::new(Box::new(DirectFuser::new()), hints);
+        let result = IdentityFuser::new(Box::new(DirectFuser::new()), hints);
         match result {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
                 assert!(msg.contains("virtual_mac"), "msg was: {msg}");
@@ -1181,8 +1181,8 @@ mod tests {
     }
 
     #[test]
-    fn correlation_hints_new_accepts_empty_vec() {
-        let hints = CorrelationHints::new(Vec::new());
+    fn identity_hints_new_accepts_empty_vec() {
+        let hints = IdentityHints::new(Vec::new());
         assert!(hints.vrrp_groups.is_empty());
     }
 

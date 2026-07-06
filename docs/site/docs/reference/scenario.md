@@ -292,7 +292,7 @@ The `delivery` field is an internally-tagged object with two variants. `per_reco
 
 ## Fusers
 
-The `fuser` field is an internally-tagged object. Three fusers are available: `direct` (always), `oui_enrichment` (with the `oui` build feature), and `correlation` (always). `oui_enrichment` and `correlation` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
+The `fuser` field is an internally-tagged object. Three fusers are available: `direct` (always), `oui_enrichment` (with the `oui` build feature), and `identity` (always). `oui_enrichment` and `identity` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
 
 ### direct
 
@@ -340,28 +340,28 @@ Requires the `oui` build feature. The bundled OUI database is a Wireshark manuf 
 
 Longest-prefix wins on lookup: a /36 MA-S allocation takes precedence over a /28 MA-M, which takes precedence over a /24 MA-L. Vendor names come from the manuf file's long-name column, falling back to the short-name column when the long name is empty.
 
-### correlation
+### identity
 
-`correlation` wraps another fuser: it delegates fusion to `inner`, then runs union-find over the returned records and merges records that share identity signals (non-virtual MAC, `SnmpSysName`). Merged records get `alt_ips` populated with the other IPs; medium-confidence non-merged pairs get `possible_alias_of` set on both records. See the [Correlation page](../discover/correlation.md) for the full algorithm, virtual MAC prefixes hard-excluded, and confidence bands.
+`identity` wraps another fuser: it delegates fusion to `inner`, then runs union-find over the returned records and merges records that share identity signals (non-virtual MAC, `SnmpSysName`). Merged records get `alt_ips` populated with the other IPs; medium-confidence non-merged pairs get `possible_alias_of` set on both records. See the [Identity page](../discover/identity.md) for the full algorithm, virtual MAC prefixes hard-excluded, and confidence bands.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
-| `type` | string | yes | — | Must be `"correlation"`. |
-| `correlation_hints` | object | no | `{}` | User-declared identity signals — see below. |
+| `type` | string | yes | — | Must be `"identity"`. |
+| `identity_hints` | object | no | `{}` | User-declared identity signals — see below. |
 | `inner` | object | yes | — | Nested fuser config (typically `direct` or `oui_enrichment`). Validated recursively. |
 
-The `correlation_hints.vrrp_groups` array declares physical members of a shared virtual IP so their records stay separate even when their MACs would otherwise match. Each entry:
+The `identity_hints.vrrp_groups` array declares physical members of a shared virtual IP so their records stay separate even when their MACs would otherwise match. Each entry:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `virtual_ip` | IP address | yes | The shared virtual IP. |
-| `virtual_mac` | string | yes | The shared virtual MAC. Validated at construction; must parse as a MAC address. Records with this MAC contribute zero weight to correlation. |
+| `virtual_mac` | string | yes | The shared virtual MAC. Validated at construction; must parse as a MAC address. Records with this MAC contribute zero weight to identity fusion. |
 | `members` | array of IP addresses | no | Physical member IPs of the VRRP group. Pairs of member IPs are capped below the medium band. |
 
 ```json
 {
-  "type": "correlation",
-  "correlation_hints": {
+  "type": "identity",
+  "identity_hints": {
     "vrrp_groups": [
       {
         "virtual_ip": "10.0.0.1",

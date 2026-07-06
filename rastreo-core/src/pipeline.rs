@@ -754,11 +754,11 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_correlates_multi_ip_device_via_shared_sysname_and_mac() {
-        use crate::fuser::CorrelationHints;
+        use crate::fuser::IdentityHints;
         use crate::model::outcome::{ProbeKind, Signal};
         use std::time::SystemTime;
 
-        // Stand up a CorrelationFuser directly and drive it with hand-built outcomes.
+        // Stand up an IdentityFuser directly and drive it with hand-built outcomes.
         // The full run_discovery path is exercised elsewhere; here we assert the fuser
         // composes correctly at the pipeline boundary.
         let sysname = Signal::SnmpSysName("core-sw01".into());
@@ -786,8 +786,8 @@ mod tests {
                 signals: vec![Signal::Mac(mac.into()), sysname.clone()],
             },
         ];
-        let fuser_cfg = FuserConfig::Correlation {
-            correlation_hints: CorrelationHints::default(),
+        let fuser_cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
             inner: Box::new(FuserConfig::Direct {
                 include_unreachable: None,
                 confidence_baseline: None,

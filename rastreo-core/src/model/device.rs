@@ -76,9 +76,9 @@ impl Confidence {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DeviceRecord {
-    /// Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary correlation key across scans.
+    /// Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans.
     pub identity_key: IdentityKey,
-    /// Management IP the device was probed on. For multi-IP devices merged by the correlation fuser, this is the first target IP that survived resolution.
+    /// Management IP the device was probed on. For multi-IP devices merged by the identity fuser, this is the first target IP that survived resolution.
     pub mgmt_ip: Option<IpAddr>,
     /// First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex.
     pub mac: Option<String>,
@@ -100,7 +100,7 @@ pub struct DeviceRecord {
     pub schema_version: String,
     /// Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.
     pub schema_id: String,
-    /// Additional IPs the fuser correlated to the same identity — empty until a correlator fuser populates it.
+    /// Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured.
     #[serde(default)]
     pub alt_ips: Vec<IpAddr>,
     /// When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.
