@@ -651,6 +651,7 @@ def create_nats_stream(
         "--no-allow-rollup",
         "--no-deny-delete",
         "--no-deny-purge",
+        "--defaults",
         "--server", server_url,
     ]
     proc = subprocess.run(
