@@ -99,3 +99,24 @@ services:
         ipv4_address: 10.50.0.12
     expose:
       - "80"
+
+  target-ssh:
+    image: linuxserver/openssh-server:10.2_p1-r0-ls229
+    container_name: rastreo-target-ssh
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - PASSWORD_ACCESS=false
+      - USER_NAME=rastreo-uat
+    networks:
+      rastreo-net:
+        ipv4_address: 10.50.0.20
+    expose:
+      - "2222"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "2222"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s

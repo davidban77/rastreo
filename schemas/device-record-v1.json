@@ -214,7 +214,8 @@
         "Dns",
         "Snmp",
         "Arp",
-        "Ndp"
+        "Ndp",
+        "Ssh"
       ]
     },
     "ScanMetadata": {
@@ -377,6 +378,30 @@
           ],
           "properties": {
             "SnmpSysName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "SshBanner"
+          ],
+          "properties": {
+            "SshBanner": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "SshHostKey"
+          ],
+          "properties": {
+            "SshHostKey": {
               "type": "string"
             }
           },

@@ -91,4 +91,6 @@ One of:
 - { `MemcachedVersion`: string }
 - { `StunMappedAddress`: string }
 - { `SnmpSysName`: string }
+- { `SshBanner`: string }
+- { `SshHostKey`: string }
 

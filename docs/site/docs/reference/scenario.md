@@ -54,7 +54,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Seven probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, and `ndp`. The `http`, `snmp`, `arp`, and `ndp` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Eight probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, `ndp`, and `ssh`. The `http`, `snmp`, `arp`, `ndp`, and `ssh` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
 
 ### `tcp_connect`
 
@@ -182,6 +182,19 @@ Sends an ICMPv6 Neighbor Solicitation (RFC 4861 §4.3) on the local IPv6 subnet,
 ```yaml
 type: ndp
 interface: eth0
+```
+
+### `ssh`
+
+Opens a TCP connection to each configured port, captures the pre-negotiation SSH banner (`SSH-2.0-…`), then completes the SSH key exchange to record the server's host public key in OpenSSH single-line format. Emits `SshBanner(<value>)` and `SshHostKey(<value>)` signals. No authentication is attempted. See the [SSH prober page](../probe/ssh.md) for banner shape, host-key format, and identity-fuser interaction.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"ssh"`. |
+| `ports` | array of u16 | no | `[22]` | Ports to probe. |
+
+```json
+{"type": "ssh", "ports": [22]}
 ```
 
 ## Encoders

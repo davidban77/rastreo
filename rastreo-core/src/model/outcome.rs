@@ -15,6 +15,7 @@ pub enum ProbeKind {
     Snmp,
     Arp,
     Ndp,
+    Ssh,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -31,6 +32,8 @@ pub enum Signal {
     MemcachedVersion(String),
     StunMappedAddress(String),
     SnmpSysName(String),
+    SshBanner(String),
+    SshHostKey(String),
 }
 
 impl Signal {
@@ -49,6 +52,7 @@ impl Signal {
             | Self::SipUserAgent(_)
             | Self::MemcachedVersion(_)
             | Self::StunMappedAddress(_) => ProbeKind::Udp,
+            Self::SshBanner(_) | Self::SshHostKey(_) => ProbeKind::Ssh,
         }
     }
 }
@@ -83,6 +87,7 @@ mod tests {
             ProbeKind::Snmp,
             ProbeKind::Arp,
             ProbeKind::Ndp,
+            ProbeKind::Ssh,
         ] {
             let s = serde_json::to_string(&kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
@@ -250,5 +255,36 @@ mod tests {
             Signal::StunMappedAddress("203.0.113.42:5432".into()).probe_kind(),
             ProbeKind::Udp
         );
+    }
+
+    #[test]
+    fn probe_kind_ssh_banner_maps_to_ssh() {
+        assert_eq!(
+            Signal::SshBanner("SSH-2.0-OpenSSH_9.3p1".into()).probe_kind(),
+            ProbeKind::Ssh
+        );
+    }
+
+    #[test]
+    fn probe_kind_ssh_host_key_maps_to_ssh() {
+        assert_eq!(
+            Signal::SshHostKey("ssh-ed25519 AAAAC3Nz".into()).probe_kind(),
+            ProbeKind::Ssh
+        );
+    }
+
+    #[test]
+    fn ssh_signal_variants_round_trip_json() {
+        for signal in [
+            Signal::SshBanner("SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3".into()),
+            Signal::SshHostKey(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ"
+                    .into(),
+            ),
+        ] {
+            let s = serde_json::to_string(&signal).expect("serialize");
+            let back: Signal = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(signal, back);
+        }
     }
 }
