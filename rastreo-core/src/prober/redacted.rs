@@ -26,32 +26,40 @@ impl std::ops::Deref for Community {
 }
 
 #[cfg(feature = "snmp")]
+impl Community {
+    /// Returns the underlying community string. Callers must not log, serialize, or persist the result.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(feature = "snmp")]
 impl From<Community> for String {
     fn from(c: Community) -> String {
         c.0
     }
 }
 
-#[cfg(feature = "snmp")]
+#[cfg(any(feature = "snmp", feature = "nats"))]
 #[derive(Clone, Default, serde::Deserialize)]
 #[serde(transparent)]
 pub struct Password(pub String);
 
-#[cfg(feature = "snmp")]
+#[cfg(any(feature = "snmp", feature = "nats"))]
 impl std::fmt::Debug for Password {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<redacted:{}>", short_hash(&self.0))
     }
 }
 
-#[cfg(feature = "snmp")]
+#[cfg(any(feature = "snmp", feature = "nats"))]
 impl serde::Serialize for Password {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(&format_args!("<redacted:{}>", short_hash(&self.0)))
     }
 }
 
-#[cfg(feature = "snmp")]
+#[cfg(any(feature = "snmp", feature = "nats"))]
 impl std::ops::Deref for Password {
     type Target = str;
     fn deref(&self) -> &str {
@@ -59,8 +67,16 @@ impl std::ops::Deref for Password {
     }
 }
 
+#[cfg(any(feature = "snmp", feature = "nats"))]
+impl Password {
+    /// Returns the underlying secret string. Callers must not log, serialize, or persist the result.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
 // Distinct-per-value redacted marker: credential rotation must change `source_config_hash`.
-#[cfg(feature = "snmp")]
+#[cfg(any(feature = "snmp", feature = "nats"))]
 fn short_hash(s: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -119,6 +135,12 @@ mod tests {
     }
 
     #[test]
+    fn community_expose_returns_inner() {
+        let c = Community("readonly".to_string());
+        assert_eq!(c.expose(), "readonly");
+    }
+
+    #[test]
     fn community_into_string_returns_inner() {
         let c = Community("public".to_string());
         let s: String = c.into();
@@ -151,6 +173,12 @@ mod tests {
     fn password_deref_exposes_str() {
         let p = Password("privpass".to_string());
         assert_eq!(&*p, "privpass");
+    }
+
+    #[test]
+    fn password_expose_returns_inner() {
+        let p = Password("privpass".to_string());
+        assert_eq!(p.expose(), "privpass");
     }
 
     #[test]
@@ -193,5 +221,32 @@ mod tests {
         let a = serde_json::to_string(&Password("authpass".to_string())).expect("serialize a");
         let b = serde_json::to_string(&Password("privpass".to_string())).expect("serialize b");
         assert_ne!(a, b);
+    }
+}
+
+#[cfg(all(test, feature = "nats", not(feature = "snmp")))]
+mod nats_only_tests {
+    use super::*;
+
+    #[test]
+    fn password_debug_is_redacted() {
+        let p = Password("maplesyrup".to_string());
+        let s = format!("{p:?}");
+        assert!(s.starts_with("<redacted:"), "got: {s}");
+        assert!(s.ends_with('>'), "got: {s}");
+        assert!(!s.contains("maplesyrup"), "plaintext leaked: {s}");
+    }
+
+    #[test]
+    fn password_expose_returns_inner() {
+        let p = Password("privpass".to_string());
+        assert_eq!(p.expose(), "privpass");
+    }
+
+    #[test]
+    fn password_serialize_is_redacted() {
+        let p = Password("maplesyrup".to_string());
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(!json.contains("maplesyrup"), "plaintext leaked: {json}");
     }
 }

@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import unittest.mock
@@ -60,6 +61,15 @@ KAFKA_INTERNAL_BROKER = "kafka:29092"
 KAFKA_UAT_TOPIC = f"rastreo-uat-records-{os.urandom(4).hex()}"
 KCAT_IMAGE = "edenhill/kcat:1.7.1"
 
+# NATS in-network listener (JetStream enabled on port 4222).
+NATS_INTERNAL_URL = "nats://nats:4222"
+# Randomised per harness invocation so concurrent CI runs don't collide on the
+# shared server. Both stream and subject are randomised because both live in
+# the server's global namespace.
+NATS_UAT_STREAM = f"rastreo-uat-{os.urandom(4).hex()}"
+NATS_UAT_SUBJECT = f"rastreo.uat.records.{os.urandom(4).hex()}"
+NATS_BOX_IMAGE = "natsio/nats-box:0.18.0"
+
 # Server (host-reachable, published port).
 SERVER_HEALTH_URL = "http://localhost:8080/health"
 SERVER_SCANS_URL = "http://localhost:8080/scans"
@@ -72,6 +82,7 @@ HTTP_REQUEST_TIMEOUT_S = 5.0
 # side timeout surfaces as a 5xx rather than racing the client-side urlopen.
 SCENARIO_TIMEOUT_S = 90.0
 KCAT_TIMEOUT_S = 20.0
+NATS_TIMEOUT_S = 20.0
 COMPOSE_UP_TIMEOUT_S = 300.0
 COMPOSE_DOWN_TIMEOUT_S = 120.0
 DOCKER_LOG_TAIL_LINES = 100
@@ -232,6 +243,36 @@ def wait_for_kafka_ready(
             return False
         brokers = meta.get("brokers", [])
         return isinstance(brokers, list) and len(brokers) > 0
+
+    return poll_until(_check, timeout_s=timeout_s, interval_s=interval_s)
+
+
+def wait_for_nats_ready(
+    *,
+    timeout_s: float = READINESS_TIMEOUT_S,
+    interval_s: float = READINESS_POLL_INTERVAL_S,
+) -> bool:
+    """Poll NATS via nats-box until the server accepts a connection, or timeout.
+
+    Uses ``nats server check connection`` from inside the compose network so
+    the internal listener (``nats:4222``) is reachable.
+    """
+
+    def _check() -> bool:
+        proc = subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "--network", COMPOSE_NETWORK,
+                NATS_BOX_IMAGE,
+                "nats", "server", "check", "connection",
+                "--server", NATS_INTERNAL_URL,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+        )
+        return proc.returncode == 0
 
     return poll_until(_check, timeout_s=timeout_s, interval_s=interval_s)
 
@@ -578,6 +619,241 @@ def run_cli_kafka(ctx: HarnessCtx) -> tuple[bool, str]:
     return True, f"{len(records)} records consumed from {KAFKA_UAT_TOPIC}"
 
 
+def create_nats_stream(
+    ctx: HarnessCtx,
+    *,
+    stream: str = NATS_UAT_STREAM,
+    subject: str = NATS_UAT_SUBJECT,
+    server_url: str = NATS_INTERNAL_URL,
+    network: str = COMPOSE_NETWORK,
+    timeout_s: float = NATS_TIMEOUT_S,
+) -> subprocess.CompletedProcess[str]:
+    """Create the JetStream stream the CLI publishes to.
+
+    The rastreo NATS sink verifies the stream exists at construction time, so
+    the harness must create it before running the row. Memory storage keeps
+    the stream cheap and self-cleaning; ``--no-...`` flags dodge nats-box's
+    interactive prompt fallback for the unspecified options.
+    """
+    argv = [
+        "docker", "run", "--rm",
+        "--network", network,
+        NATS_BOX_IMAGE,
+        "nats", "stream", "add", stream,
+        "--subjects", subject,
+        "--storage", "memory",
+        "--retention", "limits",
+        "--discard", "old",
+        "--max-msgs", "1000",
+        "--max-age", "5m",
+        "--dupe-window", "2m",
+        "--replicas", "1",
+        "--no-allow-rollup",
+        "--no-deny-delete",
+        "--no-deny-purge",
+        "--defaults",
+        "--server", server_url,
+    ]
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr_tail = "\n    ".join((proc.stderr or "").strip().splitlines()[-20:])
+        raise RuntimeError(
+            f"nats stream add {stream} failed (exit {proc.returncode})\n    {stderr_tail}"
+        )
+    return proc
+
+
+def build_cli_nats_scenario_yaml(
+    target_ips: Sequence[str] = TARGET_IPS,
+    port: int = TARGET_PORT,
+    server_url: str = NATS_INTERNAL_URL,
+    subject: str = NATS_UAT_SUBJECT,
+    stream: str = NATS_UAT_STREAM,
+) -> str:
+    """Render the scenario YAML for the CLI -> NATS row.
+
+    The NATS sink has no CLI flag surface, so the CLI runs against a mounted
+    scenario file. Field names match ``SinkConfig::Nats`` (``servers``,
+    ``subject``, ``stream``); ``delivery`` is omitted so the Rust default
+    ``PerRecord`` applies.
+    """
+    targets_yaml = "\n".join(f"      - Ip: {ip}" for ip in target_ips)
+    return (
+        "version: 1\n"
+        "kind: discovery\n"
+        "scenarios:\n"
+        "  - signal_type: discover\n"
+        "    name: uat-nats\n"
+        "    timeout_ms: 2000\n"
+        "    rate_limit: 16\n"
+        "    sink:\n"
+        "      type: nats\n"
+        f"      servers: [\"{server_url}\"]\n"
+        f"      subject: {subject}\n"
+        f"      stream: {stream}\n"
+        "    targets:\n"
+        f"{targets_yaml}\n"
+        "    probers:\n"
+        "      - type: tcp_connect\n"
+        f"        ports: [{port}]\n"
+    )
+
+
+def build_cli_nats_argv(
+    scenario_host_path: str,
+    rastreo_image: str = RASTREO_IMAGE,
+    network: str = COMPOSE_NETWORK,
+) -> list[str]:
+    """Build the docker-run argv for the CLI -> NATS row.
+
+    The scenario file is bind-mounted at ``/scenario.yaml`` inside the
+    container so the CLI can load it via ``--file``.
+    """
+    return [
+        "docker", "run", "--rm",
+        "--network", network,
+        "-v", f"{scenario_host_path}:/scenario.yaml:ro",
+        "--entrypoint", "/rastreo",
+        rastreo_image,
+        "discover",
+        "--file", "/scenario.yaml",
+    ]
+
+
+def build_nats_consume_argv(
+    network: str = COMPOSE_NETWORK,
+    stream: str = NATS_UAT_STREAM,
+    server_url: str = NATS_INTERNAL_URL,
+) -> list[str]:
+    """Build the docker-run argv that drains the JetStream stream.
+
+    Uses ``nats stream get`` inside a shell loop: ``stream info --json``
+    reports the message count, then each message is fetched by sequence and
+    the base64-encoded payload decoded. This shape is the reliable one across
+    nats-box versions; ``nats stream view --raw`` prints framing metadata
+    interleaved with the payloads on nats-box 0.18.0 and is not usable as
+    a clean NDJSON source.
+    """
+    script = (
+        "set -e\n"
+        f"N=$(nats stream info {stream} --server {server_url} --json | "
+        "jq .state.messages)\n"
+        "for i in $(seq 1 $N); do\n"
+        f"  nats stream get {stream} $i --server {server_url} --json | "
+        "jq -r .data | base64 -d\n"
+        "  echo\n"
+        "done\n"
+    )
+    return [
+        "docker", "run", "--rm",
+        "--network", network,
+        "--entrypoint", "sh",
+        NATS_BOX_IMAGE,
+        "-c", script,
+    ]
+
+
+def run_cli_nats(ctx: HarnessCtx) -> tuple[bool, str]:
+    """CLI -> NATS row: create the JetStream stream, publish via the CLI with
+    a mounted scenario file, drain the stream, and verify record shape."""
+    try:
+        create_nats_stream(ctx)
+    except RuntimeError as e:
+        return False, str(e)
+
+    scenario_yaml = build_cli_nats_scenario_yaml()
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
+    try:
+        tmp.write(scenario_yaml)
+        tmp.close()
+        # rastreo runs as UID 65532 inside the container; NamedTemporaryFile
+        # is 0600 by default, so widen so the container's non-root user can read.
+        os.chmod(tmp.name, 0o644)
+
+        publish_argv = build_cli_nats_argv(tmp.name)
+        try:
+            proc = subprocess.run(
+                publish_argv,
+                capture_output=True,
+                text=True,
+                timeout=SCENARIO_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"rastreo CLI (nats) timed out after {SCENARIO_TIMEOUT_S:.0f}s"
+
+        if proc.returncode != 0:
+            stderr_tail = "\n    ".join(
+                (proc.stderr or "").strip().splitlines()[-20:]
+            )
+            return False, f"rastreo exited {proc.returncode}\n    {stderr_tail}"
+
+        consume_argv = build_nats_consume_argv()
+        try:
+            consume = subprocess.run(
+                consume_argv,
+                capture_output=True,
+                text=True,
+                timeout=NATS_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"nats consume timed out after {NATS_TIMEOUT_S:.0f}s"
+
+        if consume.returncode != 0:
+            stderr_tail = "\n    ".join(
+                (consume.stderr or "").strip().splitlines()[-20:]
+            )
+            return False, f"nats consume exited {consume.returncode}\n    {stderr_tail}"
+
+        try:
+            records = parse_ndjson_records(consume.stdout)
+        except json.JSONDecodeError as e:
+            return False, (
+                f"nats output was not NDJSON: {e}\n    stdout: {consume.stdout!r}"
+            )
+
+        if len(records) != len(TARGET_IPS):
+            return False, (
+                f"expected {len(TARGET_IPS)} records on stream, got {len(records)}\n"
+                f"    nats stdout: {consume.stdout!r}"
+            )
+
+        seen_keys: set[str] = set()
+        for rec in records:
+            key = rec.get("identity_key")
+            if not isinstance(key, str):
+                return False, f"record missing identity_key: {rec!r}"
+            seen_keys.add(key)
+            if not record_has_open_port_signal(rec, TARGET_PORT):
+                return False, (
+                    f"record {key!r} missing OpenPort({TARGET_PORT}) signal: "
+                    f"{rec.get('signals')!r}"
+                )
+
+        expected_keys = {f"ip:{ip}" for ip in TARGET_IPS}
+        if seen_keys != expected_keys:
+            return False, (
+                f"identity_key mismatch: expected {sorted(expected_keys)}, "
+                f"got {sorted(seen_keys)}"
+            )
+
+        return True, f"{len(records)} records consumed from {NATS_UAT_STREAM}"
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 # --- Matrix ------------------------------------------------------------------
 
 MATRIX: tuple[MatrixRow, ...] = (
@@ -595,6 +871,11 @@ MATRIX: tuple[MatrixRow, ...] = (
         name="cli_kafka",
         run=run_cli_kafka,
         failure_log_containers=("kafka", "target-1"),
+    ),
+    MatrixRow(
+        name="cli_nats",
+        run=run_cli_nats,
+        failure_log_containers=("nats", "target-1"),
     ),
 )
 
@@ -668,6 +949,24 @@ def run_all(
                     ok=False,
                     message=(
                         f"kafka broker did not become ready within "
+                        f"{READINESS_TIMEOUT_S:.0f}s"
+                    ),
+                )
+            )
+            return results
+
+        print(f"==> waiting for nats ({NATS_INTERNAL_URL})", file=sys.stderr)
+        if not wait_for_nats_ready():
+            results.append(
+                RowResult(
+                    row=MatrixRow(
+                        name="readiness:nats",
+                        run=lambda _c: (False, "n/a"),
+                        failure_log_containers=("nats",),
+                    ),
+                    ok=False,
+                    message=(
+                        f"nats server did not become ready within "
                         f"{READINESS_TIMEOUT_S:.0f}s"
                     ),
                 )
@@ -918,6 +1217,68 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertNotIn("base", payload)
         self.assertEqual(payload["timeout_ms"], 2000)
 
+    def test_build_cli_nats_argv_shape(self) -> None:
+        argv = build_cli_nats_argv(
+            scenario_host_path="/tmp/scenario.yaml",
+            rastreo_image="img",
+            network="net",
+        )
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "--network", "net"])
+        self.assertIn("-v", argv)
+        self.assertEqual(argv[argv.index("-v") + 1], "/tmp/scenario.yaml:/scenario.yaml:ro")
+        self.assertIn("--entrypoint", argv)
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], "/rastreo")
+        self.assertIn("img", argv)
+        self.assertIn("discover", argv)
+        self.assertIn("--file", argv)
+        self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+
+    def test_build_nats_consume_argv_shape(self) -> None:
+        argv = build_nats_consume_argv(
+            network="net", stream="uat-stream", server_url="nats://nats:4222",
+        )
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "--network", "net"])
+        self.assertIn(NATS_BOX_IMAGE, argv)
+        # The consume script is passed via `sh -c`.
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], "sh")
+        self.assertIn("-c", argv)
+        script = argv[argv.index("-c") + 1]
+        self.assertIn("uat-stream", script)
+        self.assertIn("nats://nats:4222", script)
+        self.assertIn("nats stream info", script)
+        self.assertIn("nats stream get", script)
+
+    def test_build_cli_nats_scenario_yaml_shape(self) -> None:
+        yaml_text = build_cli_nats_scenario_yaml(
+            target_ips=("10.0.0.1", "10.0.0.2"),
+            port=80,
+            server_url="nats://nats:4222",
+            subject="rastreo.uat.records.abc",
+            stream="rastreo-uat-abc",
+        )
+        # ScenarioFile wrapper present.
+        self.assertIn("version: 1", yaml_text)
+        self.assertIn("kind: discovery", yaml_text)
+        self.assertIn("signal_type: discover", yaml_text)
+        # Required scenario fields present.
+        self.assertIn("name: uat-nats", yaml_text)
+        self.assertIn("targets:", yaml_text)
+        self.assertIn("- Ip: 10.0.0.1", yaml_text)
+        self.assertIn("- Ip: 10.0.0.2", yaml_text)
+        self.assertIn("probers:", yaml_text)
+        self.assertIn("type: tcp_connect", yaml_text)
+        self.assertIn("ports: [80]", yaml_text)
+        self.assertIn("timeout_ms: 2000", yaml_text)
+        self.assertIn("rate_limit: 16", yaml_text)
+        # Sink block uses the exact field names that SinkConfig::Nats expects.
+        self.assertIn("sink:", yaml_text)
+        self.assertIn("type: nats", yaml_text)
+        self.assertIn('servers: ["nats://nats:4222"]', yaml_text)
+        self.assertIn("subject: rastreo.uat.records.abc", yaml_text)
+        self.assertIn("stream: rastreo-uat-abc", yaml_text)
+        # Delivery omitted so the Rust default (PerRecord) applies.
+        self.assertNotIn("delivery:", yaml_text)
+
 
 class _AttributeFailureTests(unittest.TestCase):
     def test_includes_row_name_and_message(self) -> None:
@@ -943,12 +1304,20 @@ class _MatrixIntegrityTests(unittest.TestCase):
     def test_expected_row_set(self) -> None:
         names = {r.name for r in MATRIX}
         self.assertEqual(
-            names, {"cli_stdout", "server_post_scans", "cli_kafka"}
+            names, {"cli_stdout", "server_post_scans", "cli_kafka", "cli_nats"}
         )
 
     def test_failure_containers_non_empty(self) -> None:
         for row in MATRIX:
             self.assertTrue(row.failure_log_containers, row.name)
+
+    def test_cli_nats_row_present(self) -> None:
+        rows = [r for r in MATRIX if r.name == "cli_nats"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertTrue(callable(row.run))
+        self.assertTrue(row.failure_log_containers)
+        self.assertIn("nats", row.failure_log_containers)
 
 
 class _RowExecutionWithMocksTests(unittest.TestCase):
@@ -1060,6 +1429,36 @@ class _RowExecutionWithMocksTests(unittest.TestCase):
             ok, msg = run_cli_kafka(self._ctx())
         self.assertFalse(ok)
         self.assertIn("exited 1", msg)
+
+    def test_run_cli_nats_success_path(self) -> None:
+        stream_add = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        publish = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        consume_stdout = "\n".join(
+            json.dumps({"identity_key": f"ip:{ip}", "signals": [{"OpenPort": 80}]})
+            for ip in TARGET_IPS
+        ) + "\n"
+        consume = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=consume_stdout, stderr=""
+        )
+        with unittest.mock.patch.object(
+            subprocess, "run", side_effect=[stream_add, publish, consume]
+        ):
+            ok, msg = run_cli_nats(self._ctx())
+        self.assertTrue(ok, msg)
+        self.assertIn("3 records consumed", msg)
+
+    def test_run_cli_nats_fails_when_stream_add_fails(self) -> None:
+        stream_add = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="stream already exists"
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=stream_add):
+            ok, msg = run_cli_nats(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("nats stream add", msg)
 
 
 def _run_self_tests() -> int:

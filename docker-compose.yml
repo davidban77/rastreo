@@ -35,6 +35,26 @@ services:
       retries: 6
       start_period: 20s
 
+  nats:
+    image: nats:2.11-alpine
+    container_name: rastreo-nats
+    command:
+      - "-js"
+      - "-m"
+      - "8222"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    networks:
+      rastreo-net:
+        ipv4_address: 10.50.0.4
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/varz"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
   # No healthcheck: scratch image has no shell. Use host curl on localhost:8080/health instead.
   rastreo-server:
     build: .

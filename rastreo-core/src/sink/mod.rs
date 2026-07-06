@@ -2,12 +2,16 @@ pub mod file;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 pub mod memory;
+#[cfg(feature = "nats")]
+pub mod nats;
 pub mod stdout;
 
 pub use file::FileSink;
 #[cfg(feature = "kafka")]
 pub use kafka::{KafkaFlushMode, KafkaSink};
 pub use memory::{MemorySink, MemorySinkHandle};
+#[cfg(feature = "nats")]
+pub use nats::{NatsCredentials, NatsDelivery, NatsSink};
 pub use stdout::StdoutSink;
 
 use std::path::PathBuf;
@@ -42,6 +46,16 @@ pub enum SinkConfig {
         #[serde(default)]
         flush_mode: KafkaFlushMode,
     },
+    #[cfg(feature = "nats")]
+    Nats {
+        servers: Vec<String>,
+        subject: String,
+        stream: String,
+        #[serde(default)]
+        credentials: NatsCredentials,
+        #[serde(default)]
+        delivery: NatsDelivery,
+    },
 }
 
 pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoError> {
@@ -57,6 +71,23 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
         } => {
             let sink = KafkaSink::new(brokers.clone(), topic.clone()).await?;
             Ok(Box::new(sink.with_flush_mode(flush_mode.clone())))
+        }
+        #[cfg(feature = "nats")]
+        SinkConfig::Nats {
+            servers,
+            subject,
+            stream,
+            credentials,
+            delivery,
+        } => {
+            let sink = NatsSink::new(
+                servers.clone(),
+                subject.clone(),
+                stream.clone(),
+                credentials.clone(),
+            )
+            .await?;
+            Ok(Box::new(sink.with_delivery(delivery.clone())))
         }
     }
 }
@@ -171,6 +202,114 @@ mod tests {
             }
             other => panic!("expected Kafka, got {other:?}"),
         }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_with_defaults() {
+        let yaml = "type: nats\nservers: [\"nats://nats:4222\"]\nsubject: rastreo.discovery.records.v1\nstream: rastreo\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats {
+                servers,
+                subject,
+                stream,
+                credentials,
+                delivery,
+            } => {
+                assert_eq!(servers, vec!["nats://nats:4222".to_string()]);
+                assert_eq!(subject, "rastreo.discovery.records.v1");
+                assert_eq!(stream, "rastreo");
+                assert!(matches!(credentials, NatsCredentials::Anonymous));
+                assert!(matches!(delivery, NatsDelivery::PerRecord));
+            }
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_with_user_pass_credentials() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  auth_type: user_pass\n  username: admin\n  password: sekret\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { credentials, .. } => match credentials {
+                NatsCredentials::UserPass { username, password } => {
+                    assert_eq!(username, "admin");
+                    assert_eq!(&*password, "sekret");
+                }
+                other => panic!("expected UserPass, got {other:?}"),
+            },
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_with_token_credentials() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  auth_type: token\n  token: tok\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { credentials, .. } => match credentials {
+                NatsCredentials::Token { token } => assert_eq!(&*token, "tok"),
+                other => panic!("expected Token, got {other:?}"),
+            },
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_with_creds_file() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  auth_type: creds\n  creds_file: /etc/rastreo/nats.creds\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { credentials, .. } => match credentials {
+                NatsCredentials::Creds { creds_file } => {
+                    assert_eq!(creds_file, "/etc/rastreo/nats.creds");
+                }
+                other => panic!("expected Creds, got {other:?}"),
+            },
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_with_batched_delivery() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ndelivery:\n  mode: batched\n  threshold_bytes: 4096\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { delivery, .. } => match delivery {
+                NatsDelivery::Batched { threshold_bytes } => assert_eq!(threshold_bytes, 4096),
+                other => panic!("expected Batched, got {other:?}"),
+            },
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_requires_servers() {
+        let yaml = "type: nats\nsubject: s\nstream: st\n";
+        let result: Result<SinkConfig, _> = serde_yaml_ng::from_str(yaml);
+        assert!(result.is_err(), "missing servers must fail");
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_requires_subject() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nstream: st\n";
+        let result: Result<SinkConfig, _> = serde_yaml_ng::from_str(yaml);
+        assert!(result.is_err(), "missing subject must fail");
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn deserialize_nats_sink_config_requires_stream() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\n";
+        let result: Result<SinkConfig, _> = serde_yaml_ng::from_str(yaml);
+        assert!(result.is_err(), "missing stream must fail");
     }
 
     #[cfg(all(feature = "config", feature = "kafka"))]

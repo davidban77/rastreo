@@ -234,6 +234,39 @@ mod tests {
         assert_eq!(a.source_config_hash, b.source_config_hash);
     }
 
+    #[cfg(feature = "nats")]
+    #[test]
+    fn source_config_hash_differs_when_nats_password_differs() {
+        use crate::prober::Password;
+        use crate::sink::{NatsCredentials, SinkConfig};
+
+        let mk = |pw: &str| DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                name: Some("lab".to_string()),
+                sink: Some(SinkConfig::Nats {
+                    servers: vec!["nats://nats:4222".to_string()],
+                    subject: "rastreo.discovery.records.v1".to_string(),
+                    stream: "rastreo".to_string(),
+                    credentials: NatsCredentials::UserPass {
+                        username: "admin".to_string(),
+                        password: Password(pw.to_string()),
+                    },
+                    delivery: Default::default(),
+                }),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        };
+
+        let a = ScanMetadata::new(&mk("password-a"));
+        let b = ScanMetadata::new(&mk("password-b"));
+        assert_ne!(
+            a.source_config_hash, b.source_config_hash,
+            "nats password rotation must change source_config_hash"
+        );
+    }
+
     #[cfg(feature = "snmp")]
     #[test]
     fn source_config_hash_differs_when_snmpv3_auth_password_differs() {
