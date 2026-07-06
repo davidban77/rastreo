@@ -683,21 +683,25 @@ def build_cli_nats_scenario_yaml(
     ``subject``, ``stream``); ``delivery`` is omitted so the Rust default
     ``PerRecord`` applies.
     """
-    targets_yaml = "\n".join(f"  - Ip: {ip}" for ip in target_ips)
+    targets_yaml = "\n".join(f"      - Ip: {ip}" for ip in target_ips)
     return (
-        "name: uat-nats\n"
-        "targets:\n"
+        "version: 1\n"
+        "kind: discovery\n"
+        "scenarios:\n"
+        "  - signal_type: discover\n"
+        "    name: uat-nats\n"
+        "    timeout_ms: 2000\n"
+        "    rate_limit: 16\n"
+        "    sink:\n"
+        "      type: nats\n"
+        f"      servers: [\"{server_url}\"]\n"
+        f"      subject: {subject}\n"
+        f"      stream: {stream}\n"
+        "    targets:\n"
         f"{targets_yaml}\n"
-        "probers:\n"
-        "  - type: tcp_connect\n"
-        f"    ports: [{port}]\n"
-        "timeout_ms: 2000\n"
-        "rate_limit: 16\n"
-        "sink:\n"
-        "  type: nats\n"
-        f"  servers: [\"{server_url}\"]\n"
-        f"  subject: {subject}\n"
-        f"  stream: {stream}\n"
+        "    probers:\n"
+        "      - type: tcp_connect\n"
+        f"        ports: [{port}]\n"
     )
 
 
@@ -1252,7 +1256,11 @@ class _ArgvBuildersTests(unittest.TestCase):
             subject="rastreo.uat.records.abc",
             stream="rastreo-uat-abc",
         )
-        # Required top-level fields present.
+        # ScenarioFile wrapper present.
+        self.assertIn("version: 1", yaml_text)
+        self.assertIn("kind: discovery", yaml_text)
+        self.assertIn("signal_type: discover", yaml_text)
+        # Required scenario fields present.
         self.assertIn("name: uat-nats", yaml_text)
         self.assertIn("targets:", yaml_text)
         self.assertIn("- Ip: 10.0.0.1", yaml_text)
