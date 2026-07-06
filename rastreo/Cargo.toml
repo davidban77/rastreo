@@ -21,6 +21,7 @@ snmp = ["rastreo-core/snmp"]
 arp = ["rastreo-core/arp"]
 ndp = ["rastreo-core/ndp"]
 oui = ["rastreo-core/oui"]
+ssh = ["rastreo-core/ssh"]
 
 [[bin]]
 name = "rastreo"

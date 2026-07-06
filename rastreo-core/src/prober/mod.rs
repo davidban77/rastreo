@@ -8,6 +8,8 @@ pub mod ndp;
 mod redacted;
 #[cfg(feature = "snmp")]
 pub mod snmp;
+#[cfg(feature = "ssh")]
+pub mod ssh;
 pub mod tcp_connect;
 pub mod udp;
 
@@ -24,6 +26,8 @@ pub use redacted::Community;
 pub use redacted::Password;
 #[cfg(feature = "snmp")]
 pub use snmp::{SnmpProber, SnmpVersion, UsmAuth, UsmCredentials, UsmPrivacy};
+#[cfg(feature = "ssh")]
+pub use ssh::SshProber;
 pub use tcp_connect::TcpConnectProber;
 pub use udp::{UdpProber, UdpProtocol};
 
@@ -96,6 +100,11 @@ pub enum ProberConfig {
         #[serde(default = "ndp::default_interface")]
         interface: String,
     },
+    #[cfg(feature = "ssh")]
+    Ssh {
+        #[serde(default = "ssh::default_ports")]
+        ports: Vec<u16>,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -147,6 +156,8 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
         ProberConfig::Arp { interface } => Ok(Box::new(ArpProber::new(interface.clone())?)),
         #[cfg(feature = "ndp")]
         ProberConfig::Ndp { interface } => Ok(Box::new(NdpProber::new(interface.clone())?)),
+        #[cfg(feature = "ssh")]
+        ProberConfig::Ssh { ports } => Ok(Box::new(SshProber::new(ports.clone())?)),
     }
 }
 
@@ -605,6 +616,51 @@ mod tests {
         };
         let prober = create_prober(&config).expect("factory ok");
         assert_eq!(prober.kind(), ProbeKind::Ndp);
+    }
+
+    #[cfg(all(feature = "config", feature = "ssh"))]
+    #[test]
+    fn prober_config_deserializes_ssh_variant_with_defaults() {
+        let yaml = "type: ssh\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize ssh");
+        match config {
+            ProberConfig::Ssh { ports } => assert_eq!(ports, vec![22]),
+            other => panic!("expected Ssh variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "ssh"))]
+    #[test]
+    fn prober_config_deserializes_ssh_variant_with_explicit_ports() {
+        let yaml = "type: ssh\nports: [22, 2222]\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize ssh");
+        match config {
+            ProberConfig::Ssh { ports } => assert_eq!(ports, vec![22, 2222]),
+            other => panic!("expected Ssh variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn create_prober_ssh_produces_ssh_prober() {
+        let config = ProberConfig::Ssh {
+            ports: crate::prober::ssh::default_ports(),
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Ssh);
+    }
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn create_prober_ssh_propagates_empty_ports_error() {
+        let config = ProberConfig::Ssh { ports: Vec::new() };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("port"), "got: {msg}");
+            }
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("empty ports must error"),
+        }
     }
 
     #[cfg(all(feature = "config", feature = "snmp"))]

@@ -1,2 +1,12 @@
 [advisories]
-ignore = []
+# RUSTSEC-2023-0071 — Marvin Attack timing sidechannel in the `rsa` crate.
+# Pulled in transitively by `ssh-key` via `russh` (SSH prober, `ssh` feature).
+# The advisory targets RSA *decryption* with an attacker-controlled ciphertext;
+# rastreo only *verifies* the server's host-key signature during KEX and never
+# performs private-key operations with the `rsa` crate, so the sidechannel is
+# not reachable. No fixed upgrade is available upstream.
+#
+# Re-evaluate this ignore when authenticated SSH probing lands. An authenticated
+# probe with a client RSA private key would perform RSA decryption/signing and
+# reactivate the Marvin sidechannel.
+ignore = ["RUSTSEC-2023-0071"]

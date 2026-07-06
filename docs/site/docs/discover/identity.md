@@ -54,7 +54,7 @@ The identity fuser weights pairs of records based on the identity signals they s
 | `SnmpSysName` | +0.5 | Case-insensitive equality on the `sysName` value from any SNMP prober outcome. Empty strings do not count. |
 | Conflicting `manufacturer` | -0.3 | Applied when both records have a non-null `manufacturer` and the values differ. Only meaningful when `oui_enrichment` has populated the field. |
 
-More identity signals are coming as more probers arrive: SSH host key from the SSH prober, SNMPv3 engine ID from SNMPv3, both contribute at +0.5 each. The weights, thresholds, and the union-find algorithm stay unchanged — the fuser will recognise those new signals alongside the existing ones.
+The [SSH prober](../probe/ssh.md) already emits `SshHostKey` on every scan. The identity fuser does not currently correlate on it; that wiring lands in a follow-up. Host keys survive interface changes and IP renumbering, so two IPs that present the same key are the same device — a strong third signal once consumed. The weights, thresholds, and union-find algorithm stay unchanged when it does. SNMPv3 engine ID is the next candidate after that.
 
 ## Confidence bands
 
