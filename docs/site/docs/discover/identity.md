@@ -106,7 +106,7 @@ When a group of records merges into one:
 
 - `identity_key` — the highest-confidence constituent's key.
 - `mgmt_ip` — the first constituent's `mgmt_ip`, following target-list order.
-- `alt_ips` — the other constituents' `mgmt_ip` values, deduplicated, in source order.
+- `alt_ips` — the other constituents' `mgmt_ip` values, deduplicated, in source order. Each entry is an [`AltIp`](../reference/schema/device-record.md#altip) object; see [The `AltIp` shape](#the-altip-shape) below for the field breakdown.
 - `mac` — from the highest-confidence constituent, falling back to any non-null value.
 - `manufacturer`, `platform`, `role` — from the highest-confidence constituent, falling back to any non-null value.
 - `confidence` — `max(constituents) + 0.1`, clamped to `1.0`. Merging is additional evidence.
@@ -114,6 +114,29 @@ When a group of records merges into one:
 - `signals` — union across constituents, deduplicated.
 
 For medium-band pairs that do not merge, both records receive `possible_alias_of = peer.identity_key`. The peer is picked by highest confidence first, then pair weight, then earliest input position.
+
+## The `AltIp` shape
+
+Each entry in `alt_ips` is an [`AltIp`](../reference/schema/device-record.md#altip) object. The shape maps 1:1 to the IP-address models in NetBox, Nautobot, and Infrahub. A reconciler reads the address, role hint, and probe kinds straight from the record.
+
+| Field | Type | Description |
+|---|---|---|
+| `address` | string (IP) | The alternate IP that merged into the primary `mgmt_ip`. Always present. |
+| `role` | [`AltIpRole`](../reference/schema/device-record.md#altiprole) \| null | Role hint mapped 1:1 to NetBox / Nautobot / Infrahub IP-address role models. Omitted from the wire form when null. |
+| `responded_via` | array<`ProbeKind`> | Deduplicated list of probe kinds that produced signals for this IP before the merge (for example `Arp`, `Snmp`, `TcpConnect`). Omitted from the wire form when empty. |
+
+### `AltIpRole` values
+
+The role hint is one of `secondary`, `loopback`, `vrrp`, `hsrp`, `carp`, `anycast`, or `vip`. The [schema reference](../reference/schema/device-record.md#altiprole) has the full enum. What the identity fuser writes today:
+
+- `secondary` — the default when an alternate IP merges in. Written whenever the MAC is not a known virtual-router prefix (or when there is no MAC at all).
+- `vrrp` — the alternate IP's MAC matches a VRRP prefix (`00:00:5e:00:01:XX` for VRRPv2, `00:00:5e:00:02:XX` for VRRPv3).
+- `hsrp` — the alternate IP's MAC matches the Cisco HSRP prefix (`00:00:0c:07:ac:XX`).
+
+The rest of the enum (`loopback`, `carp`, `anycast`, `vip`) is reserved. The identity fuser does not emit these today. They are part of the wire contract so future signals (SNMP `ifDescr`, load-balancer VIP hints) can populate them without a schema change.
+
+!!! warning "CARP is not distinguishable from VRRP today"
+    FreeBSD's CARP reuses the VRRPv2 MAC prefix `00:00:5e:00:01:XX`, so MAC-only inference reports a CARP virtual IP as `role: vrrp`. Do not expect `role: carp` on a CARP-configured device — the variant is reserved for a future signal-based detection path.
 
 ## Example scenario
 
@@ -149,7 +172,10 @@ With SNMP returning `sysName: core-sw01` on all three IPs and ARP returning the 
 {
   "identity_key": "mac:aa:bb:cc:11:22:33",
   "mgmt_ip": "10.0.0.1",
-  "alt_ips": ["10.0.0.2", "1.1.1.1"],
+  "alt_ips": [
+    {"address": "10.0.0.2", "role": "secondary", "responded_via": ["Arp", "Snmp"]},
+    {"address": "1.1.1.1", "role": "secondary", "responded_via": ["Arp", "Snmp"]}
+  ],
   "possible_alias_of": null,
   ...
 }

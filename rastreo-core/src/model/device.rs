@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use schemars::JsonSchema;
 
 use crate::error::ConfigError;
-use crate::model::outcome::Signal;
+use crate::model::outcome::{ProbeKind, Signal};
 use crate::model::scan::ScanMetadata;
 
 /// Version tag stamped on every emitted `DeviceRecord`. Increment when the wire shape changes in a backward-incompatible way.
@@ -70,6 +70,53 @@ impl Confidence {
     }
 }
 
+/// Role hint attached to each `AltIp`. Values map 1:1 to NetBox / Nautobot / Infrahub IP-address role models so downstream reconcilers pull the role directly instead of re-inferring it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AltIpRole {
+    /// Secondary interface address on the same device.
+    Secondary,
+    /// Loopback address. Not currently inferred; reserved for future SNMP `ifDescr` signal.
+    Loopback,
+    /// VRRP virtual IP — detected from the `00:00:5e:00:01:XX` or `00:00:5e:00:02:XX` MAC prefix.
+    Vrrp,
+    /// HSRP virtual IP — detected from the `00:00:0c:07:ac:XX` MAC prefix.
+    Hsrp,
+    /// CARP virtual IP. Not currently inferred from MAC because CARP shares the VRRPv2 prefix; reserved for future signal-based detection.
+    Carp,
+    /// Anycast address. Not currently inferred; reserved.
+    Anycast,
+    /// Virtual IP (VIP) fronting real IPs. Not currently inferred; reserved.
+    Vip,
+}
+
+/// Additional IP merged into a `DeviceRecord` by the identity fuser, carrying the role hint and the probe kinds that responded on that IP.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct AltIp {
+    pub address: IpAddr,
+
+    /// Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. `None` when the identity fuser can't infer a role from available signals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AltIpRole>,
+
+    /// Probe kinds that responded on this IP before the identity fuser merged it into the primary record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub responded_via: Vec<ProbeKind>,
+}
+
+impl AltIp {
+    /// Construct an `AltIp` with a bare address and no metadata.
+    pub fn new(address: IpAddr) -> Self {
+        Self {
+            address,
+            role: None,
+            responded_via: Vec::new(),
+        }
+    }
+}
+
 /// Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`.
 /// Legacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize;
 /// consumers should tag legacy records with an explicit v0 marker before ingest.
@@ -100,9 +147,9 @@ pub struct DeviceRecord {
     pub schema_version: String,
     /// Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.
     pub schema_id: String,
-    /// Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured.
+    /// Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.
     #[serde(default)]
-    pub alt_ips: Vec<IpAddr>,
+    pub alt_ips: Vec<AltIp>,
     /// When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.
     #[serde(default)]
     pub possible_alias_of: Option<IdentityKey>,
@@ -347,6 +394,64 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("epoch positive");
         assert_eq!(elapsed.as_secs(), 1_720_000_000);
+    }
+
+    #[test]
+    fn alt_ip_new_defaults_role_to_none_and_responded_via_to_empty() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let alt = AltIp::new(ip);
+        assert_eq!(alt.address, ip);
+        assert!(alt.role.is_none());
+        assert!(alt.responded_via.is_empty());
+    }
+
+    #[test]
+    fn alt_ip_role_serializes_as_snake_case() {
+        for (role, wire) in [
+            (AltIpRole::Secondary, "\"secondary\""),
+            (AltIpRole::Loopback, "\"loopback\""),
+            (AltIpRole::Vrrp, "\"vrrp\""),
+            (AltIpRole::Hsrp, "\"hsrp\""),
+            (AltIpRole::Carp, "\"carp\""),
+            (AltIpRole::Anycast, "\"anycast\""),
+            (AltIpRole::Vip, "\"vip\""),
+        ] {
+            let s = serde_json::to_string(&role).expect("serialize");
+            assert_eq!(s, wire);
+            let back: AltIpRole = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(back, role);
+        }
+    }
+
+    #[test]
+    fn alt_ip_omits_role_when_none_and_responded_via_when_empty() {
+        let alt = AltIp::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+        let json = serde_json::to_value(&alt).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(obj.get("role").is_none(), "role must be omitted when None");
+        assert!(
+            obj.get("responded_via").is_none(),
+            "responded_via must be omitted when empty"
+        );
+    }
+
+    #[test]
+    fn alt_ip_round_trips_with_role_and_responded_via() {
+        let alt = AltIp {
+            address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+            role: Some(AltIpRole::Secondary),
+            responded_via: vec![ProbeKind::TcpConnect, ProbeKind::Http],
+        };
+        let s = serde_json::to_string(&alt).expect("serialize");
+        let back: AltIp = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back, alt);
+    }
+
+    #[test]
+    fn alt_ip_types_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AltIp>();
+        assert_send_sync::<AltIpRole>();
     }
 
     #[test]

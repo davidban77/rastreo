@@ -228,10 +228,18 @@ fn format_variant(v: &Value, defs: &Definitions<'_>) -> String {
             .iter()
             .map(|(name, spec)| format!("`{name}`: {}", format_type(spec, defs)))
             .collect();
-        format!("{{ {} }}", parts.join(", "))
-    } else {
-        format_type(v, defs)
+        return format!("{{ {} }}", parts.join(", "));
     }
+    if let Some(values) = v.get("enum").and_then(Value::as_array) {
+        let parts: Vec<String> = values
+            .iter()
+            .filter_map(|val| val.as_str().map(|s| format!("`{s}`")))
+            .collect();
+        if !parts.is_empty() {
+            return parts.join(" \\| ");
+        }
+    }
+    format_type(v, defs)
 }
 
 fn format_type(spec: &Value, defs: &Definitions<'_>) -> String {
@@ -486,6 +494,12 @@ mod tests {
             .find(|l| l.starts_with("description:"))
             .expect("has description in front matter");
         assert!(!desc_line[13..].contains('\n'));
+    }
+
+    #[test]
+    fn format_variant_renders_string_enum_as_backticked_value() {
+        let spec = json!({"type": "string", "enum": ["secondary"]});
+        assert_eq!(format_variant(&spec, &Vec::new()), "`secondary`");
     }
 
     #[test]
