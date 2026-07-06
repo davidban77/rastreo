@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 
 use crate::error::{ConfigError, RastreoError};
 use crate::fuser::Fuser;
-use crate::model::device::{Confidence, DeviceRecord};
-use crate::model::outcome::{ProbeOutcome, Signal};
+use crate::model::device::{AltIp, AltIpRole, Confidence, DeviceRecord};
+use crate::model::outcome::{ProbeKind, ProbeOutcome, Signal};
 
 const HIGH_BAND_THRESHOLD: f64 = 0.8;
 const MEDIUM_BAND_THRESHOLD: f64 = 0.4;
@@ -313,7 +313,7 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
     let first_idx = member_indices[0];
     let mgmt_ip = records[first_idx].as_ref().and_then(|r| r.mgmt_ip);
 
-    let mut alt_ips: Vec<IpAddr> = Vec::new();
+    let mut alt_ips: Vec<AltIp> = Vec::new();
     let mut seen_ips: HashSet<IpAddr> = HashSet::new();
     if let Some(ip) = mgmt_ip {
         seen_ips.insert(ip);
@@ -323,11 +323,16 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
             continue;
         }
         if let Some(r) = records[i].as_ref() {
-            if let Some(ip) = r.mgmt_ip {
-                if !seen_ips.contains(&ip) {
-                    seen_ips.insert(ip);
-                    alt_ips.push(ip);
-                }
+            let Some(ip) = r.mgmt_ip else { continue };
+            if !seen_ips.contains(&ip) {
+                seen_ips.insert(ip);
+                let role = altip_role_from_mac(r.mac.as_deref());
+                let responded_via = uniq_probe_kinds(&r.signals);
+                alt_ips.push(AltIp {
+                    address: ip,
+                    role,
+                    responded_via,
+                });
             }
         }
     }
@@ -493,6 +498,33 @@ pub(crate) fn is_virtual_mac(mac: &str) -> bool {
         None => return false,
     };
     bytes == VRRP_V2_IPV4_PREFIX || bytes == VRRP_V3_IPV6_PREFIX || bytes == HSRP_PREFIX
+}
+
+fn altip_role_from_mac(mac: Option<&str>) -> Option<AltIpRole> {
+    let bytes = match mac.and_then(parse_mac_prefix) {
+        Some(b) => b,
+        // An IP that merged into another device is a secondary by definition, even without a MAC.
+        None => return Some(AltIpRole::Secondary),
+    };
+    if bytes == VRRP_V2_IPV4_PREFIX || bytes == VRRP_V3_IPV6_PREFIX {
+        // CARP shares the VRRPv2 prefix; MAC alone can't distinguish them.
+        Some(AltIpRole::Vrrp)
+    } else if bytes == HSRP_PREFIX {
+        Some(AltIpRole::Hsrp)
+    } else {
+        Some(AltIpRole::Secondary)
+    }
+}
+
+fn uniq_probe_kinds(signals: &[Signal]) -> Vec<ProbeKind> {
+    let mut seen: Vec<ProbeKind> = Vec::new();
+    for s in signals {
+        let k = s.probe_kind();
+        if !seen.contains(&k) {
+            seen.push(k);
+        }
+    }
+    seen
 }
 
 fn parse_mac_prefix(mac: &str) -> Option<[u8; 5]> {
@@ -670,7 +702,9 @@ mod tests {
         assert_eq!(out.len(), 1, "high band should merge");
         let r = &out[0];
         assert_eq!(r.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert_eq!(r.alt_ips, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))]);
+        assert_eq!(r.alt_ips.len(), 1);
+        assert_eq!(r.alt_ips[0].address, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(r.alt_ips[0].role, Some(AltIpRole::Secondary));
         assert!(r.possible_alias_of.is_none());
     }
 
@@ -838,8 +872,9 @@ mod tests {
                 0.3,
             ),
         ]);
+        let addresses: Vec<IpAddr> = out[0].alt_ips.iter().map(|a| a.address).collect();
         assert_eq!(
-            out[0].alt_ips,
+            addresses,
             vec![
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
@@ -1216,7 +1251,111 @@ mod tests {
         let out = correlate(vec![a, b, c]);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert_eq!(out[0].alt_ips, vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
+        let addresses: Vec<IpAddr> = out[0].alt_ips.iter().map(|a| a.address).collect();
+        assert_eq!(addresses, vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
         assert_eq!(out[1].mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    }
+
+    fn merge_two(a: DeviceRecord, b: DeviceRecord) -> DeviceRecord {
+        let mut opts: Vec<Option<DeviceRecord>> = vec![Some(a), Some(b)];
+        merge_group(&mut opts, &[0, 1])
+    }
+
+    #[test]
+    fn altip_role_is_vrrp_when_merged_mac_matches_vrrp_prefix() {
+        let real_mac = "aa:bb:cc:11:22:33";
+        let primary = base_record(1, Some(real_mac), vec![Signal::Mac(real_mac.into())], 0.4);
+        let vrrp_member = base_record(
+            2,
+            Some("00:00:5e:00:01:0a"),
+            vec![Signal::Mac("00:00:5e:00:01:0a".into())],
+            0.3,
+        );
+        let merged = merge_two(primary, vrrp_member);
+        assert_eq!(merged.alt_ips.len(), 1);
+        assert_eq!(merged.alt_ips[0].role, Some(AltIpRole::Vrrp));
+    }
+
+    #[test]
+    fn altip_role_is_hsrp_when_merged_mac_matches_hsrp_prefix() {
+        let real_mac = "aa:bb:cc:11:22:33";
+        let primary = base_record(1, Some(real_mac), vec![Signal::Mac(real_mac.into())], 0.4);
+        let hsrp_member = base_record(
+            2,
+            Some("00:00:0c:07:ac:01"),
+            vec![Signal::Mac("00:00:0c:07:ac:01".into())],
+            0.3,
+        );
+        let merged = merge_two(primary, hsrp_member);
+        assert_eq!(merged.alt_ips.len(), 1);
+        assert_eq!(merged.alt_ips[0].role, Some(AltIpRole::Hsrp));
+    }
+
+    #[test]
+    fn altip_role_defaults_to_secondary_for_non_virtual_mac() {
+        let mac = "aa:bb:cc:11:22:33";
+        let primary = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.4);
+        let secondary = base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        let merged = merge_two(primary, secondary);
+        assert_eq!(merged.alt_ips.len(), 1);
+        assert_eq!(merged.alt_ips[0].role, Some(AltIpRole::Secondary));
+    }
+
+    #[test]
+    fn altip_role_defaults_to_secondary_when_merged_record_has_no_mac() {
+        let primary = base_record(
+            1,
+            Some("aa:bb:cc:11:22:33"),
+            vec![Signal::Mac("aa:bb:cc:11:22:33".into())],
+            0.4,
+        );
+        let no_mac_member = base_record(2, None, vec![], 0.3);
+        let merged = merge_two(primary, no_mac_member);
+        assert_eq!(merged.alt_ips.len(), 1);
+        assert_eq!(merged.alt_ips[0].role, Some(AltIpRole::Secondary));
+    }
+
+    #[test]
+    fn altip_responded_via_dedups_probe_kinds() {
+        let mac = "aa:bb:cc:11:22:33";
+        let primary = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.4);
+        let secondary = base_record(
+            2,
+            Some(mac),
+            vec![
+                Signal::Mac(mac.into()),
+                Signal::SnmpSysName("core-sw01".into()),
+                Signal::OpenPort(22),
+                Signal::OpenPort(80),
+            ],
+            0.3,
+        );
+        let merged = merge_two(primary, secondary);
+        assert_eq!(merged.alt_ips.len(), 1);
+        assert_eq!(
+            merged.alt_ips[0].responded_via,
+            vec![ProbeKind::Arp, ProbeKind::Snmp, ProbeKind::TcpConnect],
+        );
+    }
+
+    #[test]
+    fn altip_responded_via_preserves_source_order() {
+        let mac = "aa:bb:cc:11:22:33";
+        let primary = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.4);
+        let secondary = base_record(
+            2,
+            Some(mac),
+            vec![
+                Signal::OpenPort(22),
+                Signal::Mac(mac.into()),
+                Signal::SnmpSysName("core-sw01".into()),
+            ],
+            0.3,
+        );
+        let merged = merge_two(primary, secondary);
+        assert_eq!(
+            merged.alt_ips[0].responded_via,
+            vec![ProbeKind::TcpConnect, ProbeKind::Arp, ProbeKind::Snmp],
+        );
     }
 }

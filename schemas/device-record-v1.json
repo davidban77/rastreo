@@ -13,12 +13,11 @@
   ],
   "properties": {
     "alt_ips": {
-      "description": "Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured.",
+      "description": "Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.",
       "default": [],
       "type": "array",
       "items": {
-        "type": "string",
-        "format": "ip"
+        "$ref": "#/definitions/AltIp"
       }
     },
     "confidence": {
@@ -118,8 +117,105 @@
     }
   },
   "definitions": {
+    "AltIp": {
+      "description": "Additional IP merged into a `DeviceRecord` by the identity fuser, carrying the role hint and the probe kinds that responded on that IP.",
+      "type": "object",
+      "required": [
+        "address"
+      ],
+      "properties": {
+        "address": {
+          "type": "string",
+          "format": "ip"
+        },
+        "responded_via": {
+          "description": "Probe kinds that responded on this IP before the identity fuser merged it into the primary record.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProbeKind"
+          }
+        },
+        "role": {
+          "description": "Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. `None` when the identity fuser can't infer a role from available signals.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AltIpRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "AltIpRole": {
+      "description": "Role hint attached to each `AltIp`. Values map 1:1 to NetBox / Nautobot / Infrahub IP-address role models so downstream reconcilers pull the role directly instead of re-inferring it.",
+      "oneOf": [
+        {
+          "description": "Secondary interface address on the same device.",
+          "type": "string",
+          "enum": [
+            "secondary"
+          ]
+        },
+        {
+          "description": "Loopback address. Not currently inferred; reserved for future SNMP `ifDescr` signal.",
+          "type": "string",
+          "enum": [
+            "loopback"
+          ]
+        },
+        {
+          "description": "VRRP virtual IP — detected from the `00:00:5e:00:01:XX` or `00:00:5e:00:02:XX` MAC prefix.",
+          "type": "string",
+          "enum": [
+            "vrrp"
+          ]
+        },
+        {
+          "description": "HSRP virtual IP — detected from the `00:00:0c:07:ac:XX` MAC prefix.",
+          "type": "string",
+          "enum": [
+            "hsrp"
+          ]
+        },
+        {
+          "description": "CARP virtual IP. Not currently inferred from MAC because CARP shares the VRRPv2 prefix; reserved for future signal-based detection.",
+          "type": "string",
+          "enum": [
+            "carp"
+          ]
+        },
+        {
+          "description": "Anycast address. Not currently inferred; reserved.",
+          "type": "string",
+          "enum": [
+            "anycast"
+          ]
+        },
+        {
+          "description": "Virtual IP (VIP) fronting real IPs. Not currently inferred; reserved.",
+          "type": "string",
+          "enum": [
+            "vip"
+          ]
+        }
+      ]
+    },
     "IdentityKey": {
       "type": "string"
+    },
+    "ProbeKind": {
+      "type": "string",
+      "enum": [
+        "TcpConnect",
+        "Udp",
+        "Http",
+        "Dns",
+        "Snmp",
+        "Arp",
+        "Ndp"
+      ]
     },
     "ScanMetadata": {
       "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",

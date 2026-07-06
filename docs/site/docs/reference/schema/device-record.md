@@ -16,7 +16,7 @@ Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Leg
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `alt_ips` | array<string (ip)> | no | Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured. |
+| `alt_ips` | array<[`AltIp`](#altip)> | no | Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP. |
 | `confidence` | double | yes | Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device. |
 | `identity_key` | [`IdentityKey`](#identitykey) | yes | Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans. |
 | `last_seen` | string (date-time) | yes | RFC 3339 UTC timestamp of the most recent probe that produced signals for this device. |
@@ -33,7 +33,35 @@ Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Leg
 
 ## Definitions
 
+### `AltIp` {#altip}
+
+Additional IP merged into a `DeviceRecord` by the identity fuser, carrying the role hint and the probe kinds that responded on that IP.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `address` | string (ip) | yes | — |
+| `responded_via` | array<[`ProbeKind`](#probekind)> | no | Probe kinds that responded on this IP before the identity fuser merged it into the primary record. |
+| `role` | [`AltIpRole`](#altiprole) \| null | no | Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. `None` when the identity fuser can't infer a role from available signals. |
+
+### `AltIpRole` {#altiprole}
+
+Role hint attached to each `AltIp`. Values map 1:1 to NetBox / Nautobot / Infrahub IP-address role models so downstream reconcilers pull the role directly instead of re-inferring it.
+
+One of:
+
+- `secondary`
+- `loopback`
+- `vrrp`
+- `hsrp`
+- `carp`
+- `anycast`
+- `vip`
+
 ### `IdentityKey` {#identitykey}
+
+Type: string
+
+### `ProbeKind` {#probekind}
 
 Type: string
 

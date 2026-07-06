@@ -799,8 +799,9 @@ mod tests {
         assert_eq!(records.len(), 1, "three IPs share sysName+MAC, one record");
         let r = &records[0];
         assert_eq!(r.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        let alt_addresses: Vec<IpAddr> = r.alt_ips.iter().map(|a| a.address).collect();
         assert_eq!(
-            r.alt_ips,
+            alt_addresses,
             vec![
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
