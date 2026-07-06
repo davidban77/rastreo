@@ -13,7 +13,7 @@
   ],
   "properties": {
     "alt_ips": {
-      "description": "Additional IPs the fuser correlated to the same identity — empty until a correlator fuser populates it.",
+      "description": "Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured.",
       "default": [],
       "type": "array",
       "items": {
@@ -27,7 +27,7 @@
       "format": "double"
     },
     "identity_key": {
-      "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary correlation key across scans.",
+      "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans.",
       "allOf": [
         {
           "$ref": "#/definitions/IdentityKey"
@@ -54,7 +54,7 @@
       ]
     },
     "mgmt_ip": {
-      "description": "Management IP the device was probed on. For multi-IP devices merged by the correlation fuser, this is the first target IP that survived resolution.",
+      "description": "Management IP the device was probed on. For multi-IP devices merged by the identity fuser, this is the first target IP that survived resolution.",
       "type": [
         "string",
         "null"

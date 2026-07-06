@@ -109,7 +109,7 @@ nav:
       - Targets: discover/targets.md
       - Sinks: discover/sinks.md
       - Enrichment: discover/enrichment.md
-      - Correlation: discover/correlation.md
+      - Identity: discover/identity.md
   - Probe:
       - probe/index.md
       - HTTP: probe/http.md
