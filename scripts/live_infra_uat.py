@@ -770,6 +770,9 @@ def run_cli_nats(ctx: HarnessCtx) -> tuple[bool, str]:
     try:
         tmp.write(scenario_yaml)
         tmp.close()
+        # rastreo runs as UID 65532 inside the container; NamedTemporaryFile
+        # is 0600 by default, so widen so the container's non-root user can read.
+        os.chmod(tmp.name, 0o644)
 
         publish_argv = build_cli_nats_argv(tmp.name)
         try:
