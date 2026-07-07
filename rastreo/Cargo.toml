@@ -22,6 +22,7 @@ arp = ["rastreo-core/arp"]
 ndp = ["rastreo-core/ndp"]
 oui = ["rastreo-core/oui"]
 ssh = ["rastreo-core/ssh"]
+icmp = ["rastreo-core/icmp"]
 
 [[bin]]
 name = "rastreo"

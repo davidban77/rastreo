@@ -93,4 +93,5 @@ One of:
 - { `SnmpSysName`: string }
 - { `SshBanner`: string }
 - { `SshHostKey`: string }
+- { `IcmpEchoRttMicros`: uint64 }
 

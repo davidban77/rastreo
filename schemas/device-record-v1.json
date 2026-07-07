@@ -215,7 +215,8 @@
         "Snmp",
         "Arp",
         "Ndp",
-        "Ssh"
+        "Ssh",
+        "Icmp"
       ]
     },
     "ScanMetadata": {
@@ -403,6 +404,20 @@
           "properties": {
             "SshHostKey": {
               "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "IcmpEchoRttMicros"
+          ],
+          "properties": {
+            "IcmpEchoRttMicros": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
             }
           },
           "additionalProperties": false

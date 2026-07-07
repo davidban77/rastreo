@@ -20,6 +20,8 @@ pub use pipeline::{
     run_discovery, run_discovery_cancellable, run_discovery_with_components,
     run_discovery_with_components_cancellable, DiscoverySummary,
 };
+#[cfg(feature = "icmp")]
+pub use prober::IcmpProber;
 #[cfg(feature = "ssh")]
 pub use prober::SshProber;
 pub use prober::{Prober, ProberConfig, TcpConnectProber};

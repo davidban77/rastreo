@@ -63,9 +63,10 @@ securityContext:
 # capability additions (Pod Security Standards `restricted`).
 podSecurity:
   # Grants NET_RAW to the container. Required for the ARP and NDP probers,
-  # which open AF_PACKET raw sockets to send Ethernet frames directly. Only
-  # enable when the operator submits scenarios that use `type: arp` or
-  # `type: ndp`.
+  # which open AF_PACKET raw sockets to send Ethernet frames directly, and ICMP
+  # (SOCK_RAW fallback path). Only enable when the operator submits scenarios
+  # that use `type: arp`, `type: ndp`, or `type: icmp` on a Linux host where the
+  # unprivileged ping-socket path is unavailable.
   netRaw: false
 
 # Optional inline configuration mounted at /etc/rastreo as a ConfigMap.
