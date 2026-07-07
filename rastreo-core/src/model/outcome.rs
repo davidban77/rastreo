@@ -17,6 +17,7 @@ pub enum ProbeKind {
     Ndp,
     Ssh,
     Icmp,
+    Tls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -36,6 +37,8 @@ pub enum Signal {
     SshBanner(String),
     SshHostKey(String),
     IcmpEchoRttMicros(u64),
+    TlsSubject(String),
+    TlsSanName(String),
 }
 
 impl Signal {
@@ -56,6 +59,7 @@ impl Signal {
             | Self::StunMappedAddress(_) => ProbeKind::Udp,
             Self::SshBanner(_) | Self::SshHostKey(_) => ProbeKind::Ssh,
             Self::IcmpEchoRttMicros(_) => ProbeKind::Icmp,
+            Self::TlsSubject(_) | Self::TlsSanName(_) => ProbeKind::Tls,
         }
     }
 }
@@ -92,6 +96,7 @@ mod tests {
             ProbeKind::Ndp,
             ProbeKind::Ssh,
             ProbeKind::Icmp,
+            ProbeKind::Tls,
         ] {
             let s = serde_json::to_string(&kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
@@ -291,6 +296,35 @@ mod tests {
         let json = serde_json::to_string(&signal).expect("serialize");
         let back: Signal = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(signal, back);
+    }
+
+    #[test]
+    fn probe_kind_tls_subject_maps_to_tls() {
+        assert_eq!(
+            Signal::TlsSubject("router.example.com".into()).probe_kind(),
+            ProbeKind::Tls
+        );
+    }
+
+    #[test]
+    fn probe_kind_tls_san_name_maps_to_tls() {
+        assert_eq!(
+            Signal::TlsSanName("router.example.com".into()).probe_kind(),
+            ProbeKind::Tls
+        );
+    }
+
+    #[test]
+    fn tls_signal_variants_round_trip_json() {
+        for signal in [
+            Signal::TlsSubject("router.example.com".into()),
+            Signal::TlsSanName("router.example.com".into()),
+            Signal::TlsSanName("ip:10.0.0.1".into()),
+        ] {
+            let s = serde_json::to_string(&signal).expect("serialize");
+            let back: Signal = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(signal, back);
+        }
     }
 
     #[test]

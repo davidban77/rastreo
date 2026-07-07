@@ -120,6 +120,7 @@ nav:
       - NDP: probe/ndp.md
       - SSH: probe/ssh.md
       - ICMP: probe/icmp.md
+      - TLS: probe/tls.md
   - Integrate:
       - integrate/index.md
       - Kafka: integrate/kafka.md

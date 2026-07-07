@@ -74,6 +74,7 @@ Several CLI surfaces appear conditionally based on which Cargo features were ena
 | `oui` | no | Enables the OUI vendor enrichment fuser. Accepted as `type: oui_enrichment` in the `fuser` block of YAML scenarios loaded via `--file`. |
 | `ssh` | no | Enables the SSH prober. Accepted as `type: ssh` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 | `icmp` | no | Enables the ICMP Echo prober. Prefers unprivileged `SOCK_DGRAM` and falls back to `SOCK_RAW` (requires `CAP_NET_RAW`). Accepted as `type: icmp` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
+| `tls` | no | Enables the TLS handshake prober. Opens a TLS connection to each configured port, accepts any certificate (fingerprinting, not authentication), and emits the leaf certificate's Subject CN and Subject Alternative Names as `TlsSubject` / `TlsSanName` signals. Accepted as `type: tls` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 
 ## Exit codes
 
