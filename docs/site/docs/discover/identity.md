@@ -46,15 +46,21 @@ fuser:
 
 ## Signals used for identity fusion
 
-The identity fuser weights pairs of records based on the identity signals they share:
+The identity fuser weights pairs of records based on the identity signals they share. Each shared signal contributes a positive weight; a conflicting `manufacturer` contributes a penalty. The **Merges alone?** column tells you whether that signal alone crosses the [high-band threshold](#confidence-bands) and auto-merges the pair. A signal marked **No** still counts — it just needs to combine with another to reach the merge threshold.
 
-| Shared signal | Weight | Notes |
-|---|---|---|
-| Non-virtual MAC | +0.5 | MAC comes from `record.mac`. Virtual MACs (VRRP / HSRP / CARP) are excluded — see [Virtual MAC detection](#virtual-mac-detection) below. |
-| `SnmpSysName` | +0.5 | Case-insensitive equality on the `sysName` value from any SNMP prober outcome. Empty strings do not count. |
-| Conflicting `manufacturer` | -0.3 | Applied when both records have a non-null `manufacturer` and the values differ. Only meaningful when `oui_enrichment` has populated the field. |
+| Shared signal | Weight | Merges alone? | Notes |
+|---|---|---|---|
+| Non-virtual MAC | +0.5 | No | MAC comes from `record.mac`. Virtual MACs (VRRP / HSRP / CARP) are excluded — see [Virtual MAC detection](#virtual-mac-detection) below. |
+| `SnmpSysName` | +0.5 | No | Case-insensitive equality on the `sysName` value from any SNMP prober outcome. Empty strings do not count. |
+| `SshHostKey` | +0.8 | Yes | Byte-exact equality on the OpenSSH-format host key emitted by the [SSH prober](../probe/ssh.md). Host keys are device-unique in practice, so two records that share one land at the high band on that signal alone. Empty strings do not count. |
+| Conflicting `manufacturer` | −0.3 | penalty | Applied when both records have a non-null `manufacturer` and the values differ. Only meaningful when `oui_enrichment` has populated the field. |
 
-The [SSH prober](../probe/ssh.md) already emits `SshHostKey` on every scan. The identity fuser does not currently correlate on it; that wiring lands in a follow-up. Host keys survive interface changes and IP renumbering, so two IPs that present the same key are the same device — a strong third signal once consumed. The weights, thresholds, and union-find algorithm stay unchanged when it does. SNMPv3 engine ID is the next candidate after that.
+`SshHostKey` is the strongest single-signal correlator the fuser has today. Host keys survive interface changes and IP renumbering, so two IPs that present the same key are the same device.
+
+!!! warning "Conflicting manufacturer with a matching host key"
+    Two records that share a host key (+0.8) but disagree on `manufacturer` (−0.3) land at 0.5, the medium band. The records are **not** auto-merged; instead each record's [`possible_alias_of`](#confidence-bands) is populated with the peer's `identity_key`. That combination is rare and worth investigating. A benign cause is a device that had its primary NIC swapped between scans, which changed the OUI-derived vendor. A suspicious cause is a cloned or stolen host key running on different vendor hardware.
+
+    A populated `possible_alias_of` means: another record in the same scan looks like the same device, but the evidence is not strong enough to fold them together — a human should decide.
 
 ## Confidence bands
 
@@ -82,7 +88,7 @@ A shared virtual MAC contributes **zero** weight. Two records that agree on noth
 
 ## User-declared VRRP hints
 
-If your topology uses a non-standard virtual MAC — a custom keepalived VRRP setup, a proprietary FHRP variant — declare it in `identity_hints.vrrp_groups`. Records with that MAC will contribute zero weight (same as a built-in virtual MAC), and if you also list the physical member IPs, pairs of those IPs are capped below the medium band even when their MACs would otherwise match.
+If your topology uses a non-standard virtual MAC — a custom keepalived VRRP setup, a proprietary FHRP variant — declare it in `identity_hints.vrrp_groups`. Records with that MAC will contribute zero weight (same as a built-in virtual MAC), and if you also list the physical member IPs, pairs of those IPs are capped at the medium-band lower edge even when their MACs would otherwise match — they surface with `possible_alias_of` populated instead of auto-merging.
 
 ```yaml
 fuser:

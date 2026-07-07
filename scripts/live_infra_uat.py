@@ -70,6 +70,13 @@ NATS_UAT_STREAM = f"rastreo-uat-{os.urandom(4).hex()}"
 NATS_UAT_SUBJECT = f"rastreo.uat.records.{os.urandom(4).hex()}"
 NATS_BOX_IMAGE = "natsio/nats-box:0.18.0"
 
+# target-ssh compose service. Fixed address; the SSH prober has no external
+# broker so per-run randomisation is not needed.
+TARGET_SSH_IP = "10.50.0.20"
+TARGET_SSH_PORT = 2222
+SSH_TIMEOUT_S = 20.0
+BUSYBOX_IMAGE = "busybox:1.36"
+
 # Server (host-reachable, published port).
 SERVER_HEALTH_URL = "http://localhost:8080/health"
 SERVER_SCANS_URL = "http://localhost:8080/scans"
@@ -277,6 +284,39 @@ def wait_for_nats_ready(
     return poll_until(_check, timeout_s=timeout_s, interval_s=interval_s)
 
 
+def wait_for_ssh_ready(
+    *,
+    target_ip: str = TARGET_SSH_IP,
+    port: int = TARGET_SSH_PORT,
+    network: str = COMPOSE_NETWORK,
+    timeout_s: float = READINESS_TIMEOUT_S,
+    interval_s: float = READINESS_POLL_INTERVAL_S,
+) -> bool:
+    """Poll the target-ssh service via a busybox ``nc -z`` sidecar until the
+    port accepts connections, or timeout.
+
+    Runs the check from inside the compose network so the target's private
+    address (``10.50.0.20``) is reachable.
+    """
+
+    def _check() -> bool:
+        proc = subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "--network", network,
+                BUSYBOX_IMAGE,
+                "nc", "-z", target_ip, str(port),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+        )
+        return proc.returncode == 0
+
+    return poll_until(_check, timeout_s=timeout_s, interval_s=interval_s)
+
+
 # --- Compose lifecycle -------------------------------------------------------
 
 
@@ -391,6 +431,27 @@ def record_has_open_port_signal(record: dict, port: int) -> bool:
         return False
     for sig in signals:
         if isinstance(sig, dict) and sig.get("OpenPort") == port:
+            return True
+    return False
+
+
+def record_has_signal_matching(
+    record: dict, tag: str, predicate: Callable[[str], bool]
+) -> bool:
+    """Return True if ``record.signals`` contains ``{tag: <string>}`` whose
+    string value satisfies ``predicate``.
+
+    Generic form of ``record_has_open_port_signal`` for string-valued
+    externally-tagged variants (e.g. ``SshBanner``, ``SshHostKey``).
+    """
+    signals = record.get("signals", [])
+    if not isinstance(signals, list):
+        return False
+    for sig in signals:
+        if not isinstance(sig, dict):
+            continue
+        value = sig.get(tag)
+        if isinstance(value, str) and predicate(value):
             return True
     return False
 
@@ -854,6 +915,129 @@ def run_cli_nats(ctx: HarnessCtx) -> tuple[bool, str]:
             pass
 
 
+def build_cli_ssh_scenario_yaml(
+    target_ip: str = TARGET_SSH_IP,
+    port: int = TARGET_SSH_PORT,
+) -> str:
+    """Render the scenario YAML for the CLI -> SSH row.
+
+    The SSH prober has no CLI flag surface, so the CLI runs against a
+    mounted scenario file. Field names match the ``ssh`` prober config.
+    """
+    return (
+        "version: 1\n"
+        "kind: discovery\n"
+        "scenarios:\n"
+        "  - signal_type: discover\n"
+        "    name: uat-ssh\n"
+        "    timeout_ms: 5000\n"
+        "    targets:\n"
+        f"      - Ip: {target_ip}\n"
+        "    probers:\n"
+        "      - type: ssh\n"
+        f"        ports: [{port}]\n"
+    )
+
+
+def build_cli_ssh_argv(
+    scenario_host_path: str,
+    rastreo_image: str = RASTREO_IMAGE,
+    network: str = COMPOSE_NETWORK,
+) -> list[str]:
+    """Build the docker-run argv for the CLI -> SSH row.
+
+    The scenario file is bind-mounted at ``/scenario.yaml`` inside the
+    container so the CLI can load it via ``--file``.
+    """
+    return [
+        "docker", "run", "--rm",
+        "--network", network,
+        "-v", f"{scenario_host_path}:/scenario.yaml:ro",
+        "--entrypoint", "/rastreo",
+        rastreo_image,
+        "discover",
+        "--file", "/scenario.yaml",
+    ]
+
+
+def run_cli_ssh(ctx: HarnessCtx) -> tuple[bool, str]:
+    """CLI -> SSH row: probe target-ssh via a mounted scenario file and
+    verify the emitted record carries both an ``SshBanner`` and an
+    ``SshHostKey`` signal."""
+    scenario_yaml = build_cli_ssh_scenario_yaml()
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
+    try:
+        tmp.write(scenario_yaml)
+        tmp.close()
+        # rastreo runs as UID 65532 inside the container; widen so the
+        # container's non-root user can read the mounted scenario.
+        os.chmod(tmp.name, 0o644)
+
+        argv = build_cli_ssh_argv(tmp.name)
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=SCENARIO_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"rastreo CLI (ssh) timed out after {SCENARIO_TIMEOUT_S:.0f}s"
+
+        if proc.returncode != 0:
+            stderr_tail = "\n    ".join(
+                (proc.stderr or "").strip().splitlines()[-20:]
+            )
+            return False, f"rastreo exited {proc.returncode}\n    {stderr_tail}"
+
+        try:
+            records = parse_ndjson_records(proc.stdout)
+        except json.JSONDecodeError as e:
+            return False, (
+                f"stdout was not NDJSON: {e}\n    stdout: {proc.stdout!r}"
+            )
+
+        if len(records) != 1:
+            return False, (
+                f"expected 1 record, got {len(records)}\n"
+                f"    stdout: {proc.stdout!r}"
+            )
+
+        rec = records[0]
+        key = rec.get("identity_key")
+        expected_key = f"ip:{TARGET_SSH_IP}"
+        if key != expected_key:
+            return False, (
+                f"identity_key mismatch: expected {expected_key!r}, got {key!r}"
+            )
+
+        if not record_has_signal_matching(
+            rec, "SshBanner", lambda s: s.startswith("SSH-")
+        ):
+            return False, (
+                f"record missing SshBanner starting with 'SSH-': "
+                f"{rec.get('signals')!r}"
+            )
+
+        if not record_has_signal_matching(
+            rec, "SshHostKey", lambda s: " " in s
+        ):
+            return False, (
+                f"record missing SshHostKey with '<algorithm> <base64>' shape: "
+                f"{rec.get('signals')!r}"
+            )
+
+        return True, f"SshBanner + SshHostKey signals on {TARGET_SSH_IP}"
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 # --- Matrix ------------------------------------------------------------------
 
 MATRIX: tuple[MatrixRow, ...] = (
@@ -876,6 +1060,11 @@ MATRIX: tuple[MatrixRow, ...] = (
         name="cli_nats",
         run=run_cli_nats,
         failure_log_containers=("nats", "target-1"),
+    ),
+    MatrixRow(
+        name="cli_ssh",
+        run=run_cli_ssh,
+        failure_log_containers=("target-ssh", "target-1"),
     ),
 )
 
@@ -967,6 +1156,27 @@ def run_all(
                     ok=False,
                     message=(
                         f"nats server did not become ready within "
+                        f"{READINESS_TIMEOUT_S:.0f}s"
+                    ),
+                )
+            )
+            return results
+
+        print(
+            f"==> waiting for target-ssh ({TARGET_SSH_IP}:{TARGET_SSH_PORT})",
+            file=sys.stderr,
+        )
+        if not wait_for_ssh_ready():
+            results.append(
+                RowResult(
+                    row=MatrixRow(
+                        name="readiness:target-ssh",
+                        run=lambda _c: (False, "n/a"),
+                        failure_log_containers=("target-ssh",),
+                    ),
+                    ok=False,
+                    message=(
+                        f"target-ssh did not become ready within "
                         f"{READINESS_TIMEOUT_S:.0f}s"
                     ),
                 )
@@ -1279,6 +1489,70 @@ class _ArgvBuildersTests(unittest.TestCase):
         # Delivery omitted so the Rust default (PerRecord) applies.
         self.assertNotIn("delivery:", yaml_text)
 
+    def test_build_cli_ssh_argv_shape(self) -> None:
+        argv = build_cli_ssh_argv(
+            scenario_host_path="/tmp/scenario.yaml",
+            rastreo_image="img",
+            network="net",
+        )
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "--network", "net"])
+        self.assertIn("-v", argv)
+        self.assertEqual(
+            argv[argv.index("-v") + 1], "/tmp/scenario.yaml:/scenario.yaml:ro"
+        )
+        self.assertIn("--entrypoint", argv)
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], "/rastreo")
+        self.assertIn("img", argv)
+        self.assertIn("discover", argv)
+        self.assertIn("--file", argv)
+        self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+
+    def test_build_cli_ssh_scenario_yaml_shape(self) -> None:
+        yaml_text = build_cli_ssh_scenario_yaml(
+            target_ip="10.50.0.20",
+            port=2222,
+        )
+        self.assertIn("version: 1", yaml_text)
+        self.assertIn("kind: discovery", yaml_text)
+        self.assertIn("signal_type: discover", yaml_text)
+        self.assertIn("name: uat-ssh", yaml_text)
+        self.assertIn("- Ip: 10.50.0.20", yaml_text)
+        self.assertIn("type: ssh", yaml_text)
+        self.assertIn("ports: [2222]", yaml_text)
+
+    def test_record_has_signal_matching_finds_prefix_match(self) -> None:
+        rec = {
+            "signals": [
+                {"OpenPort": 2222},
+                {"SshBanner": "SSH-2.0-Foo"},
+            ]
+        }
+        self.assertTrue(
+            record_has_signal_matching(
+                rec, "SshBanner", lambda s: s.startswith("SSH-")
+            )
+        )
+
+    def test_record_has_signal_matching_returns_false_when_no_match(self) -> None:
+        rec = {"signals": [{"OpenPort": 2222}, {"SshBanner": "not-ssh"}]}
+        self.assertFalse(
+            record_has_signal_matching(
+                rec, "SshBanner", lambda s: s.startswith("SSH-")
+            )
+        )
+        # Missing tag entirely.
+        self.assertFalse(
+            record_has_signal_matching(
+                {"signals": []}, "SshHostKey", lambda s: " " in s
+            )
+        )
+        # signals not a list.
+        self.assertFalse(
+            record_has_signal_matching(
+                {"signals": "nope"}, "SshBanner", lambda _s: True
+            )
+        )
+
 
 class _AttributeFailureTests(unittest.TestCase):
     def test_includes_row_name_and_message(self) -> None:
@@ -1304,7 +1578,14 @@ class _MatrixIntegrityTests(unittest.TestCase):
     def test_expected_row_set(self) -> None:
         names = {r.name for r in MATRIX}
         self.assertEqual(
-            names, {"cli_stdout", "server_post_scans", "cli_kafka", "cli_nats"}
+            names,
+            {
+                "cli_stdout",
+                "server_post_scans",
+                "cli_kafka",
+                "cli_nats",
+                "cli_ssh",
+            },
         )
 
     def test_failure_containers_non_empty(self) -> None:
@@ -1318,6 +1599,14 @@ class _MatrixIntegrityTests(unittest.TestCase):
         self.assertTrue(callable(row.run))
         self.assertTrue(row.failure_log_containers)
         self.assertIn("nats", row.failure_log_containers)
+
+    def test_cli_ssh_row_present(self) -> None:
+        rows = [r for r in MATRIX if r.name == "cli_ssh"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertTrue(callable(row.run))
+        self.assertTrue(row.failure_log_containers)
+        self.assertIn("target-ssh", row.failure_log_containers)
 
 
 class _RowExecutionWithMocksTests(unittest.TestCase):
@@ -1459,6 +1748,53 @@ class _RowExecutionWithMocksTests(unittest.TestCase):
             ok, msg = run_cli_nats(self._ctx())
         self.assertFalse(ok)
         self.assertIn("nats stream add", msg)
+
+    def test_run_cli_ssh_success_path(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{TARGET_SSH_IP}",
+                "signals": [
+                    {"OpenPort": TARGET_SSH_PORT},
+                    {"SshBanner": "SSH-2.0-OpenSSH_9.6"},
+                    {"SshHostKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"},
+                ],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_ssh(self._ctx())
+        self.assertTrue(ok, msg)
+        self.assertIn("SshBanner", msg)
+        self.assertIn("SshHostKey", msg)
+
+    def test_run_cli_ssh_fails_when_cli_exits_nonzero(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="ssh probe crashed"
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_ssh(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("exited 1", msg)
+
+    def test_run_cli_ssh_fails_when_banner_signal_missing(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{TARGET_SSH_IP}",
+                "signals": [
+                    {"OpenPort": TARGET_SSH_PORT},
+                    {"SshHostKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA"},
+                ],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_ssh(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("SshBanner", msg)
 
 
 def _run_self_tests() -> int:
