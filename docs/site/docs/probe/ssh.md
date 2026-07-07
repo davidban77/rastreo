@@ -4,7 +4,7 @@ description: The SSH prober — opens a TCP connection to each configured port, 
 
 # SSH prober
 
-The SSH prober captures two observable facts from every SSH server it can reach. The first is the pre-negotiation identification banner, for example `SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3`. The second is the server's host public key in OpenSSH single-line format, for example `ssh-ed25519 AAAAC3Nz…`. The banner tells you which SSH implementation and version answers on that port. The host key is a stable per-device identifier. It will feed the identity fuser once that wiring lands (see the [`SshHostKey` note on the Identity page](../discover/identity.md#signals-used-for-identity-fusion)). The prober never attempts authentication. It disconnects immediately after the key exchange completes.
+The SSH prober captures two observable facts from every SSH server it can reach. The first is the pre-negotiation identification banner, for example `SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3`. The second is the server's host public key in OpenSSH single-line format, for example `ssh-ed25519 AAAAC3Nz…`. The banner tells you which SSH implementation and version answers on that port. The host key is a stable per-device identifier. The [identity fuser](../discover/identity.md#signals-used-for-identity-fusion) consumes it as a high-weight correlation signal: two IPs that present the same host key auto-merge into a single record. The prober never attempts authentication. It disconnects immediately after the key exchange completes.
 
 ## Configuration
 
@@ -79,7 +79,7 @@ A record produced against a stock OpenSSH server contains the banner and the hos
 
 ## See also
 
-- [Identity fuser](../discover/identity.md#signals-used-for-identity-fusion) — where `SshHostKey` will slot in as a third correlation signal once the fuser starts consuming it.
+- [Identity fuser](../discover/identity.md#signals-used-for-identity-fusion) — how `SshHostKey` participates as a high-weight correlation signal (0.8, enough to auto-merge alone).
 - [Scenario schema](../reference/scenario.md#ssh) — the full `ProberConfig::Ssh` field table.
 - [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the SSH prober from the CLI via `--file`.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.

@@ -14,6 +14,7 @@ const MERGE_CONFIDENCE_BONUS: f64 = 0.1;
 
 const WEIGHT_SHARED_MAC: f64 = 0.5;
 const WEIGHT_SHARED_SYSNAME: f64 = 0.5;
+const WEIGHT_SHARED_HOST_KEY: f64 = 0.8;
 const PENALTY_CONFLICTING_MANUFACTURER: f64 = 0.3;
 const VRRP_MEMBER_WEIGHT_CAP: f64 = 0.4;
 
@@ -132,6 +133,14 @@ impl IdentityFuser {
             }
         }
 
+        let hk_a = find_ssh_host_key(&a.signals);
+        let hk_b = find_ssh_host_key(&b.signals);
+        if let (Some(ka), Some(kb)) = (hk_a, hk_b) {
+            if !ka.is_empty() && ka == kb {
+                w += WEIGHT_SHARED_HOST_KEY;
+            }
+        }
+
         if let (Some(mfa), Some(mfb)) = (a.manufacturer.as_deref(), b.manufacturer.as_deref()) {
             if !mfa.eq_ignore_ascii_case(mfb) {
                 w -= PENALTY_CONFLICTING_MANUFACTURER;
@@ -183,6 +192,13 @@ impl Fuser for IdentityFuser {
 fn find_sysname(signals: &[Signal]) -> Option<&str> {
     signals.iter().find_map(|s| match s {
         Signal::SnmpSysName(n) => Some(n.as_str()),
+        _ => None,
+    })
+}
+
+fn find_ssh_host_key(signals: &[Signal]) -> Option<&str> {
+    signals.iter().find_map(|s| match s {
+        Signal::SshHostKey(k) => Some(k.as_str()),
         _ => None,
     })
 }
@@ -1336,6 +1352,109 @@ mod tests {
             merged.alt_ips[0].responded_via,
             vec![ProbeKind::Arp, ProbeKind::Snmp, ProbeKind::TcpConnect],
         );
+    }
+
+    #[test]
+    fn two_records_shared_ssh_host_key_alone_merge() {
+        let key = Signal::SshHostKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI".into());
+        let records = vec![
+            base_record(1, None, vec![key.clone()], 0.3),
+            base_record(2, None, vec![key.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1, "shared host key alone hits high band");
+        assert_eq!(out[0].alt_ips.len(), 1);
+        assert_eq!(
+            out[0].alt_ips[0].address,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+        assert!(out[0].possible_alias_of.is_none());
+    }
+
+    #[test]
+    fn two_records_shared_ssh_host_key_and_mac_merge_high_confidence() {
+        let mac = "aa:bb:cc:11:22:33";
+        let key = Signal::SshHostKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI".into());
+        let records = vec![
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), key.clone()],
+                0.3,
+            ),
+            base_record(
+                2,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), key.clone()],
+                0.3,
+            ),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].alt_ips.len(), 1);
+    }
+
+    #[test]
+    fn two_records_shared_ssh_host_key_but_conflicting_manufacturer_medium_band() {
+        let key = Signal::SshHostKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI".into());
+        let mut a = base_record(1, None, vec![key.clone()], 0.3);
+        a.manufacturer = Some("Cisco Systems, Inc".into());
+        let mut b = base_record(2, None, vec![key.clone()], 0.3);
+        b.manufacturer = Some("Juniper Networks".into());
+        let out = correlate(vec![a, b]);
+        assert_eq!(out.len(), 2, "0.8 - 0.3 = 0.5, medium band");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn two_records_different_ssh_host_keys_stay_separate() {
+        let records = vec![
+            base_record(
+                1,
+                None,
+                vec![Signal::SshHostKey("ssh-ed25519 AAAA1111".into())],
+                0.3,
+            ),
+            base_record(
+                2,
+                None,
+                vec![Signal::SshHostKey("ssh-ed25519 AAAA2222".into())],
+                0.3,
+            ),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn two_records_one_empty_ssh_host_key_stays_separate() {
+        let records = vec![
+            base_record(
+                1,
+                None,
+                vec![Signal::SshHostKey("ssh-ed25519 AAAAC3Nz".into())],
+                0.3,
+            ),
+            base_record(2, None, vec![Signal::SshHostKey(String::new())], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn three_records_all_share_ssh_host_key_merge_into_one() {
+        let key = Signal::SshHostKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI".into());
+        let records = vec![
+            base_record(1, None, vec![key.clone()], 0.3),
+            base_record(2, None, vec![key.clone()], 0.3),
+            base_record(3, None, vec![key.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].alt_ips.len(), 2);
     }
 
     #[test]
