@@ -15,6 +15,8 @@ const MERGE_CONFIDENCE_BONUS: f64 = 0.1;
 const WEIGHT_SHARED_MAC: f64 = 0.5;
 const WEIGHT_SHARED_SYSNAME: f64 = 0.5;
 const WEIGHT_SHARED_HOST_KEY: f64 = 0.8;
+const WEIGHT_SHARED_TLS_SUBJECT: f64 = 0.3;
+const WEIGHT_SHARED_TLS_SAN: f64 = 0.5;
 const PENALTY_CONFLICTING_MANUFACTURER: f64 = 0.3;
 const VRRP_MEMBER_WEIGHT_CAP: f64 = 0.4;
 
@@ -141,6 +143,20 @@ impl IdentityFuser {
             }
         }
 
+        let subj_a = find_tls_subject(&a.signals);
+        let subj_b = find_tls_subject(&b.signals);
+        if let (Some(sa), Some(sb)) = (subj_a, subj_b) {
+            if !sa.is_empty() && sa == sb {
+                w += WEIGHT_SHARED_TLS_SUBJECT;
+            }
+        }
+
+        let sans_a = collect_tls_san_names(&a.signals);
+        let sans_b = collect_tls_san_names(&b.signals);
+        if !sans_a.is_empty() && !sans_b.is_empty() && any_tls_san_overlap(&sans_a, &sans_b) {
+            w += WEIGHT_SHARED_TLS_SAN;
+        }
+
         if let (Some(mfa), Some(mfb)) = (a.manufacturer.as_deref(), b.manufacturer.as_deref()) {
             if !mfa.eq_ignore_ascii_case(mfb) {
                 w -= PENALTY_CONFLICTING_MANUFACTURER;
@@ -201,6 +217,27 @@ fn find_ssh_host_key(signals: &[Signal]) -> Option<&str> {
         Signal::SshHostKey(k) => Some(k.as_str()),
         _ => None,
     })
+}
+
+fn find_tls_subject(signals: &[Signal]) -> Option<&str> {
+    signals.iter().find_map(|s| match s {
+        Signal::TlsSubject(v) => Some(v.as_str()),
+        _ => None,
+    })
+}
+
+fn collect_tls_san_names(signals: &[Signal]) -> Vec<&str> {
+    signals
+        .iter()
+        .filter_map(|s| match s {
+            Signal::TlsSanName(v) => Some(v.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn any_tls_san_overlap(a: &[&str], b: &[&str]) -> bool {
+    a.iter().any(|name| !name.is_empty() && b.contains(name))
 }
 
 fn collect_medium_peers(
@@ -1476,5 +1513,102 @@ mod tests {
             merged.alt_ips[0].responded_via,
             vec![ProbeKind::TcpConnect, ProbeKind::Arp, ProbeKind::Snmp],
         );
+    }
+
+    #[test]
+    fn two_records_shared_tls_subject_and_san_merge() {
+        let subject = Signal::TlsSubject("router.example.com".into());
+        let san = Signal::TlsSanName("router.example.com".into());
+        let records = vec![
+            base_record(1, None, vec![subject.clone(), san.clone()], 0.3),
+            base_record(2, None, vec![subject.clone(), san.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1, "0.3 + 0.5 = 0.8, high band");
+        assert_eq!(out[0].alt_ips.len(), 1);
+        assert_eq!(
+            out[0].alt_ips[0].address,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+        assert!(out[0].possible_alias_of.is_none());
+    }
+
+    #[test]
+    fn two_records_shared_tls_subject_only_stays_separate() {
+        let subject = Signal::TlsSubject("router.example.com".into());
+        let records = vec![
+            base_record(1, None, vec![subject.clone()], 0.3),
+            base_record(2, None, vec![subject.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2, "subject alone = 0.3, below medium band");
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn two_records_shared_tls_san_only_medium_band() {
+        let san = Signal::TlsSanName("router.example.com".into());
+        let records = vec![
+            base_record(1, None, vec![san.clone()], 0.3),
+            base_record(2, None, vec![san.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2, "san alone = 0.5, medium band");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn two_records_different_tls_subjects_and_sans_stay_separate() {
+        let records = vec![
+            base_record(
+                1,
+                None,
+                vec![
+                    Signal::TlsSubject("router-a.example.com".into()),
+                    Signal::TlsSanName("router-a.example.com".into()),
+                ],
+                0.3,
+            ),
+            base_record(
+                2,
+                None,
+                vec![
+                    Signal::TlsSubject("router-b.example.com".into()),
+                    Signal::TlsSanName("router-b.example.com".into()),
+                ],
+                0.3,
+            ),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn two_records_shared_tls_ip_san_merges() {
+        let subject = Signal::TlsSubject("router.example.com".into());
+        let san = Signal::TlsSanName("ip:10.0.0.1".into());
+        let records = vec![
+            base_record(1, None, vec![subject.clone(), san.clone()], 0.3),
+            base_record(2, None, vec![subject.clone(), san.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1, "IP SAN matches by byte-exact equality");
+        assert_eq!(out[0].alt_ips.len(), 1);
+    }
+
+    #[test]
+    fn two_records_shared_tls_subject_and_san_but_conflicting_manufacturer_medium_band() {
+        let subject = Signal::TlsSubject("router.example.com".into());
+        let san = Signal::TlsSanName("router.example.com".into());
+        let mut a = base_record(1, None, vec![subject.clone(), san.clone()], 0.3);
+        a.manufacturer = Some("Cisco Systems, Inc".into());
+        let mut b = base_record(2, None, vec![subject.clone(), san.clone()], 0.3);
+        b.manufacturer = Some("Juniper Networks".into());
+        let out = correlate(vec![a, b]);
+        assert_eq!(out.len(), 2, "0.3 + 0.5 - 0.3 = 0.5, medium band");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
     }
 }
