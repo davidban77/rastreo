@@ -91,6 +91,14 @@ TLS_TIMEOUT_S = 20.0
 # CAP_NET_RAW for the SOCK_RAW fallback path when SOCK_DGRAM isn't usable.
 ICMP_TIMEOUT_S = 20.0
 
+# ReverseDns prober row queries a public resolver from inside the compose
+# network. Cloudflare's second resolver (1.0.0.1) has a stable PTR for
+# 1.1.1.1 -> one.one.one.one, so the assertion is deterministic.
+RDNS_TARGET_IP = "1.1.1.1"
+RDNS_RESOLVER_IP = "1.0.0.1"
+RDNS_EXPECTED_NAME = "one.one.one.one"
+RDNS_TIMEOUT_S = 20.0
+
 # Server (host-reachable, published port).
 SERVER_HEALTH_URL = "http://localhost:8080/health"
 SERVER_SCANS_URL = "http://localhost:8080/scans"
@@ -1344,6 +1352,124 @@ def run_cli_tls(ctx: HarnessCtx) -> tuple[bool, str]:
             pass
 
 
+def build_cli_reverse_dns_scenario_yaml(
+    target_ip: str = RDNS_TARGET_IP,
+    resolver_ip: str = RDNS_RESOLVER_IP,
+) -> str:
+    """Render the scenario YAML for the CLI -> ReverseDns row.
+
+    The ReverseDns prober has no CLI flag surface, so the CLI runs against a
+    mounted scenario file. Field names match the ``reverse_dns`` prober config.
+    """
+    return (
+        "version: 1\n"
+        "kind: discovery\n"
+        "scenarios:\n"
+        "  - signal_type: discover\n"
+        "    name: uat-reverse-dns\n"
+        "    timeout_ms: 8000\n"
+        "    targets:\n"
+        f"      - Ip: {target_ip}\n"
+        "    probers:\n"
+        "      - type: reverse_dns\n"
+        f"        resolvers: [\"{resolver_ip}\"]\n"
+    )
+
+
+def build_cli_reverse_dns_argv(
+    scenario_host_path: str,
+    rastreo_image: str = RASTREO_IMAGE,
+    network: str = COMPOSE_NETWORK,
+) -> list[str]:
+    """Build the docker-run argv for the CLI -> ReverseDns row.
+
+    The scenario file is bind-mounted at ``/scenario.yaml`` inside the
+    container so the CLI can load it via ``--file``. Reverse DNS is a plain
+    UDP query, so no ``--cap-add`` is needed.
+    """
+    return [
+        "docker", "run", "--rm",
+        "--network", network,
+        "-v", f"{scenario_host_path}:/scenario.yaml:ro",
+        "--entrypoint", "/rastreo",
+        rastreo_image,
+        "discover",
+        "--file", "/scenario.yaml",
+    ]
+
+
+def run_cli_reverse_dns(ctx: HarnessCtx) -> tuple[bool, str]:
+    """CLI -> ReverseDns row: probe RDNS_TARGET_IP via RDNS_RESOLVER_IP through
+    a mounted scenario file and verify the emitted record carries a
+    ``ReverseDnsName`` signal whose value is ``RDNS_EXPECTED_NAME``."""
+    scenario_yaml = build_cli_reverse_dns_scenario_yaml()
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
+    try:
+        tmp.write(scenario_yaml)
+        tmp.close()
+        # rastreo runs as UID 65532 inside the container; widen so the
+        # container's non-root user can read the mounted scenario.
+        os.chmod(tmp.name, 0o644)
+
+        argv = build_cli_reverse_dns_argv(tmp.name)
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=SCENARIO_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"rastreo CLI (reverse_dns) timed out after {SCENARIO_TIMEOUT_S:.0f}s"
+            )
+
+        if proc.returncode != 0:
+            stderr_tail = "\n    ".join(
+                (proc.stderr or "").strip().splitlines()[-20:]
+            )
+            return False, f"rastreo exited {proc.returncode}\n    {stderr_tail}"
+
+        try:
+            records = parse_ndjson_records(proc.stdout)
+        except json.JSONDecodeError as e:
+            return False, (
+                f"stdout was not NDJSON: {e}\n    stdout: {proc.stdout!r}"
+            )
+
+        if len(records) != 1:
+            return False, (
+                f"expected 1 record, got {len(records)}\n"
+                f"    stdout: {proc.stdout!r}"
+            )
+
+        rec = records[0]
+        key = rec.get("identity_key")
+        expected_key = f"ip:{RDNS_TARGET_IP}"
+        if key != expected_key:
+            return False, (
+                f"identity_key mismatch: expected {expected_key!r}, got {key!r}"
+            )
+
+        if not record_has_signal_matching(
+            rec, "ReverseDnsName", lambda v: v == RDNS_EXPECTED_NAME
+        ):
+            return False, (
+                f"record missing ReverseDnsName == {RDNS_EXPECTED_NAME!r}: "
+                f"{rec.get('signals')!r}"
+            )
+
+        return True, f"ReverseDnsName={RDNS_EXPECTED_NAME} on {RDNS_TARGET_IP}"
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 # --- Matrix ------------------------------------------------------------------
 
 MATRIX: tuple[MatrixRow, ...] = (
@@ -1381,6 +1507,13 @@ MATRIX: tuple[MatrixRow, ...] = (
         name="cli_tls",
         run=run_cli_tls,
         failure_log_containers=("target-tls", "target-1"),
+    ),
+    MatrixRow(
+        name="cli_reverse_dns",
+        run=run_cli_reverse_dns,
+        # No in-network compose service participates (external resolver).
+        # target-1 covers a network-reachability sanity dump on failure.
+        failure_log_containers=("target-1",),
     ),
 )
 
@@ -1917,6 +2050,36 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("type: tls", yaml_text)
         self.assertIn("ports: [443]", yaml_text)
 
+    def test_build_cli_reverse_dns_argv_shape(self) -> None:
+        argv = build_cli_reverse_dns_argv(
+            scenario_host_path="/tmp/scenario.yaml",
+            rastreo_image="img",
+            network="net",
+        )
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "--network", "net"])
+        # Reverse DNS is a plain UDP query — no raw-socket capability needed.
+        self.assertNotIn("--cap-add=NET_RAW", argv)
+        self.assertIn("-v", argv)
+        self.assertEqual(
+            argv[argv.index("-v") + 1], "/tmp/scenario.yaml:/scenario.yaml:ro"
+        )
+        self.assertIn("--entrypoint", argv)
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], "/rastreo")
+        self.assertIn("img", argv)
+        self.assertIn("discover", argv)
+        self.assertIn("--file", argv)
+        self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+
+    def test_build_cli_reverse_dns_scenario_yaml_shape(self) -> None:
+        yaml_text = build_cli_reverse_dns_scenario_yaml()
+        self.assertIn("version: 1", yaml_text)
+        self.assertIn("kind: discovery", yaml_text)
+        self.assertIn("signal_type: discover", yaml_text)
+        self.assertIn("name: uat-reverse-dns", yaml_text)
+        self.assertIn("- Ip: 1.1.1.1", yaml_text)
+        self.assertIn("type: reverse_dns", yaml_text)
+        self.assertIn('resolvers: ["1.0.0.1"]', yaml_text)
+
     def test_record_has_signal_matching_finds_prefix_match(self) -> None:
         rec = {
             "signals": [
@@ -2008,6 +2171,7 @@ class _MatrixIntegrityTests(unittest.TestCase):
                 "cli_ssh",
                 "cli_icmp",
                 "cli_tls",
+                "cli_reverse_dns",
             },
         )
 
@@ -2046,6 +2210,13 @@ class _MatrixIntegrityTests(unittest.TestCase):
         self.assertTrue(callable(row.run))
         self.assertTrue(row.failure_log_containers)
         self.assertIn("target-tls", row.failure_log_containers)
+
+    def test_cli_reverse_dns_row_present(self) -> None:
+        rows = [r for r in MATRIX if r.name == "cli_reverse_dns"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertTrue(callable(row.run))
+        self.assertTrue(row.failure_log_containers)
 
 
 class _RowExecutionWithMocksTests(unittest.TestCase):
@@ -2365,6 +2536,56 @@ class _RowExecutionWithMocksTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("TlsSanName", msg)
         self.assertIn(TARGET_TLS_EXPECTED_IP_SAN, msg)
+
+    def test_run_cli_reverse_dns_success_path(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{RDNS_TARGET_IP}",
+                "signals": [
+                    {"ReverseDnsName": RDNS_EXPECTED_NAME},
+                ],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_reverse_dns(self._ctx())
+        self.assertTrue(ok, msg)
+        self.assertIn("ReverseDnsName", msg)
+        self.assertIn(RDNS_EXPECTED_NAME, msg)
+        self.assertIn(RDNS_TARGET_IP, msg)
+
+    def test_run_cli_reverse_dns_fails_when_signal_missing(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{RDNS_TARGET_IP}",
+                "signals": [{"OpenPort": 53}],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_reverse_dns(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("ReverseDnsName", msg)
+
+    def test_run_cli_reverse_dns_fails_when_signal_value_wrong(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{RDNS_TARGET_IP}",
+                "signals": [{"ReverseDnsName": "wrong.host"}],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_reverse_dns(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("ReverseDnsName", msg)
+        self.assertIn(RDNS_EXPECTED_NAME, msg)
 
 
 def _run_self_tests() -> int:
