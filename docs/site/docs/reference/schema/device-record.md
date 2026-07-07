@@ -94,4 +94,6 @@ One of:
 - { `SshBanner`: string }
 - { `SshHostKey`: string }
 - { `IcmpEchoRttMicros`: uint64 }
+- { `TlsSubject`: string }
+- { `TlsSanName`: string }
 

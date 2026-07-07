@@ -54,7 +54,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Nine probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, and `icmp`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, and `icmp` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Ten probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
 
 ### `tcp_connect`
 
@@ -209,6 +209,19 @@ Sends ICMP Echo Requests (IPv4 protocol 1, IPv6 protocol 58 — dispatched by ta
 
 ```json
 {"type": "icmp", "count": 3, "interval_ms": 200}
+```
+
+### `tls`
+
+Opens a TCP connection to each configured port, performs a TLS handshake accepting any certificate, then extracts the Subject Common Name and Subject Alternative Names from the server's leaf certificate. Emits `TlsSubject(<value>)` for the CN and one `TlsSanName(<value>)` per SAN entry. No trust-chain validation is performed — the prober fingerprints what a server calls itself, it does not authenticate it. See the [TLS prober page](../probe/tls.md) for the SAN encoding rules, IP-vs-DNS format, and the identity-fingerprint rationale.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"tls"`. |
+| `ports` | array of u16 | no | `[443]` | Ports to probe. Sorted and deduplicated at construction. |
+
+```json
+{"type": "tls", "ports": [443, 8443]}
 ```
 
 ## Encoders

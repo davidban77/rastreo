@@ -216,7 +216,8 @@
         "Arp",
         "Ndp",
         "Ssh",
-        "Icmp"
+        "Icmp",
+        "Tls"
       ]
     },
     "ScanMetadata": {
@@ -418,6 +419,30 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "TlsSubject"
+          ],
+          "properties": {
+            "TlsSubject": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "TlsSanName"
+          ],
+          "properties": {
+            "TlsSanName": {
+              "type": "string"
             }
           },
           "additionalProperties": false

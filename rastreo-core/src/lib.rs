@@ -24,6 +24,8 @@ pub use pipeline::{
 pub use prober::IcmpProber;
 #[cfg(feature = "ssh")]
 pub use prober::SshProber;
+#[cfg(feature = "tls")]
+pub use prober::TlsProber;
 pub use prober::{Prober, ProberConfig, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};

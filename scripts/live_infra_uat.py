@@ -77,6 +77,16 @@ TARGET_SSH_PORT = 2222
 SSH_TIMEOUT_S = 20.0
 BUSYBOX_IMAGE = "busybox:1.36"
 
+# target-tls compose service. Self-signed cert generated at container start
+# with a known CN + DNS SAN + IP SAN so the TLS prober's fingerprints can be
+# asserted exactly.
+TARGET_TLS_IP = "10.50.0.30"
+TARGET_TLS_PORT = 443
+TARGET_TLS_EXPECTED_CN = "uat-tls.rastreo.local"
+TARGET_TLS_EXPECTED_DNS_SAN = "uat-tls.rastreo.local"
+TARGET_TLS_EXPECTED_IP_SAN = "ip:10.50.0.30"
+TLS_TIMEOUT_S = 20.0
+
 # ICMP prober row runs against the nginx targets; the container needs
 # CAP_NET_RAW for the SOCK_RAW fallback path when SOCK_DGRAM isn't usable.
 ICMP_TIMEOUT_S = 20.0
@@ -301,6 +311,39 @@ def wait_for_ssh_ready(
 
     Runs the check from inside the compose network so the target's private
     address (``10.50.0.20``) is reachable.
+    """
+
+    def _check() -> bool:
+        proc = subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "--network", network,
+                BUSYBOX_IMAGE,
+                "nc", "-z", target_ip, str(port),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+        )
+        return proc.returncode == 0
+
+    return poll_until(_check, timeout_s=timeout_s, interval_s=interval_s)
+
+
+def wait_for_tls_ready(
+    *,
+    target_ip: str = TARGET_TLS_IP,
+    port: int = TARGET_TLS_PORT,
+    network: str = COMPOSE_NETWORK,
+    timeout_s: float = READINESS_TIMEOUT_S,
+    interval_s: float = READINESS_POLL_INTERVAL_S,
+) -> bool:
+    """Poll the target-tls service via a busybox ``nc -z`` sidecar until the
+    HTTPS port accepts connections, or timeout.
+
+    Runs the check from inside the compose network so the target's private
+    address (``10.50.0.30``) is reachable.
     """
 
     def _check() -> bool:
@@ -1170,6 +1213,137 @@ def run_cli_icmp(ctx: HarnessCtx) -> tuple[bool, str]:
             pass
 
 
+def build_cli_tls_scenario_yaml(
+    target_ip: str = TARGET_TLS_IP,
+    port: int = TARGET_TLS_PORT,
+) -> str:
+    """Render the scenario YAML for the CLI -> TLS row.
+
+    The TLS prober has no CLI flag surface, so the CLI runs against a
+    mounted scenario file. Field names match the ``tls`` prober config.
+    """
+    return (
+        "version: 1\n"
+        "kind: discovery\n"
+        "scenarios:\n"
+        "  - signal_type: discover\n"
+        "    name: uat-tls\n"
+        "    timeout_ms: 5000\n"
+        "    targets:\n"
+        f"      - Ip: {target_ip}\n"
+        "    probers:\n"
+        "      - type: tls\n"
+        f"        ports: [{port}]\n"
+    )
+
+
+def build_cli_tls_argv(
+    scenario_host_path: str,
+    rastreo_image: str = RASTREO_IMAGE,
+    network: str = COMPOSE_NETWORK,
+) -> list[str]:
+    """Build the docker-run argv for the CLI -> TLS row.
+
+    The scenario file is bind-mounted at ``/scenario.yaml`` inside the
+    container so the CLI can load it via ``--file``.
+    """
+    return [
+        "docker", "run", "--rm",
+        "--network", network,
+        "-v", f"{scenario_host_path}:/scenario.yaml:ro",
+        "--entrypoint", "/rastreo",
+        rastreo_image,
+        "discover",
+        "--file", "/scenario.yaml",
+    ]
+
+
+def run_cli_tls(ctx: HarnessCtx) -> tuple[bool, str]:
+    """CLI -> TLS row: probe target-tls via a mounted scenario file and
+    verify the emitted record carries the known ``TlsSubject`` and both
+    the DNS and IP ``TlsSanName`` fingerprints."""
+    scenario_yaml = build_cli_tls_scenario_yaml()
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
+    try:
+        tmp.write(scenario_yaml)
+        tmp.close()
+        # rastreo runs as UID 65532 inside the container; widen so the
+        # container's non-root user can read the mounted scenario.
+        os.chmod(tmp.name, 0o644)
+
+        argv = build_cli_tls_argv(tmp.name)
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=SCENARIO_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"rastreo CLI (tls) timed out after {SCENARIO_TIMEOUT_S:.0f}s"
+
+        if proc.returncode != 0:
+            stderr_tail = "\n    ".join(
+                (proc.stderr or "").strip().splitlines()[-20:]
+            )
+            return False, f"rastreo exited {proc.returncode}\n    {stderr_tail}"
+
+        try:
+            records = parse_ndjson_records(proc.stdout)
+        except json.JSONDecodeError as e:
+            return False, (
+                f"stdout was not NDJSON: {e}\n    stdout: {proc.stdout!r}"
+            )
+
+        if len(records) != 1:
+            return False, (
+                f"expected 1 record, got {len(records)}\n"
+                f"    stdout: {proc.stdout!r}"
+            )
+
+        rec = records[0]
+        key = rec.get("identity_key")
+        expected_key = f"ip:{TARGET_TLS_IP}"
+        if key != expected_key:
+            return False, (
+                f"identity_key mismatch: expected {expected_key!r}, got {key!r}"
+            )
+
+        if not record_has_signal_matching(
+            rec, "TlsSubject", lambda s: s == TARGET_TLS_EXPECTED_CN
+        ):
+            return False, (
+                f"record missing TlsSubject == {TARGET_TLS_EXPECTED_CN!r}: "
+                f"{rec.get('signals')!r}"
+            )
+
+        if not record_has_signal_matching(
+            rec, "TlsSanName", lambda s: s == TARGET_TLS_EXPECTED_DNS_SAN
+        ):
+            return False, (
+                f"record missing TlsSanName == {TARGET_TLS_EXPECTED_DNS_SAN!r}: "
+                f"{rec.get('signals')!r}"
+            )
+
+        if not record_has_signal_matching(
+            rec, "TlsSanName", lambda s: s == TARGET_TLS_EXPECTED_IP_SAN
+        ):
+            return False, (
+                f"record missing TlsSanName == {TARGET_TLS_EXPECTED_IP_SAN!r}: "
+                f"{rec.get('signals')!r}"
+            )
+
+        return True, f"TlsSubject + DNS/IP TlsSanName on {TARGET_TLS_IP}"
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 # --- Matrix ------------------------------------------------------------------
 
 MATRIX: tuple[MatrixRow, ...] = (
@@ -1202,6 +1376,11 @@ MATRIX: tuple[MatrixRow, ...] = (
         name="cli_icmp",
         run=run_cli_icmp,
         failure_log_containers=("target-1", "target-2"),
+    ),
+    MatrixRow(
+        name="cli_tls",
+        run=run_cli_tls,
+        failure_log_containers=("target-tls", "target-1"),
     ),
 )
 
@@ -1314,6 +1493,27 @@ def run_all(
                     ok=False,
                     message=(
                         f"target-ssh did not become ready within "
+                        f"{READINESS_TIMEOUT_S:.0f}s"
+                    ),
+                )
+            )
+            return results
+
+        print(
+            f"==> waiting for target-tls ({TARGET_TLS_IP}:{TARGET_TLS_PORT})",
+            file=sys.stderr,
+        )
+        if not wait_for_tls_ready():
+            results.append(
+                RowResult(
+                    row=MatrixRow(
+                        name="readiness:target-tls",
+                        run=lambda _c: (False, "n/a"),
+                        failure_log_containers=("target-tls",),
+                    ),
+                    ok=False,
+                    message=(
+                        f"target-tls did not become ready within "
                         f"{READINESS_TIMEOUT_S:.0f}s"
                     ),
                 )
@@ -1689,6 +1889,34 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("count: 3", yaml_text)
         self.assertIn("interval_ms: 100", yaml_text)
 
+    def test_build_cli_tls_argv_shape(self) -> None:
+        argv = build_cli_tls_argv(
+            scenario_host_path="/tmp/scenario.yaml",
+            rastreo_image="img",
+            network="net",
+        )
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "--network", "net"])
+        self.assertIn("-v", argv)
+        self.assertEqual(
+            argv[argv.index("-v") + 1], "/tmp/scenario.yaml:/scenario.yaml:ro"
+        )
+        self.assertIn("--entrypoint", argv)
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], "/rastreo")
+        self.assertIn("img", argv)
+        self.assertIn("discover", argv)
+        self.assertIn("--file", argv)
+        self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+
+    def test_build_cli_tls_scenario_yaml_shape(self) -> None:
+        yaml_text = build_cli_tls_scenario_yaml()
+        self.assertIn("version: 1", yaml_text)
+        self.assertIn("kind: discovery", yaml_text)
+        self.assertIn("signal_type: discover", yaml_text)
+        self.assertIn("name: uat-tls", yaml_text)
+        self.assertIn("- Ip: 10.50.0.30", yaml_text)
+        self.assertIn("type: tls", yaml_text)
+        self.assertIn("ports: [443]", yaml_text)
+
     def test_record_has_signal_matching_finds_prefix_match(self) -> None:
         rec = {
             "signals": [
@@ -1779,6 +2007,7 @@ class _MatrixIntegrityTests(unittest.TestCase):
                 "cli_nats",
                 "cli_ssh",
                 "cli_icmp",
+                "cli_tls",
             },
         )
 
@@ -1809,6 +2038,14 @@ class _MatrixIntegrityTests(unittest.TestCase):
         self.assertTrue(callable(row.run))
         self.assertTrue(row.failure_log_containers)
         self.assertIn("target-1", row.failure_log_containers)
+
+    def test_cli_tls_row_present(self) -> None:
+        rows = [r for r in MATRIX if r.name == "cli_tls"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertTrue(callable(row.run))
+        self.assertTrue(row.failure_log_containers)
+        self.assertIn("target-tls", row.failure_log_containers)
 
 
 class _RowExecutionWithMocksTests(unittest.TestCase):
@@ -2051,6 +2288,83 @@ class _RowExecutionWithMocksTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("expected 3 records", msg)
         self.assertIn("got 2", msg)
+
+    def test_run_cli_tls_success_path(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{TARGET_TLS_IP}",
+                "signals": [
+                    {"OpenPort": TARGET_TLS_PORT},
+                    {"TlsSubject": TARGET_TLS_EXPECTED_CN},
+                    {"TlsSanName": TARGET_TLS_EXPECTED_DNS_SAN},
+                    {"TlsSanName": TARGET_TLS_EXPECTED_IP_SAN},
+                ],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_tls(self._ctx())
+        self.assertTrue(ok, msg)
+        self.assertIn("TlsSubject", msg)
+        self.assertIn(TARGET_TLS_IP, msg)
+
+    def test_run_cli_tls_fails_when_subject_missing(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{TARGET_TLS_IP}",
+                "signals": [
+                    {"TlsSanName": TARGET_TLS_EXPECTED_DNS_SAN},
+                    {"TlsSanName": TARGET_TLS_EXPECTED_IP_SAN},
+                ],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_tls(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("TlsSubject", msg)
+
+    def test_run_cli_tls_fails_when_dns_san_missing(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{TARGET_TLS_IP}",
+                "signals": [
+                    {"TlsSubject": TARGET_TLS_EXPECTED_CN},
+                    {"TlsSanName": TARGET_TLS_EXPECTED_IP_SAN},
+                ],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_tls(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("TlsSanName", msg)
+        self.assertIn(TARGET_TLS_EXPECTED_DNS_SAN, msg)
+
+    def test_run_cli_tls_fails_when_ip_san_missing(self) -> None:
+        stdout = json.dumps(
+            {
+                "identity_key": f"ip:{TARGET_TLS_IP}",
+                "signals": [
+                    {"TlsSubject": TARGET_TLS_EXPECTED_CN},
+                    {"TlsSanName": TARGET_TLS_EXPECTED_DNS_SAN},
+                ],
+            }
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_tls(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("TlsSanName", msg)
+        self.assertIn(TARGET_TLS_EXPECTED_IP_SAN, msg)
 
 
 def _run_self_tests() -> int:

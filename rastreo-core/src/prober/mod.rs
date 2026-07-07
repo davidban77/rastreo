@@ -13,6 +13,8 @@ pub mod snmp;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 pub mod tcp_connect;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod udp;
 
 #[cfg(feature = "arp")]
@@ -33,6 +35,8 @@ pub use snmp::{SnmpProber, SnmpVersion, UsmAuth, UsmCredentials, UsmPrivacy};
 #[cfg(feature = "ssh")]
 pub use ssh::SshProber;
 pub use tcp_connect::TcpConnectProber;
+#[cfg(feature = "tls")]
+pub use tls::TlsProber;
 pub use udp::{UdpProber, UdpProtocol};
 
 use crate::error::RastreoError;
@@ -116,6 +120,11 @@ pub enum ProberConfig {
         #[serde(default = "icmp::default_interval_ms")]
         interval_ms: u64,
     },
+    #[cfg(feature = "tls")]
+    Tls {
+        #[serde(default = "tls::default_ports")]
+        ports: Vec<u16>,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -173,6 +182,8 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
         ProberConfig::Icmp { count, interval_ms } => {
             Ok(Box::new(IcmpProber::new(*count, *interval_ms)?))
         }
+        #[cfg(feature = "tls")]
+        ProberConfig::Tls { ports } => Ok(Box::new(TlsProber::new(ports.clone())?)),
     }
 }
 
@@ -730,6 +741,51 @@ mod tests {
             }
             Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
             Ok(_) => panic!("zero count must error"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "tls"))]
+    #[test]
+    fn prober_config_deserializes_tls_variant_with_defaults() {
+        let yaml = "type: tls\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize tls");
+        match config {
+            ProberConfig::Tls { ports } => assert_eq!(ports, vec![443]),
+            other => panic!("expected Tls variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "tls"))]
+    #[test]
+    fn prober_config_deserializes_tls_variant_fully_populated() {
+        let yaml = "type: tls\nports: [443, 8443]\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize tls");
+        match config {
+            ProberConfig::Tls { ports } => assert_eq!(ports, vec![443, 8443]),
+            other => panic!("expected Tls variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn create_prober_tls_produces_tls_prober() {
+        let config = ProberConfig::Tls {
+            ports: crate::prober::tls::default_ports(),
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Tls);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn create_prober_tls_propagates_empty_ports_error() {
+        let config = ProberConfig::Tls { ports: Vec::new() };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("port"), "got: {msg}");
+            }
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("empty ports must error"),
         }
     }
 
