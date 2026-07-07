@@ -67,7 +67,7 @@ RUN mkdir -p rastreo-core/src rastreo/src rastreo-server/src xtask/src && \
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp,oui,nats,ssh -p rastreo -p rastreo-server 2>/dev/null || true
+    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp -p rastreo -p rastreo-server 2>/dev/null || true
 
 # Copy real source and build. xtask is a workspace member but excluded from
 # default-members and not passed to `-p`, so it isn't compiled — the manifest
@@ -82,7 +82,7 @@ RUN touch rastreo-core/src/lib.rs rastreo/src/main.rs rastreo-server/src/main.rs
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp,oui,nats,ssh -p rastreo -p rastreo-server
+    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp -p rastreo -p rastreo-server
 
 # Copy binaries to a known location regardless of target triple and grant
 # CAP_NET_RAW as a file capability so non-root users can open AF_PACKET raw

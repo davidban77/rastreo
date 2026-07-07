@@ -3,6 +3,8 @@ pub mod arp;
 pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
+#[cfg(feature = "icmp")]
+pub mod icmp;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 mod redacted;
@@ -18,6 +20,8 @@ pub use arp::ArpProber;
 pub use dns::{DnsProber, DnsQueryType, DnsTransport};
 #[cfg(feature = "http")]
 pub use http::{HttpProber, HttpScheme};
+#[cfg(feature = "icmp")]
+pub use icmp::IcmpProber;
 #[cfg(feature = "ndp")]
 pub use ndp::NdpProber;
 #[cfg(feature = "snmp")]
@@ -105,6 +109,13 @@ pub enum ProberConfig {
         #[serde(default = "ssh::default_ports")]
         ports: Vec<u16>,
     },
+    #[cfg(feature = "icmp")]
+    Icmp {
+        #[serde(default = "icmp::default_count")]
+        count: u32,
+        #[serde(default = "icmp::default_interval_ms")]
+        interval_ms: u64,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -158,6 +169,10 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
         ProberConfig::Ndp { interface } => Ok(Box::new(NdpProber::new(interface.clone())?)),
         #[cfg(feature = "ssh")]
         ProberConfig::Ssh { ports } => Ok(Box::new(SshProber::new(ports.clone())?)),
+        #[cfg(feature = "icmp")]
+        ProberConfig::Icmp { count, interval_ms } => {
+            Ok(Box::new(IcmpProber::new(*count, *interval_ms)?))
+        }
     }
 }
 
@@ -660,6 +675,61 @@ mod tests {
             }
             Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
             Ok(_) => panic!("empty ports must error"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "icmp"))]
+    #[test]
+    fn prober_config_deserializes_icmp_variant_with_defaults() {
+        let yaml = "type: icmp\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize icmp");
+        match config {
+            ProberConfig::Icmp { count, interval_ms } => {
+                assert_eq!(count, 3);
+                assert_eq!(interval_ms, 200);
+            }
+            other => panic!("expected Icmp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "icmp"))]
+    #[test]
+    fn prober_config_deserializes_icmp_variant_fully_populated() {
+        let yaml = "type: icmp\ncount: 5\ninterval_ms: 100\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize icmp");
+        match config {
+            ProberConfig::Icmp { count, interval_ms } => {
+                assert_eq!(count, 5);
+                assert_eq!(interval_ms, 100);
+            }
+            other => panic!("expected Icmp variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn create_prober_icmp_produces_icmp_prober() {
+        let config = ProberConfig::Icmp {
+            count: crate::prober::icmp::default_count(),
+            interval_ms: crate::prober::icmp::default_interval_ms(),
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Icmp);
+    }
+
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn create_prober_icmp_propagates_zero_count_error() {
+        let config = ProberConfig::Icmp {
+            count: 0,
+            interval_ms: 200,
+        };
+        match create_prober(&config) {
+            Err(RastreoError::Config(crate::error::ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("count"), "got: {msg}");
+            }
+            Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            Ok(_) => panic!("zero count must error"),
         }
     }
 

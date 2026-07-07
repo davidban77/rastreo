@@ -54,7 +54,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Eight probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, `ndp`, and `ssh`. The `http`, `snmp`, `arp`, `ndp`, and `ssh` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Nine probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, and `icmp`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, and `icmp` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
 
 ### `tcp_connect`
 
@@ -195,6 +195,20 @@ Opens a TCP connection to each configured port, captures the pre-negotiation SSH
 
 ```json
 {"type": "ssh", "ports": [22]}
+```
+
+### `icmp`
+
+Sends ICMP Echo Requests (IPv4 protocol 1, IPv6 protocol 58 — dispatched by target family) and emits the minimum round-trip time observed across the send batch as an `IcmpEchoRttMicros(<microseconds>)` signal in unsigned integer microseconds. The target is marked reachable as soon as any reply arrives; a target with no replies contributes no signal. The prober tries an unprivileged `SOCK_DGRAM` socket first and falls back to `SOCK_RAW` when the kernel refuses it; the `SOCK_RAW` path requires `CAP_NET_RAW`. See the [ICMP prober page](../probe/icmp.md) for the payload shape, capability requirements, and per-runtime setup.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"icmp"`. |
+| `count` | u32 | no | `3` | Number of Echo Requests to send. Minimum 1. |
+| `interval_ms` | u64 | no | `200` | Milliseconds between consecutive requests. Zero means send as fast as the kernel accepts. |
+
+```json
+{"type": "icmp", "count": 3, "interval_ms": 200}
 ```
 
 ## Encoders

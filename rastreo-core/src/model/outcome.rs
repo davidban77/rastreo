@@ -16,6 +16,7 @@ pub enum ProbeKind {
     Arp,
     Ndp,
     Ssh,
+    Icmp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -34,6 +35,7 @@ pub enum Signal {
     SnmpSysName(String),
     SshBanner(String),
     SshHostKey(String),
+    IcmpEchoRttMicros(u64),
 }
 
 impl Signal {
@@ -53,6 +55,7 @@ impl Signal {
             | Self::MemcachedVersion(_)
             | Self::StunMappedAddress(_) => ProbeKind::Udp,
             Self::SshBanner(_) | Self::SshHostKey(_) => ProbeKind::Ssh,
+            Self::IcmpEchoRttMicros(_) => ProbeKind::Icmp,
         }
     }
 }
@@ -88,6 +91,7 @@ mod tests {
             ProbeKind::Arp,
             ProbeKind::Ndp,
             ProbeKind::Ssh,
+            ProbeKind::Icmp,
         ] {
             let s = serde_json::to_string(&kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
@@ -271,6 +275,22 @@ mod tests {
             Signal::SshHostKey("ssh-ed25519 AAAAC3Nz".into()).probe_kind(),
             ProbeKind::Ssh
         );
+    }
+
+    #[test]
+    fn probe_kind_icmp_echo_rtt_micros_maps_to_icmp() {
+        assert_eq!(
+            Signal::IcmpEchoRttMicros(1234).probe_kind(),
+            ProbeKind::Icmp
+        );
+    }
+
+    #[test]
+    fn icmp_signal_round_trips_json() {
+        let signal = Signal::IcmpEchoRttMicros(987_654);
+        let json = serde_json::to_string(&signal).expect("serialize");
+        let back: Signal = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(signal, back);
     }
 
     #[test]

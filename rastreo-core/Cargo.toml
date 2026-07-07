@@ -34,6 +34,7 @@ ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
 nats = ["dep:async-nats", "dep:bytes", "dep:futures"]
 oui = ["dep:flate2"]
 ssh = ["dep:russh"]
+icmp = ["dep:socket2", "dep:pnet_packet"]
 
 [dependencies]
 serde = { workspace = true }
@@ -73,6 +74,7 @@ async-nats = { version = "0.49", default-features = false, features = ["ring", "
 bytes = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }
 russh = { version = "0.62", default-features = false, features = ["ring", "rsa"], optional = true }
+socket2 = { version = "0.6", features = ["all"], optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }

@@ -73,6 +73,7 @@ Several CLI surfaces appear conditionally based on which Cargo features were ena
 | `ndp` | no | Enables the NDP prober for IPv6 link-layer neighbor discovery. Requires `CAP_NET_RAW` at runtime. Accepted as `type: ndp` in YAML scenarios loaded via `--file`. |
 | `oui` | no | Enables the OUI vendor enrichment fuser. Accepted as `type: oui_enrichment` in the `fuser` block of YAML scenarios loaded via `--file`. |
 | `ssh` | no | Enables the SSH prober. Accepted as `type: ssh` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
+| `icmp` | no | Enables the ICMP Echo prober. Prefers unprivileged `SOCK_DGRAM` and falls back to `SOCK_RAW` (requires `CAP_NET_RAW`). Accepted as `type: icmp` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 
 ## Exit codes
 
