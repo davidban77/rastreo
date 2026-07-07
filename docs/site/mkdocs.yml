@@ -114,6 +114,7 @@ nav:
       - probe/index.md
       - HTTP: probe/http.md
       - DNS: probe/dns.md
+      - Reverse DNS: probe/reverse-dns.md
       - UDP: probe/udp.md
       - SNMP: probe/snmp.md
       - ARP: probe/arp.md

@@ -96,4 +96,5 @@ One of:
 - { `IcmpEchoRttMicros`: uint64 }
 - { `TlsSubject`: string }
 - { `TlsSanName`: string }
+- { `ReverseDnsName`: string }
 

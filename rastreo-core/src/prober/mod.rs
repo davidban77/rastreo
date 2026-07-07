@@ -8,6 +8,7 @@ pub mod icmp;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 mod redacted;
+pub mod reverse_dns;
 #[cfg(feature = "snmp")]
 pub mod snmp;
 #[cfg(feature = "ssh")]
@@ -30,6 +31,7 @@ pub use ndp::NdpProber;
 pub use redacted::Community;
 #[cfg(any(feature = "snmp", feature = "nats"))]
 pub use redacted::Password;
+pub use reverse_dns::ReverseDnsProber;
 #[cfg(feature = "snmp")]
 pub use snmp::{SnmpProber, SnmpVersion, UsmAuth, UsmCredentials, UsmPrivacy};
 #[cfg(feature = "ssh")]
@@ -125,6 +127,10 @@ pub enum ProberConfig {
         #[serde(default = "tls::default_ports")]
         ports: Vec<u16>,
     },
+    ReverseDns {
+        #[serde(default = "reverse_dns::default_resolvers")]
+        resolvers: Vec<std::net::IpAddr>,
+    },
 }
 
 pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoError> {
@@ -184,6 +190,9 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
         }
         #[cfg(feature = "tls")]
         ProberConfig::Tls { ports } => Ok(Box::new(TlsProber::new(ports.clone())?)),
+        ProberConfig::ReverseDns { resolvers } => {
+            Ok(Box::new(ReverseDnsProber::new(resolvers.clone())?))
+        }
     }
 }
 
@@ -787,6 +796,45 @@ mod tests {
             Err(other) => panic!("expected ConfigError::InvalidValue, got {other:?}"),
             Ok(_) => panic!("empty ports must error"),
         }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn prober_config_deserializes_reverse_dns_variant_with_defaults() {
+        let yaml = "type: reverse_dns\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize reverse_dns");
+        match config {
+            ProberConfig::ReverseDns { resolvers } => assert!(resolvers.is_empty()),
+            other => panic!("expected ReverseDns variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn prober_config_deserializes_reverse_dns_variant_with_custom_resolvers() {
+        let yaml = "type: reverse_dns\nresolvers: [\"1.1.1.1\", \"8.8.8.8\"]\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize reverse_dns");
+        match config {
+            ProberConfig::ReverseDns { resolvers } => {
+                assert_eq!(
+                    resolvers,
+                    vec![
+                        IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+                        IpAddr::V4(std::net::Ipv4Addr::new(8, 8, 8, 8)),
+                    ]
+                );
+            }
+            other => panic!("expected ReverseDns variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_prober_reverse_dns_variant_produces_prober() {
+        let config = ProberConfig::ReverseDns {
+            resolvers: vec![IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))],
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::ReverseDns);
     }
 
     #[cfg(all(feature = "config", feature = "snmp"))]

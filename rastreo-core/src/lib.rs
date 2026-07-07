@@ -26,7 +26,7 @@ pub use prober::IcmpProber;
 pub use prober::SshProber;
 #[cfg(feature = "tls")]
 pub use prober::TlsProber;
-pub use prober::{Prober, ProberConfig, TcpConnectProber};
+pub use prober::{Prober, ProberConfig, ReverseDnsProber, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};
 pub use sink::{FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, StdoutSink};

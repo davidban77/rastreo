@@ -54,7 +54,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Ten probers are available today: `tcp_connect`, `http`, `dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, and `udp` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Eleven probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, `reverse_dns`, and `udp` are always available.
 
 ### `tcp_connect`
 
@@ -101,6 +101,19 @@ Treats each resolved target as a DNS server, sends a query for each configured `
 
 ```json
 {"type": "dns", "ports": [53], "query_names": ["example.com"], "query_type": "a"}
+```
+
+### `reverse_dns`
+
+Issues a PTR query for each target IP against the configured resolvers (or the host's system resolver when none are configured) and emits each returned hostname as a `ReverseDnsName(<hostname>)` signal. IPv4 arpa-name construction (`in-addr.arpa`) and IPv6 arpa-name construction (`ip6.arpa`) are handled automatically from the target `IpAddr`. See the [reverse DNS prober page](../probe/reverse-dns.md) for resolver-selection semantics and empty-response handling.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"reverse_dns"`. |
+| `resolvers` | array of IP address | no | `[]` (system resolver) | Explicit resolver IPs to query. Empty means use the host's system resolver configuration. Resolvers are contacted over UDP on port 53. |
+
+```json
+{"type": "reverse_dns", "resolvers": ["1.1.1.1", "8.8.8.8"]}
 ```
 
 ### `udp`
