@@ -77,6 +77,10 @@ TARGET_SSH_PORT = 2222
 SSH_TIMEOUT_S = 20.0
 BUSYBOX_IMAGE = "busybox:1.36"
 
+# ICMP prober row runs against the nginx targets; the container needs
+# CAP_NET_RAW for the SOCK_RAW fallback path when SOCK_DGRAM isn't usable.
+ICMP_TIMEOUT_S = 20.0
+
 # Server (host-reachable, published port).
 SERVER_HEALTH_URL = "http://localhost:8080/health"
 SERVER_SCANS_URL = "http://localhost:8080/scans"
@@ -436,22 +440,24 @@ def record_has_open_port_signal(record: dict, port: int) -> bool:
 
 
 def record_has_signal_matching(
-    record: dict, tag: str, predicate: Callable[[str], bool]
+    record: dict, tag: str, predicate: Callable[[object], bool]
 ) -> bool:
-    """Return True if ``record.signals`` contains ``{tag: <string>}`` whose
-    string value satisfies ``predicate``.
+    """Return True if ``record.signals`` contains ``{tag: <value>}`` whose
+    value satisfies ``predicate``.
 
-    Generic form of ``record_has_open_port_signal`` for string-valued
-    externally-tagged variants (e.g. ``SshBanner``, ``SshHostKey``).
+    Generic form of ``record_has_open_port_signal`` for externally-tagged
+    variants with a single payload — string-valued (e.g. ``SshBanner``,
+    ``SshHostKey``) or numeric (e.g. ``IcmpEchoRttMicros``). Missing tags are
+    skipped so the predicate isn't handed ``None``; type-checking is the
+    predicate's job.
     """
     signals = record.get("signals", [])
     if not isinstance(signals, list):
         return False
     for sig in signals:
-        if not isinstance(sig, dict):
+        if not isinstance(sig, dict) or tag not in sig:
             continue
-        value = sig.get(tag)
-        if isinstance(value, str) and predicate(value):
+        if predicate(sig[tag]):
             return True
     return False
 
@@ -1038,6 +1044,132 @@ def run_cli_ssh(ctx: HarnessCtx) -> tuple[bool, str]:
             pass
 
 
+def build_cli_icmp_scenario_yaml(
+    target_ips: Sequence[str] = TARGET_IPS,
+    count: int = 3,
+    interval_ms: int = 100,
+) -> str:
+    """Render the scenario YAML for the CLI -> ICMP row.
+
+    The ICMP prober has no CLI flag surface, so the CLI runs against a
+    mounted scenario file. Field names match the ``icmp`` prober config.
+    """
+    targets_yaml = "\n".join(f"      - Ip: {ip}" for ip in target_ips)
+    return (
+        "version: 1\n"
+        "kind: discovery\n"
+        "scenarios:\n"
+        "  - signal_type: discover\n"
+        "    name: uat-icmp\n"
+        "    timeout_ms: 5000\n"
+        "    targets:\n"
+        f"{targets_yaml}\n"
+        "    probers:\n"
+        "      - type: icmp\n"
+        f"        count: {count}\n"
+        f"        interval_ms: {interval_ms}\n"
+    )
+
+
+def build_cli_icmp_argv(
+    scenario_host_path: str,
+    rastreo_image: str = RASTREO_IMAGE,
+    network: str = COMPOSE_NETWORK,
+) -> list[str]:
+    """Build the docker-run argv for the CLI -> ICMP row.
+
+    Adds ``--cap-add=NET_RAW`` so the container has the raw-socket capability
+    in its bounding set; the image ships with ``cap_net_raw+ep`` as a file
+    capability but the runtime cap must be present for it to activate.
+    """
+    return [
+        "docker", "run", "--rm",
+        "--network", network,
+        "--cap-add=NET_RAW",
+        "-v", f"{scenario_host_path}:/scenario.yaml:ro",
+        "--entrypoint", "/rastreo",
+        rastreo_image,
+        "discover",
+        "--file", "/scenario.yaml",
+    ]
+
+
+def run_cli_icmp(ctx: HarnessCtx) -> tuple[bool, str]:
+    """CLI -> ICMP row: probe the 3 nginx targets and verify each emitted
+    record carries an ``IcmpEchoRttMicros`` signal with a positive value."""
+    scenario_yaml = build_cli_icmp_scenario_yaml()
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
+    try:
+        tmp.write(scenario_yaml)
+        tmp.close()
+        # rastreo runs as UID 65532 inside the container; widen so the
+        # container's non-root user can read the mounted scenario.
+        os.chmod(tmp.name, 0o644)
+
+        argv = build_cli_icmp_argv(tmp.name)
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=SCENARIO_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"rastreo CLI (icmp) timed out after {SCENARIO_TIMEOUT_S:.0f}s"
+
+        if proc.returncode != 0:
+            stderr_tail = "\n    ".join(
+                (proc.stderr or "").strip().splitlines()[-20:]
+            )
+            return False, f"rastreo exited {proc.returncode}\n    {stderr_tail}"
+
+        try:
+            records = parse_ndjson_records(proc.stdout)
+        except json.JSONDecodeError as e:
+            return False, (
+                f"stdout was not NDJSON: {e}\n    stdout: {proc.stdout!r}"
+            )
+
+        if len(records) != len(TARGET_IPS):
+            return False, (
+                f"expected {len(TARGET_IPS)} records, got {len(records)}\n"
+                f"    stdout: {proc.stdout!r}"
+            )
+
+        seen_keys: set[str] = set()
+        for rec in records:
+            key = rec.get("identity_key")
+            if not isinstance(key, str):
+                return False, f"record missing identity_key: {rec!r}"
+            seen_keys.add(key)
+            if not record_has_signal_matching(
+                rec,
+                "IcmpEchoRttMicros",
+                lambda v: isinstance(v, int) and v > 0,
+            ):
+                return False, (
+                    f"record {key!r} missing positive IcmpEchoRttMicros signal: "
+                    f"{rec.get('signals')!r}"
+                )
+
+        expected_keys = {f"ip:{ip}" for ip in TARGET_IPS}
+        if seen_keys != expected_keys:
+            return False, (
+                f"identity_key mismatch: expected {sorted(expected_keys)}, "
+                f"got {sorted(seen_keys)}"
+            )
+
+        return True, f"IcmpEchoRttMicros on {len(records)} targets"
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 # --- Matrix ------------------------------------------------------------------
 
 MATRIX: tuple[MatrixRow, ...] = (
@@ -1065,6 +1197,11 @@ MATRIX: tuple[MatrixRow, ...] = (
         name="cli_ssh",
         run=run_cli_ssh,
         failure_log_containers=("target-ssh", "target-1"),
+    ),
+    MatrixRow(
+        name="cli_icmp",
+        run=run_cli_icmp,
+        failure_log_containers=("target-1", "target-2"),
     ),
 )
 
@@ -1520,6 +1657,38 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("type: ssh", yaml_text)
         self.assertIn("ports: [2222]", yaml_text)
 
+    def test_build_cli_icmp_argv_shape(self) -> None:
+        argv = build_cli_icmp_argv(
+            scenario_host_path="/tmp/scenario.yaml",
+            rastreo_image="img",
+            network="net",
+        )
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "--network", "net"])
+        self.assertIn("--cap-add=NET_RAW", argv)
+        self.assertIn("-v", argv)
+        self.assertEqual(
+            argv[argv.index("-v") + 1], "/tmp/scenario.yaml:/scenario.yaml:ro"
+        )
+        self.assertIn("--entrypoint", argv)
+        self.assertEqual(argv[argv.index("--entrypoint") + 1], "/rastreo")
+        self.assertIn("img", argv)
+        self.assertIn("discover", argv)
+        self.assertIn("--file", argv)
+        self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+
+    def test_build_cli_icmp_scenario_yaml_shape(self) -> None:
+        yaml_text = build_cli_icmp_scenario_yaml()
+        self.assertIn("version: 1", yaml_text)
+        self.assertIn("kind: discovery", yaml_text)
+        self.assertIn("signal_type: discover", yaml_text)
+        self.assertIn("name: uat-icmp", yaml_text)
+        self.assertIn("- Ip: 10.50.0.10", yaml_text)
+        self.assertIn("- Ip: 10.50.0.11", yaml_text)
+        self.assertIn("- Ip: 10.50.0.12", yaml_text)
+        self.assertIn("type: icmp", yaml_text)
+        self.assertIn("count: 3", yaml_text)
+        self.assertIn("interval_ms: 100", yaml_text)
+
     def test_record_has_signal_matching_finds_prefix_match(self) -> None:
         rec = {
             "signals": [
@@ -1550,6 +1719,30 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertFalse(
             record_has_signal_matching(
                 {"signals": "nope"}, "SshBanner", lambda _s: True
+            )
+        )
+
+    def test_record_has_signal_matching_finds_numeric_match(self) -> None:
+        rec = {
+            "signals": [
+                {"OpenPort": 80},
+                {"IcmpEchoRttMicros": 42},
+            ]
+        }
+        self.assertTrue(
+            record_has_signal_matching(
+                rec,
+                "IcmpEchoRttMicros",
+                lambda v: isinstance(v, int) and v > 0,
+            )
+        )
+        # Zero fails the positive-value predicate.
+        rec_zero = {"signals": [{"IcmpEchoRttMicros": 0}]}
+        self.assertFalse(
+            record_has_signal_matching(
+                rec_zero,
+                "IcmpEchoRttMicros",
+                lambda v: isinstance(v, int) and v > 0,
             )
         )
 
@@ -1585,6 +1778,7 @@ class _MatrixIntegrityTests(unittest.TestCase):
                 "cli_kafka",
                 "cli_nats",
                 "cli_ssh",
+                "cli_icmp",
             },
         )
 
@@ -1607,6 +1801,14 @@ class _MatrixIntegrityTests(unittest.TestCase):
         self.assertTrue(callable(row.run))
         self.assertTrue(row.failure_log_containers)
         self.assertIn("target-ssh", row.failure_log_containers)
+
+    def test_cli_icmp_row_present(self) -> None:
+        rows = [r for r in MATRIX if r.name == "cli_icmp"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertTrue(callable(row.run))
+        self.assertTrue(row.failure_log_containers)
+        self.assertIn("target-1", row.failure_log_containers)
 
 
 class _RowExecutionWithMocksTests(unittest.TestCase):
@@ -1795,6 +1997,60 @@ class _RowExecutionWithMocksTests(unittest.TestCase):
             ok, msg = run_cli_ssh(self._ctx())
         self.assertFalse(ok)
         self.assertIn("SshBanner", msg)
+
+    def test_run_cli_icmp_success_path(self) -> None:
+        stdout = "\n".join(
+            json.dumps(
+                {
+                    "identity_key": f"ip:{ip}",
+                    "signals": [{"IcmpEchoRttMicros": 1234}],
+                }
+            )
+            for ip in TARGET_IPS
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_icmp(self._ctx())
+        self.assertTrue(ok, msg)
+        self.assertIn("IcmpEchoRttMicros", msg)
+        self.assertIn("3 targets", msg)
+
+    def test_run_cli_icmp_fails_when_signal_missing(self) -> None:
+        # One record has no IcmpEchoRttMicros signal.
+        records = [
+            {"identity_key": f"ip:{ip}", "signals": [{"IcmpEchoRttMicros": 1000}]}
+            for ip in TARGET_IPS
+        ]
+        records[1]["signals"] = [{"OpenPort": 80}]
+        stdout = "\n".join(json.dumps(r) for r in records) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_icmp(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("IcmpEchoRttMicros", msg)
+
+    def test_run_cli_icmp_fails_when_record_count_wrong(self) -> None:
+        stdout = "\n".join(
+            json.dumps(
+                {
+                    "identity_key": f"ip:{ip}",
+                    "signals": [{"IcmpEchoRttMicros": 1000}],
+                }
+            )
+            for ip in TARGET_IPS[:2]  # emit only 2 records instead of 3
+        ) + "\n"
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed):
+            ok, msg = run_cli_icmp(self._ctx())
+        self.assertFalse(ok)
+        self.assertIn("expected 3 records", msg)
+        self.assertIn("got 2", msg)
 
 
 def _run_self_tests() -> int:

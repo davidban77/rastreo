@@ -139,6 +139,9 @@ jobs:
       - name: Test rastreo-core without default features
         run: cargo test -p rastreo-core --no-default-features
 
+      - name: Test rastreo-core with only the icmp feature
+        run: cargo test -p rastreo-core --no-default-features --features icmp
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
