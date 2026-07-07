@@ -6,16 +6,26 @@ This is the library crate. It owns **all** domain logic. If it probes a network,
 
 ```
 src/
-├── lib.rs       ← crate-root re-exports + version()
-├── error.rs     ← RastreoError umbrella + sub-enums
+├── lib.rs           ← crate-root re-exports + version()
+├── error.rs         ← RastreoError umbrella + sub-enums
 ├── model/
-│   ├── target.rs    ← Target, ResolvedTarget
-│   ├── outcome.rs   ← ProbeKind, ProbeOutcome, Signal, ProbeCtx
-│   └── device.rs    ← DeviceRecord, IdentityKey, Confidence
+│   ├── target.rs        ← Target, ResolvedTarget
+│   ├── outcome.rs       ← ProbeKind, ProbeOutcome, Signal, ProbeCtx
+│   ├── device.rs        ← DeviceRecord, IdentityKey, AltIp, AltIpRole
+│   ├── scan.rs          ← ScanMetadata, source_config_hash
+│   └── serde_iso8601.rs ← RFC 3339 serde helpers for SystemTime
 ├── resolver/mod.rs  ← Resolver trait + HickoryResolver default impl
 ├── prober/
-│   ├── mod.rs       ← Prober trait + ProberConfig + create_prober factory
-│   └── tcp_connect.rs ← TcpConnectProber
+│   ├── mod.rs           ← Prober trait + ProberConfig + create_prober factory
+│   ├── tcp_connect.rs   ← TcpConnectProber
+│   ├── http.rs          ← HttpProber (feature: http)
+│   ├── dns.rs           ← DnsProber
+│   ├── udp/             ← UdpProber (NTP / SIP / memcached / STUN)
+│   ├── snmp/            ← SnmpProber v1/v2c/v3-USM (feature: snmp)
+│   ├── arp.rs           ← ArpProber (feature: arp)
+│   ├── ndp.rs           ← NdpProber (feature: ndp)
+│   ├── ssh.rs           ← SshProber (feature: ssh)
+│   └── redacted.rs      ← Password, Community — Debug + Serialize redact plaintext
 ├── encoder/
 │   ├── mod.rs       ← Encoder trait + EncoderConfig + create_encoder factory
 │   └── ndjson.rs    ← NdjsonEncoder
@@ -24,9 +34,13 @@ src/
 │   ├── stdout.rs    ← StdoutSink
 │   ├── file.rs      ← FileSink
 │   ├── memory.rs    ← MemorySink + MemorySinkHandle
-│   └── kafka.rs     ← KafkaSink (feature: kafka)
+│   ├── kafka.rs     ← KafkaSink (feature: kafka)
+│   └── nats.rs      ← NatsSink (feature: nats)
 ├── scheduler/mod.rs ← Scheduler trait + BoundedScheduler default impl
-├── fuser/mod.rs     ← Fuser trait + DirectFuser default impl
+├── fuser/
+│   ├── mod.rs       ← Fuser trait + DirectFuser default impl
+│   ├── oui.rs       ← OuiEnrichmentFuser (feature: oui)
+│   └── identity.rs  ← IdentityFuser (MAC + SnmpSysName + SshHostKey correlation)
 ├── pipeline.rs     ← run_discovery + DiscoverySummary
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
@@ -41,13 +55,15 @@ src/
 | `snmp`   | no      | Enables the SNMP prober for vendor / interface fingerprinting. |
 | `arp`    | no      | Enables the ARP prober for IPv4 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
 | `ndp`    | no      | Enables the NDP prober for IPv6 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
+| `ssh`    | no      | Enables the SSH prober. Reads the pre-negotiation banner and captures the server's host key via `russh` (client mode, `ring` crypto backend). No authentication is attempted. |
+| `nats`   | no      | Enables `NatsSink` (`async-nats` JetStream client with `ring` crypto backend). |
 | `oui`    | no      | Enables the `oui_enrichment` fuser and bundles a compressed Wireshark manuf snapshot (`data/manuf.gz`, ~800 KB in-binary). Populates `DeviceRecord::manufacturer` from a MAC-address OUI lookup. |
 
-The `config`, `http`, `kafka`, `snmp`, `arp`, `ndp`, and `oui` features each pull in their own dependency chain when enabled. `arp` and `ndp` share the `pnet_datalink` + `pnet_packet` + `ipnetwork` dep chain — enabling either pulls the full set in.
+The `config`, `http`, `kafka`, `snmp`, `arp`, `ndp`, `ssh`, `nats`, and `oui` features each pull in their own dependency chain when enabled. `arp` and `ndp` share the `pnet_datalink` + `pnet_packet` + `ipnetwork` dep chain — enabling either pulls the full set in. `ssh` and `nats` both use `ring` as the crypto backend, so enabling either brings the `ring` chain in.
 
 ## Prober Config Conventions
 
-Every prober (`TcpConnect`, `Http`, and any future `Udp` / `Dns` / `Snmp` / `Arp` addition) is a variant on `ProberConfig` — a `#[serde(tag = "type", rename_all = "snake_case")] #[non_exhaustive]` tagged enum. New probers slot in without breaking existing scenarios because `#[non_exhaustive]` prevents downstream exhaustive matching.
+Every prober (`TcpConnect`, `Http`, `Dns`, `Udp`, `Snmp`, `Arp`, `Ndp`, `Ssh`) is a variant on `ProberConfig` — a `#[serde(tag = "type", rename_all = "snake_case")] #[non_exhaustive]` tagged enum. New probers slot in without breaking existing scenarios because `#[non_exhaustive]` prevents downstream exhaustive matching.
 
 **Field naming.** snake_case. Prefer descriptive nouns over abbreviations (`user_agent` over `ua`, `path` over `endpoint`, `query_names` over `queries`). If the protocol has a well-known term, use it verbatim (`community` for SNMP, `interface` for ARP).
 
