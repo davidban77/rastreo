@@ -162,13 +162,25 @@ fn ip_from_bytes(bytes: &[u8]) -> Option<IpAddr> {
     }
 }
 
-async fn handshake_and_extract(connector: &TlsConnector, addr: SocketAddr) -> Option<Vec<Signal>> {
-    let stream = TcpStream::connect(addr).await.ok()?;
+async fn handshake_and_extract(
+    connector: &TlsConnector,
+    stream: TcpStream,
+    addr: SocketAddr,
+) -> Vec<Signal> {
     let server_name = ServerName::IpAddress(addr.ip().into());
-    let tls_stream = connector.connect(server_name, stream).await.ok()?;
+    let tls_stream = match connector.connect(server_name, stream).await {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
     let (_, connection) = tls_stream.get_ref();
-    let peer_certs = connection.peer_certificates()?;
-    let leaf = peer_certs.first()?;
+    let peer_certs = match connection.peer_certificates() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let leaf = match peer_certs.first() {
+        Some(l) => l,
+        None => return Vec::new(),
+    };
     let der = leaf.as_ref();
 
     let mut signals = Vec::new();
@@ -178,7 +190,7 @@ async fn handshake_and_extract(connector: &TlsConnector, addr: SocketAddr) -> Op
     for entry in extract_san_entries(der) {
         signals.push(Signal::TlsSanName(entry));
     }
-    Some(signals)
+    signals
 }
 
 #[async_trait::async_trait]
@@ -198,10 +210,16 @@ impl Prober for TlsProber {
 
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
-            if let Ok(Some(port_signals)) =
-                timeout(ctx.timeout, handshake_and_extract(&connector, addr)).await
+            let stream = match timeout(ctx.timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(s)) => s,
+                _ => continue,
+            };
+            any_reachable = true;
+            signals.push(Signal::OpenPort(port));
+
+            if let Ok(port_signals) =
+                timeout(ctx.timeout, handshake_and_extract(&connector, stream, addr)).await
             {
-                any_reachable = true;
                 signals.extend(port_signals);
             }
         }
@@ -447,7 +465,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_reports_no_signal_when_server_speaks_plain_tcp() {
+    async fn probe_emits_open_port_but_no_tls_signals_on_non_tls_port() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         tokio::spawn(async move {
@@ -464,8 +482,80 @@ mod tests {
             )
             .await
             .expect("probe ok");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 1);
+        assert!(matches!(&outcome.signals[0], Signal::OpenPort(p) if *p == port));
+    }
+
+    #[tokio::test]
+    async fn tls_probe_emits_open_port_on_successful_connect() {
+        let sans = vec![SanType::DnsName("alt.example.com".try_into().expect("dns"))];
+        let port = spawn_tls_stub_server("router.example.com", sans).await;
+        let prober = TlsProber::new(vec![port]).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(5_000),
+            )
+            .await
+            .expect("probe ok");
+        let open_port = outcome
+            .signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .expect("OpenPort emitted");
+        assert_eq!(open_port, port);
+    }
+
+    #[tokio::test]
+    async fn tls_probe_emits_open_port_before_protocol_signals() {
+        let sans = vec![SanType::DnsName("alt.example.com".try_into().expect("dns"))];
+        let port = spawn_tls_stub_server("router.example.com", sans).await;
+        let prober = TlsProber::new(vec![port]).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(5_000),
+            )
+            .await
+            .expect("probe ok");
+        let open_port_idx = outcome
+            .signals
+            .iter()
+            .position(|s| matches!(s, Signal::OpenPort(_)))
+            .expect("OpenPort emitted");
+        let subject_idx = outcome
+            .signals
+            .iter()
+            .position(|s| matches!(s, Signal::TlsSubject(_)))
+            .expect("TlsSubject emitted");
+        assert!(
+            open_port_idx < subject_idx,
+            "OpenPort must precede TlsSubject"
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_probe_does_not_emit_open_port_on_connect_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let prober = TlsProber::new(vec![port]).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(500),
+            )
+            .await
+            .expect("probe ok");
         assert!(!outcome.reachable);
-        assert!(outcome.signals.is_empty());
+        assert!(!outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::OpenPort(_))));
     }
 
     #[test]

@@ -146,6 +146,9 @@ pub struct DeviceRecord {
     pub last_seen: SystemTime,
     /// Deduplicated list of every observable fact collected from every prober that targeted this device.
     pub signals: Vec<Signal>,
+    /// Deduplicated `ProbeKind` values whose outcomes contributed to this record. Preserves authoritative provenance from ingest through fusion so consumers do not infer prober attribution from signals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probe_kinds: Vec<ProbeKind>,
     /// Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build.
     pub schema_version: String,
     /// Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.
@@ -260,6 +263,7 @@ mod tests {
             confidence: Confidence::new(0.8).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
             signals: vec![Signal::Mac("aa:bb:cc:dd:ee:ff".into())],
+            probe_kinds: Vec::new(),
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
@@ -301,6 +305,35 @@ mod tests {
     }
 
     #[test]
+    fn device_record_omits_probe_kinds_when_empty() {
+        let record = fresh_record();
+        let json = serde_json::to_value(&record).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(
+            obj.get("probe_kinds").is_none(),
+            "probe_kinds must be omitted when empty"
+        );
+    }
+
+    #[test]
+    fn device_record_round_trips_probe_kinds() {
+        let record = DeviceRecord {
+            probe_kinds: vec![ProbeKind::Http, ProbeKind::Snmp],
+            ..fresh_record()
+        };
+        let s = serde_json::to_string(&record).expect("serialize");
+        let back: DeviceRecord = serde_json::from_str(&s).expect("deserialize");
+        assert_eq!(back.probe_kinds, vec![ProbeKind::Http, ProbeKind::Snmp]);
+    }
+
+    #[test]
+    fn device_record_missing_probe_kinds_deserializes_to_empty_vec() {
+        let json = r#"{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.1,"last_seen":"2024-07-03T15:16:40Z","signals":[],"schema_version":"v1","schema_id":"https://schemas.rastreo.dev/device-record/v1.json","alt_ips":[],"possible_alias_of":null,"scan_metadata":{"scan_id":"","scenario_name":null,"initiated_at":"1970-01-01T00:00:00Z","source_config_hash":null}}"#;
+        let back: DeviceRecord = serde_json::from_str(json).expect("deserialize");
+        assert!(back.probe_kinds.is_empty());
+    }
+
+    #[test]
     fn schemars_derives_produce_valid_json_schema() {
         let schema = schemars::schema_for!(DeviceRecord);
         let json = serde_json::to_value(&schema).expect("schema serializes");
@@ -327,6 +360,7 @@ mod tests {
             confidence: Confidence::new(0.0).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
             signals: Vec::new(),
+            probe_kinds: Vec::new(),
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),

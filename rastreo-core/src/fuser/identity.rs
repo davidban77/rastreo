@@ -434,7 +434,7 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
             if !seen_ips.contains(&ip) {
                 seen_ips.insert(ip);
                 let role = altip_role_from_mac(r.mac.as_deref());
-                let responded_via = uniq_probe_kinds(&r.signals);
+                let responded_via = r.probe_kinds.clone();
                 alt_ips.push(AltIp {
                     address: ip,
                     role,
@@ -502,6 +502,17 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
         }
     }
 
+    let mut probe_kinds: Vec<ProbeKind> = Vec::new();
+    for &i in member_indices {
+        if let Some(r) = records[i].as_ref() {
+            for k in &r.probe_kinds {
+                if !probe_kinds.contains(k) {
+                    probe_kinds.push(*k);
+                }
+            }
+        }
+    }
+
     let best = records[best_idx].take().expect("record present");
 
     DeviceRecord {
@@ -515,6 +526,7 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
         confidence,
         last_seen,
         signals,
+        probe_kinds,
         schema_version: best.schema_version,
         schema_id: best.schema_id,
         alt_ips,
@@ -627,17 +639,6 @@ fn altip_role_from_mac(mac: Option<&str>) -> Option<AltIpRole> {
     }
 }
 
-fn uniq_probe_kinds(signals: &[Signal]) -> Vec<ProbeKind> {
-    let mut seen: Vec<ProbeKind> = Vec::new();
-    for s in signals {
-        let k = s.probe_kind();
-        if !seen.contains(&k) {
-            seen.push(k);
-        }
-    }
-    seen
-}
-
 fn parse_mac_prefix(mac: &str) -> Option<[u8; 5]> {
     let hex_count = mac.chars().filter(|ch| *ch != ':' && *ch != '-').count();
     if hex_count != 12 {
@@ -700,6 +701,16 @@ mod tests {
         signals: Vec<Signal>,
         confidence: f64,
     ) -> DeviceRecord {
+        base_record_with_kinds(ip_last_octet, mac, signals, confidence, Vec::new())
+    }
+
+    fn base_record_with_kinds(
+        ip_last_octet: u8,
+        mac: Option<&str>,
+        signals: Vec<Signal>,
+        confidence: f64,
+        probe_kinds: Vec<ProbeKind>,
+    ) -> DeviceRecord {
         let identity_value = match mac {
             Some(m) => format!("mac:{m}"),
             None => format!("ip:10.0.0.{ip_last_octet}"),
@@ -715,6 +726,7 @@ mod tests {
             confidence: Confidence::new(confidence).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
             signals,
+            probe_kinds,
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
@@ -1430,8 +1442,14 @@ mod tests {
     #[test]
     fn altip_responded_via_dedups_probe_kinds() {
         let mac = "aa:bb:cc:11:22:33";
-        let primary = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.4);
-        let secondary = base_record(
+        let primary = base_record_with_kinds(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into())],
+            0.4,
+            vec![ProbeKind::Arp],
+        );
+        let secondary = base_record_with_kinds(
             2,
             Some(mac),
             vec![
@@ -1441,6 +1459,7 @@ mod tests {
                 Signal::OpenPort(80),
             ],
             0.3,
+            vec![ProbeKind::Arp, ProbeKind::Snmp, ProbeKind::TcpConnect],
         );
         let merged = merge_two(primary, secondary);
         assert_eq!(merged.alt_ips.len(), 1);
@@ -1556,8 +1575,14 @@ mod tests {
     #[test]
     fn altip_responded_via_preserves_source_order() {
         let mac = "aa:bb:cc:11:22:33";
-        let primary = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.4);
-        let secondary = base_record(
+        let primary = base_record_with_kinds(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into())],
+            0.4,
+            vec![ProbeKind::Arp],
+        );
+        let secondary = base_record_with_kinds(
             2,
             Some(mac),
             vec![
@@ -1566,12 +1591,63 @@ mod tests {
                 Signal::SnmpSysName("core-sw01".into()),
             ],
             0.3,
+            vec![ProbeKind::TcpConnect, ProbeKind::Arp, ProbeKind::Snmp],
         );
         let merged = merge_two(primary, secondary);
         assert_eq!(
             merged.alt_ips[0].responded_via,
             vec![ProbeKind::TcpConnect, ProbeKind::Arp, ProbeKind::Snmp],
         );
+    }
+
+    #[test]
+    fn altip_responded_via_uses_probe_kinds_not_signal_inference() {
+        let primary = base_record_with_kinds(
+            1,
+            Some("aa:bb:cc:11:22:33"),
+            vec![Signal::Mac("aa:bb:cc:11:22:33".into())],
+            0.4,
+            vec![ProbeKind::Arp],
+        );
+        let http_only = base_record_with_kinds(
+            2,
+            Some("aa:bb:cc:11:22:33"),
+            vec![
+                Signal::Mac("aa:bb:cc:11:22:33".into()),
+                Signal::OpenPort(80),
+                Signal::HttpBanner("nginx/1.27".into()),
+            ],
+            0.3,
+            vec![ProbeKind::Http],
+        );
+        let merged = merge_two(primary, http_only);
+        assert_eq!(merged.alt_ips.len(), 1);
+        assert_eq!(
+            merged.alt_ips[0].responded_via,
+            vec![ProbeKind::Http],
+            "attribution must come from probe_kinds, not from signal inference",
+        );
+    }
+
+    #[test]
+    fn identity_fuser_merges_probe_kinds_across_constituent_records() {
+        let mac = "aa:bb:cc:11:22:33";
+        let a = base_record_with_kinds(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into())],
+            0.4,
+            vec![ProbeKind::Http],
+        );
+        let b = base_record_with_kinds(
+            2,
+            Some(mac),
+            vec![Signal::Mac(mac.into())],
+            0.3,
+            vec![ProbeKind::Snmp],
+        );
+        let merged = merge_two(a, b);
+        assert_eq!(merged.probe_kinds, vec![ProbeKind::Http, ProbeKind::Snmp]);
     }
 
     #[test]

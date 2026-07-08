@@ -128,7 +128,7 @@ The role phase runs after the platform phase. The baked-in table ships only `por
 
 `ports_open` rules match when **every** port in the `ports` list appears as an `OpenPort` signal on the record. Extra open ports on the device do not cause a mismatch: `ports: [22, 179]` matches a record that also has `OpenPort(443)`, but does not match a record that only has `OpenPort(22)`.
 
-Ports that no prober scanned appear identical to closed ports to the role phase. `ports_open` rules match only when the record carries `OpenPort(<port>)` signals — emitted today by the `tcp_connect` prober. To use a `ports_open` rule against port 80, for example, include a `tcp_connect` prober covering port 80 in your scenario. Application-layer probers (`http`, `ssh`, `tls`) currently emit protocol-specific signals only, not `OpenPort`; a future release may extend them to emit `OpenPort` for the ports they successfully connect to.
+Every prober that opens a TCP connection to a target port emits `Signal::OpenPort(port)` alongside its protocol-specific signals. `tcp_connect`, `http`, `ssh`, and `tls` all satisfy this contract today. A `ports_open` rule matching `[80]` fires against a record produced by any of them.
 
 Because rule evaluation is first-match-wins, ordering matters for role rules with overlapping port sets. A `[22, 179]` rule for `router` must be listed before a `[22]` rule for `host`, otherwise every router with SSH open would classify as `host`. The baked-in table follows this pattern: more specific port sets are listed before less specific ones. User-supplied `sys_object_id_prefix` rules run before either kind when merged via `merge_mode: extend`, because SNMP fingerprints are more specific evidence of role than a port-only heuristic.
 

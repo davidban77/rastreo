@@ -8,7 +8,7 @@ use crate::error::{ConfigError, RastreoError};
 use crate::model::device::{
     Confidence, DeviceRecord, IdentityKey, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
 };
-use crate::model::outcome::{ProbeOutcome, Signal};
+use crate::model::outcome::{ProbeKind, ProbeOutcome, Signal};
 use crate::model::scan::ScanMetadata;
 
 pub mod identity;
@@ -126,6 +126,13 @@ impl Fuser for DirectFuser {
             }
         }
 
+        let mut probe_kinds: Vec<ProbeKind> = Vec::new();
+        for outcome in outcomes {
+            if !probe_kinds.contains(&outcome.kind) {
+                probe_kinds.push(outcome.kind);
+            }
+        }
+
         let raw = self.confidence_baseline + (signals.len() as f64) * self.confidence_per_signal;
         let confidence = Confidence::new(raw.min(1.0))?;
 
@@ -146,6 +153,7 @@ impl Fuser for DirectFuser {
             confidence,
             last_seen,
             signals,
+            probe_kinds,
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
@@ -265,8 +273,17 @@ mod tests {
     use crate::model::outcome::ProbeKind;
 
     fn outcome(last_octet: u8, reachable: bool, signals: Vec<Signal>) -> ProbeOutcome {
+        outcome_with_kind(last_octet, ProbeKind::TcpConnect, reachable, signals)
+    }
+
+    fn outcome_with_kind(
+        last_octet: u8,
+        kind: ProbeKind,
+        reachable: bool,
+        signals: Vec<Signal>,
+    ) -> ProbeOutcome {
         ProbeOutcome {
-            kind: ProbeKind::TcpConnect,
+            kind,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
             timestamp: SystemTime::UNIX_EPOCH,
             reachable,
@@ -423,6 +440,58 @@ mod tests {
         ];
         let record = f.fuse(&outcomes).expect("ok").expect("some");
         assert_eq!(record.last_seen, t1);
+    }
+
+    #[test]
+    fn direct_fuser_populates_probe_kinds_from_outcomes() {
+        let f = DirectFuser::new();
+        let outcomes = vec![
+            outcome_with_kind(
+                1,
+                ProbeKind::Http,
+                true,
+                vec![Signal::HttpBanner("nginx/1.27".into())],
+            ),
+            outcome_with_kind(
+                1,
+                ProbeKind::Snmp,
+                true,
+                vec![Signal::SnmpSysName("core-sw01".into())],
+            ),
+        ];
+        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        assert_eq!(record.probe_kinds, vec![ProbeKind::Http, ProbeKind::Snmp]);
+    }
+
+    #[test]
+    fn direct_fuser_dedups_probe_kinds_across_outcomes() {
+        let f = DirectFuser::new();
+        let outcomes = vec![
+            outcome_with_kind(1, ProbeKind::Http, true, vec![Signal::OpenPort(80)]),
+            outcome_with_kind(
+                1,
+                ProbeKind::Http,
+                true,
+                vec![Signal::HttpBanner("nginx/1.27".into())],
+            ),
+        ];
+        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        assert_eq!(record.probe_kinds, vec![ProbeKind::Http]);
+    }
+
+    #[test]
+    fn direct_fuser_probe_kinds_preserve_first_occurrence_order() {
+        let f = DirectFuser::new();
+        let outcomes = vec![
+            outcome_with_kind(1, ProbeKind::Snmp, true, vec![]),
+            outcome_with_kind(1, ProbeKind::Http, true, vec![Signal::OpenPort(80)]),
+            outcome_with_kind(1, ProbeKind::TcpConnect, true, vec![Signal::OpenPort(22)]),
+        ];
+        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        assert_eq!(
+            record.probe_kinds,
+            vec![ProbeKind::Snmp, ProbeKind::Http, ProbeKind::TcpConnect],
+        );
     }
 
     #[test]

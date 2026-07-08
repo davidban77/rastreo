@@ -275,6 +275,7 @@ mod tests {
             confidence: Confidence::new(0.1).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
             signals: Vec::new(),
+            probe_kinds: Vec::new(),
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),

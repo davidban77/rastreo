@@ -43,30 +43,6 @@ pub enum Signal {
     ReverseDnsName(String),
 }
 
-impl Signal {
-    /// Which prober kind produced this signal. Deterministic mapping; useful for downstream analytics and for populating `AltIp::responded_via`.
-    pub fn probe_kind(&self) -> ProbeKind {
-        match self {
-            Self::OpenPort(_) => ProbeKind::TcpConnect,
-            Self::HttpBanner(_) => ProbeKind::Http,
-            Self::SnmpSysObjectId(_) | Self::SnmpSysDescr(_) | Self::SnmpSysName(_) => {
-                ProbeKind::Snmp
-            }
-            // NDP also emits Signal::Mac; ARP wins the tie because the variant carries no address-family info.
-            Self::Mac(_) => ProbeKind::Arp,
-            Self::DnsHost(_) => ProbeKind::Dns,
-            Self::NtpBanner(_)
-            | Self::SipUserAgent(_)
-            | Self::MemcachedVersion(_)
-            | Self::StunMappedAddress(_) => ProbeKind::Udp,
-            Self::SshBanner(_) | Self::SshHostKey(_) => ProbeKind::Ssh,
-            Self::IcmpEchoRttMicros(_) => ProbeKind::Icmp,
-            Self::TlsSubject(_) | Self::TlsSanName(_) => ProbeKind::Tls,
-            Self::ReverseDnsName(_) => ProbeKind::ReverseDns,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ProbeCtx {
     pub timeout: Duration,
@@ -186,144 +162,11 @@ mod tests {
     }
 
     #[test]
-    fn probe_kind_open_port_maps_to_tcp_connect() {
-        assert_eq!(Signal::OpenPort(22).probe_kind(), ProbeKind::TcpConnect);
-    }
-
-    #[test]
-    fn probe_kind_http_banner_maps_to_http() {
-        assert_eq!(
-            Signal::HttpBanner("nginx/1.25".into()).probe_kind(),
-            ProbeKind::Http
-        );
-    }
-
-    #[test]
-    fn probe_kind_snmp_sys_object_id_maps_to_snmp() {
-        assert_eq!(
-            Signal::SnmpSysObjectId("1.3.6.1".into()).probe_kind(),
-            ProbeKind::Snmp
-        );
-    }
-
-    #[test]
-    fn probe_kind_snmp_sys_descr_maps_to_snmp() {
-        assert_eq!(
-            Signal::SnmpSysDescr("Linux".into()).probe_kind(),
-            ProbeKind::Snmp
-        );
-    }
-
-    #[test]
-    fn probe_kind_snmp_sys_name_maps_to_snmp() {
-        assert_eq!(
-            Signal::SnmpSysName("core-sw01".into()).probe_kind(),
-            ProbeKind::Snmp
-        );
-    }
-
-    #[test]
-    fn probe_kind_mac_maps_to_arp() {
-        assert_eq!(
-            Signal::Mac("aa:bb:cc:dd:ee:ff".into()).probe_kind(),
-            ProbeKind::Arp
-        );
-    }
-
-    #[test]
-    fn probe_kind_dns_host_maps_to_dns() {
-        assert_eq!(
-            Signal::DnsHost("router.example.".into()).probe_kind(),
-            ProbeKind::Dns
-        );
-    }
-
-    #[test]
-    fn probe_kind_ntp_banner_maps_to_udp() {
-        assert_eq!(
-            Signal::NtpBanner("stratum=2".into()).probe_kind(),
-            ProbeKind::Udp
-        );
-    }
-
-    #[test]
-    fn probe_kind_sip_user_agent_maps_to_udp() {
-        assert_eq!(
-            Signal::SipUserAgent("Kamailio/5.6.5".into()).probe_kind(),
-            ProbeKind::Udp
-        );
-    }
-
-    #[test]
-    fn probe_kind_memcached_version_maps_to_udp() {
-        assert_eq!(
-            Signal::MemcachedVersion("1.6.24".into()).probe_kind(),
-            ProbeKind::Udp
-        );
-    }
-
-    #[test]
-    fn probe_kind_stun_mapped_address_maps_to_udp() {
-        assert_eq!(
-            Signal::StunMappedAddress("203.0.113.42:5432".into()).probe_kind(),
-            ProbeKind::Udp
-        );
-    }
-
-    #[test]
-    fn probe_kind_ssh_banner_maps_to_ssh() {
-        assert_eq!(
-            Signal::SshBanner("SSH-2.0-OpenSSH_9.3p1".into()).probe_kind(),
-            ProbeKind::Ssh
-        );
-    }
-
-    #[test]
-    fn probe_kind_ssh_host_key_maps_to_ssh() {
-        assert_eq!(
-            Signal::SshHostKey("ssh-ed25519 AAAAC3Nz".into()).probe_kind(),
-            ProbeKind::Ssh
-        );
-    }
-
-    #[test]
-    fn probe_kind_icmp_echo_rtt_micros_maps_to_icmp() {
-        assert_eq!(
-            Signal::IcmpEchoRttMicros(1234).probe_kind(),
-            ProbeKind::Icmp
-        );
-    }
-
-    #[test]
     fn icmp_signal_round_trips_json() {
         let signal = Signal::IcmpEchoRttMicros(987_654);
         let json = serde_json::to_string(&signal).expect("serialize");
         let back: Signal = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(signal, back);
-    }
-
-    #[test]
-    fn probe_kind_tls_subject_maps_to_tls() {
-        assert_eq!(
-            Signal::TlsSubject("router.example.com".into()).probe_kind(),
-            ProbeKind::Tls
-        );
-    }
-
-    #[test]
-    fn probe_kind_tls_san_name_maps_to_tls() {
-        assert_eq!(
-            Signal::TlsSanName("router.example.com".into()).probe_kind(),
-            ProbeKind::Tls
-        );
-    }
-
-    #[test]
-    fn probe_kind_reverse_dns_name_maps_to_reverse_dns() {
-        assert_eq!(
-            Signal::ReverseDnsName("router.example.com".into()).probe_kind(),
-            ProbeKind::ReverseDns
-        );
     }
 
     #[test]

@@ -87,6 +87,13 @@
         }
       ]
     },
+    "probe_kinds": {
+      "description": "Deduplicated `ProbeKind` values whose outcomes contributed to this record. Preserves authoritative provenance from ingest through fusion so consumers do not infer prober attribution from signals.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProbeKind"
+      }
+    },
     "role": {
       "description": "Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated once role classification lands.",
       "type": [

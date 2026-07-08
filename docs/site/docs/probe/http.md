@@ -49,9 +49,10 @@ The prober disables HTTP redirects (`301`, `302`, `307`, and `308` count as reac
 
 | Signal | When produced |
 |---|---|
+| `OpenPort(<port>)` | The prober received an HTTP response from the port — the TCP connection succeeded. Enables role heuristics via `ports_open` classifier rules without a paired `tcp_connect` prober. |
 | `HttpBanner(<value>)` | Response carries a `Server:` header. The value is trimmed of surrounding whitespace and truncated at 256 bytes on a UTF-8 character boundary. |
 
-A response without a `Server:` header still marks the target as reachable but produces no signal from that port. Connection refused and unreachable hosts map to `Unreachable`; timeouts map to `Timeout`; TLS handshake failures and other protocol errors map to `Other` with the reqwest cause in the message.
+A response without a `Server:` header still marks the target as reachable and still emits `OpenPort` for that port; it just does not add an `HttpBanner`. Connection refused and unreachable hosts map to `Unreachable`; timeouts map to `Timeout`; TLS handshake failures and other protocol errors map to `Other` with the reqwest cause in the message.
 
 ## Build feature
 

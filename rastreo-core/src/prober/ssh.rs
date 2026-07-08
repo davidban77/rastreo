@@ -127,13 +127,19 @@ impl Prober for SshProber {
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
 
+            match timeout(ctx.timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(_stream)) => {
+                    any_reachable = true;
+                    signals.push(Signal::OpenPort(port));
+                }
+                _ => continue,
+            }
+
             if let Ok(Some(banner)) = timeout(ctx.timeout, read_banner(addr)).await {
-                any_reachable = true;
                 signals.push(Signal::SshBanner(banner));
             }
 
             if let Ok(Some(host_key)) = timeout(ctx.timeout, read_host_key(addr)).await {
-                any_reachable = true;
                 signals.push(Signal::SshHostKey(host_key));
             }
         }
@@ -234,10 +240,16 @@ mod tests {
             .expect("bind");
         let port = listener.local_addr().expect("addr").port();
         tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                use tokio::io::AsyncWriteExt;
-                let _ = stream.write_all(b"SSH-2.0-StubServer_1.0\r\n").await;
-                let _ = stream.shutdown().await;
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(b"SSH-2.0-StubServer_1.0\r\n").await;
+                    let _ = stream.shutdown().await;
+                });
             }
         });
         let prober = SshProber::new(vec![port]).expect("valid");
@@ -259,6 +271,100 @@ mod tests {
             })
             .expect("banner captured");
         assert_eq!(banner, "SSH-2.0-StubServer_1.0");
+    }
+
+    async fn spawn_ssh_banner_stub() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(b"SSH-2.0-StubServer_1.0\r\n").await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn ssh_probe_emits_open_port_on_successful_connect() {
+        let port = spawn_ssh_banner_stub().await;
+        let prober = SshProber::new(vec![port]).expect("valid");
+        let ctx = ProbeCtx {
+            timeout: std::time::Duration::from_millis(500),
+            retries: 0,
+        };
+        let outcome = prober
+            .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
+            .await
+            .expect("probe ok");
+        assert!(outcome.reachable);
+        let open_port = outcome
+            .signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .expect("OpenPort emitted");
+        assert_eq!(open_port, port);
+    }
+
+    #[tokio::test]
+    async fn ssh_probe_emits_open_port_before_protocol_signals() {
+        let port = spawn_ssh_banner_stub().await;
+        let prober = SshProber::new(vec![port]).expect("valid");
+        let ctx = ProbeCtx {
+            timeout: std::time::Duration::from_millis(500),
+            retries: 0,
+        };
+        let outcome = prober
+            .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
+            .await
+            .expect("probe ok");
+        let open_port_idx = outcome
+            .signals
+            .iter()
+            .position(|s| matches!(s, Signal::OpenPort(_)))
+            .expect("OpenPort emitted");
+        let banner_idx = outcome
+            .signals
+            .iter()
+            .position(|s| matches!(s, Signal::SshBanner(_)));
+        if let Some(idx) = banner_idx {
+            assert!(open_port_idx < idx, "OpenPort must precede SshBanner");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_probe_does_not_emit_open_port_on_connect_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let prober = SshProber::new(vec![port]).expect("valid");
+        let ctx = ProbeCtx {
+            timeout: std::time::Duration::from_millis(500),
+            retries: 0,
+        };
+        let outcome = prober
+            .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(!outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::OpenPort(_))));
     }
 
     #[test]
