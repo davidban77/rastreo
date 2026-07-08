@@ -94,7 +94,7 @@
       }
     },
     "role": {
-      "description": "Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated once role classification lands.",
+      "description": "Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open` and `sys_object_id_prefix` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.",
       "type": [
         "string",
         "null"

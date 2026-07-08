@@ -27,7 +27,7 @@ Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Leg
 | `platform` | string \| null | no | Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. |
 | `possible_alias_of` | [`IdentityKey`](#identitykey) \| null | no | When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`. |
 | `probe_kinds` | array<[`ProbeKind`](#probekind)> | no | Deduplicated `ProbeKind` values whose outcomes contributed to this record. Preserves authoritative provenance from ingest through fusion so consumers do not infer prober attribution from signals. |
-| `role` | string \| null | no | Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated once role classification lands. |
+| `role` | string \| null | no | Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open` and `sys_object_id_prefix` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on. |
 | `scan_metadata` | [`ScanMetadata`](#scanmetadata) | no | Provenance stamped by the pipeline at scan entry. |
 | `schema_id` | string | yes | Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build. |
 | `schema_version` | string | yes | Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build. |

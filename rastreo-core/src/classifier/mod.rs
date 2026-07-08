@@ -158,12 +158,18 @@ impl RulesClassifier {
             MergeMode::Replace => user_role_rules,
         };
         for rule in &effective_role {
-            if let RoleRule::PortsOpen { ports, role } = rule {
-                if ports.is_empty() {
+            match rule {
+                RoleRule::PortsOpen { ports, role } if ports.is_empty() => {
                     return Err(ClassifierError::InvalidRoleRule(format!(
                         "ports_open rule for role `{role}` has an empty ports list"
                     )));
                 }
+                RoleRule::SysObjectIdPrefix { prefix, role } if prefix.is_empty() => {
+                    return Err(ClassifierError::InvalidRoleRule(format!(
+                        "sys_object_id_prefix rule for role `{role}` has an empty prefix"
+                    )));
+                }
+                _ => {}
             }
         }
 
@@ -965,6 +971,23 @@ role: router
         let result = create_classifier(&replace_role_rules(user));
         let err = match result {
             Ok(_) => panic!("empty ports must fail construction"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            RastreoError::Classifier(ClassifierError::InvalidRoleRule(_))
+        ));
+    }
+
+    #[test]
+    fn role_rule_sys_object_id_prefix_with_empty_prefix_fails_construction() {
+        let user = vec![RoleRule::SysObjectIdPrefix {
+            prefix: String::new(),
+            role: "invalid".into(),
+        }];
+        let result = create_classifier(&replace_role_rules(user));
+        let err = match result {
+            Ok(_) => panic!("empty prefix must fail construction"),
             Err(e) => e,
         };
         assert!(matches!(
