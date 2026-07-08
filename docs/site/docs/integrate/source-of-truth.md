@@ -25,6 +25,47 @@ The minimum upsert flow is:
 
 A record from a single TCP-connect probe (one open port) lands at `confidence: 0.2` with the default `DirectFuser`. The score rises as more signals fuse into the same `identity_key`.
 
+## Mapping signals to source-of-truth fields
+
+Every probe produces `Signal` entries carried on the `DeviceRecord` in the `signals` array. A reconciler decides which signals become fields on the source-of-truth object and which stay as raw observation history. The SSH, TLS, ICMP echo, and reverse-DNS probers together contribute six signal variants, and each has a natural mapping into the NetBox, Nautobot, and Infrahub data models.
+
+The signals split by role:
+
+- **Identity** — `SshHostKey`, `TlsSubject`, `TlsSanName`, `ReverseDnsName`. These help answer *which device is this?*. Four of them are already consumed by the [identity fuser](../discover/identity.md) for cross-IP correlation, so if you enable that fuser your reconciler receives one merged record per device and does not need to redo the correlation.
+- **Fingerprint** — `SshBanner`. This helps answer *what software / version is running?*. It is not consumed by the identity fuser today; it is intended for platform inference. Store it as-is and let a downstream classifier map it to a platform.
+- **Operational** — `IcmpEchoRttMicros`. This is a time-varying observation, not an identity claim. Treat it as a metric point, not as device metadata.
+
+### Identity signals
+
+These signals correlate a device across scans and across IPs. When the identity fuser is enabled, matching values fold multiple per-IP records into one; the reconciler still benefits from storing the underlying values so external systems (audit tools, network graph views) can query them directly.
+
+| Signal | Description | NetBox field | Nautobot field | Infrahub field |
+|---|---|---|---|---|
+| `SshHostKey` | OpenSSH single-line encoding of the server's host key (for example `"ssh-ed25519 AAAAC3Nz..."`). Device-unique in practice. Consumed by the identity fuser at weight 0.8 — merges alone at the high band. | Custom field on `dcim.Device`, for example `rastreo_ssh_host_key`. | Custom field on `dcim.Device`, for example `rastreo_ssh_host_key`. | String attribute on your device kind, for example `ssh_host_key`. |
+| `TlsSubject` | Subject Common Name from the leaf certificate. Often generic (`localhost`, `nginx`) — do not use as a stand-alone unique key. | Custom field, for example `rastreo_tls_subject`. | Same shape. | String attribute. |
+| `TlsSanName` | One entry per Subject Alternative Name. DNS entries emit the name (`api.example.com`); IP entries emit `ip:<addr>` (`ip:10.0.0.1`). Multiple entries per record are normal. | Multi-value custom field or a related model. If your NetBox extension already stores certificate SANs, reuse that. | Same as NetBox. | Array attribute or related node. |
+| `ReverseDnsName` | Hostname returned by a PTR query, trailing `.` stripped. Multiple names per IP are allowed by RFC and rastreo emits one signal per name. | The built-in `dcim.Device.name` field is a good primary target when a single name is present. Store additional names in a custom field or as related `ipam.IPAddress.dns_name` entries. | Same as NetBox — `dcim.Device.name` primary, custom field for extras. | Standard `name` attribute on the device kind; additional names on a related node. |
+
+The identity fuser already consumes all four of these to merge cross-IP records. If your reconciler groups by `identity_key`, the merge has already happened and each merged record carries the union of the constituents' signals — no additional correlation code is needed on the reconciler side.
+
+### Fingerprint signal
+
+`SshBanner` is the SSH server's identification string, for example `"SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3"`. It fingerprints the SSH implementation and OS distribution and feeds later platform inference. The identity fuser does not use it today, so it will not be part of the correlation logic in a merged record — but it is still emitted as a `Signal` and stored on every record where an SSH probe succeeded.
+
+| Signal | NetBox field | Nautobot field | Infrahub field |
+|---|---|---|---|
+| `SshBanner` | Custom field on `dcim.Device`, for example `rastreo_ssh_banner`. When a platform-inference step is added, populate the built-in `dcim.Device.platform` foreign key from the banner and keep the raw string in the custom field. | Same as NetBox — custom field now, `dcim.Device.platform` once inference is available. | String attribute on the device kind, for example `ssh_banner`. Set the standard platform attribute once inference is available. |
+
+### Operational signal
+
+`IcmpEchoRttMicros` is the minimum ICMP echo round-trip time in microseconds across the probe's echo requests. It changes on every scan, so it does not belong in a device's static configuration attributes.
+
+| Signal | NetBox field | Nautobot field | Infrahub field |
+|---|---|---|---|
+| `IcmpEchoRttMicros` | Custom field like `rastreo_last_rtt_us` on `dcim.Device`, or (better) a Prometheus / InfluxDB metric point keyed by `identity_key`. | Same choice — custom field or external metric store. | Same choice — either a custom attribute or an external metric store. |
+
+The custom-field path keeps every observation reachable through the source-of-truth API; the metric-store path keeps the source of truth lean and gives you time-series charts without extra work. Pick one based on how your team already tracks operational data.
+
 ## Multi-IP devices and `alt_ips`
 
 When the [identity fuser](../discover/identity.md) is configured, a multi-homed device arrives as a single `DeviceRecord`. `mgmt_ip` holds the primary address; `alt_ips` holds the other addresses. Each entry is an [`AltIp`](../reference/schema/device-record.md#altip) object with `address`, an optional `role` hint, and the `responded_via` probe kinds that saw that IP before the merge.

@@ -219,8 +219,14 @@ const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
     ("snmp", "snmp"),
     ("arp", "arp"),
     ("ndp", "ndp"),
+    ("ssh", "ssh"),
+    ("icmp", "icmp"),
+    ("tls", "tls"),
     ("oui_enrichment", "oui"),
 ];
+
+#[cfg(feature = "config")]
+const RELEASE_BUNDLED_FEATURES: &str = "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls";
 
 #[cfg(feature = "config")]
 fn enrich_feature_hint(error_msg: &str) -> Option<String> {
@@ -234,7 +240,7 @@ fn enrich_feature_hint(error_msg: &str) -> Option<String> {
         .find(|(name, _)| *name == variant)
         .map(|(_, feat)| *feat)?;
     Some(format!(
-        "hint: '{variant}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles kafka, http, snmp, arp, ndp, oui."
+        "hint: '{variant}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles {RELEASE_BUNDLED_FEATURES}."
     ))
 }
 
@@ -902,6 +908,39 @@ mod tests {
     fn enrich_feature_hint_matches_ndp_variant() {
         let hint = enrich_feature_hint("unknown variant `ndp`, expected one of ...").expect("hint");
         assert!(hint.contains("--features ndp"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_matches_ssh_variant() {
+        let hint = enrich_feature_hint("unknown variant `ssh`, expected one of ...").expect("hint");
+        assert!(hint.contains("--features ssh"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_matches_icmp_variant() {
+        let hint =
+            enrich_feature_hint("unknown variant `icmp`, expected one of ...").expect("hint");
+        assert!(hint.contains("--features icmp"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_matches_tls_variant() {
+        let hint = enrich_feature_hint("unknown variant `tls`, expected one of ...").expect("hint");
+        assert!(hint.contains("--features tls"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_names_current_bundled_release_features() {
+        let hint = enrich_feature_hint("unknown variant `ssh`, expected one of ...").expect("hint");
+        for feat in [
+            "kafka", "http", "snmp", "arp", "ndp", "oui", "nats", "ssh", "icmp", "tls",
+        ] {
+            assert!(hint.contains(feat), "hint missing '{feat}': {hint}");
+        }
     }
 
     #[cfg(feature = "config")]

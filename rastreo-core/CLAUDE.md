@@ -20,11 +20,14 @@ src/
 │   ├── tcp_connect.rs   ← TcpConnectProber
 │   ├── http.rs          ← HttpProber (feature: http)
 │   ├── dns.rs           ← DnsProber
+│   ├── reverse_dns.rs   ← ReverseDnsProber (PTR lookup; no feature — reuses hickory-resolver)
 │   ├── udp/             ← UdpProber (NTP / SIP / memcached / STUN)
 │   ├── snmp/            ← SnmpProber v1/v2c/v3-USM (feature: snmp)
 │   ├── arp.rs           ← ArpProber (feature: arp)
 │   ├── ndp.rs           ← NdpProber (feature: ndp)
 │   ├── ssh.rs           ← SshProber (feature: ssh)
+│   ├── icmp.rs          ← IcmpProber (feature: icmp)
+│   ├── tls.rs           ← TlsProber (feature: tls)
 │   └── redacted.rs      ← Password, Community — Debug + Serialize redact plaintext
 ├── encoder/
 │   ├── mod.rs       ← Encoder trait + EncoderConfig + create_encoder factory
@@ -40,7 +43,7 @@ src/
 ├── fuser/
 │   ├── mod.rs       ← Fuser trait + DirectFuser default impl
 │   ├── oui.rs       ← OuiEnrichmentFuser (feature: oui)
-│   └── identity.rs  ← IdentityFuser (MAC + SnmpSysName + SshHostKey correlation)
+│   └── identity.rs  ← IdentityFuser (MAC + SnmpSysName + SshHostKey + TlsSubject + TlsSanName + ReverseDnsName correlation)
 ├── pipeline.rs     ← run_discovery + DiscoverySummary
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
@@ -56,14 +59,18 @@ src/
 | `arp`    | no      | Enables the ARP prober for IPv4 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
 | `ndp`    | no      | Enables the NDP prober for IPv6 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
 | `ssh`    | no      | Enables the SSH prober. Reads the pre-negotiation banner and captures the server's host key via `russh` (client mode, `ring` crypto backend). No authentication is attempted. |
+| `icmp`   | no      | Enables the ICMP echo prober. Hand-rolled `pnet_packet::icmp` + `socket2` with SOCK_DGRAM → SOCK_RAW fallback (requires `CAP_NET_RAW` on Linux for the raw path). Emits per-target minimum RTT in microseconds. |
+| `tls`    | no      | Enables the TLS handshake prober. `tokio-rustls` (`ring` backend) + `x509-parser` extract the leaf certificate's Subject CN and SANs. Accept-any-cert verifier — fingerprinting, not authenticating. |
 | `nats`   | no      | Enables `NatsSink` (`async-nats` JetStream client with `ring` crypto backend). |
 | `oui`    | no      | Enables the `oui_enrichment` fuser and bundles a compressed Wireshark manuf snapshot (`data/manuf.gz`, ~800 KB in-binary). Populates `DeviceRecord::manufacturer` from a MAC-address OUI lookup. |
 
-The `config`, `http`, `kafka`, `snmp`, `arp`, `ndp`, `ssh`, `nats`, and `oui` features each pull in their own dependency chain when enabled. `arp` and `ndp` share the `pnet_datalink` + `pnet_packet` + `ipnetwork` dep chain — enabling either pulls the full set in. `ssh` and `nats` both use `ring` as the crypto backend, so enabling either brings the `ring` chain in.
+The `config`, `http`, `kafka`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `nats`, and `oui` features each pull in their own dependency chain when enabled. `arp`, `ndp`, and `icmp` share the `pnet_packet` chain — enabling any of them pulls it in (`arp` and `ndp` additionally pull `pnet_datalink` + `ipnetwork`). `ssh`, `tls`, and `nats` all use `ring` as the crypto backend, so enabling any of them brings the `ring` chain in.
+
+The reverse DNS prober (`ReverseDnsProber`) is unconditional — it reuses `hickory-resolver` which is already required for the forward-resolver machinery. No Cargo feature guards it.
 
 ## Prober Config Conventions
 
-Every prober (`TcpConnect`, `Http`, `Dns`, `Udp`, `Snmp`, `Arp`, `Ndp`, `Ssh`) is a variant on `ProberConfig` — a `#[serde(tag = "type", rename_all = "snake_case")] #[non_exhaustive]` tagged enum. New probers slot in without breaking existing scenarios because `#[non_exhaustive]` prevents downstream exhaustive matching.
+Every prober (`TcpConnect`, `Http`, `Dns`, `ReverseDns`, `Udp`, `Snmp`, `Arp`, `Ndp`, `Ssh`, `Icmp`, `Tls`) is a variant on `ProberConfig` — a `#[serde(tag = "type", rename_all = "snake_case")] #[non_exhaustive]` tagged enum. New probers slot in without breaking existing scenarios because `#[non_exhaustive]` prevents downstream exhaustive matching.
 
 **Field naming.** snake_case. Prefer descriptive nouns over abbreviations (`user_agent` over `ua`, `path` over `endpoint`, `query_names` over `queries`). If the protocol has a well-known term, use it verbatim (`community` for SNMP, `interface` for ARP).
 
