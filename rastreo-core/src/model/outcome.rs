@@ -18,6 +18,7 @@ pub enum ProbeKind {
     Ssh,
     Icmp,
     Tls,
+    ReverseDns,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -39,6 +40,7 @@ pub enum Signal {
     IcmpEchoRttMicros(u64),
     TlsSubject(String),
     TlsSanName(String),
+    ReverseDnsName(String),
 }
 
 impl Signal {
@@ -60,6 +62,7 @@ impl Signal {
             Self::SshBanner(_) | Self::SshHostKey(_) => ProbeKind::Ssh,
             Self::IcmpEchoRttMicros(_) => ProbeKind::Icmp,
             Self::TlsSubject(_) | Self::TlsSanName(_) => ProbeKind::Tls,
+            Self::ReverseDnsName(_) => ProbeKind::ReverseDns,
         }
     }
 }
@@ -97,6 +100,7 @@ mod tests {
             ProbeKind::Ssh,
             ProbeKind::Icmp,
             ProbeKind::Tls,
+            ProbeKind::ReverseDns,
         ] {
             let s = serde_json::to_string(&kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
@@ -312,6 +316,22 @@ mod tests {
             Signal::TlsSanName("router.example.com".into()).probe_kind(),
             ProbeKind::Tls
         );
+    }
+
+    #[test]
+    fn probe_kind_reverse_dns_name_maps_to_reverse_dns() {
+        assert_eq!(
+            Signal::ReverseDnsName("router.example.com".into()).probe_kind(),
+            ProbeKind::ReverseDns
+        );
+    }
+
+    #[test]
+    fn reverse_dns_signal_round_trips_json() {
+        let signal = Signal::ReverseDnsName("router.example.com".into());
+        let json = serde_json::to_string(&signal).expect("serialize");
+        let back: Signal = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(signal, back);
     }
 
     #[test]

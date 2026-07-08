@@ -17,6 +17,7 @@ const WEIGHT_SHARED_SYSNAME: f64 = 0.5;
 const WEIGHT_SHARED_HOST_KEY: f64 = 0.8;
 const WEIGHT_SHARED_TLS_SUBJECT: f64 = 0.3;
 const WEIGHT_SHARED_TLS_SAN: f64 = 0.5;
+const WEIGHT_SHARED_REVERSE_DNS: f64 = 0.5;
 const PENALTY_CONFLICTING_MANUFACTURER: f64 = 0.3;
 const VRRP_MEMBER_WEIGHT_CAP: f64 = 0.4;
 
@@ -157,6 +158,12 @@ impl IdentityFuser {
             w += WEIGHT_SHARED_TLS_SAN;
         }
 
+        let rdns_a = collect_reverse_dns_names(&a.signals);
+        let rdns_b = collect_reverse_dns_names(&b.signals);
+        if !rdns_a.is_empty() && !rdns_b.is_empty() && any_reverse_dns_overlap(&rdns_a, &rdns_b) {
+            w += WEIGHT_SHARED_REVERSE_DNS;
+        }
+
         if let (Some(mfa), Some(mfb)) = (a.manufacturer.as_deref(), b.manufacturer.as_deref()) {
             if !mfa.eq_ignore_ascii_case(mfb) {
                 w -= PENALTY_CONFLICTING_MANUFACTURER;
@@ -238,6 +245,21 @@ fn collect_tls_san_names(signals: &[Signal]) -> Vec<&str> {
 
 fn any_tls_san_overlap(a: &[&str], b: &[&str]) -> bool {
     a.iter().any(|name| !name.is_empty() && b.contains(name))
+}
+
+fn collect_reverse_dns_names(signals: &[Signal]) -> Vec<&str> {
+    signals
+        .iter()
+        .filter_map(|s| match s {
+            Signal::ReverseDnsName(v) => Some(v.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn any_reverse_dns_overlap(a: &[&str], b: &[&str]) -> bool {
+    a.iter()
+        .any(|name| !name.is_empty() && b.iter().any(|other| name.eq_ignore_ascii_case(other)))
 }
 
 fn collect_medium_peers(
@@ -1608,6 +1630,153 @@ mod tests {
         b.manufacturer = Some("Juniper Networks".into());
         let out = correlate(vec![a, b]);
         assert_eq!(out.len(), 2, "0.3 + 0.5 - 0.3 = 0.5, medium band");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn two_records_shared_reverse_dns_name_only_medium_band() {
+        let rdns = Signal::ReverseDnsName("router.example.com".into());
+        let records = vec![
+            base_record(1, None, vec![rdns.clone()], 0.3),
+            base_record(2, None, vec![rdns.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2, "reverse DNS alone = 0.5, medium band");
+        assert!(out[0].possible_alias_of.is_some());
+        assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn two_records_shared_reverse_dns_name_and_mac_merge() {
+        let mac = "aa:bb:cc:11:22:33";
+        let rdns = Signal::ReverseDnsName("router.example.com".into());
+        let records = vec![
+            base_record(
+                1,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), rdns.clone()],
+                0.3,
+            ),
+            base_record(
+                2,
+                Some(mac),
+                vec![Signal::Mac(mac.into()), rdns.clone()],
+                0.3,
+            ),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1, "0.5 + 0.5 = 1.0, high band");
+        assert_eq!(out[0].alt_ips.len(), 1);
+        assert_eq!(
+            out[0].alt_ips[0].address,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        );
+        assert!(out[0].possible_alias_of.is_none());
+    }
+
+    #[test]
+    fn two_records_shared_reverse_dns_name_and_sysname_merge() {
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let rdns = Signal::ReverseDnsName("core-sw01.example.com".into());
+        let records = vec![
+            base_record(1, None, vec![sysname.clone(), rdns.clone()], 0.3),
+            base_record(2, None, vec![sysname.clone(), rdns.clone()], 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1, "0.5 + 0.5 = 1.0, high band");
+        assert_eq!(out[0].alt_ips.len(), 1);
+        assert!(out[0].possible_alias_of.is_none());
+    }
+
+    #[test]
+    fn two_records_different_reverse_dns_names_stay_separate() {
+        let records = vec![
+            base_record(
+                1,
+                None,
+                vec![Signal::ReverseDnsName("router-a.example.com".into())],
+                0.3,
+            ),
+            base_record(
+                2,
+                None,
+                vec![Signal::ReverseDnsName("router-b.example.com".into())],
+                0.3,
+            ),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn two_records_shared_reverse_dns_with_multiple_ptrs_any_overlap() {
+        let mac = "aa:bb:cc:11:22:33";
+        let a_signals = vec![
+            Signal::Mac(mac.into()),
+            Signal::ReverseDnsName("router.example.com".into()),
+            Signal::ReverseDnsName("edge-01.example.com".into()),
+        ];
+        let b_signals = vec![
+            Signal::Mac(mac.into()),
+            Signal::ReverseDnsName("core-sw01.example.com".into()),
+            Signal::ReverseDnsName("edge-01.example.com".into()),
+            Signal::ReverseDnsName("mgmt-01.example.com".into()),
+        ];
+        let records = vec![
+            base_record(1, Some(mac), a_signals, 0.3),
+            base_record(2, Some(mac), b_signals, 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(out.len(), 1, "shared MAC 0.5 + any-overlap 0.5 = 1.0");
+        assert_eq!(out[0].alt_ips.len(), 1);
+    }
+
+    #[test]
+    fn two_records_shared_reverse_dns_matches_case_insensitively() {
+        let mac = "aa:bb:cc:11:22:33";
+        let a_signals = vec![
+            Signal::Mac(mac.into()),
+            Signal::ReverseDnsName("Router.Example.Com".into()),
+        ];
+        let b_signals = vec![
+            Signal::Mac(mac.into()),
+            Signal::ReverseDnsName("router.example.com".into()),
+        ];
+        let records = vec![
+            base_record(1, Some(mac), a_signals, 0.3),
+            base_record(2, Some(mac), b_signals, 0.3),
+        ];
+        let out = correlate(records);
+        assert_eq!(
+            out.len(),
+            1,
+            "case-insensitive PTR match + shared MAC merges"
+        );
+        assert_eq!(out[0].alt_ips.len(), 1);
+    }
+
+    #[test]
+    fn two_records_shared_reverse_dns_and_mac_but_conflicting_manufacturer_medium_band() {
+        let mac = "aa:bb:cc:11:22:33";
+        let rdns = Signal::ReverseDnsName("router.example.com".into());
+        let mut a = base_record(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), rdns.clone()],
+            0.3,
+        );
+        a.manufacturer = Some("Cisco Systems, Inc".into());
+        let mut b = base_record(
+            2,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), rdns.clone()],
+            0.3,
+        );
+        b.manufacturer = Some("Juniper Networks".into());
+        let out = correlate(vec![a, b]);
+        assert_eq!(out.len(), 2, "0.5 + 0.5 - 0.3 = 0.7, medium band");
         assert!(out[0].possible_alias_of.is_some());
         assert!(out[1].possible_alias_of.is_some());
     }

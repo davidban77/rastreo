@@ -217,7 +217,8 @@
         "Ndp",
         "Ssh",
         "Icmp",
-        "Tls"
+        "Tls",
+        "ReverseDns"
       ]
     },
     "ScanMetadata": {
@@ -442,6 +443,18 @@
           ],
           "properties": {
             "TlsSanName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "ReverseDnsName"
+          ],
+          "properties": {
+            "ReverseDnsName": {
               "type": "string"
             }
           },
