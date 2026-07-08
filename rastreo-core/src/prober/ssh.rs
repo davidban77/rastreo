@@ -59,8 +59,7 @@ impl Handler for CaptureHandler {
     }
 }
 
-async fn read_banner(addr: SocketAddr) -> Option<String> {
-    let mut stream = TcpStream::connect(addr).await.ok()?;
+async fn read_banner_from_stream(stream: &mut TcpStream) -> Option<String> {
     let mut buf = [0u8; BANNER_MAX_BYTES];
     let mut filled = 0usize;
     while filled < BANNER_MAX_BYTES {
@@ -127,17 +126,21 @@ impl Prober for SshProber {
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
 
-            match timeout(ctx.timeout, TcpStream::connect(addr)).await {
-                Ok(Ok(_stream)) => {
-                    any_reachable = true;
-                    signals.push(Signal::OpenPort(port));
-                }
+            let mut stream = match timeout(ctx.timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(s)) => s,
                 _ => continue,
-            }
+            };
+            any_reachable = true;
+            signals.push(Signal::OpenPort(port));
 
-            if let Ok(Some(banner)) = timeout(ctx.timeout, read_banner(addr)).await {
+            if let Ok(Some(banner)) =
+                timeout(ctx.timeout, read_banner_from_stream(&mut stream)).await
+            {
                 signals.push(Signal::SshBanner(banner));
             }
+            // russh opens its own stream: once we've consumed the peer SSH-ID
+            // above, this one cannot be reused for the key-exchange handshake.
+            drop(stream);
 
             if let Ok(Some(host_key)) = timeout(ctx.timeout, read_host_key(addr)).await {
                 signals.push(Signal::SshHostKey(host_key));
@@ -372,5 +375,46 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<SshProber>();
         assert_send_sync::<Box<dyn Prober>>();
+    }
+
+    #[tokio::test]
+    async fn probe_opens_at_most_two_tcp_connections_per_port() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_task = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                accepts_task.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(b"SSH-2.0-StubServer_1.0\r\n").await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        let prober = SshProber::new(vec![port]).expect("valid");
+        let ctx = ProbeCtx {
+            timeout: std::time::Duration::from_millis(500),
+            retries: 0,
+        };
+        let _ = prober
+            .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
+            .await
+            .expect("probe ok");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let n = accepts.load(Ordering::SeqCst);
+        assert!(
+            n <= 2,
+            "SSH probe opened {n} TCP connections per port; contract is at most 2 \
+             (one for banner, one for russh host-key exchange)"
+        );
     }
 }

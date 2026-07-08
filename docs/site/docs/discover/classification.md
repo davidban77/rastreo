@@ -101,7 +101,7 @@ The role phase runs after the platform phase. The baked-in table ships only `por
 | 5 | `[22]` (SSH-only host) | `host` |
 
 !!! info "Why no baked-in SNMP `sysObjectID` rules"
-    `sys_object_id_prefix` is a first-class role-rule kind — a user can supply their own list under `role_rules` and it will be evaluated before the baked-in port heuristics. rastreo ships no baked defaults for it because the vendor OID subtrees for common router / switch families overlap and shift across product generations, so a curated default list would misclassify as often as it helps. A future release may ship an accurate, sampled OID table sourced from an authoritative device-type catalogue.
+    `sys_object_id_prefix` is a first-class role-rule kind — a user can supply their own list under `role_rules` and it will be evaluated before the baked-in port heuristics. rastreo ships no baked defaults for it because no public vendor MIB tree cleanly maps sub-prefixes to device roles at a level rastreo could ship a defensible default for: the common vendor product subtrees commingle routers, switches, firewalls, and management gear inside the same prefix, so any curated default would misclassify as often as it helps. Users supply their own `sys_object_id_prefix` rules against their fleet's actual OIDs.
 
     To classify by `sysObjectID` today, add rules that match the exact OID prefixes present on your devices:
 
