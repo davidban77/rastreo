@@ -1,3 +1,4 @@
+use crate::classifier::ClassifierConfig;
 use crate::encoder::EncoderConfig;
 #[cfg(feature = "config")]
 use crate::error::{ConfigError, RastreoError};
@@ -37,6 +38,7 @@ pub struct BaseProbeConfig {
     pub timeout_ms: Option<u64>,
     pub encoder: Option<EncoderConfig>,
     pub fuser: Option<FuserConfig>,
+    pub classifier: Option<ClassifierConfig>,
     pub sink: Option<SinkConfig>,
 }
 
@@ -91,7 +93,17 @@ mod tests {
         assert!(cfg.timeout_ms.is_none());
         assert!(cfg.encoder.is_none());
         assert!(cfg.fuser.is_none());
+        assert!(cfg.classifier.is_none());
         assert!(cfg.sink.is_none());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn base_probe_config_deserializes_with_classifier_from_yaml() {
+        let yaml = "classifier:\n  type: noop\n";
+        let cfg: BaseProbeConfig = serde_yaml_ng::from_str(yaml).expect("yaml");
+        let classifier = cfg.classifier.expect("classifier present");
+        assert!(matches!(classifier, ClassifierConfig::Noop));
     }
 
     #[cfg(feature = "config")]

@@ -110,6 +110,7 @@ nav:
       - Sinks: discover/sinks.md
       - Enrichment: discover/enrichment.md
       - Identity: discover/identity.md
+      - Classification: discover/classification.md
   - Probe:
       - probe/index.md
       - HTTP: probe/http.md

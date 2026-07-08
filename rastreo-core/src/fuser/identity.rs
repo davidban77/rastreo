@@ -118,51 +118,7 @@ impl IdentityFuser {
     }
 
     fn pair_weight(&self, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
-        let mut w = 0.0;
-
-        let mac_a = a.mac.as_deref();
-        let mac_b = b.mac.as_deref();
-        if let (Some(ma), Some(mb)) = (mac_a, mac_b) {
-            if mac_equal(ma, mb) && !is_virtual_mac(ma) && !self.hint_says_virtual(ma) {
-                w += WEIGHT_SHARED_MAC;
-            }
-        }
-
-        let sys_a = find_sysname(&a.signals);
-        let sys_b = find_sysname(&b.signals);
-        if let (Some(sa), Some(sb)) = (sys_a, sys_b) {
-            if !sa.is_empty() && sa.eq_ignore_ascii_case(sb) {
-                w += WEIGHT_SHARED_SYSNAME;
-            }
-        }
-
-        let hk_a = find_ssh_host_key(&a.signals);
-        let hk_b = find_ssh_host_key(&b.signals);
-        if let (Some(ka), Some(kb)) = (hk_a, hk_b) {
-            if !ka.is_empty() && ka == kb {
-                w += WEIGHT_SHARED_HOST_KEY;
-            }
-        }
-
-        let subj_a = find_tls_subject(&a.signals);
-        let subj_b = find_tls_subject(&b.signals);
-        if let (Some(sa), Some(sb)) = (subj_a, subj_b) {
-            if !sa.is_empty() && sa == sb {
-                w += WEIGHT_SHARED_TLS_SUBJECT;
-            }
-        }
-
-        let sans_a = collect_tls_san_names(&a.signals);
-        let sans_b = collect_tls_san_names(&b.signals);
-        if !sans_a.is_empty() && !sans_b.is_empty() && any_tls_san_overlap(&sans_a, &sans_b) {
-            w += WEIGHT_SHARED_TLS_SAN;
-        }
-
-        let rdns_a = collect_reverse_dns_names(&a.signals);
-        let rdns_b = collect_reverse_dns_names(&b.signals);
-        if !rdns_a.is_empty() && !rdns_b.is_empty() && any_reverse_dns_overlap(&rdns_a, &rdns_b) {
-            w += WEIGHT_SHARED_REVERSE_DNS;
-        }
+        let mut w: f64 = CONTRIBUTIONS.iter().map(|f| f(&self.hints, a, b)).sum();
 
         if let (Some(mfa), Some(mfb)) = (a.manufacturer.as_deref(), b.manufacturer.as_deref()) {
             if !mfa.eq_ignore_ascii_case(mfb) {
@@ -175,13 +131,6 @@ impl IdentityFuser {
         }
 
         w
-    }
-
-    fn hint_says_virtual(&self, mac: &str) -> bool {
-        self.hints
-            .vrrp_groups
-            .iter()
-            .any(|g| mac_equal(&g.virtual_mac, mac))
     }
 
     fn pair_is_declared_vrrp_members(&self, a: &DeviceRecord, b: &DeviceRecord) -> bool {
@@ -210,6 +159,89 @@ impl Fuser for IdentityFuser {
         let per_ip = self.inner.fuse_many(outcomes)?;
         Ok(self.correlate(per_ip))
     }
+}
+
+type ContributionFn = fn(&IdentityHints, &DeviceRecord, &DeviceRecord) -> f64;
+
+const CONTRIBUTIONS: &[ContributionFn] = &[
+    contribute_mac,
+    contribute_sysname,
+    contribute_ssh_host_key,
+    contribute_tls_subject,
+    contribute_tls_san,
+    contribute_reverse_dns,
+];
+
+fn contribute_mac(hints: &IdentityHints, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
+    let (Some(ma), Some(mb)) = (a.mac.as_deref(), b.mac.as_deref()) else {
+        return 0.0;
+    };
+    if mac_equal(ma, mb) && !is_virtual_mac(ma) && !hint_says_virtual(hints, ma) {
+        WEIGHT_SHARED_MAC
+    } else {
+        0.0
+    }
+}
+
+fn contribute_sysname(_hints: &IdentityHints, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
+    let (Some(sa), Some(sb)) = (find_sysname(&a.signals), find_sysname(&b.signals)) else {
+        return 0.0;
+    };
+    if !sa.is_empty() && sa.eq_ignore_ascii_case(sb) {
+        WEIGHT_SHARED_SYSNAME
+    } else {
+        0.0
+    }
+}
+
+fn contribute_ssh_host_key(_hints: &IdentityHints, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
+    let (Some(ka), Some(kb)) = (find_ssh_host_key(&a.signals), find_ssh_host_key(&b.signals))
+    else {
+        return 0.0;
+    };
+    if !ka.is_empty() && ka == kb {
+        WEIGHT_SHARED_HOST_KEY
+    } else {
+        0.0
+    }
+}
+
+fn contribute_tls_subject(_hints: &IdentityHints, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
+    let (Some(sa), Some(sb)) = (find_tls_subject(&a.signals), find_tls_subject(&b.signals)) else {
+        return 0.0;
+    };
+    if !sa.is_empty() && sa == sb {
+        WEIGHT_SHARED_TLS_SUBJECT
+    } else {
+        0.0
+    }
+}
+
+fn contribute_tls_san(_hints: &IdentityHints, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
+    let sans_a = collect_tls_san_names(&a.signals);
+    let sans_b = collect_tls_san_names(&b.signals);
+    if !sans_a.is_empty() && !sans_b.is_empty() && any_tls_san_overlap(&sans_a, &sans_b) {
+        WEIGHT_SHARED_TLS_SAN
+    } else {
+        0.0
+    }
+}
+
+fn contribute_reverse_dns(_hints: &IdentityHints, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
+    let rdns_a = collect_reverse_dns_names(&a.signals);
+    let rdns_b = collect_reverse_dns_names(&b.signals);
+    if !rdns_a.is_empty() && !rdns_b.is_empty() && any_reverse_dns_overlap(&rdns_a, &rdns_b) {
+        WEIGHT_SHARED_REVERSE_DNS
+    } else {
+        0.0
+    }
+}
+
+fn hint_says_virtual(hints: &IdentityHints, mac: &str) -> bool {
+    hints
+        .vrrp_groups
+        .iter()
+        .any(|g| mac_equal(&g.virtual_mac, mac))
 }
 
 fn find_sysname(signals: &[Signal]) -> Option<&str> {
@@ -1779,5 +1811,116 @@ mod tests {
         assert_eq!(out.len(), 2, "0.5 + 0.5 - 0.3 = 0.7, medium band");
         assert!(out[0].possible_alias_of.is_some());
         assert!(out[1].possible_alias_of.is_some());
+    }
+
+    #[test]
+    fn contributions_slice_covers_every_identity_signal() {
+        assert_eq!(
+            CONTRIBUTIONS.len(),
+            6,
+            "MAC, sysName, SSH host key, TLS subject, TLS SAN, reverse DNS",
+        );
+    }
+
+    #[test]
+    fn pair_weight_iterator_matches_pre_refactor_output_for_high_band_ssh_key() {
+        let key = Signal::SshHostKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI".into());
+        let a = base_record(1, None, vec![key.clone()], 0.3);
+        let b = base_record(2, None, vec![key.clone()], 0.3);
+        let f = make_fuser(IdentityHints::default());
+        assert!((f.pair_weight(&a, &b) - WEIGHT_SHARED_HOST_KEY).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pair_weight_sums_mac_and_sysname_contributions() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core-sw01".into());
+        let a = base_record(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let b = base_record(
+            2,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let f = make_fuser(IdentityHints::default());
+        let expected = WEIGHT_SHARED_MAC + WEIGHT_SHARED_SYSNAME;
+        assert!((f.pair_weight(&a, &b) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pair_weight_subtracts_manufacturer_penalty_after_summing_contributions() {
+        let mac = "aa:bb:cc:11:22:33";
+        let mut a = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        a.manufacturer = Some("Cisco Systems, Inc".into());
+        let mut b = base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        b.manufacturer = Some("Juniper Networks".into());
+        let f = make_fuser(IdentityHints::default());
+        let expected = WEIGHT_SHARED_MAC - PENALTY_CONFLICTING_MANUFACTURER;
+        assert!((f.pair_weight(&a, &b) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pair_weight_caps_declared_vrrp_members_at_medium_band_edge() {
+        let mac = "aa:bb:cc:11:22:33";
+        let sysname = Signal::SnmpSysName("core".into());
+        let hints = IdentityHints {
+            vrrp_groups: vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                virtual_mac: "00:00:5e:00:01:0a".into(),
+                members: vec![
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                ],
+            }],
+        };
+        let a = base_record(
+            1,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let b = base_record(
+            2,
+            Some(mac),
+            vec![Signal::Mac(mac.into()), sysname.clone()],
+            0.3,
+        );
+        let f = IdentityFuser::new(Box::new(DirectFuser::new()), hints).expect("fuser");
+        assert!((f.pair_weight(&a, &b) - VRRP_MEMBER_WEIGHT_CAP).abs() < 1e-9);
+    }
+
+    #[test]
+    fn contribute_mac_returns_zero_for_virtual_prefix() {
+        let mac = "00:00:5e:00:01:0a";
+        let a = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        let b = base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        assert_eq!(contribute_mac(&IdentityHints::default(), &a, &b), 0.0);
+    }
+
+    #[test]
+    fn contribute_mac_returns_zero_for_hint_declared_virtual() {
+        let mac = "de:ad:be:ef:00:01";
+        let hints = IdentityHints {
+            vrrp_groups: vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                virtual_mac: mac.into(),
+                members: vec![],
+            }],
+        };
+        let a = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        let b = base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
+        assert_eq!(contribute_mac(&hints, &a, &b), 0.0);
+    }
+
+    #[test]
+    fn contribute_sysname_returns_zero_for_empty_string() {
+        let a = base_record(1, None, vec![Signal::SnmpSysName(String::new())], 0.3);
+        let b = base_record(2, None, vec![Signal::SnmpSysName(String::new())], 0.3);
+        assert_eq!(contribute_sysname(&IdentityHints::default(), &a, &b), 0.0);
     }
 }

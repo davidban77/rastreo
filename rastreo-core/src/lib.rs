@@ -1,3 +1,4 @@
+pub mod classifier;
 pub mod config;
 pub mod encoder;
 pub mod error;
@@ -9,6 +10,7 @@ pub mod resolver;
 pub mod scheduler;
 pub mod sink;
 
+pub use classifier::{create_classifier, Classifier, ClassifierConfig, NoopClassifier};
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, ResolverError, RuntimeError};
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
