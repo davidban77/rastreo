@@ -153,8 +153,8 @@ pub struct DeviceRecord {
     pub schema_version: String,
     /// Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.
     pub schema_id: String,
-    /// Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.
-    #[serde(default)]
+    /// Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alt_ips: Vec<AltIp>,
     /// When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.
     #[serde(default)]

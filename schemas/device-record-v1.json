@@ -13,8 +13,7 @@
   ],
   "properties": {
     "alt_ips": {
-      "description": "Additional IPs merged into this device by the identity fuser — empty when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.",
-      "default": [],
+      "description": "Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.",
       "type": "array",
       "items": {
         "$ref": "#/definitions/AltIp"
