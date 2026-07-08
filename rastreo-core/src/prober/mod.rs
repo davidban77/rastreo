@@ -72,6 +72,7 @@ pub enum ProberConfig {
         #[serde(default = "http::default_tls_verify")]
         tls_verify: bool,
         #[serde(default = "http::default_user_agent")]
+        #[schemars(default = "http::default_user_agent_schema")]
         user_agent: String,
     },
     Dns {

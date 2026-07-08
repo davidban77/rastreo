@@ -83,3 +83,27 @@ fn committed_schemas_match_derives() {
         "committed scenario-v1.json is out of sync with the ScenarioFile derives. Run `task schema:generate`."
     );
 }
+
+#[test]
+fn scenario_schema_defaults_are_version_stable() {
+    let root = workspace_root();
+    let raw =
+        fs::read_to_string(root.join("schemas/scenario-v1.json")).expect("read scenario schema");
+    // Shape-check rather than exact-match against `env!("CARGO_PKG_VERSION")`: the latter
+    // resolves to xtask's own version (0.0.0), not rastreo-core's. A schemars default that
+    // bakes a semver starts with a digit after `rastreo/`; a stable placeholder such as
+    // `rastreo/<version>` does not.
+    let marker = "\"default\": \"rastreo/";
+    let baked = raw.match_indices(marker).find_map(|(idx, _)| {
+        let tail = &raw[idx + marker.len()..];
+        tail.starts_with(|c: char| c.is_ascii_digit())
+            .then(|| tail.chars().take_while(|c| *c != '"').collect::<String>())
+    });
+    assert!(
+        baked.is_none(),
+        "scenario-v1.json contains a version-baked default `rastreo/{}` — \
+         use a schemars-only stable default (see http::default_user_agent_schema) \
+         to keep the committed schema stable across release bumps.",
+        baked.as_deref().unwrap_or("")
+    );
+}

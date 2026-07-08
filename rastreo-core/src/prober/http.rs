@@ -89,6 +89,13 @@ pub fn default_user_agent() -> String {
     format!("rastreo/{}", env!("CARGO_PKG_VERSION"))
 }
 
+/// JsonSchema-facing default: the literal `"rastreo/<version>"` placeholder,
+/// not the version-baked runtime value. Keeps committed schemas stable across
+/// release bumps that would otherwise re-derive the concrete version string.
+pub fn default_user_agent_schema() -> &'static str {
+    "rastreo/<version>"
+}
+
 fn scheme_for_port(port: u16, scheme: HttpScheme) -> &'static str {
     match scheme {
         HttpScheme::Http => "http",
