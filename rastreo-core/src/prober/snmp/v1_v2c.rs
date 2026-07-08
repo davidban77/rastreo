@@ -30,6 +30,14 @@ pub fn default_community() -> crate::prober::redacted::Community {
     crate::prober::redacted::Community("public".to_string())
 }
 
+/// JsonSchema-facing default: the plaintext community, not the redacted
+/// `Serialize` output. Used via `#[schemars(default = ...)]` so IDE autocomplete
+/// suggests `public` rather than an opaque `<redacted:...>` token.
+#[cfg(feature = "snmp")]
+pub fn default_community_plaintext() -> &'static str {
+    "public"
+}
+
 pub(super) fn new_request_id(port: u16) -> i32 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

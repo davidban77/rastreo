@@ -24,7 +24,7 @@ pub fn default_batch_threshold() -> usize {
     NatsSink::DEFAULT_BUFFER_THRESHOLD
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(tag = "auth_type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NatsCredentials {
@@ -42,7 +42,7 @@ pub enum NatsCredentials {
     },
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NatsDelivery {

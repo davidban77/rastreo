@@ -15,6 +15,7 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 
 - [DeviceRecord](device-record.md) — every field on the emitted record. Generated from the schemars derives.
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
+- [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo run --scenario`. Generated. Point an IDE YAML plugin at `schemas/scenario-v1.json` for autocomplete and validation. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
 - [Streaming API](streaming-api.md) — Kafka topic / NATS subject conventions, correlation IDs, the AsyncAPI spec.
 
 ## Versioning policy
@@ -39,7 +40,8 @@ The `schema_id` URL is the discovery mechanism today; a future release may add o
 schemas/
 ├── asyncapi.yaml            # AsyncAPI 3.0 description of the streaming surface
 ├── device-record-v1.json    # JSON Schema for DeviceRecord
-└── scan-metadata-v1.json    # JSON Schema for ScanMetadata
+├── scan-metadata-v1.json    # JSON Schema for ScanMetadata
+└── scenario-v1.json         # JSON Schema for ScenarioFile (YAML scenario input)
 ```
 
 Regenerate everything (JSON Schemas + this doc section) locally with `task schema:all`. The CI drift-check job re-runs the same command and fails if the committed files diverge from what the Rust type derives produce.

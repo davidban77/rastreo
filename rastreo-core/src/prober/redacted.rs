@@ -40,6 +40,29 @@ impl From<Community> for String {
     }
 }
 
+#[cfg(feature = "snmp")]
+impl schemars::JsonSchema for Community {
+    // Wire form is a plain YAML string; the redacted `<redacted:HHHHHHHH>` shape only affects Serialize output.
+    fn schema_name() -> String {
+        "Community".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "SNMP community string written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output."
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
 #[cfg(any(feature = "snmp", feature = "nats"))]
 #[derive(Clone, Default, serde::Deserialize)]
 #[serde(transparent)]
@@ -72,6 +95,29 @@ impl Password {
     /// Returns the underlying secret string. Callers must not log, serialize, or persist the result.
     pub fn expose(&self) -> &str {
         &self.0
+    }
+}
+
+#[cfg(any(feature = "snmp", feature = "nats"))]
+impl schemars::JsonSchema for Password {
+    // Wire form is a plain YAML string; the redacted `<redacted:HHHHHHHH>` shape only affects Serialize output.
+    fn schema_name() -> String {
+        "Password".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Credential value written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output."
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
     }
 }
 

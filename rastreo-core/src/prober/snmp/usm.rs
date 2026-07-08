@@ -1,6 +1,6 @@
 use crate::prober::redacted::Password;
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct UsmCredentials {
     #[serde(default)]
     pub username: String,
@@ -10,7 +10,7 @@ pub struct UsmCredentials {
     pub privacy: UsmPrivacy,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "algorithm", rename_all = "snake_case")]
 pub enum UsmAuth {
     #[default]
@@ -35,7 +35,7 @@ pub enum UsmAuth {
     },
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "algorithm", rename_all = "snake_case")]
 pub enum UsmPrivacy {
     #[default]

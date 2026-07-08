@@ -1,3 +1,5 @@
+use schemars::JsonSchema;
+
 use crate::classifier::ClassifierConfig;
 use crate::encoder::EncoderConfig;
 #[cfg(feature = "config")]
@@ -14,7 +16,7 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")).into())
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct ScenarioFile {
     pub version: u8,
     pub kind: ScenarioKind,
@@ -23,14 +25,14 @@ pub struct ScenarioFile {
     pub scenarios: Vec<ScenarioEntry>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ScenarioKind {
     Discovery,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct BaseProbeConfig {
     pub name: Option<String>,
@@ -48,14 +50,14 @@ impl BaseProbeConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "signal_type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ScenarioEntry {
     Discover(DiscoverScenarioConfig),
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DiscoverScenarioConfig {
     #[serde(flatten)]

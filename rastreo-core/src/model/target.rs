@@ -2,8 +2,9 @@ use std::net::IpAddr;
 use std::time::SystemTime;
 
 use ipnet::IpNet;
+use schemars::JsonSchema;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub enum Target {
     Ip(IpAddr),

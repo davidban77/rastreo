@@ -41,6 +41,22 @@ fn committed_scan_metadata_render_matches_current_schema() {
 }
 
 #[test]
+fn committed_scenario_render_matches_current_schema() {
+    let root = workspace_root();
+    let raw =
+        fs::read_to_string(root.join("schemas/scenario-v1.json")).expect("read scenario schema");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse schema");
+    let rendered = xtask::render_schema(&value, "rastreo-core/src/config/mod.rs");
+    let committed =
+        fs::read_to_string(root.join("docs/site/docs/reference/schema/scenario-config.md"))
+            .expect("read committed scenario-config.md");
+    assert_eq!(
+        rendered, committed,
+        "committed scenario-config.md is out of sync with the schema. Run `task schema:all`."
+    );
+}
+
+#[test]
 fn committed_schemas_match_derives() {
     let root = workspace_root();
     let device_committed =
@@ -57,5 +73,13 @@ fn committed_schemas_match_derives() {
     assert_eq!(
         scan_committed, scan_current,
         "committed scan-metadata-v1.json is out of sync with the ScanMetadata derives. Run `task schema:generate`."
+    );
+
+    let scenario_committed =
+        fs::read_to_string(root.join("schemas/scenario-v1.json")).expect("read scenario schema");
+    let scenario_current = xtask::scenario_file_schema().expect("scenario schema");
+    assert_eq!(
+        scenario_committed, scenario_current,
+        "committed scenario-v1.json is out of sync with the ScenarioFile derives. Run `task schema:generate`."
     );
 }

@@ -16,6 +16,8 @@ pub use stdout::StdoutSink;
 
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
+
 use crate::error::RastreoError;
 
 #[async_trait::async_trait]
@@ -30,7 +32,7 @@ pub trait Sink: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SinkConfig {

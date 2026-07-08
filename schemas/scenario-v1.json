@@ -1,0 +1,1398 @@
+{
+  "$id": "https://schemas.rastreo.dev/scenario-config/v1.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "BaseProbeConfig": {
+      "properties": {
+        "classifier": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ClassifierConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "encoder": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EncoderConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fuser": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FuserConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rate_limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sink": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SinkConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ClassifierConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "noop"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Community": {
+      "description": "SNMP community string written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
+      "type": "string"
+    },
+    "DnsQueryType": {
+      "enum": [
+        "a",
+        "aaaa",
+        "mx",
+        "txt",
+        "ptr",
+        "ns",
+        "cname"
+      ],
+      "type": "string"
+    },
+    "DnsTransport": {
+      "enum": [
+        "udp",
+        "tcp"
+      ],
+      "type": "string"
+    },
+    "EncoderConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "ndjson"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FuserConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "confidence_baseline": {
+              "default": null,
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence_per_signal": {
+              "default": null,
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "include_unreachable": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "direct"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data_path": {
+              "default": "",
+              "type": "string"
+            },
+            "inner": {
+              "$ref": "#/definitions/FuserConfig"
+            },
+            "type": {
+              "enum": [
+                "oui_enrichment"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "inner",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "identity_hints": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/IdentityHints"
+                }
+              ],
+              "default": {
+                "vrrp_groups": []
+              }
+            },
+            "inner": {
+              "$ref": "#/definitions/FuserConfig"
+            },
+            "type": {
+              "enum": [
+                "identity"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "inner",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpScheme": {
+      "enum": [
+        "auto",
+        "http",
+        "https"
+      ],
+      "type": "string"
+    },
+    "IdentityHints": {
+      "properties": {
+        "vrrp_groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/VrrpGroup"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "IpNet": {
+      "description": "An IPv4 or IPv6 address with prefix length",
+      "examples": [
+        "192.168.0.0/24",
+        "fd00::/32"
+      ],
+      "oneOf": [
+        {
+          "description": "An IPv4 address with prefix length",
+          "examples": [
+            "0.0.0.0/0",
+            "192.168.0.0/24"
+          ],
+          "maxLength": 18,
+          "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\/(?:3[0-2]|[1-2][0-9]|[0-9])$",
+          "title": "IPv4 network",
+          "type": "string"
+        },
+        {
+          "description": "An IPv6 address with prefix length",
+          "examples": [
+            "::/0",
+            "fd00::/32"
+          ],
+          "maxLength": 43,
+          "pattern": "^[0-9A-Fa-f:\\.]+\\/(?:[0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$",
+          "title": "IPv6 network",
+          "type": "string"
+        }
+      ],
+      "title": "IP network"
+    },
+    "KafkaFlushMode": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "per_record"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threshold_bytes": {
+              "default": 65536,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "batched"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NatsCredentials": {
+      "oneOf": [
+        {
+          "properties": {
+            "auth_type": {
+              "enum": [
+                "anonymous"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "auth_type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "auth_type": {
+              "enum": [
+                "user_pass"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "auth_type",
+            "password",
+            "username"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "auth_type": {
+              "enum": [
+                "token"
+              ],
+              "type": "string"
+            },
+            "token": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "auth_type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "auth_type": {
+              "enum": [
+                "creds"
+              ],
+              "type": "string"
+            },
+            "creds_file": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "auth_type",
+            "creds_file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NatsDelivery": {
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "enum": [
+                "per_record"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "enum": [
+                "batched"
+              ],
+              "type": "string"
+            },
+            "threshold_bytes": {
+              "default": 65536,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Password": {
+      "description": "Credential value written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
+      "type": "string"
+    },
+    "ProberConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "tcp_connect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "ports",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "default": "/",
+              "type": "string"
+            },
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "scheme": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HttpScheme"
+                }
+              ],
+              "default": "auto"
+            },
+            "tls_verify": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "enum": [
+                "http"
+              ],
+              "type": "string"
+            },
+            "user_agent": {
+              "default": "rastreo/0.5.0",
+              "type": "string"
+            }
+          },
+          "required": [
+            "ports",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "default": [
+                53
+              ],
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "query_names": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "query_type": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/DnsQueryType"
+                }
+              ],
+              "default": "a"
+            },
+            "recursion_desired": {
+              "default": true,
+              "type": "boolean"
+            },
+            "transport": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/DnsTransport"
+                }
+              ],
+              "default": "udp"
+            },
+            "type": {
+              "enum": [
+                "dns"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "query_names",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "protocol": {
+              "$ref": "#/definitions/UdpProtocol"
+            },
+            "type": {
+              "enum": [
+                "udp"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "ports",
+            "protocol",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "community": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/Community"
+                }
+              ],
+              "default": "public"
+            },
+            "credentials": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/UsmCredentials"
+                }
+              ],
+              "default": {
+                "auth": {
+                  "algorithm": "none"
+                },
+                "privacy": {
+                  "algorithm": "none"
+                },
+                "username": ""
+              }
+            },
+            "ports": {
+              "default": [
+                161
+              ],
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "snmp"
+              ],
+              "type": "string"
+            },
+            "version": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/SnmpVersion"
+                }
+              ],
+              "default": "v2c"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "interface": {
+              "default": "",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "arp"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "interface": {
+              "default": "",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "ndp"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "default": [
+                22
+              ],
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "ssh"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "count": {
+              "default": 3,
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "interval_ms": {
+              "default": 200,
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "icmp"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "default": [
+                443
+              ],
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "tls"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "resolvers": {
+              "default": [],
+              "items": {
+                "format": "ip",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "reverse_dns"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScenarioEntry": {
+      "oneOf": [
+        {
+          "properties": {
+            "classifier": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ClassifierConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "encoder": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/EncoderConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fuser": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/FuserConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "probers": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/ProberConfig"
+              },
+              "type": "array"
+            },
+            "rate_limit": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "signal_type": {
+              "enum": [
+                "discover"
+              ],
+              "type": "string"
+            },
+            "sink": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SinkConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "targets": {
+              "items": {
+                "$ref": "#/definitions/Target"
+              },
+              "type": "array"
+            },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "signal_type",
+            "targets"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScenarioKind": {
+      "enum": [
+        "discovery"
+      ],
+      "type": "string"
+    },
+    "SinkConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "stdout"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "file"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "memory"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "brokers": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "flush_mode": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/KafkaFlushMode"
+                }
+              ],
+              "default": {
+                "threshold_bytes": 65536,
+                "type": "batched"
+              }
+            },
+            "topic": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "kafka"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "brokers",
+            "topic",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "credentials": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/NatsCredentials"
+                }
+              ],
+              "default": {
+                "auth_type": "anonymous"
+              }
+            },
+            "delivery": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/NatsDelivery"
+                }
+              ],
+              "default": {
+                "mode": "per_record"
+              }
+            },
+            "servers": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stream": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "nats"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "servers",
+            "stream",
+            "subject",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SnmpVersion": {
+      "enum": [
+        "v1",
+        "v2c",
+        "v3"
+      ],
+      "type": "string"
+    },
+    "Target": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Ip": {
+              "format": "ip",
+              "type": "string"
+            }
+          },
+          "required": [
+            "Ip"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Cidr": {
+              "$ref": "#/definitions/IpNet"
+            }
+          },
+          "required": [
+            "Cidr"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Range": {
+              "properties": {
+                "end": {
+                  "format": "ip",
+                  "type": "string"
+                },
+                "start": {
+                  "format": "ip",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "end",
+                "start"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "DnsName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "DnsName"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "UdpProtocol": {
+      "enum": [
+        "ntp",
+        "sip_options",
+        "memcached_stats",
+        "stun_binding"
+      ],
+      "type": "string"
+    },
+    "UsmAuth": {
+      "oneOf": [
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "none"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "algorithm"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "md5"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "sha1"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "sha224"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "sha256"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "sha384"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "sha512"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "UsmCredentials": {
+      "properties": {
+        "auth": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/UsmAuth"
+            }
+          ],
+          "default": {
+            "algorithm": "none"
+          }
+        },
+        "privacy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/UsmPrivacy"
+            }
+          ],
+          "default": {
+            "algorithm": "none"
+          }
+        },
+        "username": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UsmPrivacy": {
+      "oneOf": [
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "none"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "algorithm"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "des"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "aes128"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "aes192"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "enum": [
+                "aes256"
+              ],
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/definitions/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "VrrpGroup": {
+      "properties": {
+        "members": {
+          "default": [],
+          "items": {
+            "format": "ip",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "virtual_ip": {
+          "format": "ip",
+          "type": "string"
+        },
+        "virtual_mac": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "virtual_ip",
+        "virtual_mac"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "defaults": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/BaseProbeConfig"
+        }
+      ],
+      "default": {
+        "classifier": null,
+        "encoder": null,
+        "fuser": null,
+        "name": null,
+        "rate_limit": null,
+        "sink": null,
+        "timeout_ms": null
+      }
+    },
+    "kind": {
+      "$ref": "#/definitions/ScenarioKind"
+    },
+    "scenarios": {
+      "items": {
+        "$ref": "#/definitions/ScenarioEntry"
+      },
+      "type": "array"
+    },
+    "version": {
+      "format": "uint8",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "kind",
+    "scenarios",
+    "version"
+  ],
+  "title": "ScenarioFile",
+  "type": "object"
+}
