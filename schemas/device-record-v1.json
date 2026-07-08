@@ -60,8 +60,16 @@
       ],
       "format": "ip"
     },
+    "os_version": {
+      "description": "Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "platform": {
-      "description": "Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated once platform classification lands.",
+      "description": "Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing.",
       "type": [
         "string",
         "null"

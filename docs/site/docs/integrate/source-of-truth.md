@@ -27,12 +27,12 @@ A record from a single TCP-connect probe (one open port) lands at `confidence: 0
 
 ## Mapping signals to source-of-truth fields
 
-Every probe produces `Signal` entries carried on the `DeviceRecord` in the `signals` array. A reconciler decides which signals become fields on the source-of-truth object and which stay as raw observation history. The SSH, TLS, ICMP echo, and reverse-DNS probers together contribute six signal variants, and each has a natural mapping into the NetBox, Nautobot, and Infrahub data models.
+Every probe produces `Signal` entries carried on the `DeviceRecord` in the `signals` array. A reconciler decides which signals become fields on the source-of-truth object and which stay as raw observation history. The signals below have a natural mapping into the NetBox, Nautobot, and Infrahub data models — either as canonical fields populated upstream by the classifier, or as raw signals a reconciler pins directly.
 
 The signals split by role:
 
 - **Identity** — `SshHostKey`, `TlsSubject`, `TlsSanName`, `ReverseDnsName`. These help answer *which device is this?*. Four of them are already consumed by the [identity fuser](../discover/identity.md) for cross-IP correlation, so if you enable that fuser your reconciler receives one merged record per device and does not need to redo the correlation.
-- **Fingerprint** — `SshBanner`. This helps answer *what software / version is running?*. It is not consumed by the identity fuser today; it is intended for platform inference. Store it as-is and let a downstream classifier map it to a platform.
+- **Fingerprint** — `SshBanner`, `SnmpSysDescr`, `SnmpSysName`, `HttpBanner`. These help answer *what software / version is running?*. When the [rules classifier](../discover/classification.md) is enabled, these signals populate `DeviceRecord.platform` and `DeviceRecord.os_version` directly; your reconciler can read the canonical fields and treat the raw signals as history. When only `noop` is configured, both fields stay `null` and the reconciler owns any inference.
 - **Operational** — `IcmpEchoRttMicros`. This is a time-varying observation, not an identity claim. Treat it as a metric point, not as device metadata.
 
 ### Identity signals
@@ -48,13 +48,18 @@ These signals correlate a device across scans and across IPs. When the identity 
 
 The identity fuser already consumes all four of these to merge cross-IP records. If your reconciler groups by `identity_key`, the merge has already happened and each merged record carries the union of the constituents' signals — no additional correlation code is needed on the reconciler side.
 
-### Fingerprint signal
+### Fingerprint signals
 
-`SshBanner` is the SSH server's identification string, for example `"SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3"`. It fingerprints the SSH implementation and OS distribution and feeds later platform inference. The identity fuser does not use it today, so it will not be part of the correlation logic in a merged record — but it is still emitted as a `Signal` and stored on every record where an SSH probe succeeded.
+Fingerprint signals identify the software running on a device. `SshBanner`, `SnmpSysDescr`, `SnmpSysName`, and `HttpBanner` all feed the [rules classifier](../discover/classification.md); when the classifier is enabled, `DeviceRecord.platform` and `DeviceRecord.os_version` are populated directly and the raw signals remain on the record as history.
 
-| Signal | NetBox field | Nautobot field | Infrahub field |
+When the classifier is not enabled (`classifier.type: noop`, or omitted), `platform` and `os_version` stay `null` and the reconciler has to derive them from the raw signals — or leave the source of truth without a platform value.
+
+| Signal | Populates on the record | NetBox / Nautobot mapping | Infrahub mapping |
 |---|---|---|---|
-| `SshBanner` | Custom field on `dcim.Device`, for example `rastreo_ssh_banner`. When a platform-inference step is added, populate the built-in `dcim.Device.platform` foreign key from the banner and keep the raw string in the custom field. | Same as NetBox — custom field now, `dcim.Device.platform` once inference is available. | String attribute on the device kind, for example `ssh_banner`. Set the standard platform attribute once inference is available. |
+| `SshBanner` | Feeds `platform` (e.g. `linux`, `freebsd`) when the SSH banner rules match. Example value: `"SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3"`. | Set the built-in `dcim.Device.platform` foreign key from `DeviceRecord.platform`. Keep the raw banner in a custom field like `rastreo_ssh_banner` for audit. | Set the standard platform attribute from `DeviceRecord.platform`. Keep the raw banner in a `ssh_banner` string attribute. |
+| `SnmpSysDescr` | Feeds `platform` and `os_version` when the SNMP `sysDescr` rules match. Covers Cisco IOS / IOS-XR / NX-OS, Juniper JUNOS, Arista EOS, Linux. | `dcim.Device.platform` foreign key + a `dcim.Device.software_version` custom field (or the built-in `Platform.version` if you model it that way). | `platform` attribute + a version string attribute on the device kind. |
+| `SnmpSysName` | User-defined rules only; no defaults ship. Set `platform` / `os_version` from your naming convention if you have one. | Same shape as `SnmpSysDescr` above. | Same shape as `SnmpSysDescr` above. |
+| `HttpBanner` | Feeds `platform` and `os_version` when the `Server:` header matches the HTTP rules. Covers `nginx/*` and `Apache/*`. | `dcim.Device.platform` + `dcim.Device.software_version`. Useful mainly for hosts and appliances that speak HTTP as the front door. | `platform` attribute + version string attribute. |
 
 ### Operational signal
 

@@ -84,6 +84,35 @@
             "type"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "merge_mode": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/MergeMode"
+                }
+              ],
+              "default": "extend"
+            },
+            "platform_rules": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/PlatformRule"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "rules"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -309,6 +338,25 @@
         }
       ]
     },
+    "MergeMode": {
+      "description": "How user-supplied rules combine with the baked-in default rules.",
+      "oneOf": [
+        {
+          "description": "User rules PREPEND the baked-in list. First-match wins across the combined list.",
+          "enum": [
+            "extend"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only user rules run; baked-in rules are ignored.",
+          "enum": [
+            "replace"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "NatsCredentials": {
       "oneOf": [
         {
@@ -425,6 +473,43 @@
     },
     "Password": {
       "description": "Credential value written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
+      "type": "string"
+    },
+    "PlatformRule": {
+      "description": "A single regex-based platform-detection rule.",
+      "properties": {
+        "os_version_capture": {
+          "description": "Named regex capture group (e.g. `version` for `(?P<version>\\d+\\.\\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "signal": {
+          "$ref": "#/definitions/PlatformSignal"
+        }
+      },
+      "required": [
+        "pattern",
+        "platform",
+        "signal"
+      ],
+      "type": "object"
+    },
+    "PlatformSignal": {
+      "description": "Which probe-emitted signal a `PlatformRule` matches against.",
+      "enum": [
+        "snmp_sys_descr",
+        "ssh_banner",
+        "http_banner",
+        "snmp_sys_name"
+      ],
       "type": "string"
     },
     "ProberConfig": {

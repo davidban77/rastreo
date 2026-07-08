@@ -458,7 +458,7 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
             None
         });
 
-    let (manufacturer, platform, role) = {
+    let (manufacturer, platform, os_version, role) = {
         let best = records[best_idx].as_ref().expect("record present");
         (
             best.manufacturer
@@ -467,6 +467,9 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
             best.platform
                 .clone()
                 .or_else(|| first_non_none(records, member_indices, |r| r.platform.clone())),
+            best.os_version
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.os_version.clone())),
             best.role
                 .clone()
                 .or_else(|| first_non_none(records, member_indices, |r| r.role.clone())),
@@ -507,6 +510,7 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
         mac,
         manufacturer,
         platform,
+        os_version,
         role,
         confidence,
         last_seen,
@@ -706,6 +710,7 @@ mod tests {
             mac: mac.map(str::to_string),
             manufacturer: None,
             platform: None,
+            os_version: None,
             role: None,
             confidence: Confidence::new(confidence).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,

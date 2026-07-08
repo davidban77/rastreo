@@ -50,6 +50,7 @@ ipnet = { workspace = true }
 schemars = { workspace = true }
 ulid = { workspace = true }
 sha2 = { workspace = true }
+regex = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"], optional = true }
 rskafka = { workspace = true, optional = true }
 chrono = { workspace = true }
