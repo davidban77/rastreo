@@ -171,6 +171,7 @@ impl Prober for HttpProber {
             match tokio::time::timeout(ctx.timeout, request).await {
                 Ok(Ok(response)) => {
                     any_reachable = true;
+                    signals.push(Signal::OpenPort(port));
                     if let Some(server) = response
                         .headers()
                         .get(reqwest::header::SERVER)
@@ -336,8 +337,14 @@ mod tests {
             .await
             .expect("probe ok");
         assert!(outcome.reachable);
-        assert_eq!(outcome.signals.len(), 1);
-        assert!(matches!(&outcome.signals[0], Signal::HttpBanner(b) if b == "nginx/1.24.0"));
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::OpenPort(p) if *p == port)));
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::HttpBanner(b) if b == "nginx/1.24.0")));
         assert_eq!(outcome.kind, ProbeKind::Http);
     }
 
@@ -364,12 +371,18 @@ mod tests {
             .await
             .expect("probe ok");
         assert!(outcome.reachable);
-        assert_eq!(outcome.signals.len(), 1);
-        assert!(matches!(&outcome.signals[0], Signal::HttpBanner(b) if b == "Apache/2.4.62"));
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::OpenPort(p) if *p == port)));
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::HttpBanner(b) if b == "Apache/2.4.62")));
     }
 
     #[tokio::test]
-    async fn http_prober_no_server_header_emits_no_signal() {
+    async fn http_prober_no_server_header_still_emits_open_port() {
         let port = spawn_server(Arc::new(|_req| {
             Response::builder()
                 .status(200)
@@ -390,7 +403,8 @@ mod tests {
             .await
             .expect("probe ok");
         assert!(outcome.reachable);
-        assert!(outcome.signals.is_empty());
+        assert_eq!(outcome.signals.len(), 1);
+        assert!(matches!(&outcome.signals[0], Signal::OpenPort(p) if *p == port));
     }
 
     #[tokio::test]
@@ -471,11 +485,15 @@ mod tests {
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
             .expect("probe ok");
-        assert_eq!(outcome.signals.len(), 1);
-        match &outcome.signals[0] {
-            Signal::HttpBanner(b) => assert_eq!(b.len(), 256, "banner: {b}"),
-            other => panic!("expected HttpBanner, got {other:?}"),
-        }
+        let banner = outcome
+            .signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::HttpBanner(b) => Some(b),
+                _ => None,
+            })
+            .expect("banner emitted");
+        assert_eq!(banner.len(), 256, "banner: {banner}");
     }
 
     #[tokio::test]
@@ -500,8 +518,10 @@ mod tests {
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
             .expect("probe ok");
-        assert_eq!(outcome.signals.len(), 1);
-        assert!(matches!(&outcome.signals[0], Signal::HttpBanner(b) if b == "nginx"));
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::HttpBanner(b) if b == "nginx")));
     }
 
     #[tokio::test]
@@ -539,10 +559,105 @@ mod tests {
             .await
             .expect("probe ok");
         assert!(outcome.reachable);
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::HttpBanner(v) if v == "nginx-v6/1.0")));
+    }
+
+    #[tokio::test]
+    async fn http_probe_emits_open_port_on_successful_connect() {
+        let port = spawn_server(Arc::new(|_req| {
+            Response::builder()
+                .status(200)
+                .header("Server", "nginx/1.24.0")
+                .body(Full::new(Bytes::from("ok")))
+                .expect("response")
+        }))
+        .await;
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect("probe ok");
+        let open_port = outcome
+            .signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .expect("OpenPort emitted");
+        assert_eq!(open_port, port);
+    }
+
+    #[tokio::test]
+    async fn http_probe_does_not_emit_open_port_on_connect_failure() {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
+        let err = prober
+            .probe(&loopback_target(), &ctx_with_timeout(500))
+            .await
+            .expect_err("closed port must error");
         assert!(matches!(
-            outcome.signals.first(),
-            Some(Signal::HttpBanner(s)) if s == "nginx-v6/1.0"
+            err,
+            RastreoError::Probe(ProbeError::Unreachable { .. } | ProbeError::Timeout { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn http_probe_emits_open_port_per_successful_port_only() {
+        let good_port = spawn_server(Arc::new(|_req| {
+            Response::builder()
+                .status(200)
+                .body(Full::new(Bytes::from("ok")))
+                .expect("response")
+        }))
+        .await;
+        let closed_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("bind");
+        let closed_port = closed_listener.local_addr().expect("addr").port();
+        drop(closed_listener);
+        let prober = HttpProber::new(
+            vec![good_port, closed_port],
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(500))
+            .await
+            .expect("at least one port reachable");
+        let open_ports: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(open_ports, vec![good_port]);
     }
 
     #[tokio::test]

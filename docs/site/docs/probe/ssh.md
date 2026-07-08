@@ -25,6 +25,7 @@ probers:
 
 | Signal | When produced |
 |---|---|
+| `OpenPort(<port>)` | The prober opened a TCP connection to the port. Enables role heuristics via `ports_open` classifier rules without a paired `tcp_connect` prober. |
 | `SshBanner(<value>)` | The server sends its identification banner as the first line on the TCP connection (RFC 4253 §4.2). The prober captures the full line including the `SSH-2.0-` prefix and strips the trailing `\r\n`. |
 | `SshHostKey(<value>)` | The server's host public key, captured during the key-exchange step. Emitted as OpenSSH single-line format: `<algorithm> <base64-blob>`, matching the shape used in `~/.ssh/known_hosts` (without the leading host field). |
 

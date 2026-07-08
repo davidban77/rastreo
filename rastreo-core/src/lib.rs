@@ -12,7 +12,7 @@ pub mod sink;
 
 pub use classifier::{
     create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
-    PlatformSignal, RulesClassifier,
+    PlatformSignal, RoleRule, RulesClassifier,
 };
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{

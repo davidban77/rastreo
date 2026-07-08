@@ -32,7 +32,7 @@ Every probe produces `Signal` entries carried on the `DeviceRecord` in the `sign
 The signals split by role:
 
 - **Identity** — `SshHostKey`, `TlsSubject`, `TlsSanName`, `ReverseDnsName`. These help answer *which device is this?*. Four of them are already consumed by the [identity fuser](../discover/identity.md) for cross-IP correlation, so if you enable that fuser your reconciler receives one merged record per device and does not need to redo the correlation.
-- **Fingerprint** — `SshBanner`, `SnmpSysDescr`, `SnmpSysName`, `HttpBanner`. These help answer *what software / version is running?*. When the [rules classifier](../discover/classification.md) is enabled, these signals populate `DeviceRecord.platform` and `DeviceRecord.os_version` directly; your reconciler can read the canonical fields and treat the raw signals as history. When only `noop` is configured, both fields stay `null` and the reconciler owns any inference.
+- **Fingerprint** — `SshBanner`, `SnmpSysDescr`, `SnmpSysName`, `HttpBanner`, `SnmpSysObjectId`, and `OpenPort`. These help answer *what software / version is running?* and *what kind of device is this?*. When the [rules classifier](../discover/classification.md) is enabled, banner signals populate `DeviceRecord.platform` and `DeviceRecord.os_version`, while `SnmpSysObjectId` and `OpenPort` populate `DeviceRecord.role`. Your reconciler reads the canonical fields and keeps the raw signals as history. When only `noop` is configured, all three canonical fields stay `null` and the reconciler owns any inference.
 - **Operational** — `IcmpEchoRttMicros`. This is a time-varying observation, not an identity claim. Treat it as a metric point, not as device metadata.
 
 ### Identity signals
@@ -50,9 +50,9 @@ The identity fuser already consumes all four of these to merge cross-IP records.
 
 ### Fingerprint signals
 
-Fingerprint signals identify the software running on a device. `SshBanner`, `SnmpSysDescr`, `SnmpSysName`, and `HttpBanner` all feed the [rules classifier](../discover/classification.md); when the classifier is enabled, `DeviceRecord.platform` and `DeviceRecord.os_version` are populated directly and the raw signals remain on the record as history.
+Fingerprint signals identify the software running on a device and what role that device plays. `SshBanner`, `SnmpSysDescr`, `SnmpSysName`, and `HttpBanner` feed the platform phase of the [rules classifier](../discover/classification.md); `SnmpSysObjectId` and `OpenPort` feed the role phase. When the classifier is enabled, `DeviceRecord.platform`, `DeviceRecord.os_version`, and `DeviceRecord.role` are populated directly and the raw signals remain on the record as history.
 
-When the classifier is not enabled (`classifier.type: noop`, or omitted), `platform` and `os_version` stay `null` and the reconciler has to derive them from the raw signals — or leave the source of truth without a platform value.
+When the classifier is not enabled (`classifier.type: noop`, or omitted), all three fields stay `null` and the reconciler has to derive them from the raw signals — or leave the source of truth without canonical values.
 
 | Signal | Populates on the record | NetBox / Nautobot mapping | Infrahub mapping |
 |---|---|---|---|
@@ -60,6 +60,8 @@ When the classifier is not enabled (`classifier.type: noop`, or omitted), `platf
 | `SnmpSysDescr` | Feeds `platform` and `os_version` when the SNMP `sysDescr` rules match. Covers Cisco IOS / IOS-XR / NX-OS, Juniper JUNOS, Arista EOS, Linux. | `dcim.Device.platform` foreign key + a `dcim.Device.software_version` custom field (or the built-in `Platform.version` if you model it that way). | `platform` attribute + a version string attribute on the device kind. |
 | `SnmpSysName` | User-defined rules only; no defaults ship. Set `platform` / `os_version` from your naming convention if you have one. | Same shape as `SnmpSysDescr` above. | Same shape as `SnmpSysDescr` above. |
 | `HttpBanner` | Feeds `platform` and `os_version` when the `Server:` header matches the HTTP rules. Covers `nginx/*` and `Apache/*`. | `dcim.Device.platform` + `dcim.Device.software_version`. Useful mainly for hosts and appliances that speak HTTP as the front door. | `platform` attribute + version string attribute. |
+| `SnmpSysObjectId` | Feeds `role` when a user-supplied `sys_object_id_prefix` role rule matches — no baked-in prefixes ship because no public vendor MIB tree cleanly maps sub-prefixes to device roles; users supply rules against their own fleet's OIDs. See `classification.md#baked-in-role-rules` for the rationale. Example value: `"1.3.6.1.4.1.9.1.2050"`. | `dcim.Device.role` (or `device_role`) foreign key from `DeviceRecord.role`. Keep the raw OID in a custom field like `rastreo_sys_object_id` for audit. | Standard role attribute + a `sys_object_id` string attribute. |
+| `OpenPort` | Feeds `role` when a `ports_open` role rule matches. Baked-in port sets cover `router` (SSH + BGP, or SSH + HTTPS + NETCONF), `web_server` (80 or 443), and `host` (SSH-only). Rules match when every listed port appears; extra open ports do not cause a mismatch. | `dcim.Device.role` foreign key from `DeviceRecord.role`. Individual open ports live better as related `dcim.Service` or interface records if your model has them. | Standard role attribute; individual ports as related records. |
 
 ### Operational signal
 

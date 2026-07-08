@@ -9,15 +9,15 @@ This section is the per-prober reference. Each prober has its own configuration,
 | Prober | Signal | Build feature |
 |---|---|---|
 | [TCP-connect](../reference/scenario.md#probers) | `OpenPort(<port>)` | always available |
-| [HTTP](http.md) | `HttpBanner(<value>)` | `--features http` (bundled with release binaries) |
+| [HTTP](http.md) | `OpenPort(<port>)`, `HttpBanner(<value>)` | `--features http` (bundled with release binaries) |
 | [DNS](dns.md) | `DnsHost(<value>)` | always available |
 | [Reverse DNS](reverse-dns.md) | `ReverseDnsName(<hostname>)` | always available |
 | [UDP](udp.md) | `NtpBanner`, `SipUserAgent`, `MemcachedVersion`, `StunMappedAddress` | always available |
 | [SNMP](snmp.md) | `SnmpSysDescr`, `SnmpSysObjectId`, `SnmpSysName` | `--features snmp` (bundled with release binaries) |
 | [ARP](arp.md) | `Mac(<address>)` (IPv4 targets) | `--features arp` (bundled with release binaries; requires `CAP_NET_RAW`) |
 | [NDP](ndp.md) | `Mac(<address>)` (IPv6 targets) | `--features ndp` (bundled with release binaries; requires `CAP_NET_RAW`) |
-| [SSH](ssh.md) | `SshBanner(<value>)`, `SshHostKey(<value>)` | `--features ssh` (bundled with release binaries) |
+| [SSH](ssh.md) | `OpenPort(<port>)`, `SshBanner(<value>)`, `SshHostKey(<value>)` | `--features ssh` (bundled with release binaries) |
 | [ICMP](icmp.md) | `IcmpEchoRttMicros(<value>)` | `--features icmp` (bundled with release binaries; unprivileged where `SOCK_DGRAM` ICMP is permitted, `CAP_NET_RAW` otherwise) |
-| [TLS](tls.md) | `TlsSubject(<value>)`, `TlsSanName(<value>)` | `--features tls` (bundled with release binaries) |
+| [TLS](tls.md) | `OpenPort(<port>)`, `TlsSubject(<value>)`, `TlsSanName(<value>)` | `--features tls` (bundled with release binaries) |
 
 Topics covered here include the configuration schema, observable signal shape, timeout semantics, and known limits for each prober. Where a prober has nontrivial tuning (HTTP TLS modes, DNS transport selection, UDP protocol selection, SNMP credentials, ARP or NDP interface selection, reverse DNS resolver selection), that surface lives on the prober's page rather than scattered across the scenario reference.

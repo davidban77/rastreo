@@ -28,6 +28,7 @@ probers:
 
 | Signal | When produced |
 |---|---|
+| `OpenPort(<port>)` | The prober opened a TCP connection to the port. Emitted even when the subsequent TLS handshake fails — a non-TLS port that answers TCP is still an open port. Enables role heuristics via `ports_open` classifier rules without a paired `tcp_connect` prober. |
 | `TlsSubject(<value>)` | The server's leaf certificate has a non-empty Common Name (CN) attribute in its Subject Distinguished Name. `<value>` is the CN string, trimmed of surrounding whitespace. Certificates with no CN (increasingly common in modern PKIs that put the identity in the SAN extension only) produce no `TlsSubject` signal. |
 | `TlsSanName(<value>)` | Emitted once per DNS or IP entry in the leaf certificate's Subject Alternative Name (SAN) extension. DNS entries are emitted as-is. IP entries are prefixed with `ip:` so downstream consumers can differentiate `router.example.com` from `10.0.0.1`. Entries appear in the order the certificate lists them. |
 

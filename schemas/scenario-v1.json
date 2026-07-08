@@ -102,6 +102,13 @@
               },
               "type": "array"
             },
+            "role_rules": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/RoleRule"
+              },
+              "type": "array"
+            },
             "type": {
               "enum": [
                 "rules"
@@ -846,6 +853,62 @@
             }
           },
           "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RoleRule": {
+      "description": "A single role-detection rule. Two match strategies are supported: exact byte-prefix on `SnmpSysObjectId` and all-of set membership over `OpenPort` signals.",
+      "oneOf": [
+        {
+          "description": "Matches when the record carries any `Signal::SnmpSysObjectId(oid)` whose dotted string starts with `prefix`. Case-sensitive byte comparison.",
+          "properties": {
+            "prefix": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "sys_object_id_prefix"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "prefix",
+            "role",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Matches when the record carries a `Signal::OpenPort(p)` for every `p` in `ports`. Empty `ports` is rejected at classifier construction.",
+          "properties": {
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "role": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "ports_open"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "ports",
+            "role",
             "type"
           ],
           "type": "object"

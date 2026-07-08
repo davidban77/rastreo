@@ -1,4 +1,5 @@
 pub mod platform_rules;
+pub mod role_rules;
 
 use regex::Regex;
 use schemars::JsonSchema;
@@ -62,6 +63,17 @@ pub struct PlatformRule {
     pub os_version_capture: Option<String>,
 }
 
+/// A single role-detection rule. Two match strategies are supported: exact byte-prefix on `SnmpSysObjectId` and all-of set membership over `OpenPort` signals.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RoleRule {
+    /// Matches when the record carries any `Signal::SnmpSysObjectId(oid)` whose dotted string starts with `prefix`. Case-sensitive byte comparison.
+    SysObjectIdPrefix { prefix: String, role: String },
+    /// Matches when the record carries a `Signal::OpenPort(p)` for every `p` in `ports`. Empty `ports` is rejected at classifier construction.
+    PortsOpen { ports: Vec<u16>, role: String },
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -72,6 +84,8 @@ pub enum ClassifierConfig {
         merge_mode: MergeMode,
         #[serde(default)]
         platform_rules: Vec<PlatformRule>,
+        #[serde(default)]
+        role_rules: Vec<RoleRule>,
     },
 }
 
@@ -81,9 +95,11 @@ pub fn create_classifier(config: &ClassifierConfig) -> Result<Box<dyn Classifier
         ClassifierConfig::Rules {
             merge_mode,
             platform_rules,
+            role_rules,
         } => Ok(Box::new(RulesClassifier::new(
             *merge_mode,
             platform_rules.clone(),
+            role_rules.clone(),
         )?)),
     }
 }
@@ -95,29 +111,31 @@ struct CompiledRule {
     os_version_capture: Option<String>,
 }
 
-/// Classifier that walks a device's `signals` and assigns `platform` + `os_version` from the first matching rule.
+/// Classifier that walks a device's `signals` and assigns `platform` + `os_version` from the first matching platform rule, then `role` from the first matching role rule.
 pub struct RulesClassifier {
-    rules: Vec<CompiledRule>,
+    platform_rules: Vec<CompiledRule>,
+    role_rules: Vec<RoleRule>,
 }
 
 impl RulesClassifier {
-    /// Builds a classifier by resolving `merge_mode` into an effective rule list and compiling each rule's pattern.
-    /// Returns `ClassifierError::InvalidRegex` if any pattern fails to compile.
+    /// Builds a classifier by resolving `merge_mode` into an effective platform + role rule list, compiling each platform pattern, and validating each role rule.
+    /// Returns `ClassifierError::InvalidRegex` if any pattern fails to compile, or `ClassifierError::InvalidRoleRule` if a role rule fails validation.
     pub fn new(
         merge_mode: MergeMode,
-        user_rules: Vec<PlatformRule>,
+        user_platform_rules: Vec<PlatformRule>,
+        user_role_rules: Vec<RoleRule>,
     ) -> Result<Self, ClassifierError> {
-        let effective = match merge_mode {
+        let effective_platform = match merge_mode {
             MergeMode::Extend => {
-                let mut merged = user_rules;
+                let mut merged = user_platform_rules;
                 merged.extend(platform_rules::baked_platform_rules());
                 merged
             }
-            MergeMode::Replace => user_rules,
+            MergeMode::Replace => user_platform_rules,
         };
 
-        let mut compiled = Vec::with_capacity(effective.len());
-        for rule in effective {
+        let mut compiled = Vec::with_capacity(effective_platform.len());
+        for rule in effective_platform {
             let regex =
                 Regex::new(&rule.pattern).map_err(|source| ClassifierError::InvalidRegex {
                     pattern: rule.pattern.clone(),
@@ -130,32 +148,102 @@ impl RulesClassifier {
                 os_version_capture: rule.os_version_capture,
             });
         }
-        Ok(Self { rules: compiled })
+
+        let effective_role = match merge_mode {
+            MergeMode::Extend => {
+                let mut merged = user_role_rules;
+                merged.extend(role_rules::baked_role_rules());
+                merged
+            }
+            MergeMode::Replace => user_role_rules,
+        };
+        for rule in &effective_role {
+            match rule {
+                RoleRule::PortsOpen { ports, role } if ports.is_empty() => {
+                    return Err(ClassifierError::InvalidRoleRule(format!(
+                        "ports_open rule for role `{role}` has an empty ports list"
+                    )));
+                }
+                RoleRule::SysObjectIdPrefix { prefix, role } if prefix.is_empty() => {
+                    return Err(ClassifierError::InvalidRoleRule(format!(
+                        "sys_object_id_prefix rule for role `{role}` has an empty prefix"
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Self {
+            platform_rules: compiled,
+            role_rules: effective_role,
+        })
     }
 }
 
 impl Classifier for RulesClassifier {
     fn classify(&self, record: &mut DeviceRecord) -> Result<(), RastreoError> {
-        if record.platform.is_some() {
-            return Ok(());
-        }
-        for rule in &self.rules {
-            for signal in &record.signals {
-                let Some(text) = signal_text_for(signal, rule.signal) else {
-                    continue;
-                };
-                if let Some(caps) = rule.regex.captures(text) {
+        if record.platform.is_none() {
+            for rule in &self.platform_rules {
+                if let Some(matched) = platform_rule_match(rule, record) {
                     record.platform = Some(rule.platform.clone());
-                    if let Some(name) = rule.os_version_capture.as_deref() {
-                        if let Some(m) = caps.name(name) {
-                            record.os_version = Some(m.as_str().to_string());
-                        }
+                    if let Some(version) = matched {
+                        record.os_version = Some(version);
                     }
-                    return Ok(());
+                    break;
                 }
             }
         }
+
+        if record.role.is_none() {
+            for rule in &self.role_rules {
+                if role_rule_matches(rule, record) {
+                    record.role = Some(role_of(rule).to_string());
+                    break;
+                }
+            }
+        }
+
         Ok(())
+    }
+}
+
+fn platform_rule_match(rule: &CompiledRule, record: &DeviceRecord) -> Option<Option<String>> {
+    for signal in &record.signals {
+        let Some(text) = signal_text_for(signal, rule.signal) else {
+            continue;
+        };
+        if let Some(caps) = rule.regex.captures(text) {
+            let version = rule
+                .os_version_capture
+                .as_deref()
+                .and_then(|name| caps.name(name))
+                .map(|m| m.as_str().to_string());
+            return Some(version);
+        }
+    }
+    None
+}
+
+fn role_rule_matches(rule: &RoleRule, record: &DeviceRecord) -> bool {
+    match rule {
+        RoleRule::SysObjectIdPrefix { prefix, .. } => record
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::SnmpSysObjectId(oid) if oid.starts_with(prefix.as_str()))),
+        RoleRule::PortsOpen { ports, .. } => ports.iter().all(|want| {
+            record
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::OpenPort(p) if p == want))
+        }),
+    }
+}
+
+fn role_of(rule: &RoleRule) -> &str {
+    match rule {
+        RoleRule::SysObjectIdPrefix { role, .. } | RoleRule::PortsOpen { role, .. } => {
+            role.as_str()
+        }
     }
 }
 
@@ -193,6 +281,7 @@ mod tests {
             confidence: Confidence::new(0.1).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
             signals: Vec::new(),
+            probe_kinds: Vec::new(),
             schema_version: CURRENT_SCHEMA_VERSION.to_string(),
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
@@ -212,6 +301,7 @@ mod tests {
         ClassifierConfig::Rules {
             merge_mode: MergeMode::Extend,
             platform_rules: user,
+            role_rules: Vec::new(),
         }
     }
 
@@ -219,6 +309,23 @@ mod tests {
         ClassifierConfig::Rules {
             merge_mode: MergeMode::Replace,
             platform_rules: user,
+            role_rules: Vec::new(),
+        }
+    }
+
+    fn extend_role_rules(user: Vec<RoleRule>) -> ClassifierConfig {
+        ClassifierConfig::Rules {
+            merge_mode: MergeMode::Extend,
+            platform_rules: Vec::new(),
+            role_rules: user,
+        }
+    }
+
+    fn replace_role_rules(user: Vec<RoleRule>) -> ClassifierConfig {
+        ClassifierConfig::Rules {
+            merge_mode: MergeMode::Replace,
+            platform_rules: Vec::new(),
+            role_rules: user,
         }
     }
 
@@ -290,6 +397,7 @@ mod tests {
         assert_send_sync::<PlatformRule>();
         assert_send_sync::<PlatformSignal>();
         assert_send_sync::<MergeMode>();
+        assert_send_sync::<RoleRule>();
     }
 
     #[test]
@@ -571,9 +679,11 @@ mod tests {
             ClassifierConfig::Rules {
                 merge_mode,
                 platform_rules,
+                role_rules,
             } => {
                 assert_eq!(merge_mode, MergeMode::Extend);
                 assert!(platform_rules.is_empty());
+                assert!(role_rules.is_empty());
             }
             _ => panic!("expected Rules variant"),
         }
@@ -599,6 +709,7 @@ platform_rules:
             ClassifierConfig::Rules {
                 merge_mode,
                 platform_rules,
+                role_rules,
             } => {
                 assert_eq!(merge_mode, MergeMode::Replace);
                 assert_eq!(platform_rules.len(), 2);
@@ -609,8 +720,78 @@ platform_rules:
                 );
                 assert_eq!(platform_rules[1].platform, "linux");
                 assert!(platform_rules[1].os_version_capture.is_none());
+                assert!(role_rules.is_empty());
             }
             _ => panic!("expected Rules variant"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn classifier_config_deserializes_rules_variant_with_role_rules() {
+        let yaml = r#"
+type: rules
+platform_rules:
+  - signal: snmp_sys_descr
+    pattern: "^Cisco IOS Software"
+    platform: cisco_ios
+role_rules:
+  - type: sys_object_id_prefix
+    prefix: "1.3.6.1.4.1.9.1"
+    role: router
+  - type: ports_open
+    ports: [22, 179]
+    role: router
+"#;
+        let cfg: ClassifierConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            ClassifierConfig::Rules {
+                platform_rules,
+                role_rules,
+                ..
+            } => {
+                assert_eq!(platform_rules.len(), 1);
+                assert_eq!(role_rules.len(), 2);
+                assert!(matches!(role_rules[0], RoleRule::SysObjectIdPrefix { .. }));
+                assert!(matches!(role_rules[1], RoleRule::PortsOpen { .. }));
+            }
+            _ => panic!("expected Rules variant"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn role_rule_sys_object_id_prefix_deserializes_from_yaml() {
+        let yaml = r#"
+type: sys_object_id_prefix
+prefix: "1.3.6.1.4.1.9.1"
+role: router
+"#;
+        let rule: RoleRule = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match rule {
+            RoleRule::SysObjectIdPrefix { prefix, role } => {
+                assert_eq!(prefix, "1.3.6.1.4.1.9.1");
+                assert_eq!(role, "router");
+            }
+            _ => panic!("expected SysObjectIdPrefix"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn role_rule_ports_open_deserializes_from_yaml() {
+        let yaml = r#"
+type: ports_open
+ports: [22, 179]
+role: router
+"#;
+        let rule: RoleRule = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match rule {
+            RoleRule::PortsOpen { ports, role } => {
+                assert_eq!(ports, vec![22, 179]);
+                assert_eq!(role, "router");
+            }
+            _ => panic!("expected PortsOpen"),
         }
     }
 
@@ -644,5 +825,208 @@ platform_rules:
             serde_json::to_string(&MergeMode::Replace).expect("serialize"),
             "\"replace\""
         );
+    }
+
+    #[test]
+    fn rules_classifier_populates_role_from_sys_object_id_prefix() {
+        let user = vec![RoleRule::SysObjectIdPrefix {
+            prefix: "1.3.6.1.4.1.9.1".into(),
+            role: "router".into(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysObjectId("1.3.6.1.4.1.9.1.2050".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("router"));
+    }
+
+    #[test]
+    fn rules_classifier_populates_role_from_ports_open() {
+        let c = create_classifier(&extend_role_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::OpenPort(22));
+        record.signals.push(Signal::OpenPort(179));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("router"));
+    }
+
+    #[test]
+    fn rules_classifier_ports_open_requires_all_ports() {
+        let user = vec![RoleRule::PortsOpen {
+            ports: vec![22, 179],
+            role: "router".into(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::OpenPort(22));
+        c.classify(&mut record).expect("classify ok");
+        assert!(record.role.is_none());
+    }
+
+    #[test]
+    fn rules_classifier_preserves_prepopulated_role() {
+        let user = vec![RoleRule::SysObjectIdPrefix {
+            prefix: "1.3.6.1.4.1.9.1".into(),
+            role: "router".into(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.role = Some("manual_override".into());
+        record
+            .signals
+            .push(Signal::SnmpSysObjectId("1.3.6.1.4.1.9.1.2050".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("manual_override"));
+    }
+
+    #[test]
+    fn rules_classifier_role_first_matching_rule_wins() {
+        let user = vec![
+            RoleRule::PortsOpen {
+                ports: vec![22],
+                role: "user_first".into(),
+            },
+            RoleRule::PortsOpen {
+                ports: vec![22],
+                role: "user_second".into(),
+            },
+        ];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::OpenPort(22));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("user_first"));
+    }
+
+    #[test]
+    fn rules_classifier_role_skips_when_no_signal_matches() {
+        let c = create_classifier(&extend_role_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        c.classify(&mut record).expect("classify ok");
+        assert!(record.role.is_none());
+    }
+
+    #[test]
+    fn rules_classifier_snmp_oid_trumps_port_heuristic() {
+        let user = vec![
+            RoleRule::SysObjectIdPrefix {
+                prefix: "1.3.6.1.4.1.9.1".into(),
+                role: "snmp_router".into(),
+            },
+            RoleRule::PortsOpen {
+                ports: vec![22, 179],
+                role: "port_router".into(),
+            },
+        ];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysObjectId("1.3.6.1.4.1.9.1.2050".into()));
+        record.signals.push(Signal::OpenPort(22));
+        record.signals.push(Signal::OpenPort(179));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("snmp_router"));
+    }
+
+    #[test]
+    fn rules_classifier_role_merge_mode_extend_prepends_user_rules() {
+        let user = vec![RoleRule::PortsOpen {
+            ports: vec![22, 179],
+            role: "user_router".into(),
+        }];
+        let c = create_classifier(&extend_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::OpenPort(22));
+        record.signals.push(Signal::OpenPort(179));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("user_router"));
+    }
+
+    #[test]
+    fn rules_classifier_role_merge_mode_replace_uses_only_user_rules() {
+        let user = vec![RoleRule::PortsOpen {
+            ports: vec![8080],
+            role: "user_only".into(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::OpenPort(22));
+        record.signals.push(Signal::OpenPort(179));
+        c.classify(&mut record).expect("classify ok");
+        assert!(
+            record.role.is_none(),
+            "baked router heuristic must not run under Replace"
+        );
+    }
+
+    #[test]
+    fn role_rule_ports_open_with_empty_ports_fails_construction() {
+        let user = vec![RoleRule::PortsOpen {
+            ports: vec![],
+            role: "invalid".into(),
+        }];
+        let result = create_classifier(&replace_role_rules(user));
+        let err = match result {
+            Ok(_) => panic!("empty ports must fail construction"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            RastreoError::Classifier(ClassifierError::InvalidRoleRule(_))
+        ));
+    }
+
+    #[test]
+    fn role_rule_sys_object_id_prefix_with_empty_prefix_fails_construction() {
+        let user = vec![RoleRule::SysObjectIdPrefix {
+            prefix: String::new(),
+            role: "invalid".into(),
+        }];
+        let result = create_classifier(&replace_role_rules(user));
+        let err = match result {
+            Ok(_) => panic!("empty prefix must fail construction"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            RastreoError::Classifier(ClassifierError::InvalidRoleRule(_))
+        ));
+    }
+
+    #[test]
+    fn baked_role_rules_snapshot_matches_expected_count() {
+        assert_eq!(
+            role_rules::baked_role_rules().len(),
+            5,
+            "if you added or removed a baked-in role rule, update docs/site/docs/discover/classification.md AND this count"
+        );
+    }
+
+    #[test]
+    fn baked_role_rules_match_realistic_fixtures() {
+        let cases: &[(&[u16], &str)] = &[
+            (&[22, 179], "router"),
+            (&[22, 443, 830], "router"),
+            (&[443], "web_server"),
+            (&[80], "web_server"),
+            (&[22], "host"),
+        ];
+
+        let classifier = create_classifier(&extend_role_rules(vec![])).expect("create");
+        for (ports, expected_role) in cases {
+            let mut record = empty_record();
+            for p in *ports {
+                record.signals.push(Signal::OpenPort(*p));
+            }
+            classifier.classify(&mut record).expect("classify ok");
+            assert_eq!(
+                record.role.as_deref(),
+                Some(*expected_role),
+                "fixture ports {ports:?} should classify to `{expected_role}`"
+            );
+        }
     }
 }
