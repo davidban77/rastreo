@@ -570,7 +570,7 @@
               "type": "string"
             },
             "user_agent": {
-              "default": "rastreo/0.5.0",
+              "default": "rastreo/<version>",
               "type": "string"
             }
           },
