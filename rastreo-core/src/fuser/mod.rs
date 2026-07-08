@@ -141,6 +141,7 @@ impl Fuser for DirectFuser {
             mac: first_mac,
             manufacturer: None,
             platform: None,
+            os_version: None,
             role: None,
             confidence,
             last_seen,

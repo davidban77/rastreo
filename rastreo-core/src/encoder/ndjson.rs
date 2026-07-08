@@ -43,6 +43,7 @@ mod tests {
             mac: Some("aa:bb:cc:dd:ee:ff".into()),
             manufacturer: Some("Cisco".into()),
             platform: Some("IOS-XR".into()),
+            os_version: None,
             role: Some("router".into()),
             confidence: Confidence::new(0.75).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,

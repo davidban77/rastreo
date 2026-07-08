@@ -40,6 +40,7 @@ Wire schema for ScenarioFile emitted by rastreo.
 One of:
 
 - { `type`: `noop` }
+- { `merge_mode`: [`MergeMode`](#mergemode), `platform_rules`: array<[`PlatformRule`](#platformrule)>, `type`: `rules` }
 
 ### `Community` {#community}
 
@@ -95,6 +96,15 @@ One of:
 - { `type`: `per_record` }
 - { `threshold_bytes`: uint, `type`: `batched` }
 
+### `MergeMode` {#mergemode}
+
+How user-supplied rules combine with the baked-in default rules.
+
+One of:
+
+- `extend`
+- `replace`
+
 ### `NatsCredentials` {#natscredentials}
 
 One of:
@@ -114,6 +124,23 @@ One of:
 ### `Password` {#password}
 
 Credential value written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.
+
+Type: string
+
+### `PlatformRule` {#platformrule}
+
+A single regex-based platform-detection rule.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`. |
+| `pattern` | string | yes | — |
+| `platform` | string | yes | — |
+| `signal` | [`PlatformSignal`](#platformsignal) | yes | — |
+
+### `PlatformSignal` {#platformsignal}
+
+Which probe-emitted signal a `PlatformRule` matches against.
 
 Type: string
 

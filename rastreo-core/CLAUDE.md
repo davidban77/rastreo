@@ -45,7 +45,8 @@ src/
 │   ├── oui.rs       ← OuiEnrichmentFuser (feature: oui)
 │   └── identity.rs  ← IdentityFuser (MAC + SnmpSysName + SshHostKey + TlsSubject + TlsSanName + ReverseDnsName correlation)
 ├── classifier/
-│   └── mod.rs       ← Classifier trait + ClassifierConfig + create_classifier factory + NoopClassifier default impl
+│   ├── mod.rs           ← Classifier trait + ClassifierConfig + create_classifier factory + NoopClassifier / RulesClassifier
+│   └── platform_rules.rs ← Baked-in default PlatformRule table
 ├── pipeline.rs     ← run_discovery + DiscoverySummary
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```

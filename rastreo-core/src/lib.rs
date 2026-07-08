@@ -10,9 +10,15 @@ pub mod resolver;
 pub mod scheduler;
 pub mod sink;
 
-pub use classifier::{create_classifier, Classifier, ClassifierConfig, NoopClassifier};
+pub use classifier::{
+    create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
+    PlatformSignal, RulesClassifier,
+};
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
-pub use error::{ConfigError, EncoderError, ProbeError, RastreoError, ResolverError, RuntimeError};
+pub use error::{
+    ClassifierError, ConfigError, EncoderError, ProbeError, RastreoError, ResolverError,
+    RuntimeError,
+};
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
 pub use model::{
     AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome,

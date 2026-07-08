@@ -19,6 +19,9 @@ pub enum RastreoError {
 
     #[error("runtime error: {0}")]
     Runtime(#[from] RuntimeError),
+
+    #[error("classifier error: {0}")]
+    Classifier(#[from] ClassifierError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +98,18 @@ pub enum RuntimeError {
     TaskPanicked(String),
     #[error("task aborted: {reason}")]
     TaskAborted { reason: &'static str },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ClassifierError {
+    /// Fires when a `PlatformRule` carries a `pattern` that fails to compile as a regex.
+    #[error("invalid regex `{pattern}`: {source}")]
+    InvalidRegex {
+        pattern: String,
+        #[source]
+        source: regex::Error,
+    },
 }
 
 #[cfg(test)]
@@ -222,5 +237,32 @@ mod tests {
         assert_send_sync::<ResolverError>();
         assert_send_sync::<EncoderError>();
         assert_send_sync::<RuntimeError>();
+        assert_send_sync::<ClassifierError>();
+    }
+
+    fn bad_regex_error() -> regex::Error {
+        let bad = String::from("(unclosed");
+        regex::Regex::new(&bad).expect_err("bad regex fails")
+    }
+
+    #[test]
+    fn classifier_error_converts_via_from() {
+        let c = ClassifierError::InvalidRegex {
+            pattern: "(unclosed".into(),
+            source: bad_regex_error(),
+        };
+        let err: RastreoError = c.into();
+        assert!(matches!(err, RastreoError::Classifier(_)));
+    }
+
+    #[test]
+    fn classifier_invalid_regex_display_includes_pattern() {
+        let err = RastreoError::Classifier(ClassifierError::InvalidRegex {
+            pattern: "(unclosed".into(),
+            source: bad_regex_error(),
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("classifier error"));
+        assert!(msg.contains("(unclosed"));
     }
 }

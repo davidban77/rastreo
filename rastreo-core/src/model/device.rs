@@ -131,8 +131,11 @@ pub struct DeviceRecord {
     pub mac: Option<String>,
     /// Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser. `null` when the OUI is not in the bundled Wireshark manuf database.
     pub manufacturer: Option<String>,
-    /// Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing. Currently always `null`; populated once platform classification lands.
+    /// Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing.
     pub platform: Option<String>,
+    /// Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.
+    #[serde(default)]
+    pub os_version: Option<String>,
     /// Fielded device role (e.g. `router`, `switch`, `host`) derived from `sysObjectID` prefix or port-based heuristics. Currently always `null`; populated once role classification lands.
     pub role: Option<String>,
     /// Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.
@@ -252,6 +255,7 @@ mod tests {
             mac: Some("aa:bb:cc:dd:ee:ff".into()),
             manufacturer: Some("Cisco".into()),
             platform: Some("IOS-XR".into()),
+            os_version: Some("6.5.3".into()),
             role: Some("router".into()),
             confidence: Confidence::new(0.8).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
@@ -318,6 +322,7 @@ mod tests {
             mac: None,
             manufacturer: None,
             platform: None,
+            os_version: None,
             role: None,
             confidence: Confidence::new(0.0).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,

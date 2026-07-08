@@ -20,7 +20,7 @@ This page documents the JSON form. Field names match the wire shape exactly (the
 | `timeout_ms` | integer \| null | `null` | Per-probe timeout in milliseconds. |
 | `encoder` | object \| null | `null` (NDJSON) | Output encoding. See [Encoders](#encoders). |
 | `fuser` | object \| null | `null` (Direct, baseline 0.1 / per-signal 0.1) | Signal-fusion strategy. See [Fusers](#fusers). |
-| `classifier` | object \| null | `null` (Noop) | Platform / role classifier applied after fusion. See [Classifier](#classifier). |
+| `classifier` | object \| null | `null` (Noop) | Platform / os_version / role classifier applied after fusion. See [Classifier](#classifier). |
 | `sink` | object \| null | `null` | Output destination. See [Sinks](#sinks). On `POST /scans` the server strips this and writes records to an internal buffer that is returned in the response body. |
 | `targets` | array | — (required) | List of targets to probe. Must not be empty for `POST /scans`. See [Targets](#targets). |
 | `probers` | array | `[]` | List of probers to run against each target. Must not be empty for `POST /scans`. See [Probers](#probers). |
@@ -433,11 +433,11 @@ The `identity_hints.vrrp_groups` array declares physical members of a shared vir
 
 ## Classifier
 
-The `classifier` field is an internally-tagged object. One classifier is available today: `noop`. It leaves every `DeviceRecord` unchanged. When the field is omitted, `noop` is used. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
+The `classifier` field is an internally-tagged object. Two classifiers ship today: `noop` (pass-through) and `rules` (regex-based `platform` + `os_version` detection with a baked-in default table). When the field is omitted, `noop` is used. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
 
 ### noop
 
-Pass-through classifier. Assigns nothing on the record; `platform` and `role` stay at whatever the fuser set them to.
+Pass-through classifier. Assigns nothing on the record; `platform`, `os_version`, and `role` stay at whatever the fuser set them to.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -445,6 +445,40 @@ Pass-through classifier. Assigns nothing on the record; `platform` and `role` st
 
 ```json
 {"type": "noop"}
+```
+
+### rules
+
+Regex-based classifier. Walks each record's signals and evaluates a list of regex rules; the first match sets `platform` and (when the pattern names a capture group) `os_version`. See [Baked-in platform rules](../discover/classification.md#baked-in-platform-rules) for the shipped defaults and [Extending the rule set](../discover/classification.md#extending-the-rule-set) for merge-mode semantics.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Must be `"rules"`. |
+| `merge_mode` | string | no | `"extend"` (default) prepends user rules to the baked-in list. `"replace"` runs only user rules. |
+| `platform_rules` | array | no | User-supplied `PlatformRule` list. Empty array (or field omitted) is equivalent under `extend` to running the baked-in rules alone. |
+
+Each `PlatformRule` has:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `signal` | string | yes | Which probe signal the pattern matches against. One of `snmp_sys_descr`, `snmp_sys_name`, `ssh_banner`, `http_banner`. |
+| `pattern` | string | yes | Regex pattern. Validated when the classifier is built; a bad pattern is rejected before the scan starts. |
+| `platform` | string | yes | Canonical platform label assigned on match (e.g. `cisco_ios`, `linux`, `nginx`). |
+| `os_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.os_version`. When absent, `os_version` stays `null` even on a platform match. |
+
+```json
+{
+  "type": "rules",
+  "merge_mode": "extend",
+  "platform_rules": [
+    {
+      "signal": "snmp_sys_descr",
+      "pattern": "^Cisco IOS Software.*Version (?P<version>15\\.\\d+)",
+      "platform": "cisco_ios",
+      "os_version_capture": "version"
+    }
+  ]
+}
 ```
 
 ## Example: minimal POST /scans body

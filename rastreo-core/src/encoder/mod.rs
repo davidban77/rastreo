@@ -54,6 +54,7 @@ mod tests {
             mac: None,
             manufacturer: None,
             platform: None,
+            os_version: None,
             role: None,
             confidence: Confidence::new(0.5).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
