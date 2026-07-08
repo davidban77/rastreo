@@ -110,6 +110,8 @@ pub enum ClassifierError {
         #[source]
         source: regex::Error,
     },
+    #[error("invalid role rule: {0}")]
+    InvalidRoleRule(String),
 }
 
 #[cfg(test)]

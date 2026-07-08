@@ -433,7 +433,7 @@ The `identity_hints.vrrp_groups` array declares physical members of a shared vir
 
 ## Classifier
 
-The `classifier` field is an internally-tagged object. Two classifiers ship today: `noop` (pass-through) and `rules` (regex-based `platform` + `os_version` detection with a baked-in default table). When the field is omitted, `noop` is used. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
+The `classifier` field is an internally-tagged object. Two classifiers ship today: `noop` (pass-through) and `rules` (a platform phase for `platform` + `os_version` and a role phase for `role`, each with a baked-in default table). When the field is omitted, `noop` is used. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
 
 ### noop
 
@@ -449,13 +449,14 @@ Pass-through classifier. Assigns nothing on the record; `platform`, `os_version`
 
 ### rules
 
-Regex-based classifier. Walks each record's signals and evaluates a list of regex rules; the first match sets `platform` and (when the pattern names a capture group) `os_version`. See [Baked-in platform rules](../discover/classification.md#baked-in-platform-rules) for the shipped defaults and [Extending the rule set](../discover/classification.md#extending-the-rule-set) for merge-mode semantics.
+Rules classifier. Runs a platform phase (regex patterns) and a role phase (signal-driven prefix and set-membership rules). First match per phase sets the corresponding field. See [Baked-in platform rules](../discover/classification.md#baked-in-platform-rules), [Baked-in role rules](../discover/classification.md#baked-in-role-rules), and [Extending the rule set](../discover/classification.md#extending-the-rule-set) for the shipped defaults and merge-mode semantics.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"rules"`. |
-| `merge_mode` | string | no | `"extend"` (default) prepends user rules to the baked-in list. `"replace"` runs only user rules. |
-| `platform_rules` | array | no | User-supplied `PlatformRule` list. Empty array (or field omitted) is equivalent under `extend` to running the baked-in rules alone. |
+| `merge_mode` | string | no | `"extend"` (default) prepends user rules to the baked-in lists for both phases. `"replace"` runs only user rules. Applies uniformly to `platform_rules` and `role_rules`. |
+| `platform_rules` | array | no | User-supplied `PlatformRule` list. Empty array (or field omitted) is equivalent under `extend` to running the baked-in platform rules alone. |
+| `role_rules` | array | no | User-supplied `RoleRule` list. Empty array (or field omitted) is equivalent under `extend` to running the baked-in role rules alone. |
 
 Each `PlatformRule` has:
 
@@ -465,6 +466,24 @@ Each `PlatformRule` has:
 | `pattern` | string | yes | Regex pattern. Validated when the classifier is built; a bad pattern is rejected before the scan starts. |
 | `platform` | string | yes | Canonical platform label assigned on match (e.g. `cisco_ios`, `linux`, `nginx`). |
 | `os_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.os_version`. When absent, `os_version` stays `null` even on a platform match. |
+
+Each `RoleRule` is an internally-tagged object. Two variants exist.
+
+`sys_object_id_prefix` matches when the record carries any `SnmpSysObjectId` signal whose dotted-string form starts with `prefix` (case-sensitive byte comparison).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Must be `"sys_object_id_prefix"`. |
+| `prefix` | string | yes | SNMP `sysObjectID` byte prefix (e.g. `"1.3.6.1.4.1.9.1"`). |
+| `role` | string | yes | Role label assigned on match (e.g. `router`, `switch`). |
+
+`ports_open` matches when the record carries a `Signal::OpenPort(p)` for every `p` in `ports`. Extra open ports do not cause a mismatch; only the listed ones must all be present.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Must be `"ports_open"`. |
+| `ports` | array of u16 | yes | Ports that must all appear as `OpenPort` signals. Must be non-empty; an empty list is rejected when the classifier is built. |
+| `role` | string | yes | Role label assigned on match. |
 
 ```json
 {
@@ -477,6 +496,10 @@ Each `PlatformRule` has:
       "platform": "cisco_ios",
       "os_version_capture": "version"
     }
+  ],
+  "role_rules": [
+    {"type": "sys_object_id_prefix", "prefix": "1.3.6.1.4.1.9.1", "role": "router"},
+    {"type": "ports_open", "ports": [22, 179], "role": "router"}
   ]
 }
 ```

@@ -40,7 +40,7 @@ Wire schema for ScenarioFile emitted by rastreo.
 One of:
 
 - { `type`: `noop` }
-- { `merge_mode`: [`MergeMode`](#mergemode), `platform_rules`: array<[`PlatformRule`](#platformrule)>, `type`: `rules` }
+- { `merge_mode`: [`MergeMode`](#mergemode), `platform_rules`: array<[`PlatformRule`](#platformrule)>, `role_rules`: array<[`RoleRule`](#rolerule)>, `type`: `rules` }
 
 ### `Community` {#community}
 
@@ -159,6 +159,15 @@ One of:
 - { `count`: uint32, `interval_ms`: uint64, `type`: `icmp` }
 - { `ports`: array<uint16>, `type`: `tls` }
 - { `resolvers`: array<string (ip)>, `type`: `reverse_dns` }
+
+### `RoleRule` {#rolerule}
+
+A single role-detection rule. Two match strategies are supported: exact byte-prefix on `SnmpSysObjectId` and all-of set membership over `OpenPort` signals.
+
+One of:
+
+- { `prefix`: string, `role`: string, `type`: `sys_object_id_prefix` }
+- { `ports`: array<uint16>, `role`: string, `type`: `ports_open` }
 
 ### `ScenarioEntry` {#scenarioentry}
 

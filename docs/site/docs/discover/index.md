@@ -15,4 +15,4 @@ Topics covered here include the full CLI flag reference, the YAML scenario file 
 - [Sinks](sinks.md) — stdout, file, and Kafka output, plus the NDJSON contract.
 - [Enrichment](enrichment.md) — OUI vendor lookup from MAC addresses, the bundled Wireshark manuf snapshot, and how to override it.
 - [Identity](identity.md) — merges records that describe the same physical device and populates `alt_ips` / `possible_alias_of`.
-- [Classification](classification.md) — the pipeline stage that assigns canonical `platform` and `os_version` values on each `DeviceRecord`.
+- [Classification](classification.md) — the pipeline stage that assigns canonical `platform`, `os_version`, and `role` values on each `DeviceRecord`.
