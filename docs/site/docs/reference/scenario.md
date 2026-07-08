@@ -20,6 +20,7 @@ This page documents the JSON form. Field names match the wire shape exactly (the
 | `timeout_ms` | integer \| null | `null` | Per-probe timeout in milliseconds. |
 | `encoder` | object \| null | `null` (NDJSON) | Output encoding. See [Encoders](#encoders). |
 | `fuser` | object \| null | `null` (Direct, baseline 0.1 / per-signal 0.1) | Signal-fusion strategy. See [Fusers](#fusers). |
+| `classifier` | object \| null | `null` (Noop) | Platform / role classifier applied after fusion. See [Classifier](#classifier). |
 | `sink` | object \| null | `null` | Output destination. See [Sinks](#sinks). On `POST /scans` the server strips this and writes records to an internal buffer that is returned in the response body. |
 | `targets` | array | — (required) | List of targets to probe. Must not be empty for `POST /scans`. See [Targets](#targets). |
 | `probers` | array | `[]` | List of probers to run against each target. Must not be empty for `POST /scans`. See [Probers](#probers). |
@@ -428,6 +429,22 @@ The `identity_hints.vrrp_groups` array declares physical members of a shared vir
     "inner": {"type": "direct"}
   }
 }
+```
+
+## Classifier
+
+The `classifier` field is an internally-tagged object. One classifier is available today: `noop`. It leaves every `DeviceRecord` unchanged. When the field is omitted, `noop` is used. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
+
+### noop
+
+Pass-through classifier. Assigns nothing on the record; `platform` and `role` stay at whatever the fuser set them to.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Must be `"noop"`. |
+
+```json
+{"type": "noop"}
 ```
 
 ## Example: minimal POST /scans body

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use crate::classifier::{create_classifier, ClassifierConfig};
 use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, EncoderConfig};
 use crate::error::{ConfigError, RastreoError};
@@ -107,6 +108,13 @@ pub async fn run_discovery_with_components_cancellable(
     });
     let fuser = create_fuser(&fuser_config)?;
 
+    let classifier_config = scenario
+        .base
+        .classifier
+        .clone()
+        .unwrap_or(ClassifierConfig::Noop);
+    let classifier = create_classifier(&classifier_config)?;
+
     let mut all_outcomes: Vec<ProbeOutcome> = Vec::new();
     let mut probe_attempts: usize = 0;
     let mut probe_errors: usize = 0;
@@ -137,6 +145,7 @@ pub async fn run_discovery_with_components_cancellable(
 
     let mut records = fuser.fuse_many(all_outcomes)?;
     for record in &mut records {
+        classifier.classify(record)?;
         record.scan_metadata = scan_metadata.clone();
     }
 
@@ -185,6 +194,7 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
+    use crate::classifier::ClassifierConfig;
     use crate::config::BaseProbeConfig;
     use crate::error::ConfigError;
     use crate::model::Target;
@@ -808,6 +818,34 @@ mod tests {
             ]
         );
         assert!(r.possible_alias_of.is_none());
+    }
+
+    #[tokio::test]
+    async fn pipeline_runs_classifier_after_fuser() {
+        let port = open_loopback_port().await;
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                classifier: Some(ClassifierConfig::Noop),
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("run_discovery_with_components");
+        assert_eq!(summary.records_emitted, 1);
+        let lines = handle.ndjson_lines();
+        assert_eq!(lines.len(), 1);
+        let record: crate::model::DeviceRecord =
+            serde_json::from_str(&lines[0]).expect("parse json");
+        assert!(record.platform.is_none(), "noop must leave platform unset");
+        assert!(record.role.is_none(), "noop must leave role unset");
     }
 
     #[tokio::test]

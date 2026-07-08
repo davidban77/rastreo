@@ -1,3 +1,6 @@
+use schemars::JsonSchema;
+
+use crate::classifier::ClassifierConfig;
 use crate::encoder::EncoderConfig;
 #[cfg(feature = "config")]
 use crate::error::{ConfigError, RastreoError};
@@ -13,7 +16,7 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")).into())
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct ScenarioFile {
     pub version: u8,
     pub kind: ScenarioKind,
@@ -22,14 +25,14 @@ pub struct ScenarioFile {
     pub scenarios: Vec<ScenarioEntry>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ScenarioKind {
     Discovery,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct BaseProbeConfig {
     pub name: Option<String>,
@@ -37,6 +40,7 @@ pub struct BaseProbeConfig {
     pub timeout_ms: Option<u64>,
     pub encoder: Option<EncoderConfig>,
     pub fuser: Option<FuserConfig>,
+    pub classifier: Option<ClassifierConfig>,
     pub sink: Option<SinkConfig>,
 }
 
@@ -46,14 +50,14 @@ impl BaseProbeConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "signal_type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ScenarioEntry {
     Discover(DiscoverScenarioConfig),
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DiscoverScenarioConfig {
     #[serde(flatten)]
@@ -91,7 +95,17 @@ mod tests {
         assert!(cfg.timeout_ms.is_none());
         assert!(cfg.encoder.is_none());
         assert!(cfg.fuser.is_none());
+        assert!(cfg.classifier.is_none());
         assert!(cfg.sink.is_none());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn base_probe_config_deserializes_with_classifier_from_yaml() {
+        let yaml = "classifier:\n  type: noop\n";
+        let cfg: BaseProbeConfig = serde_yaml_ng::from_str(yaml).expect("yaml");
+        let classifier = cfg.classifier.expect("classifier present");
+        assert!(matches!(classifier, ClassifierConfig::Noop));
     }
 
     #[cfg(feature = "config")]

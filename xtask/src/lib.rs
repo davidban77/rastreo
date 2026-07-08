@@ -18,6 +18,7 @@ pub fn generate_all() -> Result<()> {
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     write_schema(&dir, "device-record-v1.json", device_record_schema()?)?;
     write_schema(&dir, "scan-metadata-v1.json", scan_metadata_schema()?)?;
+    write_schema(&dir, "scenario-v1.json", scenario_file_schema()?)?;
     Ok(())
 }
 
@@ -42,6 +43,11 @@ pub fn render_all() -> Result<()> {
         &docs_dir.join("scan-metadata.md"),
         "rastreo-core/src/model/scan.rs",
     )?;
+    render_schema_file(
+        &schemas_dir.join("scenario-v1.json"),
+        &docs_dir.join("scenario-config.md"),
+        "rastreo-core/src/config/mod.rs",
+    )?;
     Ok(())
 }
 
@@ -54,6 +60,20 @@ pub fn device_record_schema() -> Result<String> {
 pub fn scan_metadata_schema() -> Result<String> {
     let schema = schema_for!(rastreo_core::ScanMetadata);
     let json = serde_json::to_string_pretty(&schema).context("serialize ScanMetadata schema")?;
+    Ok(format!("{json}\n"))
+}
+
+pub fn scenario_file_schema() -> Result<String> {
+    let schema = schema_for!(rastreo_core::config::ScenarioFile);
+    let mut value: Value =
+        serde_json::to_value(&schema).context("convert ScenarioFile schema to JSON value")?;
+    if let Value::Object(map) = &mut value {
+        map.insert(
+            "$id".to_string(),
+            Value::String("https://schemas.rastreo.dev/scenario-config/v1.json".to_string()),
+        );
+    }
+    let json = serde_json::to_string_pretty(&value).context("serialize ScenarioFile schema")?;
     Ok(format!("{json}\n"))
 }
 
@@ -226,7 +246,7 @@ fn format_variant(v: &Value, defs: &Definitions<'_>) -> String {
     if let Some(props) = props {
         let parts: Vec<String> = props
             .iter()
-            .map(|(name, spec)| format!("`{name}`: {}", format_type(spec, defs)))
+            .map(|(name, spec)| format!("`{name}`: {}", format_property_type(spec, defs)))
             .collect();
         return format!("{{ {} }}", parts.join(", "));
     }
@@ -240,6 +260,19 @@ fn format_variant(v: &Value, defs: &Definitions<'_>) -> String {
         }
     }
     format_type(v, defs)
+}
+
+fn format_property_type(spec: &Value, defs: &Definitions<'_>) -> String {
+    if let Some(values) = spec.get("enum").and_then(Value::as_array) {
+        let parts: Vec<String> = values
+            .iter()
+            .filter_map(|val| val.as_str().map(|s| format!("`{s}`")))
+            .collect();
+        if !parts.is_empty() {
+            return parts.join(" \\| ");
+        }
+    }
+    format_type(spec, defs)
 }
 
 fn format_type(spec: &Value, defs: &Definitions<'_>) -> String {
@@ -364,6 +397,11 @@ mod tests {
         serde_json::from_str(&raw).expect("parse scan schema")
     }
 
+    fn scenario_schema_value() -> Value {
+        let raw = scenario_file_schema().expect("scenario schema");
+        serde_json::from_str(&raw).expect("parse scenario schema")
+    }
+
     #[test]
     fn regenerate_schemas_is_idempotent() {
         let a = device_record_schema().expect("first gen");
@@ -372,6 +410,90 @@ mod tests {
         let a2 = scan_metadata_schema().expect("first gen");
         let b2 = scan_metadata_schema().expect("second gen");
         assert_eq!(a2, b2);
+    }
+
+    #[test]
+    fn scenario_schema_generation_is_idempotent() {
+        let a = scenario_file_schema().expect("first gen");
+        let b = scenario_file_schema().expect("second gen");
+        assert_eq!(a.as_bytes(), b.as_bytes());
+    }
+
+    #[test]
+    fn scenario_file_schema_names_current_type() {
+        let json = scenario_file_schema().expect("gen");
+        assert!(json.contains("\"title\": \"ScenarioFile\""));
+    }
+
+    #[test]
+    fn scenario_file_schema_carries_versioned_id() {
+        let value = scenario_schema_value();
+        assert_eq!(
+            value["$id"].as_str(),
+            Some("https://schemas.rastreo.dev/scenario-config/v1.json")
+        );
+    }
+
+    #[test]
+    fn scenario_schema_declares_expected_top_level_shape() {
+        let value = scenario_schema_value();
+        let props = value["properties"]
+            .as_object()
+            .expect("properties is an object");
+        for field in ["version", "kind", "scenarios"] {
+            assert!(
+                props.contains_key(field),
+                "expected top-level `{field}` property"
+            );
+        }
+        let required: Vec<&str> = value["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for field in ["version", "kind", "scenarios"] {
+            assert!(
+                required.contains(&field),
+                "expected `{field}` to be required"
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_schema_prober_config_covers_shipped_probers() {
+        let value = scenario_schema_value();
+        let defs = value["definitions"]
+            .as_object()
+            .expect("definitions is an object");
+        let prober = defs
+            .get("ProberConfig")
+            .expect("ProberConfig definition present");
+        let variants = prober["oneOf"]
+            .as_array()
+            .expect("ProberConfig oneOf variants");
+        assert_eq!(
+            variants.len(),
+            11,
+            "expected 11 prober variants (tcp_connect, http, dns, udp, snmp, arp, ndp, ssh, icmp, tls, reverse_dns); got {}",
+            variants.len()
+        );
+    }
+
+    #[test]
+    fn scenario_schema_contains_no_redacted_default_leaks() {
+        // Regression guard: schemars serializes `#[serde(default = ...)]` values
+        // through the field's `Serialize` impl. Redacted newtypes (Password / Community)
+        // must have a companion `#[schemars(default = ...)]` returning the plaintext,
+        // otherwise the emitted schema surfaces the `<redacted:HHHHHHHH>` token as the
+        // suggested default and misleads IDE autocomplete. Match on the `"default":`
+        // key so intentional description prose mentioning the redaction format doesn't
+        // trip the guard.
+        let json = scenario_file_schema().expect("gen");
+        assert!(
+            !json.contains("\"default\": \"<redacted:"),
+            "scenario schema leaked a redacted default token; check every `#[serde(default)]` on a `Password` / `Community` field for a matching `#[schemars(default)]` override"
+        );
     }
 
     #[test]

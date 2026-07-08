@@ -261,6 +261,9 @@ fn merge_defaults(base: &mut BaseProbeConfig, defaults: &BaseProbeConfig) {
     if base.fuser.is_none() {
         base.fuser = defaults.fuser.clone();
     }
+    if base.classifier.is_none() {
+        base.classifier = defaults.classifier.clone();
+    }
     if base.sink.is_none() {
         base.sink = defaults.sink.clone();
     }
@@ -711,11 +714,16 @@ mod tests {
         defaults.rate_limit = Some(32);
         defaults.timeout_ms = Some(750);
         defaults.sink = Some(SinkConfig::Stdout);
+        defaults.classifier = Some(rastreo_core::ClassifierConfig::Noop);
         merge_defaults(&mut base, &defaults);
         assert_eq!(base.name.as_deref(), Some("lab"));
         assert_eq!(base.rate_limit, Some(32));
         assert_eq!(base.timeout_ms, Some(750));
         assert!(matches!(base.sink, Some(SinkConfig::Stdout)));
+        assert!(matches!(
+            base.classifier,
+            Some(rastreo_core::ClassifierConfig::Noop)
+        ));
     }
 
     #[cfg(feature = "config")]

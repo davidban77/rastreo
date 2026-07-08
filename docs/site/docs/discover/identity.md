@@ -50,12 +50,12 @@ The identity fuser weights pairs of records based on the identity signals they s
 
 | Shared signal | Weight | Merges alone? | Notes |
 |---|---|---|---|
-| Non-virtual MAC | +0.5 | No | MAC comes from `record.mac`. Virtual MACs (VRRP / HSRP / CARP) are excluded — see [Virtual MAC detection](#virtual-mac-detection) below. |
-| `SnmpSysName` | +0.5 | No | Case-insensitive equality on the `sysName` value from any SNMP prober outcome. Empty strings do not count. |
 | `SshHostKey` | +0.8 | Yes | Byte-exact equality on the OpenSSH-format host key emitted by the [SSH prober](../probe/ssh.md). Host keys are device-unique in practice, so two records that share one land at the high band on that signal alone. Empty strings do not count. |
-| `TlsSubject` | +0.3 | No | Byte-exact match on the Subject Common Name. Alone contributes to the low band; combined with a shared `TlsSanName` (+0.5) it reaches the high band. |
-| `TlsSanName` | +0.5 | No | Any single overlap in the two records' SAN lists counts once. DNS names and IP-prefixed entries (`ip:10.0.0.1`) match uniformly by byte-exact equality. |
+| Non-virtual MAC | +0.5 | No | MAC comes from `record.mac`. Virtual MACs (VRRP / HSRP / CARP) are excluded — see [Virtual MAC detection](#virtual-mac-detection) below. |
 | `ReverseDnsName` | +0.5 | No | Any single overlap in the two records' PTR-name lists counts once. Case-insensitive match (DNS names are case-insensitive per RFC 1035; matches the `SnmpSysName` behavior). A hostname shared across two IPs strongly suggests the same device; combined with any other agreeing signal (MAC / sysname / TLS SAN) it reaches the high band. |
+| `SnmpSysName` | +0.5 | No | Case-insensitive equality on the `sysName` value from any SNMP prober outcome. Empty strings do not count. |
+| `TlsSanName` | +0.5 | No | Any single overlap in the two records' SAN lists counts once. DNS names and IP-prefixed entries (`ip:10.0.0.1`) match uniformly by byte-exact equality. |
+| `TlsSubject` | +0.3 | No | Byte-exact match on the Subject Common Name. Alone contributes to the low band; combined with a shared `TlsSanName` (+0.5) it reaches the high band. |
 | Conflicting `manufacturer` | −0.3 | penalty | Applied when both records have a non-null `manufacturer` and the values differ. Only meaningful when `oui_enrichment` has populated the field. |
 
 `SshHostKey` is the strongest single-signal correlator the fuser has today. Host keys survive interface changes and IP renumbering, so two IPs that present the same key are the same device. TLS is the newest signal group: `TlsSubject` alone sits in the low band because Subject Common Names are often generic (`localhost`, `nginx`, wildcard-like patterns), and `TlsSanName` alone lands in the medium band; together they stand as high-band evidence that two records present the same certificate identity. `ReverseDnsName` is a third hostname-based correlator alongside `SnmpSysName` and TLS SANs — a PTR name shared across two IPs is a strong hint the same device answers on both addresses.

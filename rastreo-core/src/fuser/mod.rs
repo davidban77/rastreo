@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
+use schemars::JsonSchema;
+
 use crate::error::{ConfigError, RastreoError};
 use crate::model::device::{
     Confidence, DeviceRecord, IdentityKey, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
@@ -152,7 +154,7 @@ impl Fuser for DirectFuser {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FuserConfig {

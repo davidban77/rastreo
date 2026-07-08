@@ -55,7 +55,7 @@ pub trait Prober: Send + Sync {
     ) -> Result<ProbeOutcome, RastreoError>;
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ProberConfig {
@@ -96,6 +96,10 @@ pub enum ProberConfig {
         #[serde(default)]
         version: SnmpVersion,
         #[serde(default = "snmp::default_community")]
+        #[cfg_attr(
+            feature = "snmp",
+            schemars(default = "snmp::default_community_plaintext")
+        )]
         community: Community,
         #[serde(default)]
         credentials: UsmCredentials,

@@ -5,8 +5,8 @@ pub mod v3;
 
 pub use usm::{AuthAlgo, PrivAlgo, SecurityLevel, UsmAuth, UsmCredentials, UsmPrivacy};
 pub use v1_v2c::{
-    default_community, default_ports, MAX_STRING_BYTES, OID_SYS_DESCR, OID_SYS_NAME,
-    OID_SYS_OBJECT_ID,
+    default_community, default_community_plaintext, default_ports, MAX_STRING_BYTES, OID_SYS_DESCR,
+    OID_SYS_NAME, OID_SYS_OBJECT_ID,
 };
 
 use std::net::SocketAddr;
@@ -21,7 +21,17 @@ use crate::prober::Prober;
 
 const RECV_BUF_LEN: usize = 8192;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SnmpVersion {
