@@ -1,3 +1,6 @@
+#[cfg(feature = "config")]
+pub(crate) mod secrets;
+
 use schemars::JsonSchema;
 
 use crate::classifier::ClassifierConfig;
@@ -9,11 +12,19 @@ use crate::model::Target;
 use crate::prober::ProberConfig;
 use crate::sink::SinkConfig;
 
-/// Parse a YAML scenario file from a UTF-8 string into a `ScenarioFile`. Shape is validated by serde; semantic acceptance of `version` and `kind` is the caller's responsibility.
+/// Parse a YAML scenario file from a UTF-8 string into a `ScenarioFile`. `${VAR}` env-var references and `!file <path>` tags are expanded before deserialization; missing vars or unreadable files fail here rather than surfacing at probe time.
 #[cfg(feature = "config")]
 pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
-    serde_yaml_ng::from_str::<ScenarioFile>(input)
-        .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")).into())
+    let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
+        .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
+    let expanded = secrets::expand(raw)?;
+    serde_yaml_ng::from_value::<ScenarioFile>(expanded)
+        .map_err(|e| {
+            ConfigError::InvalidValue(format!(
+                "scenario shape validation failed after secret expansion: {e}"
+            ))
+        })
+        .map_err(RastreoError::from)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -188,6 +199,86 @@ mod tests {
         ));
         let msg = format!("{err}");
         assert!(msg.contains("invalid YAML"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_expands_env_var_in_probe_field() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_PARSE_ENV_HOST", "10.9.8.7") };
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${RASTREO_TEST_PARSE_ENV_HOST}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let file = parse_scenario_file(yaml).expect("parse");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        match &d.targets[0] {
+            Target::Ip(ip) => assert_eq!(ip.to_string(), "10.9.8.7"),
+            other => panic!("expected Ip target, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_ENV_HOST") };
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_expands_file_tag_in_probe_field() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(b"192.0.2.55\n").expect("write");
+        let path = f.path().to_str().expect("utf-8 path");
+        let yaml = format!(
+            "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: !file {path}\n    probers:\n      - type: tcp_connect\n        ports: [22]\n"
+        );
+        let file = parse_scenario_file(&yaml).expect("parse");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        match &d.targets[0] {
+            Target::Ip(ip) => assert_eq!(ip.to_string(), "192.0.2.55"),
+            other => panic!("expected Ip target, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_missing_env_var_returns_actionable_error() {
+        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_ENV_MISSING") };
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${RASTREO_TEST_PARSE_ENV_MISSING}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err = parse_scenario_file(yaml).expect_err("must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("RASTREO_TEST_PARSE_ENV_MISSING"), "msg: {msg}");
+        assert!(msg.contains("not set"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_post_expansion_shape_error_is_labeled_distinctly() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_PARSE_ENV_BAD_IP", "not-an-ip") };
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${RASTREO_TEST_PARSE_ENV_BAD_IP}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err = parse_scenario_file(yaml).expect_err("must error");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        let msg = format!("{err}");
+        assert!(msg.contains("after secret expansion"), "msg: {msg}");
+        assert!(!msg.contains("invalid YAML"), "msg: {msg}");
+        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_ENV_BAD_IP") };
+    }
+
+    #[cfg(all(feature = "config", feature = "snmp"))]
+    #[test]
+    fn parse_scenario_file_expands_env_var_into_snmp_community() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_SECRETS_COMMUNITY", "supersecret") };
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: snmp\n        version: v2c\n        community: \"${RASTREO_TEST_SECRETS_COMMUNITY}\"\n";
+        let file = parse_scenario_file(yaml).expect("parse");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        let community = match &d.probers[0] {
+            ProberConfig::Snmp { community, .. } => community,
+            other => panic!("expected SNMP prober, got {other:?}"),
+        };
+        assert_eq!(community.0, "supersecret");
+        let debug = format!("{community:?}");
+        assert!(debug.starts_with("<redacted:"), "debug: {debug}");
+        assert!(!debug.contains("supersecret"), "plaintext leaked: {debug}");
+        unsafe { std::env::remove_var("RASTREO_TEST_SECRETS_COMMUNITY") };
     }
 
     #[test]
