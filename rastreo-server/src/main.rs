@@ -5,7 +5,10 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use rastreo_core::{HickoryResolver, Resolver};
-use rastreo_server::{build_app_with_timeout, state::AppState};
+use rastreo_server::{
+    build_app_with_timeout,
+    state::{AppState, ReadinessConfig},
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -43,7 +46,8 @@ async fn main() -> anyhow::Result<()> {
 
     let resolver: Arc<dyn Resolver> =
         Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
-    let state = AppState::new(resolver);
+    let readiness = ReadinessConfig::from_env().context("failed to load readiness config")?;
+    let state = AppState::with_readiness(resolver, readiness);
 
     let app = build_app_with_timeout(state, Duration::from_millis(cli.request_timeout_ms));
     let addr = SocketAddr::new(cli.bind, cli.port);

@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rastreo_core::{DiscoverySummary, Resolver};
 
@@ -141,17 +141,115 @@ impl Default for Metrics {
     }
 }
 
+/// Tunables for the `/readyz` gate — each check disables when its knob is zero.
+#[derive(Debug, Clone)]
+pub struct ReadinessConfig {
+    pub max_inflight_scans: u64,
+    pub sink_error_quarantine: Duration,
+    pub scan_error_quarantine: Duration,
+}
+
+impl Default for ReadinessConfig {
+    fn default() -> Self {
+        Self {
+            max_inflight_scans: 100,
+            sink_error_quarantine: Duration::from_secs(30),
+            scan_error_quarantine: Duration::from_secs(30),
+        }
+    }
+}
+
+impl ReadinessConfig {
+    /// Read `RASTREO_MAX_INFLIGHT_SCANS`, `RASTREO_SINK_ERROR_QUARANTINE_SECS`, and `RASTREO_SCAN_ERROR_QUARANTINE_SECS`, falling back to defaults when unset.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let default = Self::default();
+        Ok(Self {
+            max_inflight_scans: parse_env_u64(
+                "RASTREO_MAX_INFLIGHT_SCANS",
+                default.max_inflight_scans,
+            )?,
+            sink_error_quarantine: Duration::from_secs(parse_env_u64(
+                "RASTREO_SINK_ERROR_QUARANTINE_SECS",
+                default.sink_error_quarantine.as_secs(),
+            )?),
+            scan_error_quarantine: Duration::from_secs(parse_env_u64(
+                "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
+                default.scan_error_quarantine.as_secs(),
+            )?),
+        })
+    }
+}
+
+fn parse_env_u64(name: &str, default: u64) -> anyhow::Result<u64> {
+    match std::env::var(name) {
+        Ok(raw) => raw.parse::<u64>().map_err(|err| {
+            anyhow::anyhow!(
+                "invalid value for {name}: {raw:?} is not a non-negative integer ({err})"
+            )
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
+        }
+    }
+}
+
+pub struct ReadinessState {
+    pub inflight_scans: AtomicU64,
+    pub last_sink_error_epoch_ms: AtomicU64,
+    pub last_scan_error_epoch_ms: AtomicU64,
+    pub config: ReadinessConfig,
+}
+
+impl ReadinessState {
+    pub fn new(config: ReadinessConfig) -> Self {
+        Self {
+            inflight_scans: AtomicU64::new(0),
+            last_sink_error_epoch_ms: AtomicU64::new(0),
+            last_scan_error_epoch_ms: AtomicU64::new(0),
+            config,
+        }
+    }
+
+    pub fn record_scan_error(&self, is_sink_error: bool) {
+        let now = current_epoch_ms();
+        self.last_scan_error_epoch_ms.store(now, Ordering::Relaxed);
+        if is_sink_error {
+            self.last_sink_error_epoch_ms.store(now, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Default for ReadinessState {
+    fn default() -> Self {
+        Self::new(ReadinessConfig::default())
+    }
+}
+
+pub(crate) fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub resolver: Arc<dyn Resolver>,
     pub metrics: Arc<Metrics>,
+    pub readiness: Arc<ReadinessState>,
 }
 
 impl AppState {
     pub fn new(resolver: Arc<dyn Resolver>) -> Self {
+        Self::with_readiness(resolver, ReadinessConfig::default())
+    }
+
+    pub fn with_readiness(resolver: Arc<dyn Resolver>, config: ReadinessConfig) -> Self {
         Self {
             resolver,
             metrics: Arc::new(Metrics::default()),
+            readiness: Arc::new(ReadinessState::new(config)),
         }
     }
 }
@@ -270,5 +368,136 @@ mod tests {
         metrics.record_scan_error(Duration::from_millis(50), true);
         assert_eq!(metrics.scans_total_error.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.sink_errors_total.load(Ordering::Relaxed), 1);
+    }
+
+    // Serialise env-var reads so parallel tests do not race each other.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    const ENV_KEYS: [&str; 3] = [
+        "RASTREO_MAX_INFLIGHT_SCANS",
+        "RASTREO_SINK_ERROR_QUARANTINE_SECS",
+        "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
+    ];
+
+    fn clear_env() {
+        for k in ENV_KEYS {
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe { std::env::remove_var(k) };
+        }
+    }
+
+    #[test]
+    fn readiness_config_default_matches_documented_values() {
+        let cfg = ReadinessConfig::default();
+        assert_eq!(cfg.max_inflight_scans, 100);
+        assert_eq!(cfg.sink_error_quarantine, Duration::from_secs(30));
+        assert_eq!(cfg.scan_error_quarantine, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn readiness_config_from_env_uses_defaults_when_unset() {
+        let _guard = env_guard();
+        clear_env();
+        let cfg = ReadinessConfig::from_env().expect("from_env");
+        assert_eq!(cfg.max_inflight_scans, 100);
+        assert_eq!(cfg.sink_error_quarantine, Duration::from_secs(30));
+        assert_eq!(cfg.scan_error_quarantine, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn readiness_config_from_env_reads_custom_values() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_MAX_INFLIGHT_SCANS", "7");
+            std::env::set_var("RASTREO_SINK_ERROR_QUARANTINE_SECS", "12");
+            std::env::set_var("RASTREO_SCAN_ERROR_QUARANTINE_SECS", "45");
+        }
+        let cfg = ReadinessConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(cfg.max_inflight_scans, 7);
+        assert_eq!(cfg.sink_error_quarantine, Duration::from_secs(12));
+        assert_eq!(cfg.scan_error_quarantine, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn readiness_config_from_env_rejects_non_numeric_value() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+        unsafe { std::env::set_var("RASTREO_MAX_INFLIGHT_SCANS", "not-a-number") };
+        let err = ReadinessConfig::from_env().expect_err("must reject non-numeric");
+        clear_env();
+        let msg = err.to_string();
+        assert!(msg.contains("RASTREO_MAX_INFLIGHT_SCANS"), "msg was {msg}");
+        assert!(msg.contains("not-a-number"), "msg was {msg}");
+    }
+
+    #[test]
+    fn readiness_config_zero_disables_checks() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_MAX_INFLIGHT_SCANS", "0");
+            std::env::set_var("RASTREO_SINK_ERROR_QUARANTINE_SECS", "0");
+            std::env::set_var("RASTREO_SCAN_ERROR_QUARANTINE_SECS", "0");
+        }
+        let cfg = ReadinessConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(cfg.max_inflight_scans, 0);
+        assert_eq!(cfg.sink_error_quarantine, Duration::ZERO);
+        assert_eq!(cfg.scan_error_quarantine, Duration::ZERO);
+    }
+
+    #[test]
+    fn readiness_state_record_scan_error_non_sink_only_updates_scan_ts() {
+        let state = ReadinessState::default();
+        state.record_scan_error(false);
+        assert!(state.last_scan_error_epoch_ms.load(Ordering::Relaxed) > 0);
+        assert_eq!(state.last_sink_error_epoch_ms.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn readiness_state_record_scan_error_sink_updates_both_timestamps() {
+        let state = ReadinessState::default();
+        state.record_scan_error(true);
+        assert!(state.last_scan_error_epoch_ms.load(Ordering::Relaxed) > 0);
+        assert!(state.last_sink_error_epoch_ms.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn app_state_with_readiness_stores_config() {
+        let resolver: Arc<dyn Resolver> =
+            Arc::new(HickoryResolver::from_system().expect("system resolver"));
+        let cfg = ReadinessConfig {
+            max_inflight_scans: 5,
+            sink_error_quarantine: Duration::from_secs(3),
+            scan_error_quarantine: Duration::from_secs(9),
+        };
+        let state = AppState::with_readiness(resolver, cfg);
+        assert_eq!(state.readiness.config.max_inflight_scans, 5);
+        assert_eq!(
+            state.readiness.config.sink_error_quarantine,
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            state.readiness.config.scan_error_quarantine,
+            Duration::from_secs(9)
+        );
+    }
+
+    #[test]
+    fn app_state_clone_shares_readiness_arc() {
+        let state = build_state();
+        let clone = state.clone();
+        assert!(Arc::ptr_eq(&state.readiness, &clone.readiness));
     }
 }
