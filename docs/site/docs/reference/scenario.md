@@ -11,6 +11,8 @@ This page documents the JSON form. Field names match the wire shape exactly (the
 !!! tip "Loading from the CLI"
     `rastreo discover --file scan.yml` loads a YAML `ScenarioFile` and runs each `scenarios[]` entry sequentially. The file must set `version: 1` and `kind: discovery`. See the [CLI reference](../discover/cli.md#yaml-driven-mode) for the full mode surface, including CLI flag overrides on YAML values.
 
+Any string scalar in the scenario may use `${VAR}` to interpolate an environment variable, or the `!file /path` YAML tag to substitute the contents of a file mount. Both syntaxes are resolved at scenario load. See [Secrets](secrets.md) for the syntax rules, error behaviour, and the recommended pattern for Vault / AWS Secrets Manager (a wrapper script that exports env vars before spawning rastreo).
+
 ## Top-level fields
 
 | Field | Type | Default | Notes |

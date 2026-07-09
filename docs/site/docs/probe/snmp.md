@@ -66,6 +66,8 @@ privacy:
   password: privpw    # required for every algorithm except none; redacted in Debug output
 ```
 
+Both `auth.password` and `privacy.password` accept the `${VAR}` env-var interpolation and the `!file /path` YAML tag — see [Secrets](../reference/secrets.md) for the syntax, so scenario files can reference k8s secret mounts or environment values instead of embedding plaintext.
+
 The security level is derived from the `(auth, privacy)` pair per RFC 3411:
 
 | `auth` | `privacy` | Security level | On the wire |

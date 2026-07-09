@@ -139,6 +139,7 @@ nav:
       - reference/index.md
       - CLI: reference/cli.md
       - Scenario: reference/scenario.md
+      - Secrets: reference/secrets.md
       - Schema:
           - reference/schema/index.md
           - DeviceRecord: reference/schema/device-record.md
