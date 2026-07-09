@@ -127,6 +127,22 @@
       "description": "SNMP community string written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
       "type": "string"
     },
+    "DeadLetterConfig": {
+      "description": "Quarantine topic configuration for records the primary Kafka produce refused.",
+      "properties": {
+        "include_error_metadata": {
+          "default": true,
+          "type": "boolean"
+        },
+        "topic": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic"
+      ],
+      "type": "object"
+    },
     "DnsQueryType": {
       "enum": [
         "a",
@@ -1091,6 +1107,16 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "dead_letter": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/DeadLetterConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "flush_mode": {
               "allOf": [

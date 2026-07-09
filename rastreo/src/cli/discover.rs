@@ -378,6 +378,7 @@ fn build_sink_config_for_kind(kind: SinkKind, args: &DiscoverArgs) -> Result<Sin
                 brokers: args.brokers.clone(),
                 topic,
                 flush_mode,
+                dead_letter: None,
             })
         }
     }
@@ -792,6 +793,7 @@ mod tests {
                 brokers,
                 topic,
                 flush_mode,
+                ..
             }) => {
                 assert_eq!(brokers, vec!["localhost:9092".to_string()]);
                 assert_eq!(topic, "rastreo.devices");

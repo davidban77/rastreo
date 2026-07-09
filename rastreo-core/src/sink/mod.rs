@@ -8,7 +8,7 @@ pub mod stdout;
 
 pub use file::FileSink;
 #[cfg(feature = "kafka")]
-pub use kafka::{KafkaFlushMode, KafkaSink};
+pub use kafka::{DeadLetterConfig, KafkaFlushMode, KafkaSink};
 pub use memory::{MemorySink, MemorySinkHandle};
 #[cfg(feature = "nats")]
 pub use nats::{NatsCredentials, NatsDelivery, NatsSink};
@@ -47,6 +47,8 @@ pub enum SinkConfig {
         topic: String,
         #[serde(default)]
         flush_mode: KafkaFlushMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dead_letter: Option<DeadLetterConfig>,
     },
     #[cfg(feature = "nats")]
     Nats {
@@ -70,9 +72,14 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             brokers,
             topic,
             flush_mode,
+            dead_letter,
         } => {
-            let sink = KafkaSink::new(brokers.clone(), topic.clone()).await?;
-            Ok(Box::new(sink.with_flush_mode(flush_mode.clone())))
+            let mut sink = KafkaSink::new(brokers.clone(), topic.clone()).await?;
+            sink = sink.with_flush_mode(flush_mode.clone());
+            if let Some(dlq) = dead_letter {
+                sink = sink.with_dead_letter(dlq.clone()).await?;
+            }
+            Ok(Box::new(sink))
         }
         #[cfg(feature = "nats")]
         SinkConfig::Nats {
@@ -197,10 +204,12 @@ mod tests {
                 brokers,
                 topic,
                 flush_mode,
+                dead_letter,
             } => {
                 assert_eq!(brokers, vec!["k:9092".to_string()]);
                 assert_eq!(topic, "t");
                 assert!(matches!(flush_mode, KafkaFlushMode::PerRecord));
+                assert!(dead_letter.is_none());
             }
             other => panic!("expected Kafka, got {other:?}"),
         }
@@ -326,6 +335,35 @@ mod tests {
                 }
                 other => panic!("expected Batched, got {other:?}"),
             },
+            other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "kafka"))]
+    #[test]
+    fn sink_config_kafka_deserializes_dead_letter_field() {
+        let yaml =
+            "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\ndead_letter:\n  topic: rastreo.dlq\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka { dead_letter, .. } => {
+                let dlq = dead_letter.expect("dead_letter present");
+                assert_eq!(dlq.topic, "rastreo.dlq");
+                assert!(dlq.include_error_metadata);
+            }
+            other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "kafka"))]
+    #[test]
+    fn sink_config_kafka_without_dead_letter_deserializes_as_none() {
+        let yaml = "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka { dead_letter, .. } => {
+                assert!(dead_letter.is_none());
+            }
             other => panic!("expected Kafka, got {other:?}"),
         }
     }
