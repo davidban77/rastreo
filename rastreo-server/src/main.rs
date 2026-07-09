@@ -10,6 +10,15 @@ use rastreo_server::{
     state::{AppState, ReadinessConfig},
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+enum LogFormat {
+    /// Human-readable text output (default).
+    #[default]
+    Text,
+    /// One JSON object per line, suitable for Loki / ELK / Splunk ingestion.
+    Json,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "rastreo-server",
@@ -30,19 +39,22 @@ struct Cli {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     request_timeout_ms: u64,
+
+    /// Log line format: `text` (default) or `json` for structured ingestion.
+    #[arg(
+        long,
+        value_enum,
+        env = "RASTREO_LOG_FORMAT",
+        default_value_t = LogFormat::Text,
+    )]
+    log_format: LogFormat,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing(cli.log_format);
 
     let resolver: Arc<dyn Resolver> =
         Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
@@ -59,10 +71,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn init_tracing(log_format: LogFormat) {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    match log_format {
+        LogFormat::Text => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(filter)
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(filter)
+                .json()
+                .init();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{Parser, ValueEnum};
 
     #[test]
     fn args_request_timeout_ms_defaults_to_60000() {
@@ -81,5 +113,52 @@ mod tests {
         let cli = Cli::try_parse_from(["rastreo-server", "--request-timeout-ms", "30000"])
             .expect("explicit parse");
         assert_eq!(cli.request_timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn log_format_default_is_text() {
+        assert_eq!(LogFormat::default(), LogFormat::Text);
+    }
+
+    #[test]
+    fn log_format_parses_from_str_text_and_json() {
+        assert_eq!(
+            LogFormat::from_str("text", true).expect("text parses"),
+            LogFormat::Text,
+        );
+        assert_eq!(
+            LogFormat::from_str("json", true).expect("json parses"),
+            LogFormat::Json,
+        );
+    }
+
+    #[test]
+    fn log_format_rejects_unknown_value() {
+        assert!(LogFormat::from_str("yaml", true).is_err());
+    }
+
+    #[test]
+    fn cli_defaults_log_format_to_text() {
+        // SAFETY: no other test in this binary reads or writes RASTREO_LOG_FORMAT concurrently;
+        // clearing an ambient value protects the default-parse assertion against a caller
+        // (e.g., `RASTREO_LOG_FORMAT=json cargo test`) that would otherwise flip the default.
+        unsafe {
+            std::env::remove_var("RASTREO_LOG_FORMAT");
+        }
+        let cli = Cli::try_parse_from(["rastreo-server"]).expect("default parse");
+        assert_eq!(cli.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn cli_accepts_log_format_json() {
+        let cli = Cli::try_parse_from(["rastreo-server", "--log-format", "json"])
+            .expect("explicit parse");
+        assert_eq!(cli.log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn cli_rejects_unknown_log_format() {
+        let result = Cli::try_parse_from(["rastreo-server", "--log-format", "yaml"]);
+        assert!(result.is_err(), "unknown log format must be rejected");
     }
 }

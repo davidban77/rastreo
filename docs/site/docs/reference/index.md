@@ -16,4 +16,5 @@ Topics covered here include the full `rastreo` and `rastreo-server` CLI flag ref
 - [Record schema](schema/index.md) — the emitted `DeviceRecord` JSON Schema, versioning policy, and the streaming API description.
 - [Error reference](errors.md) — every `RastreoError` variant and its likely fix.
 - [Health endpoints](health-endpoints.md) — `/healthz`, `/readyz`, the `/health` alias, and the readiness gates.
+- [Logging](logging.md) — text and JSON log formats, log-level control, and aggregator ingestion examples.
 - [Glossary](glossary.md) — domain terms used across the docs.

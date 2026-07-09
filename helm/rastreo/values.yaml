@@ -33,6 +33,12 @@ readiness: {}
   # sinkErrorQuarantineSeconds: 30
   # scanErrorQuarantineSeconds: 30
 
+# Log line format on stderr. `text` (default) is human-readable; `json` emits
+# one JSON object per line for Loki / ELK / Splunk ingestion. Leave null to
+# inherit the binary default (text); set to `text` or `json` to render
+# RASTREO_LOG_FORMAT on the container.
+logFormat: null
+
 service:
   # Kubernetes Service type.
   type: ClusterIP

@@ -14,6 +14,7 @@ These flags apply to `rastreo` itself, before any subcommand. They are global �
 |---|---|---|
 | `-v`, `--verbose` | — | Increase log verbosity. Repeatable (`-vv`, `-vvv`). Logs always go to stderr. |
 | `-q`, `--quiet` | — | Drop log level to `error`. Mutually exclusive in spirit with `-v`. |
+| `--log-format <FORMAT>` | `text` | Log line format on stderr. Values: `text` (human-readable) or `json` (one JSON object per line). Env var: `RASTREO_LOG_FORMAT`. See [Logging](logging.md). |
 | `-h`, `--help` | — | Print help and exit. |
 | `-V`, `--version` | — | Print version and exit. |
 
@@ -49,6 +50,7 @@ Run the HTTP control plane. Every flag has both a CLI form and an environment-va
 | `--bind <BIND>` | IP address | `0.0.0.0` | `RASTREO_SERVER_BIND` | Address the HTTP listener binds to. Accepts IPv4 or IPv6. |
 | `--port <PORT>` | u16 | `8080` | `RASTREO_SERVER_PORT` | TCP port the HTTP listener binds to. |
 | `--request-timeout-ms <MS>` | u64 | `60000` | `RASTREO_SERVER_REQUEST_TIMEOUT_MS` | Per-request timeout. Requests that exceed this return `503 Service Unavailable`. Minimum 1. |
+| `--log-format <FORMAT>` | enum | `text` | `RASTREO_LOG_FORMAT` | Log line format on stderr. Values: `text` (human-readable) or `json` (one JSON object per line). See [Logging](logging.md). |
 | `-h`, `--help` | flag | — | — | Print help and exit. |
 | `-V`, `--version` | flag | — | — | Print version and exit. |
 

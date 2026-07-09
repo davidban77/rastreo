@@ -62,6 +62,9 @@ spec:
           {{- if hasKey .Values.readiness "scanErrorQuarantineSeconds" }}
           {{- $envs = append $envs (dict "name" "RASTREO_SCAN_ERROR_QUARANTINE_SECS" "value" (printf "%v" .Values.readiness.scanErrorQuarantineSeconds)) }}
           {{- end }}
+          {{- if .Values.logFormat }}
+          {{- $envs = append $envs (dict "name" "RASTREO_LOG_FORMAT" "value" (printf "%v" .Values.logFormat)) }}
+          {{- end }}
           {{- if $envs }}
           env:
             {{- toYaml $envs | nindent 12 }}

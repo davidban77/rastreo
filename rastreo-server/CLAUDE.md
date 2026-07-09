@@ -32,6 +32,7 @@ src/
 | `--port`               | `RASTREO_SERVER_PORT`                  | `8080`      | TCP port to bind                           |
 | `--bind`               | `RASTREO_SERVER_BIND`                  | `0.0.0.0`   | Bind address                               |
 | `--request-timeout-ms` | `RASTREO_SERVER_REQUEST_TIMEOUT_MS`    | `60000`     | Per-request timeout in ms; must be > 0     |
+| `--log-format`         | `RASTREO_LOG_FORMAT`                   | `text`      | Log line format on stderr: `text` or `json` |
 | —                      | `RASTREO_MAX_INFLIGHT_SCANS`           | `100`       | `/readyz` inflight-scan gate; `0` disables |
 | —                      | `RASTREO_SINK_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` sink-error quarantine window; `0` disables |
 | —                      | `RASTREO_SCAN_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` scan-error quarantine window; `0` disables |

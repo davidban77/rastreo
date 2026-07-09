@@ -148,4 +148,5 @@ nav:
           - Streaming API: reference/schema/streaming-api.md
       - Errors: reference/errors.md
       - Health endpoints: reference/health-endpoints.md
+      - Logging: reference/logging.md
       - Glossary: reference/glossary.md
