@@ -54,6 +54,8 @@ The prober disables HTTP redirects (`301`, `302`, `307`, and `308` count as reac
 
 A response without a `Server:` header still marks the target as reachable and still emits `OpenPort` for that port; it just does not add an `HttpBanner`. Connection refused and unreachable hosts map to `Unreachable`; timeouts map to `Timeout`; TLS handshake failures and other protocol errors map to `Other` with the reqwest cause in the message.
 
+When the [rules classifier](../discover/classification.md) is enabled, an `HttpBanner` matching a baked-in rule (`nginx/*`, `Apache/*`) populates `DeviceRecord.platform` (OS — `linux`), `DeviceRecord.http_server` (web-server product), and `DeviceRecord.http_version` (product version) as three separate fields on the record.
+
 ## Build feature
 
 The HTTP prober is gated behind the `http` Cargo feature on `rastreo-core`. The published release binaries ship with `--features kafka,http`, so no extra step is needed when using the tarball, Docker image, or Helm chart.

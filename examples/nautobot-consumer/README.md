@@ -24,6 +24,9 @@ The consumer expects the following custom fields on `dcim.device`. The shape eac
 | `rastreo_last_seen` | Date & Time | Timestamp of the latest probe with signals. |
 | `rastreo_confidence` | Text | Fuser confidence in `[0.0, 1.0]`, formatted as a two-decimal string (Nautobot 2.x has no decimal custom-field type). |
 | `rastreo_os_version` | Text | OS version captured alongside the platform. |
+| `rastreo_ssh_version` | Text | SSH software identifier from the classifier (e.g. `OpenSSH_8.9p1`). |
+| `rastreo_http_server` | Text | Web-server product name from the classifier (e.g. `nginx`). |
+| `rastreo_http_version` | Text | Web-server version from the classifier (e.g. `1.24.0`). |
 | `rastreo_signals` | JSON | Raw signals for audit. |
 | `rastreo_probe_kinds` | JSON | Which probers contributed to this record. |
 | `rastreo_alt_ips` | JSON | Extra IPs merged in by the identity fuser. |

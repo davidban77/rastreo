@@ -1,6 +1,6 @@
 {
-  "schema_version": "1.0.0",
-  "schema_id": "https://rastreo.dev/schemas/device-record/v1",
+  "schema_version": "v1",
+  "schema_id": "https://schemas.rastreo.dev/device-record/v1.json",
   "identity_key": "mac:00:11:22:33:44:55",
   "mgmt_ip": "10.50.0.30",
   "mac": "00:11:22:33:44:55",

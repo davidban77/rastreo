@@ -136,6 +136,15 @@ pub struct DeviceRecord {
     /// Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.
     #[serde(default)]
     pub os_version: Option<String>,
+    /// SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` populates `Some("OpenSSH_8.9p1")`. `None` when no `SshBanner` rule with `ssh_version_capture` matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_version: Option<String>,
+    /// Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some("nginx")`. `None` when no `HttpBanner` rule with `http_server_capture` matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_server: Option<String>,
+    /// Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some("1.24.0")`. `None` when no `HttpBanner` rule with `http_version_capture` matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_version: Option<String>,
     /// Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open` and `sys_object_id_prefix` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.
     pub role: Option<String>,
     /// Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.
@@ -259,6 +268,9 @@ mod tests {
             manufacturer: Some("Cisco".into()),
             platform: Some("IOS-XR".into()),
             os_version: Some("6.5.3".into()),
+            ssh_version: None,
+            http_server: None,
+            http_version: None,
             role: Some("router".into()),
             confidence: Confidence::new(0.8).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
@@ -356,6 +368,9 @@ mod tests {
             manufacturer: None,
             platform: None,
             os_version: None,
+            ssh_version: None,
+            http_server: None,
+            http_version: None,
             role: None,
             confidence: Confidence::new(0.0).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,

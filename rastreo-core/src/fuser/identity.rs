@@ -458,7 +458,7 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
             None
         });
 
-    let (manufacturer, platform, os_version, role) = {
+    let (manufacturer, platform, os_version, ssh_version, http_server, http_version, role) = {
         let best = records[best_idx].as_ref().expect("record present");
         (
             best.manufacturer
@@ -470,6 +470,15 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
             best.os_version
                 .clone()
                 .or_else(|| first_non_none(records, member_indices, |r| r.os_version.clone())),
+            best.ssh_version
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.ssh_version.clone())),
+            best.http_server
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.http_server.clone())),
+            best.http_version
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.http_version.clone())),
             best.role
                 .clone()
                 .or_else(|| first_non_none(records, member_indices, |r| r.role.clone())),
@@ -522,6 +531,9 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
         manufacturer,
         platform,
         os_version,
+        ssh_version,
+        http_server,
+        http_version,
         role,
         confidence,
         last_seen,
@@ -722,6 +734,9 @@ mod tests {
             manufacturer: None,
             platform: None,
             os_version: None,
+            ssh_version: None,
+            http_server: None,
+            http_version: None,
             role: None,
             confidence: Confidence::new(confidence).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,

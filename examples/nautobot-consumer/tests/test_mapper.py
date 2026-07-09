@@ -91,3 +91,28 @@ def test_platform_name_stripped_of_whitespace(
 def test_os_version_omitted_when_null(minimal_record_payload: dict[str, Any]) -> None:
     result = _map(minimal_record_payload)
     assert "rastreo_os_version" not in result["custom_fields"]
+
+
+def test_mapper_passes_through_ssh_and_http_fields(
+    minimal_record_payload: dict[str, Any],
+) -> None:
+    """SSH and HTTP classifier outputs land in dedicated custom fields."""
+    minimal_record_payload["ssh_version"] = "OpenSSH_8.9p1"
+    minimal_record_payload["http_server"] = "nginx"
+    minimal_record_payload["http_version"] = "1.24.0"
+    result = _map(minimal_record_payload)
+    cf = result["custom_fields"]
+    assert cf["rastreo_ssh_version"] == "OpenSSH_8.9p1"
+    assert cf["rastreo_http_server"] == "nginx"
+    assert cf["rastreo_http_version"] == "1.24.0"
+
+
+def test_ssh_and_http_fields_omitted_when_null(
+    minimal_record_payload: dict[str, Any],
+) -> None:
+    """Records without SSH/HTTP classifier output do not emit the custom fields."""
+    result = _map(minimal_record_payload)
+    cf = result["custom_fields"]
+    assert "rastreo_ssh_version" not in cf
+    assert "rastreo_http_server" not in cf
+    assert "rastreo_http_version" not in cf
