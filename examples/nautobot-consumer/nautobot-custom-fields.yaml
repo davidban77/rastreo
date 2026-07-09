@@ -1,0 +1,85 @@
+# Nautobot custom-field definitions used by the rastreo Nautobot reference consumer.
+#
+# Nautobot does not ship a single "import this YAML" command in core; the file
+# below is documentation of the shape each custom field must have. Apply the
+# fields via the Nautobot admin UI (Extensibility -> Custom Fields), or via
+# the Nautobot SSoT / bootstrap plugins (`nautobot_bootstrap_ssot`) which
+# consume YAML in a compatible shape. Each field targets `dcim.device`.
+#
+# Nautobot 2.x has no `decimal` custom-field type — `rastreo_confidence` is
+# a `text` field, and the consumer formats the float as a two-decimal string.
+
+custom_fields:
+  - key: rastreo_identity_key
+    label: rastreo identity key
+    type: text
+    content_types:
+      - dcim.device
+    required: false
+    filter_logic: exact
+    description: >-
+      Canonical device identity emitted by rastreo — `mac:<addr>` when the
+      device advertised a MAC, else `ip:<addr>`. Consumers key on this value
+      to upsert deterministically. Mark as **unique** in the Nautobot UI.
+
+  - key: rastreo_last_seen
+    label: rastreo last seen
+    type: date
+    content_types:
+      - dcim.device
+    required: false
+    description: >-
+      RFC 3339 timestamp of the most recent rastreo probe with signals.
+      Nautobot's `date` custom-field type stores date + time.
+
+  - key: rastreo_confidence
+    label: rastreo confidence
+    type: text
+    content_types:
+      - dcim.device
+    required: false
+    description: >-
+      Fuser confidence in [0.0, 1.0], formatted as a two-decimal string
+      (Nautobot has no decimal custom-field type in 2.x).
+
+  - key: rastreo_os_version
+    label: rastreo OS version
+    type: text
+    content_types:
+      - dcim.device
+    required: false
+    description: OS version captured from the same signal that identified `platform`.
+
+  - key: rastreo_signals
+    label: rastreo signals
+    type: json
+    content_types:
+      - dcim.device
+    required: false
+    description: Every raw signal observed for this device, for audit.
+
+  - key: rastreo_probe_kinds
+    label: rastreo probe kinds
+    type: json
+    content_types:
+      - dcim.device
+    required: false
+    description: Deduplicated list of probers that contributed signals.
+
+  - key: rastreo_alt_ips
+    label: rastreo alternate IPs
+    type: json
+    content_types:
+      - dcim.device
+    required: false
+    description: >-
+      Additional IPs merged into this device by the identity fuser. A future
+      version of this consumer may attach these as `ipam.IPAddress` records.
+
+  - key: rastreo_scan_metadata
+    label: rastreo scan metadata
+    type: json
+    content_types:
+      - dcim.device
+    required: false
+    description: Provenance stamped by the pipeline (scan_id, initiated_at, scenario).

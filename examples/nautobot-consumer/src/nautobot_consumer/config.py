@@ -1,0 +1,97 @@
+"""Environment-driven configuration for the reference consumer."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+from dotenv import load_dotenv
+
+
+class ConfigError(RuntimeError):
+    """Raised when required environment variables are missing or malformed."""
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    """Typed view of the environment variables the consumer reads at startup."""
+
+    kafka_brokers: str
+    kafka_topic: str
+    kafka_group_id: str
+    kafka_auto_offset_reset: str
+    poll_timeout_ms: int
+    nautobot_url: str
+    nautobot_token: str
+    nautobot_verify_tls: bool
+    nautobot_timeout_seconds: int
+    default_device_type: str
+    default_location: str
+    default_device_status: str
+    log_level: str
+    dry_run: bool
+
+    @classmethod
+    def from_env(cls, *, load_dotenv_file: bool = True) -> Config:
+        """Build a Config from the process environment, optionally reading .env first."""
+        if load_dotenv_file:
+            load_dotenv()
+
+        required = (
+            "KAFKA_BROKERS",
+            "NAUTOBOT_URL",
+            "NAUTOBOT_TOKEN",
+            "NAUTOBOT_DEFAULT_DEVICE_TYPE",
+            "NAUTOBOT_DEFAULT_LOCATION",
+        )
+        missing = [name for name in required if not os.environ.get(name, "").strip()]
+        if missing:
+            raise ConfigError("missing required environment variables: " + ", ".join(missing))
+
+        offset_reset = os.environ.get("KAFKA_AUTO_OFFSET_RESET", "earliest").strip().lower()
+        if offset_reset not in {"earliest", "latest"}:
+            raise ConfigError(
+                f"KAFKA_AUTO_OFFSET_RESET must be 'earliest' or 'latest', got {offset_reset!r}"
+            )
+
+        log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+        if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ConfigError(
+                f"LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL; got {log_level!r}"
+            )
+
+        return cls(
+            kafka_brokers=os.environ["KAFKA_BROKERS"].strip(),
+            kafka_topic=os.environ.get("KAFKA_TOPIC", "rastreo.devices"),
+            kafka_group_id=os.environ.get("KAFKA_GROUP_ID", "rastreo-nautobot-consumer"),
+            kafka_auto_offset_reset=offset_reset,
+            poll_timeout_ms=_int("POLL_TIMEOUT_MS", "1000"),
+            nautobot_url=os.environ["NAUTOBOT_URL"].strip().rstrip("/"),
+            nautobot_token=os.environ["NAUTOBOT_TOKEN"].strip(),
+            nautobot_verify_tls=_bool("NAUTOBOT_VERIFY_TLS", "true"),
+            nautobot_timeout_seconds=_int("NAUTOBOT_TIMEOUT_SECONDS", "30"),
+            default_device_type=os.environ["NAUTOBOT_DEFAULT_DEVICE_TYPE"].strip(),
+            default_location=os.environ["NAUTOBOT_DEFAULT_LOCATION"].strip(),
+            default_device_status=os.environ.get(
+                "NAUTOBOT_DEFAULT_DEVICE_STATUS", "Active"
+            ).strip(),
+            log_level=log_level,
+            dry_run=_bool("DRY_RUN", "false"),
+        )
+
+
+def _bool(name: str, default: str) -> bool:
+    raw = os.environ.get(name, default).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{name} must be a boolean, got {raw!r}")
+
+
+def _int(name: str, default: str) -> int:
+    raw = os.environ.get(name, default)
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc

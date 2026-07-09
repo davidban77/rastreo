@@ -1,0 +1,80 @@
+networks:
+  nautobot-consumer-net:
+    driver: bridge
+
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: nautobot-consumer-kafka
+    ports:
+      - "9092:9092"
+    networks:
+      - nautobot-consumer-net
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:29092,EXTERNAL://localhost:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  consumer:
+    build: .
+    container_name: nautobot-consumer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - nautobot-consumer-net
+    environment:
+      KAFKA_BROKERS: "kafka:29092"
+      KAFKA_TOPIC: "${KAFKA_TOPIC:-rastreo.devices}"
+      KAFKA_GROUP_ID: "${KAFKA_GROUP_ID:-rastreo-nautobot-consumer}"
+      KAFKA_AUTO_OFFSET_RESET: "${KAFKA_AUTO_OFFSET_RESET:-earliest}"
+      NAUTOBOT_URL: "${NAUTOBOT_URL}"
+      NAUTOBOT_TOKEN: "${NAUTOBOT_TOKEN}"
+      NAUTOBOT_VERIFY_TLS: "${NAUTOBOT_VERIFY_TLS:-true}"
+      NAUTOBOT_TIMEOUT_SECONDS: "${NAUTOBOT_TIMEOUT_SECONDS:-30}"
+      NAUTOBOT_DEFAULT_DEVICE_TYPE: "${NAUTOBOT_DEFAULT_DEVICE_TYPE}"
+      NAUTOBOT_DEFAULT_LOCATION: "${NAUTOBOT_DEFAULT_LOCATION}"
+      NAUTOBOT_DEFAULT_DEVICE_STATUS: "${NAUTOBOT_DEFAULT_DEVICE_STATUS:-Active}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      DRY_RUN: "${DRY_RUN:-false}"
+
+  rastreo-server:
+    image: ghcr.io/davidban77/rastreo:0.5.0  # bump when a new rastreo image ships
+    container_name: nautobot-consumer-rastreo-server
+    profiles: ["demo"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - nautobot-consumer-net
+    cap_add:
+      - NET_RAW
+    environment:
+      RASTREO_SERVER_PORT: "8080"
+      RASTREO_SERVER_BIND: "0.0.0.0"
+
+  nginx-target:
+    image: nginx:1.31-alpine
+    container_name: nautobot-consumer-nginx-target
+    profiles: ["demo"]
+    networks:
+      - nautobot-consumer-net
+    expose:
+      - "80"
