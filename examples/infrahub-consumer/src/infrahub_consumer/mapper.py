@@ -58,6 +58,15 @@ def map_device_record(record: DeviceRecord) -> InfrahubPayload:
     if record.os_version is not None:
         payload["os_version"] = record.os_version
 
+    if record.ssh_version is not None:
+        payload["ssh_version"] = record.ssh_version
+
+    if record.http_server is not None:
+        payload["http_server"] = record.http_server
+
+    if record.http_version is not None:
+        payload["http_version"] = record.http_version
+
     if record.role is not None:
         payload["role"] = record.role.strip()
 

@@ -485,6 +485,20 @@
     "PlatformRule": {
       "description": "A single regex-based platform-detection rule.",
       "properties": {
+        "http_server_capture": {
+          "description": "Named regex capture group whose matched text populates `DeviceRecord::http_server`. Only meaningful for `signal: HttpBanner`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "http_version_capture": {
+          "description": "Named regex capture group whose matched text populates `DeviceRecord::http_version`. Only meaningful for `signal: HttpBanner`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "os_version_capture": {
           "description": "Named regex capture group (e.g. `version` for `(?P<version>\\d+\\.\\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`.",
           "type": [
@@ -500,6 +514,13 @@
         },
         "signal": {
           "$ref": "#/definitions/PlatformSignal"
+        },
+        "ssh_version_capture": {
+          "description": "Named regex capture group whose matched text populates `DeviceRecord::ssh_version`. Only meaningful for `signal: SshBanner`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

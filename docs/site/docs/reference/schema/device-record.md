@@ -18,6 +18,8 @@ Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Leg
 |---|---|---|---|
 | `alt_ips` | array<[`AltIp`](#altip)> | no | Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP. |
 | `confidence` | double | yes | Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device. |
+| `http_server` | string \| null | no | Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some("nginx")`. `None` when no `HttpBanner` rule with `http_server_capture` matched. |
+| `http_version` | string \| null | no | Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some("1.24.0")`. `None` when no `HttpBanner` rule with `http_version_capture` matched. |
 | `identity_key` | [`IdentityKey`](#identitykey) | yes | Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans. |
 | `last_seen` | string (date-time) | yes | RFC 3339 UTC timestamp of the most recent probe that produced signals for this device. |
 | `mac` | string \| null | no | First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex. |
@@ -32,6 +34,7 @@ Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Leg
 | `schema_id` | string | yes | Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build. |
 | `schema_version` | string | yes | Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build. |
 | `signals` | array<[`Signal`](#signal)> | yes | Deduplicated list of every observable fact collected from every prober that targeted this device. |
+| `ssh_version` | string \| null | no | SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` populates `Some("OpenSSH_8.9p1")`. `None` when no `SshBanner` rule with `ssh_version_capture` matched. |
 
 ## Definitions
 

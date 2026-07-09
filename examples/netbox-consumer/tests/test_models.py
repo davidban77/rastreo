@@ -25,9 +25,14 @@ def test_minimal_record_parses(minimal_record_payload: dict[str, Any]) -> None:
 
 def test_full_record_parses(full_record_payload: dict[str, Any]) -> None:
     record = DeviceRecord.model_validate(full_record_payload)
+    assert record.schema_version == "v1"
+    assert record.schema_id == "https://schemas.rastreo.dev/device-record/v1.json"
     assert record.identity_key == "mac:aa:bb:cc:11:22:33"
     assert record.platform == "cisco_ios"
     assert record.os_version == "15.7"
+    assert record.ssh_version == "Cisco-1.25"
+    assert record.http_server is None
+    assert record.http_version is None
     assert record.role == "router"
     assert record.manufacturer == "Cisco Systems, Inc"
     assert len(record.signals) == 6

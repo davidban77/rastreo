@@ -61,6 +61,15 @@ pub struct PlatformRule {
     /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_version_capture: Option<String>,
+    /// Named regex capture group whose matched text populates `DeviceRecord::ssh_version`. Only meaningful for `signal: SshBanner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_version_capture: Option<String>,
+    /// Named regex capture group whose matched text populates `DeviceRecord::http_server`. Only meaningful for `signal: HttpBanner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_server_capture: Option<String>,
+    /// Named regex capture group whose matched text populates `DeviceRecord::http_version`. Only meaningful for `signal: HttpBanner`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_version_capture: Option<String>,
 }
 
 /// A single role-detection rule. Two match strategies are supported: exact byte-prefix on `SnmpSysObjectId` and all-of set membership over `OpenPort` signals.
@@ -109,6 +118,16 @@ struct CompiledRule {
     regex: Regex,
     platform: String,
     os_version_capture: Option<String>,
+    ssh_version_capture: Option<String>,
+    http_server_capture: Option<String>,
+    http_version_capture: Option<String>,
+}
+
+struct PlatformMatch {
+    os_version: Option<String>,
+    ssh_version: Option<String>,
+    http_server: Option<String>,
+    http_version: Option<String>,
 }
 
 /// Classifier that walks a device's `signals` and assigns `platform` + `os_version` from the first matching platform rule, then `role` from the first matching role rule.
@@ -146,6 +165,9 @@ impl RulesClassifier {
                 regex,
                 platform: rule.platform,
                 os_version_capture: rule.os_version_capture,
+                ssh_version_capture: rule.ssh_version_capture,
+                http_server_capture: rule.http_server_capture,
+                http_version_capture: rule.http_version_capture,
             });
         }
 
@@ -186,8 +208,17 @@ impl Classifier for RulesClassifier {
             for rule in &self.platform_rules {
                 if let Some(matched) = platform_rule_match(rule, record) {
                     record.platform = Some(rule.platform.clone());
-                    if let Some(version) = matched {
-                        record.os_version = Some(version);
+                    if let Some(v) = matched.os_version {
+                        record.os_version = Some(v);
+                    }
+                    if let Some(v) = matched.ssh_version {
+                        record.ssh_version = Some(v);
+                    }
+                    if let Some(v) = matched.http_server {
+                        record.http_server = Some(v);
+                    }
+                    if let Some(v) = matched.http_version {
+                        record.http_version = Some(v);
                     }
                     break;
                 }
@@ -207,18 +238,22 @@ impl Classifier for RulesClassifier {
     }
 }
 
-fn platform_rule_match(rule: &CompiledRule, record: &DeviceRecord) -> Option<Option<String>> {
+fn platform_rule_match(rule: &CompiledRule, record: &DeviceRecord) -> Option<PlatformMatch> {
     for signal in &record.signals {
         let Some(text) = signal_text_for(signal, rule.signal) else {
             continue;
         };
         if let Some(caps) = rule.regex.captures(text) {
-            let version = rule
-                .os_version_capture
-                .as_deref()
-                .and_then(|name| caps.name(name))
-                .map(|m| m.as_str().to_string());
-            return Some(version);
+            let capture_by = |name: Option<&str>| -> Option<String> {
+                name.and_then(|n| caps.name(n))
+                    .map(|m| m.as_str().to_string())
+            };
+            return Some(PlatformMatch {
+                os_version: capture_by(rule.os_version_capture.as_deref()),
+                ssh_version: capture_by(rule.ssh_version_capture.as_deref()),
+                http_server: capture_by(rule.http_server_capture.as_deref()),
+                http_version: capture_by(rule.http_version_capture.as_deref()),
+            });
         }
     }
     None
@@ -277,6 +312,9 @@ mod tests {
             manufacturer: None,
             platform: None,
             os_version: None,
+            ssh_version: None,
+            http_server: None,
+            http_version: None,
             role: None,
             confidence: Confidence::new(0.1).expect("confidence"),
             last_seen: SystemTime::UNIX_EPOCH,
@@ -436,6 +474,9 @@ mod tests {
             pattern: r"Cisco".to_string(),
             platform: "user_cisco".to_string(),
             os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
         }];
         let c = create_classifier(&extend_rules(user)).expect("create");
         let mut record = empty_record();
@@ -466,19 +507,79 @@ mod tests {
         ));
         c.classify(&mut record).expect("classify ok");
         assert_eq!(record.platform.as_deref(), Some("linux"));
-        assert!(record.os_version.is_none());
+        assert_eq!(record.os_version.as_deref(), Some("Ubuntu"));
+        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.6p1"));
     }
 
     #[test]
-    fn rules_classifier_http_banner_infers_nginx_with_version() {
+    fn baked_ssh_rule_populates_platform_linux_os_version_ubuntu_and_ssh_version() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::SshBanner(
+            "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1".into(),
+        ));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("linux"));
+        assert_eq!(record.os_version.as_deref(), Some("Ubuntu"));
+        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_8.9p1"));
+        assert!(record.http_server.is_none());
+        assert!(record.http_version.is_none());
+    }
+
+    #[test]
+    fn baked_ssh_rule_populates_debian_os_version_and_ssh_version() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SshBanner("SSH-2.0-OpenSSH_9.2p1 Debian-1".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("linux"));
+        assert_eq!(record.os_version.as_deref(), Some("Debian"));
+        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.2p1"));
+    }
+
+    #[test]
+    fn baked_http_rule_populates_platform_linux_and_http_server_and_http_version() {
         let c = create_classifier(&extend_rules(vec![])).expect("create");
         let mut record = empty_record();
         record
             .signals
             .push(Signal::HttpBanner("nginx/1.24.0".into()));
         c.classify(&mut record).expect("classify ok");
-        assert_eq!(record.platform.as_deref(), Some("nginx"));
-        assert_eq!(record.os_version.as_deref(), Some("1.24.0"));
+        assert_eq!(record.platform.as_deref(), Some("linux"));
+        assert_eq!(record.http_server.as_deref(), Some("nginx"));
+        assert_eq!(record.http_version.as_deref(), Some("1.24.0"));
+        assert!(record.os_version.is_none());
+        assert!(record.ssh_version.is_none());
+    }
+
+    #[test]
+    fn baked_http_rule_populates_apache_server_and_version() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::HttpBanner("Apache/2.4.58".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("linux"));
+        assert_eq!(record.http_server.as_deref(), Some("Apache"));
+        assert_eq!(record.http_version.as_deref(), Some("2.4.58"));
+        assert!(record.os_version.is_none());
+    }
+
+    #[test]
+    fn prepopulated_platform_skips_classifier_and_preserves_ssh_version_none() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record.platform = Some("manual_override".into());
+        record.ssh_version = Some("manual".into());
+        record
+            .signals
+            .push(Signal::SshBanner("SSH-2.0-OpenSSH_9.2p1 Debian-1".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("manual_override"));
+        assert_eq!(record.ssh_version.as_deref(), Some("manual"));
     }
 
     #[test]
@@ -488,6 +589,9 @@ mod tests {
             pattern: r"^Cisco IOS Software".to_string(),
             platform: "user_defined".to_string(),
             os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
         }];
         let c = create_classifier(&extend_rules(user)).expect("create");
         let mut record = empty_record();
@@ -503,6 +607,9 @@ mod tests {
             pattern: r"^SomethingElse".to_string(),
             platform: "user_only".to_string(),
             os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
         }];
         let c = create_classifier(&replace_rules(user)).expect("create");
         let mut record = empty_record();
@@ -521,6 +628,9 @@ mod tests {
             pattern: r"(unclosed".to_string(),
             platform: "irrelevant".to_string(),
             os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
         }];
         let result = create_classifier(&extend_rules(user));
         let err = match result {
@@ -537,6 +647,9 @@ mod tests {
             pattern: r"^SSH-2\.0-OpenSSH".to_string(),
             platform: "openssh".to_string(),
             os_version_capture: Some("nonexistent".to_string()),
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
         }];
         let c = create_classifier(&replace_rules(user)).expect("create");
         let mut record = empty_record();
@@ -555,6 +668,9 @@ mod tests {
             pattern: r"^Cisco-Nexus-(?P<version>\d+)".to_string(),
             platform: "cisco_nxos".to_string(),
             os_version_capture: Some("version".to_string()),
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
         }];
         let c = create_classifier(&replace_rules(user)).expect("create");
         let mut record = empty_record();
@@ -577,95 +693,159 @@ mod tests {
 
     #[test]
     fn baked_rules_match_realistic_fixtures() {
-        let cases: &[(PlatformSignal, &str, &str, Option<&str>)] = &[
-            (
-                PlatformSignal::SnmpSysDescr,
-                "Cisco IOS Software, C3560CX Software (C3560CX-UNIVERSALK9-M), Version 15.2(7)E4, RELEASE SOFTWARE",
-                "cisco_ios",
-                Some("15.2"),
-            ),
-            (
-                PlatformSignal::SnmpSysDescr,
-                "Cisco IOS XR Software, Version 7.5.2, RELEASE SOFTWARE",
-                "cisco_ios_xr",
-                Some("7.5.2"),
-            ),
-            (
-                PlatformSignal::SnmpSysDescr,
-                "Cisco NX-OS(tm) n9000, Software (nxos), Version 9.3(10), RELEASE SOFTWARE",
-                "cisco_nxos",
-                Some("9.3"),
-            ),
-            (
-                PlatformSignal::SnmpSysDescr,
-                "Juniper Networks, Inc. mx240 internet router, kernel JUNOS 21.4R3-S4.9",
-                "junos",
-                Some("21.4"),
-            ),
-            (
-                PlatformSignal::SnmpSysDescr,
-                "Arista Networks EOS version 4.29.3M running on an Arista Networks DCS-7060CX2-32S",
-                "arista_eos",
-                Some("4.29.3"),
-            ),
-            (
-                PlatformSignal::SnmpSysDescr,
-                "Linux hostname 5.15.0-91-generic #101-Ubuntu SMP Wed Nov 15 20:12:47 UTC 2023",
-                "linux",
-                Some("5.15.0"),
-            ),
-            (
-                PlatformSignal::SshBanner,
-                "SSH-2.0-OpenSSH_9.0p1 Ubuntu-3ubuntu0.1",
-                "linux",
-                None,
-            ),
-            (
-                PlatformSignal::SshBanner,
-                "SSH-2.0-OpenSSH_9.2p1 Debian-1",
-                "linux",
-                None,
-            ),
-            (
-                PlatformSignal::SshBanner,
-                "SSH-2.0-OpenSSH_9.5 FreeBSD-20231016",
-                "freebsd",
-                None,
-            ),
-            (
-                PlatformSignal::HttpBanner,
-                "nginx/1.24.0",
-                "nginx",
-                Some("1.24.0"),
-            ),
-            (
-                PlatformSignal::HttpBanner,
-                "Apache/2.4.58 (Ubuntu)",
-                "apache_httpd",
-                Some("2.4.58"),
-            ),
+        struct Case {
+            signal_kind: PlatformSignal,
+            input: &'static str,
+            platform: &'static str,
+            os_version: Option<&'static str>,
+            ssh_version: Option<&'static str>,
+            http_server: Option<&'static str>,
+            http_version: Option<&'static str>,
+        }
+
+        let cases: &[Case] = &[
+            Case {
+                signal_kind: PlatformSignal::SnmpSysDescr,
+                input: "Cisco IOS Software, C3560CX Software (C3560CX-UNIVERSALK9-M), Version 15.2(7)E4, RELEASE SOFTWARE",
+                platform: "cisco_ios",
+                os_version: Some("15.2"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SnmpSysDescr,
+                input: "Cisco IOS XR Software, Version 7.5.2, RELEASE SOFTWARE",
+                platform: "cisco_ios_xr",
+                os_version: Some("7.5.2"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SnmpSysDescr,
+                input: "Cisco NX-OS(tm) n9000, Software (nxos), Version 9.3(10), RELEASE SOFTWARE",
+                platform: "cisco_nxos",
+                os_version: Some("9.3"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SnmpSysDescr,
+                input: "Juniper Networks, Inc. mx240 internet router, kernel JUNOS 21.4R3-S4.9",
+                platform: "junos",
+                os_version: Some("21.4"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SnmpSysDescr,
+                input: "Arista Networks EOS version 4.29.3M running on an Arista Networks DCS-7060CX2-32S",
+                platform: "arista_eos",
+                os_version: Some("4.29.3"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SnmpSysDescr,
+                input: "Linux hostname 5.15.0-91-generic #101-Ubuntu SMP Wed Nov 15 20:12:47 UTC 2023",
+                platform: "linux",
+                os_version: Some("5.15.0"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.0p1 Ubuntu-3ubuntu0.1",
+                platform: "linux",
+                os_version: Some("Ubuntu"),
+                ssh_version: Some("OpenSSH_9.0p1"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.2p1 Debian-1",
+                platform: "linux",
+                os_version: Some("Debian"),
+                ssh_version: Some("OpenSSH_9.2p1"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.5 FreeBSD-20231016",
+                platform: "freebsd",
+                os_version: Some("FreeBSD"),
+                ssh_version: Some("OpenSSH_9.5"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: PlatformSignal::HttpBanner,
+                input: "nginx/1.24.0",
+                platform: "linux",
+                os_version: None,
+                ssh_version: None,
+                http_server: Some("nginx"),
+                http_version: Some("1.24.0"),
+            },
+            Case {
+                signal_kind: PlatformSignal::HttpBanner,
+                input: "Apache/2.4.58 (Ubuntu)",
+                platform: "linux",
+                os_version: None,
+                ssh_version: None,
+                http_server: Some("Apache"),
+                http_version: Some("2.4.58"),
+            },
         ];
 
         let classifier = create_classifier(&extend_rules(vec![])).expect("create");
-        for (signal_kind, input, expected_platform, expected_version) in cases {
+        for case in cases {
             let mut record = empty_record();
-            let signal = match signal_kind {
-                PlatformSignal::SnmpSysDescr => Signal::SnmpSysDescr((*input).to_string()),
-                PlatformSignal::SshBanner => Signal::SshBanner((*input).to_string()),
-                PlatformSignal::HttpBanner => Signal::HttpBanner((*input).to_string()),
-                PlatformSignal::SnmpSysName => Signal::SnmpSysName((*input).to_string()),
+            let signal = match case.signal_kind {
+                PlatformSignal::SnmpSysDescr => Signal::SnmpSysDescr(case.input.to_string()),
+                PlatformSignal::SshBanner => Signal::SshBanner(case.input.to_string()),
+                PlatformSignal::HttpBanner => Signal::HttpBanner(case.input.to_string()),
+                PlatformSignal::SnmpSysName => Signal::SnmpSysName(case.input.to_string()),
             };
             record.signals.push(signal);
             classifier.classify(&mut record).expect("classify ok");
+            let input = case.input;
             assert_eq!(
                 record.platform.as_deref(),
-                Some(*expected_platform),
-                "input `{input}` should classify as `{expected_platform}`"
+                Some(case.platform),
+                "input `{input}` should classify as `{}`",
+                case.platform
             );
             assert_eq!(
                 record.os_version.as_deref(),
-                *expected_version,
-                "input `{input}` should capture os_version {expected_version:?}"
+                case.os_version,
+                "input `{input}` should capture os_version {:?}",
+                case.os_version
+            );
+            assert_eq!(
+                record.ssh_version.as_deref(),
+                case.ssh_version,
+                "input `{input}` should capture ssh_version {:?}",
+                case.ssh_version
+            );
+            assert_eq!(
+                record.http_server.as_deref(),
+                case.http_server,
+                "input `{input}` should capture http_server {:?}",
+                case.http_server
+            );
+            assert_eq!(
+                record.http_version.as_deref(),
+                case.http_version,
+                "input `{input}` should capture http_version {:?}",
+                case.http_version
             );
         }
     }

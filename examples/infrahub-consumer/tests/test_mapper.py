@@ -95,3 +95,26 @@ def test_confidence_is_rounded_to_two_decimals(
     minimal_record_payload["confidence"] = 0.847239
     result = _map(minimal_record_payload)
     assert result["confidence"] == 0.85
+
+
+def test_mapper_passes_through_ssh_and_http_fields(
+    minimal_record_payload: dict[str, Any],
+) -> None:
+    """SSH and HTTP classifier outputs land as direct RastreoDevice attributes."""
+    minimal_record_payload["ssh_version"] = "OpenSSH_8.9p1"
+    minimal_record_payload["http_server"] = "nginx"
+    minimal_record_payload["http_version"] = "1.24.0"
+    result = _map(minimal_record_payload)
+    assert result["ssh_version"] == "OpenSSH_8.9p1"
+    assert result["http_server"] == "nginx"
+    assert result["http_version"] == "1.24.0"
+
+
+def test_ssh_and_http_fields_omitted_when_null(
+    minimal_record_payload: dict[str, Any],
+) -> None:
+    """Records without SSH/HTTP classifier output do not emit the attributes."""
+    result = _map(minimal_record_payload)
+    assert "ssh_version" not in result
+    assert "http_server" not in result
+    assert "http_version" not in result

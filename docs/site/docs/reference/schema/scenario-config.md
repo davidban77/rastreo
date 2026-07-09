@@ -133,10 +133,13 @@ A single regex-based platform-detection rule.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `http_server_capture` | string \| null | no | Named regex capture group whose matched text populates `DeviceRecord::http_server`. Only meaningful for `signal: HttpBanner`. |
+| `http_version_capture` | string \| null | no | Named regex capture group whose matched text populates `DeviceRecord::http_version`. Only meaningful for `signal: HttpBanner`. |
 | `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`. |
 | `pattern` | string | yes | — |
 | `platform` | string | yes | — |
 | `signal` | [`PlatformSignal`](#platformsignal) | yes | — |
+| `ssh_version_capture` | string \| null | no | Named regex capture group whose matched text populates `DeviceRecord::ssh_version`. Only meaningful for `signal: SshBanner`. |
 
 ### `PlatformSignal` {#platformsignal}
 

@@ -24,6 +24,20 @@
       "type": "number",
       "format": "double"
     },
+    "http_server": {
+      "description": "Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some(\"nginx\")`. `None` when no `HttpBanner` rule with `http_server_capture` matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "http_version": {
+      "description": "Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some(\"1.24.0\")`. `None` when no `HttpBanner` rule with `http_version_capture` matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "identity_key": {
       "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans.",
       "allOf": [
@@ -128,6 +142,13 @@
       "items": {
         "$ref": "#/definitions/Signal"
       }
+    },
+    "ssh_version": {
+      "description": "SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` populates `Some(\"OpenSSH_8.9p1\")`. `None` when no `SshBanner` rule with `ssh_version_capture` matched.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "definitions": {

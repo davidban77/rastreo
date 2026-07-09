@@ -40,6 +40,30 @@ custom_fields:
     required: false
     description: OS version captured from the same signal that identified `platform`.
 
+  - name: rastreo_ssh_version
+    label: rastreo SSH version
+    type: text
+    object_types:
+      - dcim.device
+    required: false
+    description: SSH software identifier from the classifier (e.g. `OpenSSH_8.9p1`).
+
+  - name: rastreo_http_server
+    label: rastreo HTTP server
+    type: text
+    object_types:
+      - dcim.device
+    required: false
+    description: Web-server product name from the classifier (e.g. `nginx`).
+
+  - name: rastreo_http_version
+    label: rastreo HTTP version
+    type: text
+    object_types:
+      - dcim.device
+    required: false
+    description: Web-server version from the classifier (e.g. `1.24.0`).
+
   - name: rastreo_signals
     label: rastreo signals
     type: json

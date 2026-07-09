@@ -58,6 +58,9 @@ class DeviceRecord(BaseModel):
     manufacturer: str | None = None
     platform: str | None = None
     os_version: str | None = None
+    ssh_version: str | None = None
+    http_server: str | None = None
+    http_version: str | None = None
     role: str | None = None
     alt_ips: list[AltIp] = Field(default_factory=list)
     possible_alias_of: str | None = None

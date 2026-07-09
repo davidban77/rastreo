@@ -52,6 +52,15 @@ def map_device_record(record: DeviceRecord) -> NetBoxPayload:
     if record.os_version is not None:
         payload["custom_fields"]["rastreo_os_version"] = record.os_version
 
+    if record.ssh_version is not None:
+        payload["custom_fields"]["rastreo_ssh_version"] = record.ssh_version
+
+    if record.http_server is not None:
+        payload["custom_fields"]["rastreo_http_server"] = record.http_server
+
+    if record.http_version is not None:
+        payload["custom_fields"]["rastreo_http_version"] = record.http_version
+
     if record.platform is not None:
         payload["platform"] = _slugify(record.platform)
 
