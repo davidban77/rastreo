@@ -1,0 +1,75 @@
+# NetBox custom-field definitions used by the rastreo NetBox reference consumer.
+#
+# Apply with `netbox` management commands or your GitOps NetBox tooling. Each
+# field targets `dcim.device`.
+
+custom_fields:
+  - name: rastreo_identity_key
+    label: rastreo identity key
+    type: text
+    object_types:
+      - dcim.device
+    required: false
+    unique: true
+    description: >-
+      Canonical device identity emitted by rastreo — `mac:<addr>` when the
+      device advertised a MAC, else `ip:<addr>`. Consumers key on this value
+      to upsert deterministically.
+
+  - name: rastreo_last_seen
+    label: rastreo last seen
+    type: datetime
+    object_types:
+      - dcim.device
+    required: false
+    description: RFC 3339 timestamp of the most recent rastreo probe with signals.
+
+  - name: rastreo_confidence
+    label: rastreo confidence
+    type: decimal
+    object_types:
+      - dcim.device
+    required: false
+    description: Fuser confidence in [0.0, 1.0].
+
+  - name: rastreo_os_version
+    label: rastreo OS version
+    type: text
+    object_types:
+      - dcim.device
+    required: false
+    description: OS version captured from the same signal that identified `platform`.
+
+  - name: rastreo_signals
+    label: rastreo signals
+    type: json
+    object_types:
+      - dcim.device
+    required: false
+    description: Every raw signal observed for this device, for audit.
+
+  - name: rastreo_probe_kinds
+    label: rastreo probe kinds
+    type: json
+    object_types:
+      - dcim.device
+    required: false
+    description: Deduplicated list of probers that contributed signals.
+
+  - name: rastreo_alt_ips
+    label: rastreo alternate IPs
+    type: json
+    object_types:
+      - dcim.device
+    required: false
+    description: >-
+      Additional IPs merged into this device by the identity fuser. A future
+      version of this consumer may attach these as `ipam.ip-addresses`.
+
+  - name: rastreo_scan_metadata
+    label: rastreo scan metadata
+    type: json
+    object_types:
+      - dcim.device
+    required: false
+    description: Provenance stamped by the pipeline (scan_id, initiated_at, scenario).

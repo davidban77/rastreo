@@ -13,4 +13,5 @@ Topics covered here include the end-to-end discovery pipeline (resolver → sche
 - [Kafka](kafka.md) — the wire contract: batched vs per-record flush modes, NDJSON payload shape, and consumer parsing.
 - [NATS](nats.md) — the NATS JetStream sink: auth methods, delivery modes, stream setup, and consumer parsing.
 - [Source of truth](source-of-truth.md) — the reconciliation pattern consumers feeding NetBox, Nautobot, or Infrahub are expected to honour.
+- [Reference consumers](reference-consumers.md) — executable reference implementations of the reconciliation pattern, one per source of truth.
 - [Troubleshooting](troubleshooting.md) — common failures when records do not land where you expect.
