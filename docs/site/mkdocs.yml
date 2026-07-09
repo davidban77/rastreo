@@ -147,4 +147,5 @@ nav:
           - ScenarioFile: reference/schema/scenario-config.md
           - Streaming API: reference/schema/streaming-api.md
       - Errors: reference/errors.md
+      - Health endpoints: reference/health-endpoints.md
       - Glossary: reference/glossary.md

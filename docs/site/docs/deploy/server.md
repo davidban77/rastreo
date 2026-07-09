@@ -32,17 +32,37 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 
 The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
 
-## GET /health
+## GET /healthz and GET /readyz
 
-`GET /health` is a liveness probe. It always returns `200 OK` with a static JSON body, and never runs any discovery work. Use it from Kubernetes liveness and readiness probes, from external uptime monitors, or from a quick `curl` to verify the server is up.
+`GET /healthz` is a liveness probe. It always returns `200 OK` with a static JSON body, and never runs any discovery work. Use it from Kubernetes liveness probes, from external uptime monitors, or from a quick `curl` to verify the server is up.
 
 ```bash
-curl -sS http://localhost:8080/health
+curl -sS http://localhost:8080/healthz
 ```
 
 ```json
 {"status":"ok"}
 ```
+
+`GET /readyz` is a readiness probe. It returns `200 OK` only when the server can accept new work; when an inflight-scan limit or a recent-error quarantine has fired it returns `503 SERVICE_UNAVAILABLE` with a `reason` string. Use it from Kubernetes readiness probes so the pod is temporarily removed from Service endpoints while it recovers, without triggering a restart.
+
+```bash
+curl -sS http://localhost:8080/readyz
+```
+
+```json
+{
+  "status": "ready",
+  "inflight_scans": 0,
+  "max_inflight_scans": 100,
+  "seconds_since_sink_error": null,
+  "seconds_since_scan_error": null
+}
+```
+
+The gates and the `reason` values are documented in full in the [Health endpoints reference](../reference/health-endpoints.md), along with the three environment-variable knobs (`RASTREO_MAX_INFLIGHT_SCANS`, `RASTREO_SINK_ERROR_QUARANTINE_SECS`, `RASTREO_SCAN_ERROR_QUARANTINE_SECS`).
+
+`GET /health` is preserved as a backward-compat alias for `/healthz`. New deployments should point liveness at `/healthz` and readiness at `/readyz`.
 
 ## GET /metrics
 

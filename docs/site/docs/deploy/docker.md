@@ -41,7 +41,7 @@ The default entrypoint runs `rastreo-server`. Expose port 8080 and the server is
 ```bash
 docker run --rm -p 8080:8080 rastreo
 # in another terminal
-curl http://localhost:8080/health
+curl http://localhost:8080/healthz
 ```
 
 ## The compose stack
@@ -60,7 +60,7 @@ The Kafka broker advertises two listeners: `EXTERNAL://localhost:9092` (reachabl
 
 ```bash
 docker compose up -d
-curl http://localhost:8080/health
+curl http://localhost:8080/healthz
 # {"status":"ok"}
 docker compose down -v
 ```

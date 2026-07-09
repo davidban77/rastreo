@@ -6,5 +6,8 @@ rastreo has been deployed successfully.
 
 2. Verify the server is running:
 
-  curl http://localhost:{{ .Values.server.port }}/health
+  curl http://localhost:{{ .Values.server.port }}/healthz
   # {"status":"ok"}
+
+  curl http://localhost:{{ .Values.server.port }}/readyz
+  # {"status":"ready", ...}

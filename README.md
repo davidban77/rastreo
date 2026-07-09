@@ -45,7 +45,7 @@ Bring up the local development stack (rastreo-server, single-node Kafka, three a
 
 ```bash
 docker compose up -d
-curl http://localhost:8080/health
+curl http://localhost:8080/healthz
 # {"status":"ok"}
 ```
 

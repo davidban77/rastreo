@@ -15,4 +15,5 @@ Topics covered here include the full `rastreo` and `rastreo-server` CLI flag ref
 - [Secrets](secrets.md) — env-var and file-mount syntaxes for keeping credentials out of scenario YAML.
 - [Record schema](schema/index.md) — the emitted `DeviceRecord` JSON Schema, versioning policy, and the streaming API description.
 - [Error reference](errors.md) — every `RastreoError` variant and its likely fix.
+- [Health endpoints](health-endpoints.md) — `/healthz`, `/readyz`, the `/health` alias, and the readiness gates.
 - [Glossary](glossary.md) — domain terms used across the docs.

@@ -52,9 +52,23 @@ spec:
             - name: http
               containerPort: {{ .Values.server.port }}
               protocol: TCP
+          {{- $envs := list }}
+          {{- if hasKey .Values.readiness "maxInflightScans" }}
+          {{- $envs = append $envs (dict "name" "RASTREO_MAX_INFLIGHT_SCANS" "value" (printf "%v" .Values.readiness.maxInflightScans)) }}
+          {{- end }}
+          {{- if hasKey .Values.readiness "sinkErrorQuarantineSeconds" }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SINK_ERROR_QUARANTINE_SECS" "value" (printf "%v" .Values.readiness.sinkErrorQuarantineSeconds)) }}
+          {{- end }}
+          {{- if hasKey .Values.readiness "scanErrorQuarantineSeconds" }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SCAN_ERROR_QUARANTINE_SECS" "value" (printf "%v" .Values.readiness.scanErrorQuarantineSeconds)) }}
+          {{- end }}
+          {{- if $envs }}
+          env:
+            {{- toYaml $envs | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
-              path: /health
+              path: /healthz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -62,7 +76,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5

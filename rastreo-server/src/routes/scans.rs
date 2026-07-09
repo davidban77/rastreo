@@ -1,3 +1,6 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
@@ -7,7 +10,22 @@ use rastreo_core::{
 use serde::Serialize;
 
 use crate::error::AppError;
-use crate::state::AppState;
+use crate::state::{AppState, ReadinessState};
+
+struct InflightGuard(Arc<ReadinessState>);
+
+impl InflightGuard {
+    fn new(state: Arc<ReadinessState>) -> Self {
+        state.inflight_scans.fetch_add(1, Ordering::Relaxed);
+        Self(state)
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.inflight_scans.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct ScanResponse {
@@ -21,13 +39,16 @@ pub async fn create_scan(
     Json(scenario): Json<DiscoverScenarioConfig>,
 ) -> Result<Json<ScanResponse>, AppError> {
     let start = std::time::Instant::now();
+    let _inflight = InflightGuard::new(state.readiness.clone());
 
     if scenario.targets.is_empty() {
         state.metrics.record_scan_error(start.elapsed(), false);
+        state.readiness.record_scan_error(false);
         return Err(AppError::bad_request("scenario.targets must not be empty"));
     }
     if scenario.probers.is_empty() {
         state.metrics.record_scan_error(start.elapsed(), false);
+        state.readiness.record_scan_error(false);
         return Err(AppError::bad_request("scenario.probers must not be empty"));
     }
 
@@ -72,6 +93,7 @@ pub async fn create_scan(
             state
                 .metrics
                 .record_scan_error(start.elapsed(), is_sink_error);
+            state.readiness.record_scan_error(is_sink_error);
             Err(err.into())
         }
     }
