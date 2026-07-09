@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0.0",
+  "schema_id": "https://rastreo.dev/schemas/device-record/v1",
+  "identity_key": "ip:10.50.0.10",
+  "mgmt_ip": "10.50.0.10",
+  "mac": null,
+  "manufacturer": null,
+  "platform": null,
+  "os_version": null,
+  "role": null,
+  "confidence": 0.2,
+  "last_seen": "2026-07-05T11:22:51.423959000Z",
+  "signals": [
+    {"OpenPort": 80}
+  ],
+  "probe_kinds": ["TcpConnect"],
+  "alt_ips": [],
+  "scan_metadata": {
+    "scan_id": "01J1ZQK6HVQ7YXP3D3W1Z9J4KM",
+    "initiated_at": "2026-07-05T11:22:50.000000000Z",
+    "scenario_name": "quickstart",
+    "source_config_hash": "sha256:deadbeef"
+  }
+}
