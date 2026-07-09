@@ -1,5 +1,5 @@
 ---
-description: Executable reference implementations of source-of-truth reconcilers — NetBox first, Nautobot and Infrahub next.
+description: Executable reference implementations of source-of-truth reconcilers — NetBox, Nautobot, and Infrahub.
 ---
 
 # Reference consumers
@@ -14,6 +14,7 @@ Each reference consumer targets one source of truth, reads `DeviceRecord` events
 |---|---|---|---|
 | [NetBox](https://github.com/davidban77/rastreo/tree/main/examples/netbox-consumer) | NetBox 4.x | `examples/netbox-consumer/` | Python 3.12, `confluent-kafka` + `pynetbox` |
 | [Nautobot](https://github.com/davidban77/rastreo/tree/main/examples/nautobot-consumer) | Nautobot 2.x | `examples/nautobot-consumer/` | Python 3.12, `confluent-kafka` + `pynautobot` |
+| [Infrahub](https://github.com/davidban77/rastreo/tree/main/examples/infrahub-consumer) | Infrahub 1.x | `examples/infrahub-consumer/` | Python 3.12, `confluent-kafka` + `infrahub-sdk` |
 
 The NetBox reference demonstrates:
 
@@ -33,9 +34,20 @@ The Nautobot reference demonstrates:
 - Attaching `primary_ip4`/`primary_ip6` only when an enclosing `ipam.Prefix` exists — Nautobot 2.x requires `IPAddress.parent` at create time, so a reference consumer skips primary-IP attach with a WARN when no prefix contains the address.
 - A pointer at the [`nautobot-app-ssot`](https://docs.nautobot.com/projects/ssot/en/latest/) framework as the canonical production path — the reference stays REST-only so wire calls stay readable.
 
-## Coming next
+The Infrahub reference demonstrates:
 
-An Infrahub reference is in progress. It will follow the same layout — `models.py`, `mapper.py`, `<sot>.py`, `consumer.py` — so a reader who has followed one can navigate the others without re-learning the pattern.
+- **Schema-flexible modeling.** Infrahub has no fixed device kind — the reference ships an `infrahub-schema.yaml` declaring a `RastreoDevice` node with the attributes the mapper writes, and the consumer verifies the schema is loaded at boot with an actionable error if it's missing.
+- **Branch-based mutations.** Every upsert lands on a persistent `rastreo-updates` branch (configurable), not on `main`. Ops teams review the accumulated diff via Infrahub's Proposed Changes UI before merging. Auto-merge is opt-in via `INFRAHUB_AUTO_MERGE=true`.
+- Boot-time branch bootstrap: the consumer creates the target branch from `main` if it does not exist, so the first run works with an empty Infrahub.
+- Identity-key lookup via the unique attribute constraint declared in the schema — no custom-field indirection like NetBox/Nautobot.
+- Comparison-based idempotent patch: on repeat scans, each attribute is compared to the current node value and `node.update()` is only called when the diff is non-empty.
+- **Sync-outer, async-inner runtime.** The outer Kafka poll loop is `confluent-kafka` (sync); the inner infrahub-sdk work is async. `asyncio.run(...)` per message keeps the boundary at exactly one line, at the cost of throughput — the reference documents where to switch to `aiokafka` for high-volume deployments.
+
+## The three-reference series
+
+The three reference consumers together demonstrate that the reconciliation pattern generalises across REST + custom-field SoTs (NetBox, Nautobot) and schema-flexible + branch-based SoTs (Infrahub). All three follow the same file layout — `models.py`, `mapper.py`, `<sot>.py`, `consumer.py` — so a reader who has followed one can navigate the others without re-learning the pattern. Copy whichever matches your SoT and adapt from there; forking one to target a fourth SoT (Netdot, Nornir Inventory, a custom REST SoT) is a few hundred lines of change.
+
+The three references intentionally stop at readable single-instance reconciliation. Production concerns — DLQ topics, retry with backoff, metrics, sharding — are documented per reference as extension points, not shipped in the reference itself.
 
 ## See also
 
