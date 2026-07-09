@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0.0",
+  "schema_id": "https://rastreo.dev/schemas/device-record/v1",
+  "identity_key": "mac:00:11:22:33:44:55",
+  "mgmt_ip": "10.50.0.30",
+  "mac": "00:11:22:33:44:55",
+  "manufacturer": "Juniper Networks",
+  "platform": "junos",
+  "os_version": "22.4R1",
+  "role": "router",
+  "confidence": 0.9,
+  "last_seen": "2026-07-05T12:00:00.000000000Z",
+  "signals": [
+    {"OpenPort": 22},
+    {"SshBanner": "SSH-2.0-OpenSSH_7.9 FIPS Junos"},
+    {"SnmpSysDescr": "Juniper Networks, Inc. mx204 Junos 22.4R1"},
+    {"Mac": "00:11:22:33:44:55"},
+    {"ReverseDnsName": "mx204-01.lab.example.com"}
+  ],
+  "probe_kinds": ["TcpConnect", "Ssh", "Snmp", "ReverseDns"],
+  "alt_ips": [
+    {
+      "address": "10.50.0.31",
+      "role": "secondary",
+      "responded_via": ["TcpConnect", "Ssh"]
+    },
+    {
+      "address": "10.50.0.32",
+      "role": "vrrp",
+      "responded_via": ["Arp"]
+    }
+  ],
+  "scan_metadata": {
+    "scan_id": "01J1ZQK6HVQ7YXP3D3W1Z9J4KM",
+    "initiated_at": "2026-07-05T11:22:50.000000000Z",
+    "scenario_name": "edge-routers",
+    "source_config_hash": null
+  }
+}

@@ -1,0 +1,87 @@
+# Reference schema for the rastreo Infrahub consumer.
+#
+# Declares `RastreoDevice` in the `Rastreo` namespace with the attributes the
+# reference reconciler writes. The schema is intentionally flat — no
+# relationships. Extend it with relationships to your own Site / Manufacturer /
+# Prefix nodes as needed; the consumer only reads its own attributes.
+#
+# Load it against the branch the consumer will write to:
+#
+#   infrahubctl schema load infrahub-schema.yaml --branch rastreo-updates
+#
+# Or upload via the Infrahub UI: Schema -> Load YAML.
+
+version: "1.0"
+
+nodes:
+  - name: Device
+    namespace: Rastreo
+    description: A device discovered by rastreo and reconciled into Infrahub.
+    label: Rastreo Device
+    default_filter: identity_key__value
+    human_friendly_id:
+      - identity_key__value
+    display_labels:
+      - identity_key__value
+    order_by:
+      - identity_key__value
+    attributes:
+      - name: identity_key
+        kind: Text
+        unique: true
+        description: Canonical device identity emitted by rastreo — `mac:<addr>` or `ip:<addr>`.
+
+      - name: mgmt_ip
+        kind: Text
+        optional: true
+        description: Management IP address (IPv4 or IPv6) as reported by rastreo.
+
+      - name: mac
+        kind: Text
+        optional: true
+        description: Primary MAC address observed for the device.
+
+      - name: platform
+        kind: Text
+        optional: true
+        description: Network platform (e.g. cisco_ios, junos).
+
+      - name: os_version
+        kind: Text
+        optional: true
+        description: OS version captured from the same signal that identified `platform`.
+
+      - name: role
+        kind: Text
+        optional: true
+        description: Operational role (e.g. router, switch, firewall).
+
+      - name: confidence
+        kind: Number
+        optional: true
+        description: Fuser confidence in [0.0, 1.0], stored as a number.
+
+      - name: last_seen
+        kind: DateTime
+        optional: true
+        description: RFC 3339 timestamp of the most recent rastreo probe with signals.
+
+      - name: signals
+        kind: JSON
+        optional: true
+        description: Every raw signal observed for this device, for audit.
+
+      - name: probe_kinds
+        kind: JSON
+        optional: true
+        description: Deduplicated list of probers that contributed signals.
+
+      - name: alt_ips
+        kind: JSON
+        optional: true
+        description: Additional IPs merged into this device by the identity fuser.
+
+      - name: scan_metadata
+        kind: JSON
+        optional: true
+        description: Provenance stamped by the pipeline (scan_id, initiated_at, scenario).

@@ -1,0 +1,46 @@
+[project]
+name = "infrahub-consumer"
+version = "0.1.0"
+description = "Reference consumer that upserts rastreo DeviceRecord events into an Infrahub RastreoDevice branch."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka>=2.6",
+    "infrahub-sdk>=1.0",
+    "pydantic>=2.9",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/infrahub_consumer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: hits a live Infrahub instance; requires INFRAHUB_URL and INFRAHUB_TOKEN env vars.",
+]
+# `-p no:pytest-infrahub` disables the infrahub-sdk's pytest plugin, which is
+# auto-loaded via entry_points and imports PyYAML at plugin-load. This reference
+# doesn't use pytest-infrahub fixtures and doesn't pull PyYAML — disabling the
+# plugin avoids adding an unused dev dep.
+addopts = "-m 'not integration' -p no:pytest-infrahub"
