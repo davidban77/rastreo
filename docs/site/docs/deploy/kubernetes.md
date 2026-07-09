@@ -43,6 +43,7 @@ The most useful `values.yaml` knobs are:
 | `ingress.enabled`                | `false`                       | Create an `Ingress` for the service.                      |
 | `serviceMonitor.enabled`         | `false`                       | Create a Prometheus Operator `ServiceMonitor` that scrapes `/metrics`. |
 | `podSecurity.netRaw`             | `false`                       | Add `NET_RAW` to the container capabilities. Required for the ARP and NDP probers. See [`podSecurity.netRaw`](#podsecuritynetraw-arp-and-ndp-probers). |
+| `logFormat`                      | unset (binary default `text`) | Log line format on stderr. Set to `json` for Loki / ELK / Splunk ingestion; renders `RASTREO_LOG_FORMAT` on the pod. See [Logging](../reference/logging.md). |
 | `config`                         | `{}`                          | Inline YAML mounted at `/etc/rastreo` as a `ConfigMap`.   |
 
 A worked example of `config`:
@@ -112,7 +113,18 @@ The chart's `podSecurityContext` and container `securityContext` are restrictive
 
 These line up with Pod Security Standards `restricted` out of the box. Most clusters do not need to override them.
 
+## Structured logging
+
+For log aggregation compatibility (Loki, ELK, Splunk, or any pipeline that expects one JSON object per line), set `logFormat: json` in `values.yaml`:
+
+```yaml
+logFormat: json
+```
+
+The chart renders `RASTREO_LOG_FORMAT=json` on the container's env. Leave the key unset (or `null`) to inherit the binary default of `text`. See [Logging](../reference/logging.md) for the JSON field shape and drop-in Promtail / Filebeat snippets.
+
 ## See also
 
 - [Docker](docker.md) — the image the chart deploys.
 - [rastreo-server](server.md) — the HTTP API the pods expose.
+- [Logging](../reference/logging.md) — log format and aggregator ingestion examples.

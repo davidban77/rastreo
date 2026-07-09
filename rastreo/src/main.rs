@@ -2,10 +2,12 @@ use clap::Parser;
 
 mod cli;
 
+pub use cli::LogFormat;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let parsed = cli::Cli::parse();
-    init_tracing(parsed.verbose, parsed.quiet);
+    init_tracing(parsed.verbose, parsed.quiet, parsed.log_format);
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -46,7 +48,7 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-fn init_tracing(verbose: u8, quiet: bool) {
+fn init_tracing(verbose: u8, quiet: bool, log_format: LogFormat) {
     use tracing_subscriber::EnvFilter;
     let level = if quiet {
         "error"
@@ -59,8 +61,92 @@ fn init_tracing(verbose: u8, quiet: bool) {
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
     // Stderr keeps stdout clean for NDJSON output from the stdout sink.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(filter)
-        .init();
+    match log_format {
+        LogFormat::Text => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(filter)
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(filter)
+                .json()
+                .init();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    #[test]
+    fn log_format_default_is_text() {
+        assert_eq!(LogFormat::default(), LogFormat::Text);
+    }
+
+    #[test]
+    fn log_format_parses_from_str_text_and_json() {
+        assert_eq!(
+            LogFormat::from_str("text", true).expect("text parses"),
+            LogFormat::Text,
+        );
+        assert_eq!(
+            LogFormat::from_str("json", true).expect("json parses"),
+            LogFormat::Json,
+        );
+    }
+
+    #[test]
+    fn log_format_rejects_unknown_value() {
+        assert!(LogFormat::from_str("yaml", true).is_err());
+    }
+
+    #[test]
+    fn cli_defaults_log_format_to_text() {
+        // SAFETY: no other test in this binary reads or writes RASTREO_LOG_FORMAT concurrently;
+        // clearing an ambient value protects the default-parse assertion against a caller
+        // (e.g., `RASTREO_LOG_FORMAT=json cargo test`) that would otherwise flip the default.
+        unsafe {
+            std::env::remove_var("RASTREO_LOG_FORMAT");
+        }
+        let cli =
+            cli::Cli::try_parse_from(["rastreo", "discover", "--target", "127.0.0.1", "-p", "22"])
+                .expect("default parse");
+        assert_eq!(cli.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn cli_accepts_log_format_json() {
+        let cli = cli::Cli::try_parse_from([
+            "rastreo",
+            "--log-format",
+            "json",
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "-p",
+            "22",
+        ])
+        .expect("explicit parse");
+        assert_eq!(cli.log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn cli_rejects_unknown_log_format() {
+        let result = cli::Cli::try_parse_from([
+            "rastreo",
+            "--log-format",
+            "yaml",
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "-p",
+            "22",
+        ]);
+        assert!(result.is_err(), "unknown log format must be rejected");
+    }
 }

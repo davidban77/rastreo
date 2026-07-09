@@ -5,6 +5,15 @@ use clap::{Parser, Subcommand};
 
 use discover::DiscoverArgs;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable text output (default).
+    #[default]
+    Text,
+    /// One JSON object per line, suitable for Loki / ELK / Splunk ingestion.
+    Json,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "rastreo",
@@ -22,6 +31,16 @@ pub struct Cli {
     /// Suppress all output except errors.
     #[arg(short, long, global = true)]
     pub quiet: bool,
+
+    /// Log line format: `text` (default) or `json` for structured ingestion.
+    #[arg(
+        long,
+        value_enum,
+        env = "RASTREO_LOG_FORMAT",
+        default_value_t = LogFormat::Text,
+        global = true
+    )]
+    pub log_format: LogFormat,
 }
 
 #[derive(Subcommand, Debug)]

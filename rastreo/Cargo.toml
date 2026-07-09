@@ -31,11 +31,11 @@ path = "src/main.rs"
 
 [dependencies]
 rastreo-core = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 ipnet = { workspace = true }
 
 [dev-dependencies]
