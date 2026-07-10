@@ -5,6 +5,7 @@ pub mod memory;
 #[cfg(feature = "nats")]
 pub mod nats;
 pub mod stdout;
+pub mod tee;
 
 pub use file::FileSink;
 #[cfg(feature = "kafka")]
@@ -13,6 +14,7 @@ pub use memory::{MemorySink, MemorySinkHandle};
 #[cfg(feature = "nats")]
 pub use nats::{NatsCredentials, NatsDeadLetterConfig, NatsDelivery, NatsSink};
 pub use stdout::StdoutSink;
+pub use tee::{TeeChild, TeeSink};
 
 use std::path::PathBuf;
 
@@ -88,6 +90,7 @@ pub enum SinkType {
     Memory,
     Kafka,
     Nats,
+    Tee,
 }
 
 impl SinkType {
@@ -99,6 +102,7 @@ impl SinkType {
             SinkType::Memory => "memory",
             SinkType::Kafka => "kafka",
             SinkType::Nats => "nats",
+            SinkType::Tee => "tee",
         }
     }
 }
@@ -148,6 +152,21 @@ pub trait Sink: Send + Sync {
     /// Failures to DLQ do not count.
     fn dlq_records_delivered(&self) -> u64 {
         0
+    }
+
+    /// DLQ deliveries attributed to the underlying destination sink type.
+    ///
+    /// Default derives from `kind()` and `dlq_records_delivered()` — a single-protocol
+    /// sink returns one entry (or empty when its count is zero). Fan-out sinks that
+    /// deliver to children of different protocols override this to preserve per-type
+    /// attribution for the DLQ metric.
+    fn dlq_records_by_type(&self) -> Vec<(SinkType, u64)> {
+        let count = self.dlq_records_delivered();
+        if count == 0 {
+            Vec::new()
+        } else {
+            vec![(self.kind(), count)]
+        }
     }
 
     /// Lightweight liveness check the server-side reachability probe consumes.
@@ -325,6 +344,7 @@ mod tests {
         assert_eq!(SinkType::Memory.as_label(), "memory");
         assert_eq!(SinkType::Kafka.as_label(), "kafka");
         assert_eq!(SinkType::Nats.as_label(), "nats");
+        assert_eq!(SinkType::Tee.as_label(), "tee");
     }
 
     #[test]

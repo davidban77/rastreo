@@ -49,7 +49,7 @@ The probe fires on a fixed cadence (`RASTREO_SINK_PROBE_INTERVAL_SECS`, default 
 
 When the sink is not configured (`RASTREO_SINK_CONFIG_PATH` unset), the gauge and counter series are not emitted at all, and `/readyz` reports `sink_reachable: null` and does not gate on this axis. Alerts against `rastreo_server_sink_reachable == 0` fire only for configured sinks — operators who don't configure a sink don't get the alert.
 
-Records still flow via the `POST /scans` response body; the server-configured sink does not currently receive record traffic. The probe is a reachability signal for downstream integration health, not a record-forwarding path.
+Records flow to both the `POST /scans` response body and the server-configured sink on the same pipeline pass. A sink write error mid-scan surfaces via `rastreo_server_sink_errors_total{error_class}` (the same counter that already carries CLI-side sink errors) and stamps the sink-error quarantine timer that gates `/readyz`. The reachability probe is a proactive signal in addition to this reactive path: an outage flips `sink_reachable` on the next probe tick before the next scan-triggered write hits it.
 
 ## Grafana dashboard
 
