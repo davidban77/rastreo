@@ -147,10 +147,11 @@ jobs:
 
             **Docker:**
             ```
-            docker pull ghcr.io/davidban77/rastreo:${{ github.ref_name }}
+            docker pull ghcr.io/davidban77/rastreo:${{ github.ref_name }}          # default
+            docker pull ghcr.io/davidban77/rastreo:${{ github.ref_name }}-otlp     # OTLP-enabled variant
             ```
 
-            The image is multi-arch (`linux/amd64` + `linux/arm64`) and ships with both binaries: `rastreo-server` (the default entrypoint, port 8080) and `rastreo` at `/rastreo`. The `rastreo` CLI is built with the `kafka`, `http`, `snmp`, `arp`, `ndp`, `oui`, `nats`, `ssh`, `icmp`, and `tls` features enabled — override the entrypoint to run a discovery scan with the Kafka or NATS sink. The ARP, NDP, and ICMP probers require `CAP_NET_RAW` at runtime (or a permissive `net.ipv4.ping_group_range` for ICMP); pass `--cap-add=NET_RAW` on `docker run` when using them:
+            The image is multi-arch (`linux/amd64` + `linux/arm64`) and ships with both binaries: `rastreo-server` (the default entrypoint, port 8080) and `rastreo` at `/rastreo`. The `rastreo` CLI is built with the `kafka`, `http`, `snmp`, `arp`, `ndp`, `oui`, `nats`, `ssh`, `icmp`, and `tls` features enabled — override the entrypoint to run a discovery scan with the Kafka or NATS sink. The `-otlp` variant additionally includes `--features otlp` for OpenTelemetry OTLP export of metrics and logs; see the [OTLP reference](https://rastreo.dev/reference/otlp/) for configuration. The ARP, NDP, and ICMP probers require `CAP_NET_RAW` at runtime (or a permissive `net.ipv4.ping_group_range` for ICMP); pass `--cap-add=NET_RAW` on `docker run` when using them:
 
             ```
             docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:${{ github.ref_name }} \
@@ -166,8 +167,18 @@ jobs:
             SHA256SUMS
 
   docker:
-    name: Build & Push Multi-arch Docker Image
+    name: Build & Push ${{ matrix.variant.name }} Docker Image
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: default
+            features: kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls
+            suffix: ""
+          - name: otlp
+            features: kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,otlp
+            suffix: "-otlp"
 
     steps:
       - name: Checkout
@@ -193,6 +204,8 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=${{ matrix.variant.suffix }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -205,10 +218,12 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            FEATURES=${{ matrix.variant.features }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.variant.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant.name }}
 
   helm:
     name: Package & Push Helm Chart

@@ -1,10 +1,10 @@
 ---
-description: OpenTelemetry OTLP export for rastreo — build with the otlp feature to push the metrics and logs that /metrics and stderr already emit to a Grafana Alloy, OpenTelemetry Collector, or Grafana Cloud endpoint over gRPC. Metrics export is server-only; the `rastreo` CLI ships logs.
+description: OpenTelemetry OTLP export for rastreo — build with the otlp feature to push the metrics and logs that /metrics and stderr already emit to a Grafana Alloy, OpenTelemetry Collector, or Grafana Cloud endpoint over gRPC or HTTP+protobuf. Metrics export is server-only; the `rastreo` CLI ships logs.
 ---
 
 # OpenTelemetry OTLP
 
-`rastreo-server` can push metrics and logs, and the `rastreo` CLI can push logs, to any OTLP-speaking backend (Grafana Alloy, OpenTelemetry Collector, Grafana Cloud, Honeycomb, Tempo, or a self-hosted collector) via gRPC. The exporter is behind an opt-in Cargo feature — the default binaries do not include it because the OpenTelemetry Rust chain pulls in `tonic`, `prost`, and a large slice of the async transport stack. OTLP is off by default even in feature-enabled builds; enable per binary with environment variables.
+`rastreo-server` can push metrics and logs, and the `rastreo` CLI can push logs, to any OTLP-speaking backend (Grafana Alloy, OpenTelemetry Collector, Grafana Cloud, Honeycomb, Tempo, or a self-hosted collector) via gRPC or HTTP+protobuf. The exporter is behind an opt-in Cargo feature — the default binaries do not include it because the OpenTelemetry Rust chain pulls in `tonic`, `prost`, `reqwest`, and a large slice of the async transport stack. OTLP is off by default even in feature-enabled builds; enable per binary with environment variables.
 
 Metrics and logs are the two signal types shipped in this integration. Metrics export is server-only — the CLI is short-running and does not export metrics; setting `RASTREO_OTLP_METRICS_ENABLED=true` on the CLI is rejected at startup with a clear error. Traces are deliberately deferred — see [Why traces are deferred](#why-traces-are-deferred).
 
@@ -17,7 +17,7 @@ cargo build --release -p rastreo-server --features otlp
 cargo build --release -p rastreo --features otlp
 ```
 
-Pre-built `ghcr.io/davidban77/rastreo` images do NOT ship with the OTLP feature enabled — this keeps the default image lean for the common case where metrics are pulled by a Prometheus scrape target and logs are shipped from stdout by a log aggregator. To run OTLP export in Kubernetes today, build a custom image on top of the source tree with `--features otlp`. An official OTLP-enabled image variant is on the roadmap.
+The default `ghcr.io/davidban77/rastreo:<VERSION>` image does NOT ship with the OTLP feature enabled — this keeps the default image lean for the common case where metrics are pulled by a Prometheus scrape target and logs are shipped from stdout by a log aggregator. An OTLP-enabled companion image is published alongside every release at `ghcr.io/davidban77/rastreo:<VERSION>-otlp`; see [Docker image with OTLP support](#docker-image-with-otlp-support) below.
 
 ## Configuration
 
@@ -27,13 +27,27 @@ Both binaries read the same environment variables at startup and fail-fast on in
 |---|---|---|
 | `RASTREO_OTLP_METRICS_ENABLED` | `false` | Enable metrics export. **Server-only** — setting this to `true` on the `rastreo` CLI is rejected at startup. Booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `RASTREO_OTLP_LOGS_ENABLED` | `false` | Enable logs export. Supported on both the server and the CLI. |
-| `RASTREO_OTLP_ENDPOINT` | — (required) | OTLP gRPC endpoint URL, e.g. `http://otel-collector.observability.svc:4317`. Required when either exporter is enabled. |
+| `RASTREO_OTLP_ENDPOINT` | — (required) | OTLP collector endpoint URL. Format depends on `RASTREO_OTLP_PROTOCOL`: gRPC uses `http://otel-collector.observability.svc:4317`; HTTP+protobuf typically uses `http://otel-collector.observability.svc:4318`. Required when either exporter is enabled. |
+| `RASTREO_OTLP_PROTOCOL` | `grpc` | Transport protocol. Accepts `grpc`, `http-protobuf`, or the alias `http`. Values are case-insensitive. See [Transport protocol](#transport-protocol). |
 | `RASTREO_OTLP_METRICS_INTERVAL_SECS` | `30` | Periodic export interval for metrics, in seconds. **Server-only**; ignored when metrics export is off. |
 | `RASTREO_OTLP_SERVICE_NAME` | `rastreo-server` (server) / `rastreo` (CLI) | Value of the OpenTelemetry resource attribute `service.name` on every exported signal. |
 
 Configuration is validated at startup. Enabling either exporter without an endpoint, passing a non-boolean value for a flag, or passing a non-numeric interval all fail the process with an actionable error before the HTTP server binds or the CLI runs a scan.
 
 Both signals may run at once, either alone, or neither — a common pattern is to enable logs only in local development (the collector is easier to reach than a Loki instance) and metrics only in production (Prometheus scrape covers `/metrics` too, so OTLP metrics are usually redundant).
+
+## Transport protocol
+
+Both binaries compile in two OTLP transports and select one at startup via `RASTREO_OTLP_PROTOCOL`. gRPC is the default and matches the OpenTelemetry SDK convention. HTTP+protobuf is a runtime alternative for collectors reached over HTTPS-only ingress, over restricted networks that block gRPC, or for managed backends that only expose an HTTP+protobuf endpoint.
+
+| Value | Default port | Endpoint URL format |
+|---|---|---|
+| `grpc` | `4317` | `http://collector:4317` — the SDK sends every signal to the same host:port. |
+| `http-protobuf` (or the alias `http`) | `4318` | `http://collector:4318` — rastreo appends `/v1/metrics` and `/v1/logs` per signal so a single endpoint value works for both. Pass a fully-qualified URL like `http://collector:4318/v1/logs` when the collector is on a non-standard route (rastreo detects the trailing signal path and does not double-append). |
+
+Values are case-insensitive; `HTTP-PROTOBUF`, `Grpc`, and `GRPC` all parse cleanly. Unknown values fail startup with an actionable error listing the accepted set.
+
+Choose gRPC when the collector accepts it directly (Grafana Alloy's default receiver, most `otelcol` deployments, an in-cluster ClusterIP service). Choose HTTP+protobuf when the collector is behind an ingress controller that terminates TLS and forwards HTTP but not gRPC, when a corporate network filters HTTP/2 keep-alives, or when a managed backend only publishes an HTTP endpoint. Both transports carry the same protobuf payload — the wire format is identical; only the transport layer differs.
 
 ## Metrics exported via OTLP (server only)
 
@@ -68,6 +82,26 @@ An OpenTelemetry span-per-phase view of a rastreo scan — `resolve → schedule
 
 If a real user runs into a symptom where traces would help — a slow-tail scan with no counter movement, cross-service correlation between rastreo and a downstream Kafka consumer — the trace exporter can be added on top of the existing OpenTelemetry SDK setup without breaking any of the exported metrics or logs. The Cargo feature is already carved out; the exporter builder is a copy-paste from the metric exporter with a different signal.
 
+## Docker image with OTLP support
+
+The default `ghcr.io/davidban77/rastreo:<VERSION>` image does not include `--features otlp` — the OpenTelemetry Rust stack pulls in `tonic`, `prost`, and `reqwest`, and shipping those to every operator would grow the image for the majority of users who scrape `/metrics` and ship logs off stdout. An OTLP-enabled companion image is published alongside every release under the same repository:
+
+```
+ghcr.io/davidban77/rastreo:<VERSION>-otlp
+```
+
+Both variants are multi-arch (`linux/amd64`, `linux/arm64`) and identical apart from the compiled-in `otlp` feature. Every release tag has a matching `-otlp` sibling: the full semver (`0.4.0` and `0.4.0-otlp`), the minor line (`0.4` and `0.4-otlp`), the major line (`0` and `0-otlp`), and the rolling `latest` and `latest-otlp` tags.
+
+Operators who want OTLP change one tag in their Deployment or Helm values:
+
+```yaml
+image:
+  repository: ghcr.io/davidban77/rastreo
+  tag: "0.4.0-otlp"
+```
+
+A future chart iteration may add an `image.variant: otlp` shortcut so the `-otlp` suffix is toggled by a semantic key rather than embedded in the tag string; the raw tag override works today.
+
 ## Kubernetes deployment
 
 The Helm chart's `values.yaml` exposes the same knobs under an `otlp` block. When any of `metricsEnabled` or `logsEnabled` is true, the chart renders the matching `RASTREO_OTLP_*` environment variables on the container. When both are false, no OTLP variables are rendered and the container behaves as before.
@@ -75,13 +109,14 @@ The Helm chart's `values.yaml` exposes the same knobs under an `otlp` block. Whe
 ```yaml
 otlp:
   endpoint: "http://otel-collector.observability.svc:4317"
+  protocol: grpc
   metricsEnabled: true
   logsEnabled: true
   metricsIntervalSeconds: 30
   serviceName: "rastreo-server"
 ```
 
-The container image must be an OTLP-enabled build (`cargo build --release -p rastreo-server --features otlp`, then Docker-packaged) — the default published image does not accept OTLP env vars. If a non-OTLP image sees these variables, it ignores them; the binary was compiled without the exporter.
+The container image must be an OTLP-enabled build. Point `image.tag` at the `-otlp` variant published alongside every release (see [Docker image with OTLP support](#docker-image-with-otlp-support) above), or build a custom image on top of the source tree with `--features otlp` and Docker-package it. If a non-OTLP image sees these variables, it ignores them; the binary was compiled without the exporter.
 
 For the collector configuration, the two most common target stacks are:
 
@@ -93,8 +128,7 @@ The receiver's gRPC listener must be reachable from the rastreo-server pod's net
 ## Follow-ups
 
 - **Labeled metrics** — the roadmap item that adds `probe_kind`, `scenario`, and `error_class` labels to the aggregate counters will surface on the OTLP export path automatically once the internal `Metrics` struct grows the label keys.
-- **OTLP-enabled Docker image variant** — a `ghcr.io/davidban77/rastreo-otlp` tag published alongside the default image would remove the "build your own image" step for k8s deployments.
-- **OTLP HTTP + protobuf transport** — today's exporter only speaks gRPC. HTTP+protobuf is a common fallback for collectors behind restrictive load balancers; it's a single builder swap in the code but a second `Cargo.toml` feature to compile.
+- **`RASTREO_OTLP_HEADERS`** — some managed collectors require a bearer token or API key on every request. An env var mapped to the exporter's headers builder is a natural next step for that use case; today rastreo does not set any headers on the exporter.
 
 ## See also
 

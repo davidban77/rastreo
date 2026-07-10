@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rastreo_server::observability;
-use rastreo_server::state::{Metrics, OtlpConfig};
+use rastreo_server::state::{Metrics, OtlpConfig, OtlpProtocol};
 
 fn tokio_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -19,6 +19,7 @@ fn init_metrics_only_with_unreachable_endpoint_does_not_panic() {
     rt.block_on(async {
         let cfg = OtlpConfig {
             endpoint: "http://127.0.0.1:1".to_string(),
+            protocol: OtlpProtocol::Grpc,
             metrics_enabled: true,
             logs_enabled: false,
             metrics_interval: Duration::from_secs(30),
@@ -33,11 +34,31 @@ fn init_metrics_only_with_unreachable_endpoint_does_not_panic() {
 }
 
 #[test]
+fn init_metrics_only_with_http_protobuf_protocol_builds_exporter() {
+    let rt = tokio_runtime();
+    rt.block_on(async {
+        let cfg = OtlpConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            protocol: OtlpProtocol::HttpProtobuf,
+            metrics_enabled: true,
+            logs_enabled: false,
+            metrics_interval: Duration::from_secs(30),
+            service_name: "rastreo-server-test".to_string(),
+        };
+        let metrics = Arc::new(Metrics::new());
+        let guard = observability::init_metrics_only(&cfg, Arc::clone(&metrics))
+            .expect("init_metrics_only with http-protobuf");
+        drop(guard);
+    });
+}
+
+#[test]
 fn init_metrics_only_with_disabled_metrics_returns_empty_guard() {
     let rt = tokio_runtime();
     rt.block_on(async {
         let cfg = OtlpConfig {
             endpoint: "http://127.0.0.1:1".to_string(),
+            protocol: OtlpProtocol::Grpc,
             metrics_enabled: false,
             logs_enabled: true,
             metrics_interval: Duration::from_secs(30),

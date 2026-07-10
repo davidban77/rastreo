@@ -53,7 +53,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "timeout"] }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "logs", "metrics"], optional = true }
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics", "logs"], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "reqwest-client", "metrics", "logs"], optional = true }
 opentelemetry-appender-tracing = { version = "0.32", optional = true }
 
 [dev-dependencies]

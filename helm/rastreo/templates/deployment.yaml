@@ -71,6 +71,9 @@ spec:
           {{- fail "otlp.endpoint must be set when otlp.metricsEnabled or otlp.logsEnabled is true" }}
           {{- end }}
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_ENDPOINT" "value" (printf "%v" .Values.otlp.endpoint)) }}
+          {{- if .Values.otlp.protocol }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_PROTOCOL" "value" (printf "%v" .Values.otlp.protocol)) }}
+          {{- end }}
           {{- if .Values.otlp.metricsEnabled }}
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_METRICS_ENABLED" "value" "true") }}
           {{- end }}

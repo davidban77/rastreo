@@ -1,5 +1,19 @@
 //! OpenTelemetry OTLP exporter wiring for the `rastreo` CLI.
 
+/// OTLP transport protocol selected at startup via `RASTREO_OTLP_PROTOCOL`.
+#[cfg(feature = "otlp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OtlpProtocol {
+    /// gRPC via tonic. Default. Endpoint is a URL like `http://collector:4317`.
+    #[default]
+    Grpc,
+    /// HTTP+protobuf via reqwest. Endpoint is a base URL like `http://collector:4318`;
+    /// rastreo appends `/v1/logs` per signal. Pass a fully-qualified URL
+    /// (`http://collector:4318/v1/logs`) when your collector is on a non-standard route.
+    HttpProtobuf,
+}
+
 /// OpenTelemetry OTLP exporter configuration read from `RASTREO_OTLP_*` environment variables.
 ///
 /// The CLI supports logs export only. `RASTREO_OTLP_METRICS_ENABLED=true` is rejected at parse
@@ -8,6 +22,7 @@
 #[derive(Debug, Clone)]
 pub struct OtlpConfig {
     pub endpoint: String,
+    pub protocol: OtlpProtocol,
     pub logs_enabled: bool,
     pub service_name: String,
 }
@@ -32,8 +47,9 @@ impl OtlpConfig {
             Ok(_) | Err(std::env::VarError::NotPresent) => {
                 return Err(anyhow::anyhow!(
                     "RASTREO_OTLP_ENDPOINT is required when RASTREO_OTLP_LOGS_ENABLED is true; \
-                     set it to your OTLP gRPC collector URL \
-                     (for example http://otel-collector:4317)"
+                     set it to your OTLP collector URL \
+                     (for example http://otel-collector:4317 for gRPC or \
+                     http://otel-collector:4318 for HTTP+protobuf)"
                 ));
             }
             Err(std::env::VarError::NotUnicode(_)) => {
@@ -42,12 +58,14 @@ impl OtlpConfig {
                 ));
             }
         };
+        let protocol = parse_env_protocol("RASTREO_OTLP_PROTOCOL", OtlpProtocol::Grpc)?;
         let service_name = std::env::var("RASTREO_OTLP_SERVICE_NAME")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "rastreo".to_string());
         Ok(Some(Self {
             endpoint,
+            protocol,
             logs_enabled,
             service_name,
         }))
@@ -62,6 +80,24 @@ pub struct OtlpConfig;
 impl OtlpConfig {
     pub fn from_env() -> anyhow::Result<Option<Self>> {
         Ok(None)
+    }
+}
+
+#[cfg(feature = "otlp")]
+fn parse_env_protocol(name: &str, default: OtlpProtocol) -> anyhow::Result<OtlpProtocol> {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "grpc" => Ok(OtlpProtocol::Grpc),
+            "http-protobuf" | "http" => Ok(OtlpProtocol::HttpProtobuf),
+            other => Err(anyhow::anyhow!(
+                "invalid value for {name}: {other:?} is not a supported OTLP protocol \
+                 (expected `grpc`, `http-protobuf`, or `http`)"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
+        }
     }
 }
 
@@ -82,9 +118,25 @@ fn parse_env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
     }
 }
 
+/// Append the OTLP HTTP signal path to a bare endpoint. The opentelemetry-otlp SDK
+/// applies signal-path defaults only on the `OTEL_EXPORTER_OTLP_ENDPOINT` env-var
+/// fallback path; the programmatic `.with_endpoint()` builder uses the URL verbatim,
+/// so users setting `RASTREO_OTLP_ENDPOINT=http://collector:4318` on HTTP+protobuf
+/// would POST to `/` and get 404s. We do the append here so the same endpoint value
+/// works for logs (CLI) and for both logs and metrics (server).
+#[cfg(feature = "otlp")]
+fn http_endpoint_for_signal(base: &str, signal_path: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.ends_with(signal_path) {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}{signal_path}")
+    }
+}
+
 #[cfg(feature = "otlp")]
 mod otlp_runtime {
-    use super::OtlpConfig;
+    use super::{http_endpoint_for_signal, OtlpConfig, OtlpProtocol};
     use anyhow::Context;
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
     use opentelemetry_otlp::WithExportConfig;
@@ -119,11 +171,18 @@ mod otlp_runtime {
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
-        let exporter = opentelemetry_otlp::LogExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.endpoint)
-            .build()
-            .context("failed to build OTLP log exporter")?;
+        let exporter = match config.protocol {
+            OtlpProtocol::Grpc => opentelemetry_otlp::LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(&config.endpoint)
+                .build()
+                .context("failed to build OTLP gRPC log exporter")?,
+            OtlpProtocol::HttpProtobuf => opentelemetry_otlp::LogExporter::builder()
+                .with_http()
+                .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/logs"))
+                .build()
+                .context("failed to build OTLP HTTP+protobuf log exporter")?,
+        };
         let resource = Resource::builder()
             .with_service_name(config.service_name.clone())
             .build();
@@ -159,12 +218,13 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    const KEYS: [&str; 5] = [
+    const KEYS: [&str; 6] = [
         "RASTREO_OTLP_ENDPOINT",
         "RASTREO_OTLP_METRICS_ENABLED",
         "RASTREO_OTLP_LOGS_ENABLED",
         "RASTREO_OTLP_METRICS_INTERVAL_SECS",
         "RASTREO_OTLP_SERVICE_NAME",
+        "RASTREO_OTLP_PROTOCOL",
     ];
 
     fn clear() {
@@ -236,5 +296,106 @@ mod tests {
         let err = OtlpConfig::from_env().expect_err("must reject");
         clear();
         assert!(err.to_string().contains("RASTREO_OTLP_LOGS_ENABLED"));
+    }
+
+    #[test]
+    fn otlp_config_protocol_defaults_to_grpc() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+        }
+        let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+        clear();
+        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+    }
+
+    #[test]
+    fn otlp_config_protocol_parses_grpc() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            std::env::set_var("RASTREO_OTLP_PROTOCOL", "grpc");
+        }
+        let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+        clear();
+        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+    }
+
+    #[test]
+    fn otlp_config_protocol_parses_http_protobuf() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4318");
+            std::env::set_var("RASTREO_OTLP_PROTOCOL", "http-protobuf");
+        }
+        let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+        clear();
+        assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
+    }
+
+    #[test]
+    fn otlp_config_protocol_parses_http_alias() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4318");
+            std::env::set_var("RASTREO_OTLP_PROTOCOL", "http");
+        }
+        let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+        clear();
+        assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
+    }
+
+    #[test]
+    fn otlp_config_protocol_case_insensitive() {
+        let _g = env_guard();
+        for (variant, expected) in [
+            ("GRPC", OtlpProtocol::Grpc),
+            ("Grpc", OtlpProtocol::Grpc),
+            ("HTTP-PROTOBUF", OtlpProtocol::HttpProtobuf),
+            ("Http-Protobuf", OtlpProtocol::HttpProtobuf),
+            ("HTTP", OtlpProtocol::HttpProtobuf),
+        ] {
+            clear();
+            // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                std::env::set_var("RASTREO_OTLP_PROTOCOL", variant);
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            assert_eq!(cfg.protocol, expected, "variant {variant} misparsed");
+        }
+        clear();
+    }
+
+    #[test]
+    fn otlp_config_rejects_unknown_protocol() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            std::env::set_var("RASTREO_OTLP_PROTOCOL", "yaml");
+        }
+        let err = OtlpConfig::from_env().expect_err("unknown protocol rejected");
+        clear();
+        let msg = err.to_string();
+        assert!(msg.contains("RASTREO_OTLP_PROTOCOL"), "msg was {msg}");
+        assert!(msg.contains("yaml"), "msg was {msg}");
+        assert!(msg.contains("grpc"), "msg was {msg}");
+        assert!(msg.contains("http-protobuf"), "msg was {msg}");
     }
 }

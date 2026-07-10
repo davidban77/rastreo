@@ -16,6 +16,11 @@ FROM rust:latest AS builder
 # TARGETARCH is set by docker buildx (amd64, arm64, etc.)
 ARG TARGETARCH
 
+# Cargo features to compile into the binaries. Default matches the historical
+# ghcr.io/davidban77/rastreo image; override to `${default},otlp` when building
+# the `-otlp` variant.
+ARG FEATURES=kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls
+
 # Install cross-compilation toolchain based on target architecture.
 # For amd64: musl-tools provides the native musl-gcc wrapper.
 # For arm64: we use gcc-aarch64-linux-gnu as the linker.
@@ -67,7 +72,7 @@ RUN mkdir -p rastreo-core/src rastreo/src rastreo-server/src xtask/src && \
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls -p rastreo -p rastreo-server 2>/dev/null || true
+    cargo build --release --target "${RUST_TARGET}" --features "${FEATURES}" -p rastreo -p rastreo-server 2>/dev/null || true
 
 # Copy real source and build. xtask is a workspace member but excluded from
 # default-members and not passed to `-p`, so it isn't compiled — the manifest
@@ -82,7 +87,7 @@ RUN touch rastreo-core/src/lib.rs rastreo/src/main.rs rastreo-server/src/main.rs
 
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     if [ -s /tmp/cross-env ]; then export $(cat /tmp/cross-env); fi && \
-    cargo build --release --target "${RUST_TARGET}" --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls -p rastreo -p rastreo-server
+    cargo build --release --target "${RUST_TARGET}" --features "${FEATURES}" -p rastreo -p rastreo-server
 
 # Copy binaries to a known location regardless of target triple and grant
 # CAP_NET_RAW as a file capability so non-root users can open AF_PACKET raw
