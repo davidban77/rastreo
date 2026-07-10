@@ -39,6 +39,24 @@ readiness: {}
 # RASTREO_LOG_FORMAT on the container.
 logFormat: null
 
+# OpenTelemetry OTLP export for metrics and logs. Requires building the
+# server with `--features otlp` — the default binary does not include OTLP
+# support. Off by default; enable when your observability stack accepts
+# OTLP over gRPC.
+otlp:
+  # OTLP gRPC endpoint (default port 4317). Required when either
+  # metricsEnabled or logsEnabled is true.
+  # Example: "http://otel-collector.observability.svc:4317"
+  endpoint: ""
+  # Enable metrics export via OTLP.
+  metricsEnabled: false
+  # Enable logs export via OTLP.
+  logsEnabled: false
+  # Periodic metrics export interval in seconds.
+  metricsIntervalSeconds: 30
+  # Resource `service.name` attribute on exported signals.
+  serviceName: "rastreo-server"
+
 service:
   # Kubernetes Service type.
   type: ClusterIP

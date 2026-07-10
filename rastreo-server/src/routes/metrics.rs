@@ -63,9 +63,8 @@ fn write_scans_total(state: &AppState, buf: &mut String) -> std::fmt::Result {
 }
 
 fn write_probes_total(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    let attempted = state.metrics.probes_attempted_total.load(Ordering::Relaxed);
+    let success = state.metrics.probes_succeeded_total.load(Ordering::Relaxed);
     let errored = state.metrics.probes_errored_total.load(Ordering::Relaxed);
-    let success = attempted.saturating_sub(errored);
     writeln!(
         buf,
         "# HELP rastreo_server_probes_total Probes executed across all scans, partitioned by outcome."

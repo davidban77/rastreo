@@ -150,4 +150,5 @@ nav:
       - Health endpoints: reference/health-endpoints.md
       - Observability: reference/observability.md
       - Logging: reference/logging.md
+      - OTLP: reference/otlp.md
       - Glossary: reference/glossary.md
