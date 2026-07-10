@@ -310,7 +310,11 @@ impl Metrics {
             self.probes.succeeded[idx].fetch_add(succeeded, Ordering::Relaxed);
             self.probes.errored[idx].fetch_add(pk.errored as u64, Ordering::Relaxed);
         }
-        if summary.dlq_records > 0 {
+        if !summary.dlq_records_by_type.is_empty() {
+            for (sink_type, count) in &summary.dlq_records_by_type {
+                self.record_dlq(Some(*sink_type), *count);
+            }
+        } else if summary.dlq_records > 0 {
             self.record_dlq(summary.sink_type, summary.dlq_records as u64);
         }
         let seconds = summary.elapsed.as_secs_f64();
@@ -656,12 +660,16 @@ impl SinkProbeConfig {
     }
 }
 
+/// Shared handle to the server-configured sink, protected by an async mutex so scan
+/// handlers and the probe task can serialise access without blocking the runtime.
+pub type SharedSink = Arc<tokio::sync::Mutex<Box<dyn Sink>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub resolver: Arc<dyn Resolver>,
     pub metrics: Arc<Metrics>,
     pub readiness: Arc<ReadinessState>,
-    pub sink: Option<Arc<dyn Sink>>,
+    pub sink: Option<SharedSink>,
     pub sink_reachability: Arc<SinkReachability>,
 }
 
@@ -690,7 +698,7 @@ impl AppState {
 
     pub fn with_sink(
         mut self,
-        sink: Option<Arc<dyn Sink>>,
+        sink: Option<SharedSink>,
         reachability: Arc<SinkReachability>,
     ) -> Self {
         self.sink = sink;
@@ -910,6 +918,56 @@ mod tests {
         assert_eq!(
             metrics.dlq.nats[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
             5
+        );
+    }
+
+    #[test]
+    fn metrics_record_dlq_credits_kafka_when_sink_type_is_tee_but_by_type_has_kafka() {
+        let metrics = Metrics::new();
+        let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
+        summary.sink_type = Some(SinkType::Tee);
+        summary.dlq_records = 3;
+        summary.dlq_records_by_type = vec![(SinkType::Kafka, 3)];
+        metrics.record_scan_completion(&summary, "unnamed");
+        assert_eq!(
+            metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics.dlq.nats[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn metrics_record_dlq_credits_kafka_and_nats_when_by_type_has_both() {
+        let metrics = Metrics::new();
+        let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
+        summary.sink_type = Some(SinkType::Tee);
+        summary.dlq_records = 7;
+        summary.dlq_records_by_type = vec![(SinkType::Kafka, 4), (SinkType::Nats, 3)];
+        metrics.record_scan_completion(&summary, "unnamed");
+        assert_eq!(
+            metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
+            4
+        );
+        assert_eq!(
+            metrics.dlq.nats[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
+            3
+        );
+    }
+
+    #[test]
+    fn metrics_record_dlq_falls_back_to_summary_sink_type_when_by_type_empty() {
+        let metrics = Metrics::new();
+        let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
+        summary.sink_type = Some(SinkType::Kafka);
+        summary.dlq_records = 2;
+        assert!(summary.dlq_records_by_type.is_empty());
+        metrics.record_scan_completion(&summary, "unnamed");
+        assert_eq!(
+            metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
+            2
         );
     }
 
@@ -1335,7 +1393,9 @@ mod tests {
     fn app_state_with_sink_stores_sink_and_reachability() {
         use rastreo_core::MemorySink;
         let base = build_state();
-        let sink: Arc<dyn Sink> = Arc::new(MemorySink::new());
+        let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(
+            Box::new(MemorySink::new()) as Box<dyn Sink>
+        ));
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Memory,
             Duration::from_secs(10),

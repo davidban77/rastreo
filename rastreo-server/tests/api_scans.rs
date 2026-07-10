@@ -1,9 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use rastreo_core::{HickoryResolver, Resolver};
+use rastreo_core::{HickoryResolver, MemorySink, Resolver, Sink, SinkType};
 use rastreo_server::build_app;
-use rastreo_server::state::AppState;
+use rastreo_server::state::{AppState, SharedSink, SinkReachability};
 use serde_json::json;
 
 async fn spawn_server() -> SocketAddr {
@@ -208,4 +208,150 @@ async fn get_readyz_reflects_inflight_counter_during_scan() {
         .expect("readyz final");
     let final_payload: serde_json::Value = final_resp.json().await.expect("readyz final json");
     assert_eq!(final_payload["inflight_scans"], 0);
+}
+
+#[tokio::test]
+async fn post_scans_concurrent_requests_serialize_on_shared_sink_and_both_succeed() {
+    let resolver: Arc<dyn Resolver> =
+        Arc::new(HickoryResolver::from_system().expect("system resolver"));
+    let server_sink = MemorySink::new();
+    let server_handle = server_sink.handle();
+    let boxed: Box<dyn Sink> = Box::new(server_sink);
+    let shared: SharedSink = Arc::new(tokio::sync::Mutex::new(boxed));
+    let reach = Arc::new(SinkReachability::configured(
+        SinkType::Memory,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(5),
+    ));
+    reach.record_success();
+    let state = AppState::new(resolver).with_sink(Some(Arc::clone(&shared)), reach);
+    let app = build_app(state);
+
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind server");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let port_a = spawn_target_listener().await;
+    let port_b = spawn_target_listener().await;
+    let url = format!("http://{addr}/scans");
+    let body_a = json!({
+        "name": "concurrent-a",
+        "timeout_ms": 500,
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [port_a]}],
+    });
+    let body_b = json!({
+        "name": "concurrent-b",
+        "timeout_ms": 500,
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [port_b]}],
+    });
+
+    let client = reqwest::Client::new();
+    let a = client.post(&url).json(&body_a).send();
+    let b = client.post(&url).json(&body_b).send();
+    let (resp_a, resp_b) = tokio::join!(a, b);
+    let resp_a = resp_a.expect("scan A send");
+    let resp_b = resp_b.expect("scan B send");
+    assert_eq!(resp_a.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp_b.status(), reqwest::StatusCode::OK);
+    let payload_a: serde_json::Value = resp_a.json().await.expect("scan A json");
+    let payload_b: serde_json::Value = resp_b.json().await.expect("scan B json");
+    assert_eq!(payload_a["summary"]["records_emitted"], 1);
+    assert_eq!(payload_b["summary"]["records_emitted"], 1);
+
+    let lines = server_handle.ndjson_lines();
+    assert_eq!(
+        lines.len(),
+        2,
+        "shared sink must receive exactly one record from each scan, got {lines:?}",
+    );
+    let records: Vec<serde_json::Value> = lines
+        .iter()
+        .map(|l| serde_json::from_str(l).expect("parse ndjson"))
+        .collect();
+    for r in &records {
+        assert_eq!(r["mgmt_ip"], "127.0.0.1", "record missing mgmt_ip: {r}");
+    }
+    let scenario_names: std::collections::HashSet<String> = records
+        .iter()
+        .filter_map(|r| {
+            r["scan_metadata"]["scenario_name"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(
+        scenario_names.contains("concurrent-a"),
+        "shared sink missing scan A's record; got {scenario_names:?}",
+    );
+    assert!(
+        scenario_names.contains("concurrent-b"),
+        "shared sink missing scan B's record; got {scenario_names:?}",
+    );
+}
+
+#[tokio::test]
+async fn post_scans_dual_writes_records_to_server_configured_sink_and_response_body() {
+    let resolver: Arc<dyn Resolver> =
+        Arc::new(HickoryResolver::from_system().expect("system resolver"));
+    let server_sink = MemorySink::new();
+    let server_handle = server_sink.handle();
+    let boxed: Box<dyn Sink> = Box::new(server_sink);
+    let shared: SharedSink = Arc::new(tokio::sync::Mutex::new(boxed));
+    let reach = Arc::new(SinkReachability::configured(
+        SinkType::Memory,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(5),
+    ));
+    reach.record_success();
+    let state = AppState::new(resolver).with_sink(Some(Arc::clone(&shared)), reach);
+    let app = build_app(state);
+
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind server");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let target_port = spawn_target_listener().await;
+    let body = json!({
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [target_port]}],
+        "timeout_ms": 500,
+    });
+
+    let url = format!("http://{addr}/scans");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert_eq!(payload["summary"]["records_emitted"], 1);
+    assert_eq!(
+        payload["records"].as_array().map(|a| a.len()).unwrap_or(0),
+        1,
+        "response body must carry the record"
+    );
+
+    let lines = server_handle.ndjson_lines();
+    assert_eq!(
+        lines.len(),
+        1,
+        "server-configured sink must receive exactly one record, got {lines:?}"
+    );
+    let sink_record: serde_json::Value =
+        serde_json::from_str(&lines[0]).expect("server sink record parses as JSON");
+    assert_eq!(sink_record["mgmt_ip"], "127.0.0.1");
 }

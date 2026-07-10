@@ -73,7 +73,7 @@ The gates and the `reason` values are documented in full in the [Health endpoint
 
 When `RASTREO_SINK_CONFIG_PATH` is unset the reachability axis reports null on `/readyz` and no series is emitted on `/metrics` — the server is a pure `POST /scans` control plane. When the env var points at a YAML file with a `SinkConfig`, the server builds the sink at startup and spawns a background probe task that fires every `RASTREO_SINK_PROBE_INTERVAL_SECS` (default 10s) with a per-probe timeout of `RASTREO_SINK_PROBE_TIMEOUT_SECS` (default 5s). The cached result feeds `/readyz` (`sink_reachable`, `sink_type`, `seconds_since_last_probe`, `last_probe_error`) and `/metrics` (`rastreo_server_sink_reachable{sink_type}`, `rastreo_server_sink_reachability_probe_total{outcome,sink_type}`).
 
-The probe is proactive: a broker outage flips `sink_reachable` to `false` on the next tick, and `/readyz` returns 503 with `reason: "sink_unreachable"` before any scan-triggered sink write catches the fault. Sink construction failure at startup does not crash the pod — the server stays up with `sink_reachable: false` and a `last_probe_error` string, so an operator can debug through the same endpoints. Records still return in the `POST /scans` response body; the server-configured sink does not currently receive record traffic.
+The probe is proactive: a broker outage flips `sink_reachable` to `false` on the next tick, and `/readyz` returns 503 with `reason: "sink_unreachable"` before any scan-triggered sink write catches the fault. Sink construction failure at startup does not crash the pod — the server stays up with `sink_reachable: false` and a `last_probe_error` string, so an operator can debug through the same endpoints. Records from `POST /scans` land in both the response body and the server-configured sink on the same pipeline pass (see [POST /scans](#post-scans) below).
 
 Kubernetes example (Helm values):
 
@@ -118,6 +118,8 @@ All counters are monotonic across the server process's lifetime and reset only o
 ## POST /scans
 
 `POST /scans` submits a discovery scenario, runs it synchronously, and returns the summary and records in the response body. The request body is a `DiscoverScenarioConfig` JSON object. The required fields are `targets` (a non-empty list of targets) and `probers` (a non-empty list of prober configurations). Optional fields on the embedded `base` include `rate_limit`, `timeout_ms`, `fuser`, and `name`. The `encoder` and `sink` fields are accepted but ignored — the server forces NDJSON encoding and captures records in memory so it can return them in the response.
+
+When `RASTREO_SINK_CONFIG_PATH` is set, each record is fanned out to both the in-memory capture and the server-configured sink on the same pipeline pass. The response body remains identical to the unconfigured case; the server-configured sink additionally receives every record. A write error from the server-configured sink aborts the scan and returns 500 — the response body's `records` list is not returned even if the in-memory capture succeeded. When `RASTREO_SINK_CONFIG_PATH` is unset, the response body is the only destination and behavior is identical to earlier releases.
 
 ```bash
 curl -sS -X POST http://localhost:8080/scans \

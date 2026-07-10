@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rastreo_core::{Sink, SinkType};
+use tokio::sync::Mutex;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
-use crate::state::{AppState, Metrics, SinkProbeConfig, SinkReachability};
+use crate::state::{AppState, Metrics, SharedSink, SinkProbeConfig, SinkReachability};
 
 struct ConstructError {
     hint: Option<SinkType>,
@@ -26,7 +27,7 @@ pub async fn spawn_sink_probe(state: AppState, config: &SinkProbeConfig) -> AppS
                 config.probe_interval,
                 config.probe_timeout,
             ));
-            let sink: Arc<dyn Sink> = Arc::from(sink);
+            let sink: SharedSink = Arc::new(Mutex::new(sink));
             run_probe(&sink, &reachability, &state.metrics, config.probe_timeout).await;
             spawn_probe_task(
                 Arc::clone(&sink),
@@ -119,7 +120,7 @@ fn sink_type_hint(config: &rastreo_core::SinkConfig) -> Option<SinkType> {
 }
 
 fn spawn_probe_task(
-    sink: Arc<dyn Sink>,
+    sink: SharedSink,
     reachability: Arc<SinkReachability>,
     metrics: Arc<Metrics>,
     interval_dur: Duration,
@@ -136,12 +137,24 @@ fn spawn_probe_task(
 }
 
 async fn run_probe(
-    sink: &Arc<dyn Sink>,
+    sink: &SharedSink,
     reachability: &Arc<SinkReachability>,
     metrics: &Arc<Metrics>,
     timeout_dur: Duration,
 ) {
-    match timeout(timeout_dur, sink.probe()).await {
+    // Lock unavailable within timeout means a scan holds it — busy, not unhealthy. Skip
+    // this cycle so reachability keeps its last state instead of flipping to unreachable.
+    let guard = match timeout(timeout_dur, sink.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::debug!(
+                "sink probe skipped: shared sink lock unavailable (concurrent scan in progress)"
+            );
+            return;
+        }
+    };
+    let probe_result = timeout(timeout_dur, guard.probe()).await;
+    match probe_result {
         Ok(Ok(())) => {
             reachability.record_success();
             metrics.record_sink_probe_success();
@@ -206,7 +219,7 @@ mod tests {
     }
 
     struct HangingProbe {
-        started: AtomicBool,
+        started: Arc<AtomicBool>,
     }
 
     #[async_trait]
@@ -227,7 +240,7 @@ mod tests {
         }
     }
 
-    struct CountedFail(AtomicUsize);
+    struct CountedFail(Arc<AtomicUsize>);
 
     #[async_trait]
     impl Sink for CountedFail {
@@ -246,9 +259,13 @@ mod tests {
         }
     }
 
+    fn shared(sink: Box<dyn Sink>) -> SharedSink {
+        Arc::new(Mutex::new(sink))
+    }
+
     #[tokio::test]
     async fn run_probe_success_updates_reachability_and_counter() {
-        let sink: Arc<dyn Sink> = Arc::new(AlwaysOk);
+        let sink = shared(Box::new(AlwaysOk));
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Stdout,
             Duration::from_secs(1),
@@ -265,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_probe_failure_records_error_and_counter() {
-        let sink: Arc<dyn Sink> = Arc::new(AlwaysFail);
+        let sink = shared(Box::new(AlwaysFail));
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Kafka,
             Duration::from_secs(1),
@@ -284,10 +301,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_probe_timeout_counts_as_failure_with_timeout_message() {
-        let hang = Arc::new(HangingProbe {
-            started: AtomicBool::new(false),
-        });
-        let sink: Arc<dyn Sink> = hang.clone();
+        let started_marker = Arc::new(AtomicBool::new(false));
+        let sink = shared(Box::new(HangingProbe {
+            started: Arc::clone(&started_marker),
+        }));
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Nats,
             Duration::from_secs(1),
@@ -295,7 +312,7 @@ mod tests {
         ));
         let metrics = Arc::new(Metrics::new());
         run_probe(&sink, &reach, &metrics, Duration::from_millis(10)).await;
-        assert!(hang.started.load(Ordering::SeqCst));
+        assert!(started_marker.load(Ordering::SeqCst));
         assert!(!reach.reachable.load(Ordering::Relaxed));
         let err = reach.last_error_snapshot().expect("error recorded");
         assert!(err.contains("timed out"), "err was: {err}");
@@ -303,9 +320,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_probe_skips_and_preserves_state_when_sink_lock_held() {
+        let sink = shared(Box::new(AlwaysOk));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Stdout,
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+        ));
+        let metrics = Arc::new(Metrics::new());
+
+        let holder_sink = Arc::clone(&sink);
+        let hold_ready = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hold_ready_clone = Arc::clone(&hold_ready);
+        let release_clone = Arc::clone(&release);
+        let hold_handle = tokio::spawn(async move {
+            let _guard = holder_sink.lock().await;
+            hold_ready_clone.notify_one();
+            release_clone.notified().await;
+        });
+        hold_ready.notified().await;
+
+        let baseline_probe_epoch = reach.last_probe_epoch_ms.load(Ordering::Relaxed);
+        let baseline_reachable = reach.reachable.load(Ordering::Relaxed);
+        run_probe(&sink, &reach, &metrics, Duration::from_millis(20)).await;
+        assert_eq!(
+            reach.last_probe_epoch_ms.load(Ordering::Relaxed),
+            baseline_probe_epoch,
+            "lock-held skip must not stamp last_probe_epoch_ms",
+        );
+        assert_eq!(
+            reach.reachable.load(Ordering::Relaxed),
+            baseline_reachable,
+            "lock-held skip must not flip reachable",
+        );
+        assert!(reach.last_error_snapshot().is_none());
+        assert_eq!(metrics.sink_probe_success.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.sink_probe_failure.load(Ordering::Relaxed), 0);
+
+        release.notify_one();
+        hold_handle.await.expect("holder task");
+    }
+
+    #[tokio::test]
     async fn success_after_failure_clears_last_error() {
-        let counted = Arc::new(CountedFail(AtomicUsize::new(0)));
-        let sink: Arc<dyn Sink> = counted.clone();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let sink = shared(Box::new(CountedFail(Arc::clone(&counter))));
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Kafka,
             Duration::from_secs(1),
@@ -315,7 +375,7 @@ mod tests {
         run_probe(&sink, &reach, &metrics, Duration::from_secs(1)).await;
         assert!(reach.last_error_snapshot().is_some());
 
-        let ok: Arc<dyn Sink> = Arc::new(AlwaysOk);
+        let ok = shared(Box::new(AlwaysOk));
         run_probe(&ok, &reach, &metrics, Duration::from_secs(1)).await;
         assert!(reach.reachable.load(Ordering::Relaxed));
         assert!(reach.last_error_snapshot().is_none());

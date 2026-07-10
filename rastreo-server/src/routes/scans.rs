@@ -6,7 +6,7 @@ use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
 use rastreo_core::{
     classify_sink_error, run_discovery_with_components, DeviceRecord, DiscoverySummary,
-    EncoderConfig, MemorySink,
+    EncoderConfig, MemorySink, Sink, TeeChild, TeeSink,
 };
 use serde::Serialize;
 
@@ -83,11 +83,17 @@ pub async fn create_scan(
     let memory_sink = MemorySink::new();
     let handle = memory_sink.handle();
 
+    // Memory child first so the response body captures every record even if the shared sink aborts mid-scan.
+    let mut children: Vec<TeeChild> = vec![TeeChild::Owned(Box::new(memory_sink))];
+    if let Some(server_sink) = state.sink.as_ref() {
+        children.push(TeeChild::Shared(Arc::clone(server_sink)));
+    }
+    let pipeline_sink: Box<dyn Sink> = Box::new(TeeSink::new(children));
+
     // MemorySink has no buffer to flush; TimeoutLayer handles request-lifecycle drop, so the
     // non-cancellable wrapper is correct here.
     let summary_result =
-        run_discovery_with_components(&scenario, state.resolver.clone(), Box::new(memory_sink))
-            .await;
+        run_discovery_with_components(&scenario, state.resolver.clone(), pipeline_sink).await;
 
     match summary_result {
         Ok(summary) => {
@@ -271,6 +277,70 @@ mod tests {
             .await
             .expect("create_scan");
         assert_eq!(response.summary.records_emitted, 1);
+        assert_eq!(response.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_scan_writes_records_to_server_configured_sink_and_response() {
+        use crate::state::{SharedSink, SinkReachability};
+        use rastreo_core::SinkType;
+        use tokio::sync::Mutex;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let base = state_with_system_resolver();
+        let sink = MemorySink::new();
+        let handle = sink.handle();
+        let shared: SharedSink =
+            Arc::new(Mutex::new(Box::new(sink) as Box<dyn rastreo_core::Sink>));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Memory,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        reach.record_success();
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = create_scan(State(state), Json(s))
+            .await
+            .expect("create_scan");
+        assert_eq!(response.summary.records_emitted, 1);
+        assert_eq!(response.records.len(), 1);
+        let lines = handle.ndjson_lines();
+        assert_eq!(
+            lines.len(),
+            1,
+            "server sink must receive exactly one record"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_scan_without_server_sink_still_returns_records_in_response_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        assert!(state.sink.is_none());
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = create_scan(State(state), Json(s))
+            .await
+            .expect("create_scan");
         assert_eq!(response.records.len(), 1);
     }
 

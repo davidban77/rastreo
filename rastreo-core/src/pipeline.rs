@@ -30,6 +30,9 @@ pub struct DiscoverySummary {
     /// Records delivered to a DLQ destination during this scan.
     #[serde(default)]
     pub dlq_records: usize,
+    /// DLQ deliveries per underlying sink type; populated when the pipeline sink is a fan-out that wraps multiple protocol destinations. Empty for single-protocol sinks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dlq_records_by_type: Vec<(SinkType, u64)>,
     /// Concrete sink kind the scan wrote against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sink_type: Option<SinkType>,
@@ -144,7 +147,6 @@ pub async fn run_discovery_with_components_cancellable(
     let mut errors_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
 
     let sink_type = sink.kind();
-    let dlq_before = sink.dlq_records_delivered();
 
     for prober_config in &scenario.probers {
         if *cancel.borrow_and_update() {
@@ -201,8 +203,10 @@ pub async fn run_discovery_with_components_cancellable(
         tracing::info!(records_emitted, "discovery cancelled; sink flushed");
     }
 
-    let dlq_after = sink.dlq_records_delivered();
-    let dlq_records = dlq_after.saturating_sub(dlq_before) as usize;
+    let dlq_records_by_type = sink.dlq_records_by_type();
+    let dlq_records = dlq_records_by_type
+        .iter()
+        .fold(0u64, |acc, (_, c)| acc.saturating_add(*c)) as usize;
     let probes_by_kind = build_probes_by_kind(&attempts_by_kind, &errors_by_kind);
 
     if let Some(e) = emit_err {
@@ -219,6 +223,7 @@ pub async fn run_discovery_with_components_cancellable(
         records_emitted,
         probes_by_kind,
         dlq_records,
+        dlq_records_by_type,
         sink_type: Some(sink_type),
         sink_error_class: None,
         cancelled,
@@ -503,8 +508,54 @@ mod tests {
         let summary = DiscoverySummary::default();
         assert_eq!(summary.probes_by_kind.len(), 0);
         assert_eq!(summary.dlq_records, 0);
+        assert!(summary.dlq_records_by_type.is_empty());
         assert!(summary.sink_type.is_none());
         assert!(summary.sink_error_class.is_none());
+    }
+
+    #[tokio::test]
+    async fn discovery_summary_populates_dlq_records_by_type_on_tee_wrapped_kafka() {
+        use crate::sink::{TeeChild, TeeSink};
+
+        struct KafkaLikeSink {
+            dlq: u64,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::sink::Sink for KafkaLikeSink {
+            async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+                self.dlq += 1;
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Kafka
+            }
+            fn dlq_records_delivered(&self) -> u64 {
+                self.dlq
+            }
+        }
+
+        let port = open_loopback_port().await;
+        let scenario = scenario_for_port(port);
+
+        let mem = crate::sink::MemorySink::new();
+        let kafka = KafkaLikeSink { dlq: 0 };
+        let tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(mem)),
+            TeeChild::Owned(Box::new(kafka)),
+        ]);
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(tee))
+            .await
+            .expect("run_discovery_with_components");
+
+        assert_eq!(summary.sink_type, Some(SinkType::Tee));
+        assert_eq!(summary.records_emitted, 1);
+        assert_eq!(summary.dlq_records, 1);
+        assert_eq!(summary.dlq_records_by_type, vec![(SinkType::Kafka, 1)]);
     }
 
     #[tokio::test]
