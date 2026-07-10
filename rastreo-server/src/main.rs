@@ -6,8 +6,8 @@ use anyhow::Context;
 use clap::Parser;
 use rastreo_core::{HickoryResolver, Resolver};
 use rastreo_server::{
-    build_app_with_timeout,
-    state::{AppState, MetricsConfig, OtlpConfig, ReadinessConfig},
+    build_app_with_timeout, spawn_sink_probe,
+    state::{AppState, MetricsConfig, OtlpConfig, ReadinessConfig, SinkProbeConfig},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -61,10 +61,16 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
     let readiness = ReadinessConfig::from_env().context("failed to load readiness config")?;
     let metrics_config = MetricsConfig::from_env().context("failed to load metrics config")?;
+    let sink_probe = SinkProbeConfig::from_env().context("failed to load sink-probe config")?;
     let state = AppState::with_config(resolver, readiness, metrics_config);
+    let state = spawn_sink_probe(state, &sink_probe).await;
 
     // Guard must outlive the axum serve loop so pending OTLP exports flush on shutdown.
-    let _otlp_guard = init_otlp(otlp_config.as_ref(), Arc::clone(&state.metrics))?;
+    let _otlp_guard = init_otlp(
+        otlp_config.as_ref(),
+        Arc::clone(&state.metrics),
+        Arc::clone(&state.sink_reachability),
+    )?;
 
     let app = build_app_with_timeout(state, Duration::from_millis(cli.request_timeout_ms));
     let addr = SocketAddr::new(cli.bind, cli.port);
@@ -140,9 +146,11 @@ static OTLP_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 fn init_otlp(
     config: Option<&OtlpConfig>,
     metrics: Arc<rastreo_server::state::Metrics>,
+    sink_reachability: Arc<rastreo_server::state::SinkReachability>,
 ) -> anyhow::Result<Option<rastreo_server::observability::OtlpGuard>> {
     let Some(cfg) = config else { return Ok(None) };
-    let mut guard = rastreo_server::observability::init_metrics_only(cfg, metrics)?;
+    let mut guard =
+        rastreo_server::observability::init_metrics_only(cfg, metrics, sink_reachability)?;
     if let Some(provider) = OTLP_LOGGER_PROVIDER.get() {
         rastreo_server::observability::attach_logger(&mut guard, provider.clone());
     }
@@ -153,6 +161,7 @@ fn init_otlp(
 fn init_otlp(
     _config: Option<&OtlpConfig>,
     _metrics: Arc<rastreo_server::state::Metrics>,
+    _sink_reachability: Arc<rastreo_server::state::SinkReachability>,
 ) -> anyhow::Result<Option<()>> {
     Ok(None)
 }

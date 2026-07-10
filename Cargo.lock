@@ -3005,6 +3005,7 @@ name = "rastreo-server"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "opentelemetry",
@@ -3015,6 +3016,8 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",

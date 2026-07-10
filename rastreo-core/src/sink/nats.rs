@@ -467,6 +467,19 @@ impl Sink for NatsSink {
     fn dlq_records_delivered(&self) -> u64 {
         self.dlq_delivered.load(Ordering::Relaxed)
     }
+
+    async fn probe(&self) -> Result<(), io::Error> {
+        // Client-level flush is a ping: it drains any pending client-side buffer and
+        // requires the server round-trip to complete, so failure signals the same
+        // connectivity break publish() would surface.
+        self.ctx.client().flush().await.map_err(|e| {
+            let servers_for_err = self.servers.join(",");
+            io::Error::other(format!(
+                "nats sink probe failed for subject '{}' at server(s) '{}': {e}",
+                self.subject, servers_for_err
+            ))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -876,6 +889,20 @@ mod tests {
             .get(HEADER_DLQ_TIMESTAMP)
             .expect("timestamp header present");
         chrono::DateTime::parse_from_rfc3339(value.as_str()).expect("valid rfc3339 timestamp");
+    }
+
+    #[ignore = "requires a live NATS JetStream server; exercised in Live Infra UAT"]
+    #[tokio::test]
+    async fn probe_reports_reachable_against_live_server() {
+        let sink = NatsSink::new(
+            vec!["nats://localhost:4222".into()],
+            "rastreo.discovery.records.v1".into(),
+            "rastreo".into(),
+            NatsCredentials::Anonymous,
+        )
+        .await
+        .expect("connect to live server");
+        <NatsSink as Sink>::probe(&sink).await.expect("probe");
     }
 
     #[test]

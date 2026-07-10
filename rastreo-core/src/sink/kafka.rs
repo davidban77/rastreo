@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rskafka::{
     client::{
-        partition::{Compression, PartitionClient, UnknownTopicHandling},
+        partition::{Compression, OffsetAt, PartitionClient, UnknownTopicHandling},
         ClientBuilder,
     },
     record::Record,
@@ -338,6 +338,22 @@ impl Sink for KafkaSink {
     fn dlq_records_delivered(&self) -> u64 {
         self.dlq_delivered.load(Ordering::Relaxed)
     }
+
+    async fn probe(&self) -> Result<(), io::Error> {
+        // Single ListOffsets round-trip against the configured partition — cheap
+        // reachability signal that exercises the same broker path produce uses.
+        self.client
+            .get_offset(OffsetAt::Latest)
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                let brokers_for_err = self.brokers.join(",");
+                io::Error::other(format!(
+                    "kafka sink probe failed for topic '{}' at broker(s) '{}': {e}",
+                    self.topic, brokers_for_err
+                ))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +641,15 @@ mod tests {
             std::str::from_utf8(value).expect("utf-8"),
             ERROR_CLASS_PRODUCE_FAILURE
         );
+    }
+
+    #[ignore = "requires a live Kafka broker; exercised in Live Infra UAT"]
+    #[tokio::test]
+    async fn probe_reports_reachable_against_live_broker() {
+        let sink = KafkaSink::new(vec!["localhost:9092".into()], "rastreo.probe".into())
+            .await
+            .expect("connect to live broker");
+        <KafkaSink as Sink>::probe(&sink).await.expect("probe");
     }
 
     #[test]

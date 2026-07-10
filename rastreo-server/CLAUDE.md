@@ -15,8 +15,11 @@ src/
 ├── main.rs        ← entrypoint: clap arg parsing, tracing init, resolver
 │                    construction, tokio runtime, axum serve loop
 ├── lib.rs         ← build_app(state) -> Router; reusable from tests
-├── state.rs       ← AppState { resolver, metrics, readiness } + HistogramShard
-│                    + Metrics + ReadinessConfig + ReadinessState
+├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability }
+│                    + HistogramShard + Metrics + ReadinessConfig + ReadinessState
+│                    + SinkProbeConfig + SinkReachability
+├── sink_probe.rs  ← spawn_sink_probe + periodic probe task + run_probe helper
+├── observability.rs ← OTLP exporters + instrument callbacks (feature: otlp)
 ├── error.rs       ← AppError + IntoResponse + RastreoError -> HTTP mapping
 └── routes/
     ├── mod.rs     ← route module re-exports
@@ -36,13 +39,16 @@ src/
 | —                      | `RASTREO_MAX_INFLIGHT_SCANS`           | `100`       | `/readyz` inflight-scan gate; `0` disables |
 | —                      | `RASTREO_SINK_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` sink-error quarantine window; `0` disables |
 | —                      | `RASTREO_SCAN_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` scan-error quarantine window; `0` disables |
+| —                      | `RASTREO_SINK_CONFIG_PATH`             | unset       | Path to a YAML `SinkConfig`. When set, the server builds the sink at startup and probes it periodically. Unset ⇒ no probe, `/readyz` reports `sink_reachable: null`. |
+| —                      | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`        | Sink reachability probe cadence in seconds (min 1). |
+| —                      | `RASTREO_SINK_PROBE_TIMEOUT_SECS`      | `5`         | Per-probe timeout in seconds (min 1). Elapsed probes count as failure. |
 
 ## API Surface
 
 | Method | Path     | Description                                                                                                                                                                  |
 |--------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | GET    | /healthz | Liveness — always 200 OK with `{"status":"ok"}`. Backing endpoint for k8s liveness probes.                                                                                    |
-| GET    | /readyz  | Readiness — 200 OK when the server can accept work, 503 with a `reason` string when the inflight-scan limit or a recent-error quarantine has fired.                          |
+| GET    | /readyz  | Readiness — 200 OK when the server can accept work; 503 with a `reason` string when the inflight-scan limit, sink-unreachable probe, or a recent-error quarantine has fired. Response body carries `sink_reachable`, `sink_type`, `seconds_since_last_probe`, `last_probe_error` (all `null` when no sink is configured).                                                                                                                                                                                                                                                             |
 | GET    | /health  | Backward-compat alias for `/healthz`.                                                                                                                                        |
 | GET    | /metrics | Prometheus text format with operational signals (scan / probe counters, records emitted, sink errors, request-duration histogram, uptime, build info). Namespace: `rastreo_server_`. |
 | POST   | /scans   | Submit a discovery scenario; runs synchronously and returns summary + records. The client-specified `sink` field is ignored; records are always returned in the response body. |

@@ -92,6 +92,22 @@ spec:
               This suggests probes are failing to observe live devices or the
               sink is silently swallowing records.
 
+        - alert: RastreoSinkUnreachable
+          expr: |
+            max_over_time(rastreo_server_sink_reachable[2m]) == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "rastreo-server sink is unreachable"
+            description: |
+              The server-side reachability probe for sink type
+              {{ `{{ $labels.sink_type }}` }} on {{ `{{ $labels.instance }}` }}
+              has reported unreachable for at least 2 minutes. Records still flow
+              via `POST /scans` response bodies, but downstream ingest is offline.
+              Inspect broker / server connectivity, `/readyz`, and the
+              `last_probe_error` field.
+
         - alert: RastreoBuildOld
           expr: |
             rastreo_server_uptime_seconds > {{ int .Values.alerts.buildAgeThresholdSeconds }}

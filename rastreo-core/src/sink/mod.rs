@@ -149,6 +149,16 @@ pub trait Sink: Send + Sync {
     fn dlq_records_delivered(&self) -> u64 {
         0
     }
+
+    /// Lightweight liveness check the server-side reachability probe consumes.
+    ///
+    /// Default is `Ok(())` — local sinks are always reachable. Network-backed sinks
+    /// override with a cheap round-trip (metadata / flush / ping). The error message
+    /// is surfaced verbatim on `/readyz`, so implementations should include the sink
+    /// kind and enough operator-facing context to triage without opening logs.
+    async fn probe(&self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -257,6 +267,34 @@ mod tests {
     fn default_dlq_records_delivered_is_zero() {
         let s: Box<dyn Sink> = Box::new(MockSink { buffer: Vec::new() });
         assert_eq!(s.dlq_records_delivered(), 0);
+    }
+
+    #[tokio::test]
+    async fn default_probe_reports_reachable() {
+        let s: Box<dyn Sink> = Box::new(MockSink { buffer: Vec::new() });
+        s.probe().await.expect("default probe must succeed");
+    }
+
+    #[tokio::test]
+    async fn stdout_sink_probe_reports_reachable() {
+        let sink: Box<dyn Sink> = create_sink(&SinkConfig::Stdout).await.expect("create");
+        sink.probe().await.expect("stdout probe must succeed");
+    }
+
+    #[tokio::test]
+    async fn memory_sink_probe_reports_reachable() {
+        let sink: Box<dyn Sink> = create_sink(&SinkConfig::Memory).await.expect("create");
+        sink.probe().await.expect("memory probe must succeed");
+    }
+
+    #[tokio::test]
+    async fn file_sink_probe_reports_reachable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("probe.ndjson");
+        let sink: Box<dyn Sink> = create_sink(&SinkConfig::File { path })
+            .await
+            .expect("create");
+        sink.probe().await.expect("file probe must succeed");
     }
 
     #[test]

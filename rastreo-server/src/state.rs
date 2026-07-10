@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rastreo_core::observability::otlp_config::parse_env_u64;
 use rastreo_core::{
-    DiscoverySummary, Resolver, SinkErrorClass, SinkType, PROBE_KIND_COUNT, SINK_ERROR_CLASS_COUNT,
+    DiscoverySummary, Resolver, Sink, SinkErrorClass, SinkType, PROBE_KIND_COUNT,
+    SINK_ERROR_CLASS_COUNT,
 };
 
 #[cfg(feature = "otlp")]
@@ -247,6 +248,8 @@ pub struct Metrics {
     pub(crate) sink_errors: [AtomicU64; SINK_ERROR_CLASS_COUNT],
     pub(crate) dlq: DlqRecordsCounter,
     pub(crate) scan_duration: ScenarioHistograms,
+    pub sink_probe_success: AtomicU64,
+    pub sink_probe_failure: AtomicU64,
     #[cfg(feature = "otlp")]
     otlp_scan_duration: OnceLock<opentelemetry::metrics::Histogram<f64>>,
 }
@@ -270,9 +273,19 @@ impl Metrics {
                 config.scenario_allowlist,
                 config.scenario_max_length,
             ),
+            sink_probe_success: AtomicU64::new(0),
+            sink_probe_failure: AtomicU64::new(0),
             #[cfg(feature = "otlp")]
             otlp_scan_duration: OnceLock::new(),
         }
+    }
+
+    pub fn record_sink_probe_success(&self) {
+        self.sink_probe_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_sink_probe_failure(&self) {
+        self.sink_probe_failure.fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(feature = "otlp")]
@@ -497,11 +510,159 @@ pub(crate) fn current_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Cached result of the periodic server-side sink probe consumed by `/readyz` and `/metrics`.
+pub struct SinkReachability {
+    pub reachable: AtomicBool,
+    pub last_probe_epoch_ms: AtomicU64,
+    pub last_error: Mutex<Option<String>>,
+    pub sink_type: Option<SinkType>,
+    pub configured: bool,
+    pub probe_interval: Duration,
+    pub probe_timeout: Duration,
+}
+
+impl SinkReachability {
+    /// State for a server with no sink configured; emits no metric series and does not gate `/readyz`.
+    pub fn not_configured() -> Self {
+        Self {
+            reachable: AtomicBool::new(false),
+            last_probe_epoch_ms: AtomicU64::new(0),
+            last_error: Mutex::new(None),
+            sink_type: None,
+            configured: false,
+            probe_interval: Duration::from_secs(10),
+            probe_timeout: Duration::from_secs(5),
+        }
+    }
+
+    /// Initial state for a live sink; reports unreachable until the first probe completes.
+    pub fn configured(
+        sink_type: SinkType,
+        probe_interval: Duration,
+        probe_timeout: Duration,
+    ) -> Self {
+        Self {
+            reachable: AtomicBool::new(false),
+            last_probe_epoch_ms: AtomicU64::new(0),
+            last_error: Mutex::new(None),
+            sink_type: Some(sink_type),
+            configured: true,
+            probe_interval,
+            probe_timeout,
+        }
+    }
+
+    /// State for a sink that failed to construct at startup; surfaces the failure via `/readyz`.
+    pub fn construction_failed(
+        sink_type: Option<SinkType>,
+        error: String,
+        probe_interval: Duration,
+        probe_timeout: Duration,
+    ) -> Self {
+        Self {
+            reachable: AtomicBool::new(false),
+            last_probe_epoch_ms: AtomicU64::new(current_epoch_ms()),
+            last_error: Mutex::new(Some(error)),
+            sink_type,
+            configured: true,
+            probe_interval,
+            probe_timeout,
+        }
+    }
+
+    pub fn record_success(&self) {
+        self.reachable.store(true, Ordering::Relaxed);
+        self.last_probe_epoch_ms
+            .store(current_epoch_ms(), Ordering::Relaxed);
+        let mut guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    pub fn record_failure(&self, message: String) {
+        self.reachable.store(false, Ordering::Relaxed);
+        self.last_probe_epoch_ms
+            .store(current_epoch_ms(), Ordering::Relaxed);
+        let mut guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(message);
+    }
+
+    pub fn last_error_snapshot(&self) -> Option<String> {
+        self.last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn sink_type_label(&self) -> Option<&'static str> {
+        self.sink_type.map(SinkType::as_label)
+    }
+}
+
+impl std::fmt::Debug for SinkReachability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkReachability")
+            .field("configured", &self.configured)
+            .field("sink_type", &self.sink_type)
+            .field("reachable", &self.reachable.load(Ordering::Relaxed))
+            .field(
+                "last_probe_epoch_ms",
+                &self.last_probe_epoch_ms.load(Ordering::Relaxed),
+            )
+            .field("probe_interval", &self.probe_interval)
+            .field("probe_timeout", &self.probe_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Server-side sink reachability probe knobs read from `RASTREO_SINK_PROBE_*` environment variables.
+#[derive(Debug, Clone)]
+pub struct SinkProbeConfig {
+    pub config_path: Option<std::path::PathBuf>,
+    pub probe_interval: Duration,
+    pub probe_timeout: Duration,
+}
+
+impl Default for SinkProbeConfig {
+    fn default() -> Self {
+        Self {
+            config_path: None,
+            probe_interval: Duration::from_secs(10),
+            probe_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+impl SinkProbeConfig {
+    /// Read `RASTREO_SINK_CONFIG_PATH`, `RASTREO_SINK_PROBE_INTERVAL_SECS`, and `RASTREO_SINK_PROBE_TIMEOUT_SECS`, falling back to defaults when unset.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let config_path = match std::env::var("RASTREO_SINK_CONFIG_PATH") {
+            Ok(raw) if !raw.trim().is_empty() => Some(std::path::PathBuf::from(raw)),
+            Ok(_) | Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(anyhow::anyhow!(
+                    "invalid value for RASTREO_SINK_CONFIG_PATH: not valid UTF-8"
+                ));
+            }
+        };
+        let probe_interval =
+            Duration::from_secs(parse_env_u64("RASTREO_SINK_PROBE_INTERVAL_SECS", 10)?.max(1));
+        let probe_timeout =
+            Duration::from_secs(parse_env_u64("RASTREO_SINK_PROBE_TIMEOUT_SECS", 5)?.max(1));
+        Ok(Self {
+            config_path,
+            probe_interval,
+            probe_timeout,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub resolver: Arc<dyn Resolver>,
     pub metrics: Arc<Metrics>,
     pub readiness: Arc<ReadinessState>,
+    pub sink: Option<Arc<dyn Sink>>,
+    pub sink_reachability: Arc<SinkReachability>,
 }
 
 impl AppState {
@@ -522,7 +683,19 @@ impl AppState {
             resolver,
             metrics: Arc::new(Metrics::with_config(metrics)),
             readiness: Arc::new(ReadinessState::new(readiness)),
+            sink: None,
+            sink_reachability: Arc::new(SinkReachability::not_configured()),
         }
+    }
+
+    pub fn with_sink(
+        mut self,
+        sink: Option<Arc<dyn Sink>>,
+        reachability: Arc<SinkReachability>,
+    ) -> Self {
+        self.sink = sink;
+        self.sink_reachability = reachability;
+        self
     }
 }
 
@@ -954,7 +1127,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    const ENV_KEYS: [&str; 9] = [
+    const ENV_KEYS: [&str; 12] = [
         "RASTREO_MAX_INFLIGHT_SCANS",
         "RASTREO_SINK_ERROR_QUARANTINE_SECS",
         "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
@@ -964,6 +1137,9 @@ mod tests {
         "RASTREO_OTLP_METRICS_INTERVAL_SECS",
         "RASTREO_OTLP_SERVICE_NAME",
         "RASTREO_OTLP_PROTOCOL",
+        "RASTREO_SINK_CONFIG_PATH",
+        "RASTREO_SINK_PROBE_INTERVAL_SECS",
+        "RASTREO_SINK_PROBE_TIMEOUT_SECS",
     ];
 
     fn clear_env() {
@@ -1080,6 +1256,177 @@ mod tests {
         let state = build_state();
         let clone = state.clone();
         assert!(Arc::ptr_eq(&state.readiness, &clone.readiness));
+    }
+
+    #[test]
+    fn app_state_default_sink_reachability_reports_not_configured() {
+        let state = build_state();
+        assert!(state.sink.is_none());
+        assert!(!state.sink_reachability.configured);
+        assert!(state.sink_reachability.sink_type.is_none());
+    }
+
+    #[test]
+    fn sink_reachability_configured_starts_unreachable_with_no_error() {
+        let r = SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        assert!(r.configured);
+        assert_eq!(r.sink_type, Some(SinkType::Kafka));
+        assert!(!r.reachable.load(Ordering::Relaxed));
+        assert_eq!(r.last_probe_epoch_ms.load(Ordering::Relaxed), 0);
+        assert!(r.last_error_snapshot().is_none());
+    }
+
+    #[test]
+    fn sink_reachability_record_success_clears_error_and_stamps_timestamp() {
+        let r = SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        r.record_failure("boom".into());
+        assert!(!r.reachable.load(Ordering::Relaxed));
+        assert_eq!(r.last_error_snapshot().as_deref(), Some("boom"));
+        r.record_success();
+        assert!(r.reachable.load(Ordering::Relaxed));
+        assert!(r.last_error_snapshot().is_none());
+        assert!(r.last_probe_epoch_ms.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn sink_reachability_construction_failed_records_error_immediately() {
+        let r = SinkReachability::construction_failed(
+            Some(SinkType::Nats),
+            "sink construction failed: no route to host".into(),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        assert!(r.configured);
+        assert!(!r.reachable.load(Ordering::Relaxed));
+        assert!(r.last_probe_epoch_ms.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            r.last_error_snapshot().as_deref(),
+            Some("sink construction failed: no route to host"),
+        );
+    }
+
+    #[test]
+    fn sink_reachability_recovers_from_poisoned_last_error_lock() {
+        let r = Arc::new(SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        let poisoner = Arc::clone(&r);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner.last_error.lock().expect("initial lock");
+            panic!("intentional poison");
+        });
+        let _ = handle.join();
+        assert!(r.last_error.is_poisoned());
+        r.record_failure("recovered".into());
+        assert_eq!(r.last_error_snapshot().as_deref(), Some("recovered"));
+    }
+
+    #[test]
+    fn app_state_with_sink_stores_sink_and_reachability() {
+        use rastreo_core::MemorySink;
+        let base = build_state();
+        let sink: Arc<dyn Sink> = Arc::new(MemorySink::new());
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Memory,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        let state = base.with_sink(Some(Arc::clone(&sink)), Arc::clone(&reach));
+        assert!(state.sink.is_some());
+        assert!(Arc::ptr_eq(&state.sink_reachability, &reach));
+    }
+
+    #[test]
+    fn sink_probe_config_default_matches_documented_values() {
+        let cfg = SinkProbeConfig::default();
+        assert!(cfg.config_path.is_none());
+        assert_eq!(cfg.probe_interval, Duration::from_secs(10));
+        assert_eq!(cfg.probe_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sink_probe_config_from_env_uses_defaults_when_unset() {
+        let _guard = env_guard();
+        clear_env();
+        let cfg = SinkProbeConfig::from_env().expect("from_env");
+        assert!(cfg.config_path.is_none());
+        assert_eq!(cfg.probe_interval, Duration::from_secs(10));
+        assert_eq!(cfg.probe_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sink_probe_config_from_env_reads_custom_values() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "/etc/rastreo/sink.yaml");
+            std::env::set_var("RASTREO_SINK_PROBE_INTERVAL_SECS", "30");
+            std::env::set_var("RASTREO_SINK_PROBE_TIMEOUT_SECS", "7");
+        }
+        let cfg = SinkProbeConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(
+            cfg.config_path.as_deref(),
+            Some(std::path::Path::new("/etc/rastreo/sink.yaml"))
+        );
+        assert_eq!(cfg.probe_interval, Duration::from_secs(30));
+        assert_eq!(cfg.probe_timeout, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn sink_probe_config_from_env_ignores_blank_path() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "   ");
+        }
+        let cfg = SinkProbeConfig::from_env().expect("from_env");
+        clear_env();
+        assert!(cfg.config_path.is_none());
+    }
+
+    #[test]
+    fn sink_probe_config_from_env_clamps_zero_to_one_second() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SINK_PROBE_INTERVAL_SECS", "0");
+            std::env::set_var("RASTREO_SINK_PROBE_TIMEOUT_SECS", "0");
+        }
+        let cfg = SinkProbeConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(cfg.probe_interval, Duration::from_secs(1));
+        assert_eq!(cfg.probe_timeout, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sink_probe_config_from_env_rejects_non_numeric_interval() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SINK_PROBE_INTERVAL_SECS", "not-a-number");
+        }
+        let err = SinkProbeConfig::from_env().expect_err("must reject");
+        clear_env();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("RASTREO_SINK_PROBE_INTERVAL_SECS"),
+            "msg was {msg}"
+        );
     }
 
     #[cfg(feature = "otlp")]
