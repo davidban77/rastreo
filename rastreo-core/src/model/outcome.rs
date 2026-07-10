@@ -4,10 +4,20 @@ use std::time::{Duration, SystemTime};
 use schemars::JsonSchema;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    JsonSchema,
 )]
 #[non_exhaustive]
 pub enum ProbeKind {
+    #[default]
     TcpConnect,
     Udp,
     Http,
@@ -19,6 +29,66 @@ pub enum ProbeKind {
     Icmp,
     Tls,
     ReverseDns,
+}
+
+/// Number of `ProbeKind` variants — indexes fixed-size counter arrays without heap allocation.
+///
+/// Adding a variant to `ProbeKind` requires bumping this constant and extending
+/// `ProbeKind::all()` in the same change; the compiler surfaces the miss via the
+/// array-size mismatch.
+pub const PROBE_KIND_COUNT: usize = 11;
+
+impl ProbeKind {
+    /// Every variant in a stable, deterministic order — used for iterating fixed-size counter arrays.
+    pub const fn all() -> &'static [ProbeKind; PROBE_KIND_COUNT] {
+        &[
+            ProbeKind::TcpConnect,
+            ProbeKind::Udp,
+            ProbeKind::Http,
+            ProbeKind::Dns,
+            ProbeKind::Snmp,
+            ProbeKind::Arp,
+            ProbeKind::Ndp,
+            ProbeKind::Ssh,
+            ProbeKind::Icmp,
+            ProbeKind::Tls,
+            ProbeKind::ReverseDns,
+        ]
+    }
+
+    /// Stable index for use in fixed-size `[T; PROBE_KIND_COUNT]` arrays.
+    pub const fn index(self) -> usize {
+        match self {
+            ProbeKind::TcpConnect => 0,
+            ProbeKind::Udp => 1,
+            ProbeKind::Http => 2,
+            ProbeKind::Dns => 3,
+            ProbeKind::Snmp => 4,
+            ProbeKind::Arp => 5,
+            ProbeKind::Ndp => 6,
+            ProbeKind::Ssh => 7,
+            ProbeKind::Icmp => 8,
+            ProbeKind::Tls => 9,
+            ProbeKind::ReverseDns => 10,
+        }
+    }
+
+    /// snake_case label used in `/metrics` and OTLP attribute values.
+    pub const fn label(self) -> &'static str {
+        match self {
+            ProbeKind::TcpConnect => "tcp_connect",
+            ProbeKind::Udp => "udp",
+            ProbeKind::Http => "http",
+            ProbeKind::Dns => "dns",
+            ProbeKind::Snmp => "snmp",
+            ProbeKind::Arp => "arp",
+            ProbeKind::Ndp => "ndp",
+            ProbeKind::Ssh => "ssh",
+            ProbeKind::Icmp => "icmp",
+            ProbeKind::Tls => "tls",
+            ProbeKind::ReverseDns => "reverse_dns",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -188,6 +258,50 @@ mod tests {
             let back: Signal = serde_json::from_str(&s).expect("deserialize");
             assert_eq!(signal, back);
         }
+    }
+
+    #[test]
+    fn probe_kind_all_lists_every_variant_in_index_order() {
+        let all = ProbeKind::all();
+        assert_eq!(all.len(), PROBE_KIND_COUNT);
+        for (i, kind) in all.iter().enumerate() {
+            assert_eq!(kind.index(), i, "kind {kind:?} index mismatch");
+        }
+    }
+
+    #[test]
+    fn probe_kind_indexes_are_unique_and_bounded() {
+        let mut seen = [false; PROBE_KIND_COUNT];
+        for kind in ProbeKind::all() {
+            let idx = kind.index();
+            assert!(idx < PROBE_KIND_COUNT, "index {idx} out of bounds");
+            assert!(!seen[idx], "duplicate index {idx}");
+            seen[idx] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "not every index visited");
+    }
+
+    #[test]
+    fn probe_kind_labels_are_unique_snake_case() {
+        let mut labels: Vec<&'static str> = ProbeKind::all().iter().map(|k| k.label()).collect();
+        labels.sort();
+        for pair in labels.windows(2) {
+            assert_ne!(pair[0], pair[1], "duplicate label {}", pair[0]);
+        }
+        for label in ProbeKind::all().iter().map(|k| k.label()) {
+            assert!(!label.is_empty(), "empty label");
+            assert!(
+                label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "label {label} not snake_case"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_kind_label_matches_serde_shape_for_known_variants() {
+        assert_eq!(ProbeKind::TcpConnect.label(), "tcp_connect");
+        assert_eq!(ProbeKind::ReverseDns.label(), "reverse_dns");
+        assert_eq!(ProbeKind::Http.label(), "http");
     }
 
     #[test]

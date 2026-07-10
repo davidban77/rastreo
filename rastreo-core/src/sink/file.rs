@@ -5,7 +5,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::error::RastreoError;
 
-use super::Sink;
+use super::{Sink, SinkType};
 
 pub struct FileSink {
     writer: BufWriter<File>,
@@ -29,16 +29,27 @@ impl FileSink {
 #[async_trait::async_trait]
 impl Sink for FileSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
-        self.writer
-            .write_all(data)
-            .await
-            .map_err(RastreoError::Sink)?;
+        self.writer.write_all(data).await.map_err(|e| {
+            RastreoError::Sink(std::io::Error::new(
+                e.kind(),
+                format!("failed to write to file sink: {e}"),
+            ))
+        })?;
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
-        self.writer.flush().await.map_err(RastreoError::Sink)?;
+        self.writer.flush().await.map_err(|e| {
+            RastreoError::Sink(std::io::Error::new(
+                e.kind(),
+                format!("failed to flush file sink: {e}"),
+            ))
+        })?;
         Ok(())
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::File
     }
 }
 
@@ -187,5 +198,55 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<FileSink>();
         assert_send_sync::<Box<dyn Sink>>();
+    }
+
+    #[tokio::test]
+    async fn flush_failure_on_readonly_fd_classifies_as_flush_failure() {
+        use crate::sink::{classify_sink_error, SinkErrorClass};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seed = dir.path().join("flush-seed.ndjson");
+        std::fs::File::create(&seed).expect("create seed");
+        let mut sink = FileSink::new(&seed).await.expect("open sink");
+        // Swap in a read-only fd; buffered bytes fail to drain on flush with EBADF.
+        let read_only = std::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(&seed)
+            .expect("reopen read-only");
+        sink.writer = BufWriter::new(File::from_std(read_only));
+        sink.write(b"buffered\n").await.expect("buffer write");
+
+        let err = sink.flush().await.expect_err("flush must fail");
+        let RastreoError::Sink(io) = err else {
+            panic!("expected RastreoError::Sink");
+        };
+        assert_eq!(classify_sink_error(&io), SinkErrorClass::FlushFailure);
+        assert!(io.to_string().contains("failed to flush"));
+    }
+
+    #[test]
+    fn file_sink_write_error_prefix_matches_classifier() {
+        use crate::sink::{classify_sink_error, SinkErrorClass};
+        // Contract: the exact prefix `FileSink::write` produces must classify as WriteFailure.
+        let simulated =
+            std::io::Error::other("failed to write to file sink: No space left on device");
+        assert_eq!(
+            classify_sink_error(&simulated),
+            SinkErrorClass::WriteFailure
+        );
+    }
+
+    #[test]
+    fn file_sink_flush_error_prefix_matches_classifier() {
+        use crate::sink::{classify_sink_error, SinkErrorClass};
+        let simulated = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "failed to flush file sink: Broken pipe",
+        );
+        assert_eq!(
+            classify_sink_error(&simulated),
+            SinkErrorClass::FlushFailure
+        );
     }
 }

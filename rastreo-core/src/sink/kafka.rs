@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -12,7 +13,7 @@ use rskafka::{
 };
 
 use crate::error::{ConfigError, RastreoError};
-use crate::sink::Sink;
+use crate::sink::{Sink, SinkType};
 
 /// Quarantine topic configuration for records the primary Kafka produce refused.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -92,6 +93,7 @@ pub struct KafkaSink {
     dlq_client: Option<PartitionClient>,
     dlq_topic: Option<String>,
     include_error_metadata: bool,
+    dlq_delivered: AtomicU64,
 }
 
 impl std::fmt::Debug for KafkaSink {
@@ -187,6 +189,7 @@ impl KafkaSink {
             dlq_client: None,
             dlq_topic: None,
             include_error_metadata: false,
+            dlq_delivered: AtomicU64::new(0),
         })
     }
 
@@ -288,6 +291,7 @@ impl KafkaSink {
             Ok(_) => {
                 // DLQ absorbed the payload; primary failure is quarantined, not propagated.
                 self.buffer.clear();
+                self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
             Err(dlq_err) => {
@@ -325,6 +329,14 @@ impl Sink for KafkaSink {
 
     fn last_write_delivered(&self) -> bool {
         self.last_write_delivered
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Kafka
+    }
+
+    fn dlq_records_delivered(&self) -> u64 {
+        self.dlq_delivered.load(Ordering::Relaxed)
     }
 }
 

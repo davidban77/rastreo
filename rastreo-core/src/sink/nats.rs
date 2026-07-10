@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_nats::jetstream::context::{PublishAckFuture, PublishError};
 use async_nats::jetstream::{self, Context};
@@ -9,7 +10,7 @@ use chrono::Utc;
 
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
-use crate::sink::Sink;
+use crate::sink::{Sink, SinkType};
 
 const HEADER_SOURCE_SUBJECT: &str = "x-rastreo-source-subject";
 const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
@@ -113,6 +114,7 @@ pub struct NatsSink {
     dlq_stream: Option<String>,
     dlq_subject: Option<String>,
     include_error_metadata: bool,
+    dlq_delivered: AtomicU64,
 }
 
 impl std::fmt::Debug for NatsSink {
@@ -212,6 +214,7 @@ impl NatsSink {
             dlq_stream: None,
             dlq_subject: None,
             include_error_metadata: false,
+            dlq_delivered: AtomicU64::new(0),
         })
     }
 
@@ -324,6 +327,7 @@ impl NatsSink {
         }
 
         self.buffer.clear();
+        self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -362,7 +366,10 @@ impl NatsSink {
                 .await
             {
                 Ok(dlq_ack_fut) => match dlq_ack_fut.await {
-                    Ok(_) => continue,
+                    Ok(_) => {
+                        self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     Err(dlq_ack_err) => {
                         tracing::error!(
                             subject = subject.as_str(),
@@ -451,6 +458,14 @@ impl Sink for NatsSink {
 
     fn last_write_delivered(&self) -> bool {
         self.last_write_delivered && self.pending_acks.is_empty()
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Nats
+    }
+
+    fn dlq_records_delivered(&self) -> u64 {
+        self.dlq_delivered.load(Ordering::Relaxed)
     }
 }
 

@@ -65,6 +65,14 @@ spec:
           {{- if .Values.logFormat }}
           {{- $envs = append $envs (dict "name" "RASTREO_LOG_FORMAT" "value" (printf "%v" .Values.logFormat)) }}
           {{- end }}
+          {{- if .Values.metrics }}
+          {{- if and .Values.metrics.scenarioAllowlist (gt (len .Values.metrics.scenarioAllowlist) 0) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SCENARIO_LABEL_ALLOWLIST" "value" (join "," .Values.metrics.scenarioAllowlist)) }}
+          {{- end }}
+          {{- if hasKey .Values.metrics "scenarioMaxLength" }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SCENARIO_LABEL_MAX_LENGTH" "value" (printf "%v" .Values.metrics.scenarioMaxLength)) }}
+          {{- end }}
+          {{- end }}
           {{- if .Values.otlp }}
           {{- if or .Values.otlp.metricsEnabled .Values.otlp.logsEnabled }}
           {{- if not .Values.otlp.endpoint }}

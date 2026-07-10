@@ -2,7 +2,7 @@ use tokio::io::{AsyncWriteExt, BufWriter, Stdout};
 
 use crate::error::RastreoError;
 
-use super::Sink;
+use super::{Sink, SinkType};
 
 pub struct StdoutSink {
     writer: BufWriter<Stdout>,
@@ -25,16 +25,27 @@ impl Default for StdoutSink {
 #[async_trait::async_trait]
 impl Sink for StdoutSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
-        self.writer
-            .write_all(data)
-            .await
-            .map_err(RastreoError::Sink)?;
+        self.writer.write_all(data).await.map_err(|e| {
+            RastreoError::Sink(std::io::Error::new(
+                e.kind(),
+                format!("failed to write to stdout sink: {e}"),
+            ))
+        })?;
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
-        self.writer.flush().await.map_err(RastreoError::Sink)?;
+        self.writer.flush().await.map_err(|e| {
+            RastreoError::Sink(std::io::Error::new(
+                e.kind(),
+                format!("failed to flush stdout sink: {e}"),
+            ))
+        })?;
         Ok(())
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Stdout
     }
 }
 
@@ -64,5 +75,32 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<StdoutSink>();
         assert_send_sync::<Box<dyn Sink>>();
+    }
+
+    #[test]
+    fn stdout_sink_write_error_prefix_matches_classifier() {
+        use crate::sink::{classify_sink_error, SinkErrorClass};
+        // Contract: the exact prefix `StdoutSink::write` produces must classify as WriteFailure.
+        let simulated = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "failed to write to stdout sink: Broken pipe",
+        );
+        assert_eq!(
+            classify_sink_error(&simulated),
+            SinkErrorClass::WriteFailure
+        );
+    }
+
+    #[test]
+    fn stdout_sink_flush_error_prefix_matches_classifier() {
+        use crate::sink::{classify_sink_error, SinkErrorClass};
+        let simulated = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "failed to flush stdout sink: Broken pipe",
+        );
+        assert_eq!(
+            classify_sink_error(&simulated),
+            SinkErrorClass::FlushFailure
+        );
     }
 }

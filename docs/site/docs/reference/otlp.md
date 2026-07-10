@@ -59,16 +59,17 @@ Every metric enumerated on the [Observability page](observability.md#metrics) is
 | OpenTelemetry name | Instrument | Attributes |
 |---|---|---|
 | `rastreo_server_scans_total` | observable counter (u64) | `outcome=success\|error\|cancelled` |
-| `rastreo_server_probes_total` | observable counter (u64) | `outcome=success\|error` |
+| `rastreo_server_probes_total` | observable counter (u64) | `outcome=success\|error`, `probe_kind` (bounded set — see [probe_kind taxonomy](observability.md#probe_kind-taxonomy)) |
 | `rastreo_server_records_emitted_total` | observable counter (u64) | — |
-| `rastreo_server_sink_errors_total` | observable counter (u64) | — |
-| `rastreo_server_scan_duration_seconds` | histogram (f64, unit `s`) | — |
+| `rastreo_server_sink_errors_total` | observable counter (u64) | `error_class` (bounded set — see [error_class taxonomy](observability.md#error_class-taxonomy)) |
+| `rastreo_server_dlq_records_total` | observable counter (u64) | `sink_type` (`kafka\|nats`), `error_class` |
+| `rastreo_server_scan_duration_seconds` | histogram (f64, unit `s`) | `scenario` (see [scenario label](observability.md#scenario-label)) |
 | `rastreo_server_uptime_seconds` | observable gauge (f64) | — |
 | `rastreo_server_build_info` | observable gauge (u64, value always `1`) | `version` |
 
 The instrument names use underscore separators, not the OpenTelemetry semantic-convention dot separators, so they line up with the Prometheus-format names on `/metrics`. When a collector like Grafana Alloy fans OTLP metrics into a downstream Prometheus datasource, the OTLP and scrape paths surface the same metric names.
 
-Labeled breakdowns for per-prober success rate, per-scenario duration, and per-error-class sink errors are on the [roadmap](observability.md#metrics) — the aggregate shape shipped today matches the shape on `/metrics`.
+The `scan_duration_seconds` histogram is recorded once per scan with the `scenario` attribute set to the same allow-list-mapped label used on the `/metrics` endpoint. Truncation and allow-list matching happen before the record call, so cardinality behaviour is identical on both surfaces.
 
 ## Logs exported via OTLP
 
@@ -127,7 +128,6 @@ The receiver's gRPC listener must be reachable from the rastreo-server pod's net
 
 ## Follow-ups
 
-- **Labeled metrics** — the roadmap item that adds `probe_kind`, `scenario`, and `error_class` labels to the aggregate counters will surface on the OTLP export path automatically once the internal `Metrics` struct grows the label keys.
 - **`RASTREO_OTLP_HEADERS`** — some managed collectors require a bearer token or API key on every request. An env var mapped to the exporter's headers builder is a natural next step for that use case; today rastreo does not set any headers on the exporter.
 
 ## See also

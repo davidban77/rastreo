@@ -30,18 +30,51 @@ spec:
               {{ `{{ $labels.instance }}` }}. Investigate target reachability or
               scenario configuration before continuing.
 
-        - alert: RastreoSinkErrorSpike
-          expr: rate(rastreo_server_sink_errors_total[5m]) > (1 / 60)
+        - alert: RastreoProbeErrorRatioPerKind
+          expr: |
+            (
+              sum by (probe_kind) (rate(rastreo_server_probes_total{outcome="error"}[10m]))
+              /
+              clamp_min(sum by (probe_kind) (rate(rastreo_server_probes_total[10m])), 1)
+            ) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "rastreo-server probe error rate exceeds 50% for a single probe kind"
+            description: |
+              Probe error ratio for {{ `{{ $labels.probe_kind }}` }} has stayed
+              above 50% for the last 10 minutes on {{ `{{ $labels.instance }}` }}.
+              A single failing probe kind narrows the investigation to a specific
+              protocol or target subset — check the prober configuration and the
+              targets it runs against.
+
+        - alert: RastreoSinkErrorSpikePerClass
+          expr: sum by (error_class) (rate(rastreo_server_sink_errors_total[5m])) > (1 / 60)
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: "rastreo-server sink error rate is above 1 per minute"
+            summary: "rastreo-server sink error rate is above 1 per minute for a single class"
             description: |
-              Sink error rate exceeds 1 per minute for 5+ consecutive minutes on
+              Sink error rate for class {{ `{{ $labels.error_class }}` }} exceeds
+              1 per minute for 5+ consecutive minutes on
               {{ `{{ $labels.instance }}` }}. Check the sink configuration and
               downstream broker / topic availability. If DLQ is configured, DLQ
               traffic may also be elevated.
+
+        - alert: RastreoDlqTrafficSurge
+          expr: sum(rate(rastreo_server_dlq_records_total[5m])) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "rastreo-server dead-letter queue is receiving records"
+            description: |
+              DLQ delivery rate exceeds 0.1 records/sec for 5+ consecutive minutes
+              on {{ `{{ $labels.instance }}` }}. Records are being quarantined —
+              inspect the DLQ topic / stream, verify the primary destination is
+              healthy, and drain the quarantine once the underlying issue is fixed.
 
         - alert: RastreoNoRecordsEmitted10min
           expr: |

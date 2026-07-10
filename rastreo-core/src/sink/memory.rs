@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::error::RastreoError;
 
-use super::Sink;
+use super::{Sink, SinkType};
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -75,6 +75,10 @@ impl Sink for MemorySink {
 
     fn last_write_delivered(&self) -> bool {
         self.inner.delivered.load(Ordering::SeqCst)
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Memory
     }
 }
 

@@ -58,6 +58,7 @@ opentelemetry-appender-tracing = { version = "0.32", optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 
 [lints]
 workspace = true

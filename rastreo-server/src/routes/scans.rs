@@ -5,7 +5,8 @@ use axum::extract::State;
 use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
 use rastreo_core::{
-    run_discovery_with_components, DeviceRecord, DiscoverySummary, EncoderConfig, MemorySink,
+    classify_sink_error, run_discovery_with_components, DeviceRecord, DiscoverySummary,
+    EncoderConfig, MemorySink,
 };
 use serde::Serialize;
 
@@ -41,13 +42,23 @@ pub async fn create_scan(
     let start = std::time::Instant::now();
     let _inflight = InflightGuard::new(state.readiness.clone());
 
+    let scenario_label = scenario
+        .base
+        .name
+        .clone()
+        .unwrap_or_else(|| "unnamed".to_string());
+
     if scenario.targets.is_empty() {
-        state.metrics.record_scan_error(start.elapsed(), false);
+        state
+            .metrics
+            .record_scan_error(start.elapsed(), None, &scenario_label);
         state.readiness.record_scan_error(false);
         return Err(AppError::bad_request("scenario.targets must not be empty"));
     }
     if scenario.probers.is_empty() {
-        state.metrics.record_scan_error(start.elapsed(), false);
+        state
+            .metrics
+            .record_scan_error(start.elapsed(), None, &scenario_label);
         state.readiness.record_scan_error(false);
         return Err(AppError::bad_request("scenario.probers must not be empty"));
     }
@@ -80,7 +91,9 @@ pub async fn create_scan(
 
     match summary_result {
         Ok(summary) => {
-            state.metrics.record_scan_completion(&summary);
+            state
+                .metrics
+                .record_scan_completion(&summary, &scenario_label);
             let records: Vec<DeviceRecord> = handle
                 .ndjson_lines()
                 .into_iter()
@@ -89,10 +102,14 @@ pub async fn create_scan(
             Ok(Json(ScanResponse { summary, records }))
         }
         Err(err) => {
-            let is_sink_error = matches!(err, rastreo_core::RastreoError::Sink(_));
+            let sink_class = match &err {
+                rastreo_core::RastreoError::Sink(io) => Some(classify_sink_error(io)),
+                _ => None,
+            };
+            let is_sink_error = sink_class.is_some();
             state
                 .metrics
-                .record_scan_error(start.elapsed(), is_sink_error);
+                .record_scan_error(start.elapsed(), sink_class, &scenario_label);
             state.readiness.record_scan_error(is_sink_error);
             Err(err.into())
         }
@@ -175,15 +192,13 @@ mod tests {
 
     #[test]
     fn scan_response_serializes_summary_with_elapsed_ms_field() {
+        let mut summary = DiscoverySummary::default();
+        summary.targets_resolved = 1;
+        summary.probe_attempts = 1;
+        summary.records_emitted = 1;
+        summary.elapsed = Duration::from_millis(42);
         let response = ScanResponse {
-            summary: DiscoverySummary {
-                targets_resolved: 1,
-                probe_attempts: 1,
-                probe_errors: 0,
-                records_emitted: 1,
-                cancelled: false,
-                elapsed: Duration::from_millis(42),
-            },
+            summary,
             records: Vec::new(),
         };
         let value: serde_json::Value = serde_json::to_value(&response).expect("serialize");

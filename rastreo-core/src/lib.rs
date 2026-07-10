@@ -24,10 +24,11 @@ pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, V
 pub use model::{
     AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome,
     ResolvedTarget, ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
+    PROBE_KIND_COUNT,
 };
 pub use pipeline::{
     run_discovery, run_discovery_cancellable, run_discovery_with_components,
-    run_discovery_with_components_cancellable, DiscoverySummary,
+    run_discovery_with_components_cancellable, DiscoverySummary, ProbeKindSummary,
 };
 #[cfg(feature = "icmp")]
 pub use prober::IcmpProber;
@@ -38,7 +39,10 @@ pub use prober::TlsProber;
 pub use prober::{Prober, ProberConfig, ReverseDnsProber, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};
-pub use sink::{FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, StdoutSink};
+pub use sink::{
+    classify_sink_error, FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, SinkErrorClass,
+    SinkType, StdoutSink, SINK_ERROR_CLASS_COUNT,
+};
 #[cfg(feature = "kafka")]
 pub use sink::{KafkaFlushMode, KafkaSink};
 #[cfg(feature = "nats")]
