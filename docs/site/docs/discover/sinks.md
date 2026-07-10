@@ -53,6 +53,34 @@ rastreo discover \
 
 `--sink kafka` requires both `--brokers` and `--topic`; either missing is rejected before any probe runs.
 
+### Dead-letter queue
+
+The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). When the primary produce fails and a DLQ is configured, the sink publishes the same payload to the DLQ topic, logs a `WARN`, and returns success — the buffer is drained and the pipeline moves on. When no DLQ is configured, the primary failure surfaces as an error and the buffer is retained for `flush()` retry (the pre-existing behavior).
+
+```yaml
+sink:
+  type: kafka
+  brokers: [kafka-0.internal:9092]
+  topic: rastreo.discovery.records
+  dead_letter:
+    topic: rastreo.discovery.dlq
+    include_error_metadata: true
+```
+
+DLQ messages default to carrying a small header envelope so downstream consumers can filter and diagnose without inspecting the payload:
+
+| Header | Value | Encoding |
+|---|---|---|
+| `x-rastreo-source-topic` | Primary topic name (e.g. `rastreo.discovery.records`) | UTF-8 bytes |
+| `x-rastreo-error-class` | `produce_failure` (the only class today) | UTF-8 bytes |
+| `x-rastreo-dlq-timestamp` | RFC 3339 UTC timestamp of the DLQ publish | UTF-8 bytes |
+
+Set `include_error_metadata: false` to ship the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary topic.
+
+**Failure model.** Primary produce succeeds → the payload lands on the primary topic. Primary fails and DLQ succeeds → the payload lands on the DLQ topic, a `WARN` log is emitted, and the pipeline continues. Primary fails and DLQ also fails → an `ERROR` log records both failures, the sink returns the primary error, and the buffer is retained for the caller to retry via `flush()` (identical to the no-DLQ path).
+
+**Consumer guidance.** A DLQ consumer typically re-publishes the payload to the primary topic once the underlying issue (broker outage, topic ACL, partition offline) is resolved. Filter on `x-rastreo-source-topic` when the same DLQ is shared across multiple discovery pipelines; use `x-rastreo-dlq-timestamp` to skip records older than a retention window.
+
 ## NATS
 
 The NATS sink publishes `DeviceRecord` events to a NATS JetStream subject, encoded as NDJSON. Because the wire options are richer than Kafka (four auth methods, two delivery modes, a stream binding), the NATS sink is configured through YAML scenarios loaded with `--file` or through the `POST /scans` request body — there are no dedicated CLI flags. Two delivery modes are available: per-record (the default, publishes each record and waits for the JetStream ack) and batched (accumulates NDJSON bytes into one publish at a configurable byte threshold). See [Integrate · NATS](../integrate/nats.md) for the full wire contract, auth details, and stream setup.

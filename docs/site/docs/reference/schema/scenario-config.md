@@ -48,6 +48,15 @@ SNMP community string written verbatim in YAML; serialized as `<redacted:HHHHHHH
 
 Type: string
 
+### `DeadLetterConfig` {#deadletterconfig}
+
+Quarantine topic configuration for records the primary Kafka produce refused.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `include_error_metadata` | boolean | no | — |
+| `topic` | string | yes | — |
+
 ### `DnsQueryType` {#dnsquerytype}
 
 Type: string
@@ -189,7 +198,7 @@ One of:
 - { `type`: `stdout` }
 - { `path`: string, `type`: `file` }
 - { `type`: `memory` }
-- { `brokers`: array<string>, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `topic`: string, `type`: `kafka` }
+- { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `topic`: string, `type`: `kafka` }
 - { `credentials`: [`NatsCredentials`](#natscredentials), `delivery`: [`NatsDelivery`](#natsdelivery), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
 
 ### `SnmpVersion` {#snmpversion}
