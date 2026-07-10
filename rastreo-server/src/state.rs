@@ -1,9 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rastreo_core::observability::otlp_config::parse_env_u64;
-use rastreo_core::{DiscoverySummary, Resolver};
+use rastreo_core::{
+    DiscoverySummary, Resolver, SinkErrorClass, SinkType, PROBE_KIND_COUNT, SINK_ERROR_CLASS_COUNT,
+};
 
 #[cfg(feature = "otlp")]
 pub use rastreo_core::observability::otlp_config::OtlpProtocol;
@@ -91,34 +94,182 @@ pub(crate) struct HistogramSnapshot {
     pub count: u64,
 }
 
+/// Per-`ProbeKind` success / error counters — fixed-size arrays indexed by `ProbeKind::index()`.
+pub(crate) struct ProbeKindCounters {
+    pub succeeded: [AtomicU64; PROBE_KIND_COUNT],
+    pub errored: [AtomicU64; PROBE_KIND_COUNT],
+}
+
+impl ProbeKindCounters {
+    fn new() -> Self {
+        Self {
+            succeeded: std::array::from_fn(|_| AtomicU64::new(0)),
+            errored: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+/// Per-`SinkType` × per-`SinkErrorClass` DLQ delivery counters — v1 uses a sink-type-hint
+/// mapping: Kafka DLQ deliveries record under `produce_failure`, NATS under `publish_failure`.
+pub(crate) struct DlqRecordsCounter {
+    pub kafka: [AtomicU64; SINK_ERROR_CLASS_COUNT],
+    pub nats: [AtomicU64; SINK_ERROR_CLASS_COUNT],
+}
+
+impl DlqRecordsCounter {
+    fn new() -> Self {
+        Self {
+            kafka: std::array::from_fn(|_| AtomicU64::new(0)),
+            nats: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+/// Per-scenario scan-duration histogram bank. Every observation lands on `all`; if
+/// the scenario name (truncated to `max_length`) is in `allowlist` it also lands on
+/// `per_scenario[name]`, otherwise on the shared `other` shard.
+pub(crate) struct ScenarioHistograms {
+    pub all: HistogramShard,
+    pub per_scenario: RwLock<HashMap<String, HistogramShard>>,
+    pub allowlist: HashSet<String>,
+    pub other: HistogramShard,
+    pub max_length: usize,
+}
+
+impl ScenarioHistograms {
+    fn new(allowlist: HashSet<String>, max_length: usize) -> Self {
+        let mut seeded = HashMap::with_capacity(allowlist.len());
+        for name in &allowlist {
+            seeded.insert(name.clone(), HistogramShard::new());
+        }
+        Self {
+            all: HistogramShard::new(),
+            per_scenario: RwLock::new(seeded),
+            allowlist,
+            other: HistogramShard::new(),
+            max_length,
+        }
+    }
+
+    fn resolve_label<'a>(&self, scenario: &'a str) -> Option<&'a str> {
+        let trimmed = if scenario.len() > self.max_length {
+            // Snap down to a char boundary so multi-byte codepoints are never split.
+            &scenario[..scenario.floor_char_boundary(self.max_length)]
+        } else {
+            scenario
+        };
+        if self.allowlist.contains(trimmed) {
+            Some(trimmed)
+        } else {
+            None
+        }
+    }
+
+    pub fn observe(&self, seconds: f64, scenario: &str) {
+        self.all.observe(seconds);
+        match self.resolve_label(scenario) {
+            Some(label) => {
+                {
+                    let guard = self.per_scenario.read().unwrap_or_else(|e| e.into_inner());
+                    if let Some(shard) = guard.get(label) {
+                        shard.observe(seconds);
+                        return;
+                    }
+                }
+                let mut guard = self.per_scenario.write().unwrap_or_else(|e| e.into_inner());
+                let shard = guard.entry(label.to_string()).or_default();
+                shard.observe(seconds);
+            }
+            None => self.other.observe(seconds),
+        }
+    }
+}
+
+/// Server-side metric-cardinality guard: only scenario names in the allow-list
+/// become distinct `scenario` label values; everything else buckets to `other`.
+#[derive(Debug, Clone)]
+pub struct MetricsConfig {
+    pub scenario_allowlist: HashSet<String>,
+    pub scenario_max_length: usize,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            scenario_allowlist: HashSet::new(),
+            scenario_max_length: 64,
+        }
+    }
+}
+
+impl MetricsConfig {
+    /// Read `RASTREO_SCENARIO_LABEL_ALLOWLIST` (comma-separated) and `RASTREO_SCENARIO_LABEL_MAX_LENGTH`, falling back to defaults when unset.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let allowlist: HashSet<String> = match std::env::var("RASTREO_SCENARIO_LABEL_ALLOWLIST") {
+            Ok(raw) => raw
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            Err(std::env::VarError::NotPresent) => HashSet::new(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(anyhow::anyhow!(
+                    "invalid value for RASTREO_SCENARIO_LABEL_ALLOWLIST: not valid UTF-8"
+                ));
+            }
+        };
+        for reserved in RESERVED_SCENARIO_LABELS {
+            if allowlist.contains(*reserved) {
+                return Err(anyhow::anyhow!(
+                    "invalid value for RASTREO_SCENARIO_LABEL_ALLOWLIST: {reserved:?} is reserved \
+                     for the aggregate / catch-all bucket and cannot be an allow-list entry"
+                ));
+            }
+        }
+        let max_length = parse_env_u64("RASTREO_SCENARIO_LABEL_MAX_LENGTH", 64)? as usize;
+        Ok(Self {
+            scenario_allowlist: allowlist,
+            scenario_max_length: max_length.max(1),
+        })
+    }
+}
+
+const RESERVED_SCENARIO_LABELS: &[&str] = &["_all", "other"];
+
 pub struct Metrics {
     pub started_at: Instant,
     pub scans_total_success: AtomicU64,
     pub scans_total_error: AtomicU64,
     pub scans_total_cancelled: AtomicU64,
-    pub probes_attempted_total: AtomicU64,
-    pub probes_errored_total: AtomicU64,
-    pub probes_succeeded_total: AtomicU64,
     pub records_emitted_total: AtomicU64,
-    pub sink_errors_total: AtomicU64,
-    pub(crate) scan_duration_seconds: HistogramShard,
+    pub(crate) probes: ProbeKindCounters,
+    pub(crate) sink_errors: [AtomicU64; SINK_ERROR_CLASS_COUNT],
+    pub(crate) dlq: DlqRecordsCounter,
+    pub(crate) scan_duration: ScenarioHistograms,
     #[cfg(feature = "otlp")]
     otlp_scan_duration: OnceLock<opentelemetry::metrics::Histogram<f64>>,
 }
 
 impl Metrics {
     pub fn new() -> Self {
+        Self::with_config(MetricsConfig::default())
+    }
+
+    pub fn with_config(config: MetricsConfig) -> Self {
         Self {
             started_at: Instant::now(),
             scans_total_success: AtomicU64::new(0),
             scans_total_error: AtomicU64::new(0),
             scans_total_cancelled: AtomicU64::new(0),
-            probes_attempted_total: AtomicU64::new(0),
-            probes_errored_total: AtomicU64::new(0),
-            probes_succeeded_total: AtomicU64::new(0),
             records_emitted_total: AtomicU64::new(0),
-            sink_errors_total: AtomicU64::new(0),
-            scan_duration_seconds: HistogramShard::new(),
+            probes: ProbeKindCounters::new(),
+            sink_errors: std::array::from_fn(|_| AtomicU64::new(0)),
+            dlq: DlqRecordsCounter::new(),
+            scan_duration: ScenarioHistograms::new(
+                config.scenario_allowlist,
+                config.scenario_max_length,
+            ),
             #[cfg(feature = "otlp")]
             otlp_scan_duration: OnceLock::new(),
         }
@@ -132,45 +283,69 @@ impl Metrics {
         self.otlp_scan_duration.set(histogram)
     }
 
-    pub fn record_scan_completion(&self, summary: &DiscoverySummary) {
+    pub fn record_scan_completion(&self, summary: &DiscoverySummary, scenario: &str) {
         if summary.cancelled {
             self.scans_total_cancelled.fetch_add(1, Ordering::Relaxed);
         } else {
             self.scans_total_success.fetch_add(1, Ordering::Relaxed);
         }
-        self.probes_attempted_total
-            .fetch_add(summary.probe_attempts as u64, Ordering::Relaxed);
-        self.probes_errored_total
-            .fetch_add(summary.probe_errors as u64, Ordering::Relaxed);
-        let succeeded = summary.probe_attempts.saturating_sub(summary.probe_errors);
-        self.probes_succeeded_total
-            .fetch_add(succeeded as u64, Ordering::Relaxed);
         self.records_emitted_total
             .fetch_add(summary.records_emitted as u64, Ordering::Relaxed);
+        for pk in &summary.probes_by_kind {
+            let succeeded = pk.attempted.saturating_sub(pk.errored) as u64;
+            let idx = pk.kind.index();
+            self.probes.succeeded[idx].fetch_add(succeeded, Ordering::Relaxed);
+            self.probes.errored[idx].fetch_add(pk.errored as u64, Ordering::Relaxed);
+        }
+        if summary.dlq_records > 0 {
+            self.record_dlq(summary.sink_type, summary.dlq_records as u64);
+        }
         let seconds = summary.elapsed.as_secs_f64();
-        self.scan_duration_seconds.observe(seconds);
-        self.record_otlp_scan_duration(seconds);
+        self.scan_duration.observe(seconds, scenario);
+        self.record_otlp_scan_duration(seconds, scenario);
     }
 
-    pub fn record_scan_error(&self, elapsed: Duration, is_sink_error: bool) {
+    pub fn record_scan_error(
+        &self,
+        elapsed: Duration,
+        sink_class: Option<SinkErrorClass>,
+        scenario: &str,
+    ) {
         self.scans_total_error.fetch_add(1, Ordering::Relaxed);
-        if is_sink_error {
-            self.sink_errors_total.fetch_add(1, Ordering::Relaxed);
+        if let Some(class) = sink_class {
+            self.sink_errors[class.index()].fetch_add(1, Ordering::Relaxed);
         }
         let seconds = elapsed.as_secs_f64();
-        self.scan_duration_seconds.observe(seconds);
-        self.record_otlp_scan_duration(seconds);
+        self.scan_duration.observe(seconds, scenario);
+        self.record_otlp_scan_duration(seconds, scenario);
+    }
+
+    fn record_dlq(&self, sink_type: Option<SinkType>, count: u64) {
+        let (bucket, class) = match sink_type {
+            Some(SinkType::Kafka) => (&self.dlq.kafka, SinkErrorClass::ProduceFailure),
+            Some(SinkType::Nats) => (&self.dlq.nats, SinkErrorClass::PublishFailure),
+            _ => return,
+        };
+        bucket[class.index()].fetch_add(count, Ordering::Relaxed);
     }
 
     #[cfg(feature = "otlp")]
-    fn record_otlp_scan_duration(&self, seconds: f64) {
+    fn record_otlp_scan_duration(&self, seconds: f64, scenario: &str) {
         if let Some(h) = self.otlp_scan_duration.get() {
-            h.record(seconds, &[]);
+            h.record(seconds, &[opentelemetry::KeyValue::new("scenario", "_all")]);
+            let label = self
+                .scan_duration
+                .resolve_label(scenario)
+                .unwrap_or("other");
+            h.record(
+                seconds,
+                &[opentelemetry::KeyValue::new("scenario", label.to_string())],
+            );
         }
     }
 
     #[cfg(not(feature = "otlp"))]
-    fn record_otlp_scan_duration(&self, _seconds: f64) {}
+    fn record_otlp_scan_duration(&self, _seconds: f64, _scenario: &str) {}
 }
 
 impl Default for Metrics {
@@ -335,10 +510,18 @@ impl AppState {
     }
 
     pub fn with_readiness(resolver: Arc<dyn Resolver>, config: ReadinessConfig) -> Self {
+        Self::with_config(resolver, config, MetricsConfig::default())
+    }
+
+    pub fn with_config(
+        resolver: Arc<dyn Resolver>,
+        readiness: ReadinessConfig,
+        metrics: MetricsConfig,
+    ) -> Self {
         Self {
             resolver,
-            metrics: Arc::new(Metrics::default()),
-            readiness: Arc::new(ReadinessState::new(config)),
+            metrics: Arc::new(Metrics::with_config(metrics)),
+            readiness: Arc::new(ReadinessState::new(readiness)),
         }
     }
 }
@@ -406,48 +589,79 @@ mod tests {
         assert!((snap.sum - 0.5).abs() < 1e-9);
     }
 
+    use rastreo_core::{ProbeKind, ProbeKindSummary, SinkType};
+
+    fn kind_summary(kind: ProbeKind, attempted: usize, errored: usize) -> ProbeKindSummary {
+        let mut s = ProbeKindSummary::default();
+        s.kind = kind;
+        s.attempted = attempted;
+        s.errored = errored;
+        s
+    }
+
+    fn summary_completed(
+        probe_attempts: usize,
+        probe_errors: usize,
+        records_emitted: usize,
+        by_kind: Vec<ProbeKindSummary>,
+        elapsed_ms: u64,
+    ) -> DiscoverySummary {
+        let mut s = DiscoverySummary::default();
+        s.targets_resolved = 1;
+        s.probe_attempts = probe_attempts;
+        s.probe_errors = probe_errors;
+        s.records_emitted = records_emitted;
+        s.probes_by_kind = by_kind;
+        s.elapsed = Duration::from_millis(elapsed_ms);
+        s
+    }
+
     #[test]
-    fn metrics_record_scan_completion_increments_success_counters() {
+    fn metrics_record_scan_completion_increments_per_kind_counters() {
         let metrics = Metrics::new();
-        let summary = DiscoverySummary {
-            targets_resolved: 1,
-            probe_attempts: 10,
-            probe_errors: 2,
-            records_emitted: 5,
-            cancelled: false,
-            elapsed: Duration::from_millis(123),
-        };
-        metrics.record_scan_completion(&summary);
+        let summary = summary_completed(
+            10,
+            2,
+            5,
+            vec![kind_summary(ProbeKind::TcpConnect, 10, 2)],
+            123,
+        );
+        metrics.record_scan_completion(&summary, "unnamed");
+        let idx = ProbeKind::TcpConnect.index();
         assert_eq!(metrics.scans_total_success.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.scans_total_cancelled.load(Ordering::Relaxed), 0);
-        assert_eq!(metrics.probes_attempted_total.load(Ordering::Relaxed), 10);
-        assert_eq!(metrics.probes_errored_total.load(Ordering::Relaxed), 2);
-        assert_eq!(metrics.probes_succeeded_total.load(Ordering::Relaxed), 8);
+        assert_eq!(metrics.probes.succeeded[idx].load(Ordering::Relaxed), 8);
+        assert_eq!(metrics.probes.errored[idx].load(Ordering::Relaxed), 2);
         assert_eq!(metrics.records_emitted_total.load(Ordering::Relaxed), 5);
-        assert_eq!(metrics.scan_duration_seconds.snapshot().count, 1);
+        assert_eq!(metrics.scan_duration.all.snapshot().count, 1);
     }
 
     #[test]
     fn probes_succeeded_total_is_monotonic_across_multiple_scans() {
         let metrics = Metrics::new();
-        metrics.record_scan_completion(&DiscoverySummary {
-            targets_resolved: 1,
-            probe_attempts: 10,
-            probe_errors: 8,
-            records_emitted: 2,
-            cancelled: false,
-            elapsed: Duration::from_millis(50),
-        });
-        let first = metrics.probes_succeeded_total.load(Ordering::Relaxed);
-        metrics.record_scan_completion(&DiscoverySummary {
-            targets_resolved: 1,
-            probe_attempts: 100,
-            probe_errors: 90,
-            records_emitted: 10,
-            cancelled: false,
-            elapsed: Duration::from_millis(50),
-        });
-        let second = metrics.probes_succeeded_total.load(Ordering::Relaxed);
+        let idx = ProbeKind::TcpConnect.index();
+        metrics.record_scan_completion(
+            &summary_completed(
+                10,
+                8,
+                2,
+                vec![kind_summary(ProbeKind::TcpConnect, 10, 8)],
+                50,
+            ),
+            "unnamed",
+        );
+        let first = metrics.probes.succeeded[idx].load(Ordering::Relaxed);
+        metrics.record_scan_completion(
+            &summary_completed(
+                100,
+                90,
+                10,
+                vec![kind_summary(ProbeKind::TcpConnect, 100, 90)],
+                50,
+            ),
+            "unnamed",
+        );
+        let second = metrics.probes.succeeded[idx].load(Ordering::Relaxed);
         assert_eq!(first, 2);
         assert_eq!(second, 12);
         assert!(second >= first);
@@ -456,34 +670,279 @@ mod tests {
     #[test]
     fn metrics_record_scan_completion_with_cancelled_increments_cancelled_counter() {
         let metrics = Metrics::new();
-        let summary = DiscoverySummary {
-            targets_resolved: 1,
-            probe_attempts: 3,
-            probe_errors: 0,
-            records_emitted: 1,
-            cancelled: true,
-            elapsed: Duration::from_millis(50),
-        };
-        metrics.record_scan_completion(&summary);
+        let mut summary = summary_completed(3, 0, 1, Vec::new(), 50);
+        summary.cancelled = true;
+        metrics.record_scan_completion(&summary, "unnamed");
         assert_eq!(metrics.scans_total_cancelled.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.scans_total_success.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn metrics_record_scan_error_without_sink_error() {
+    fn metrics_record_scan_error_without_sink_class_records_scan_error_only() {
         let metrics = Metrics::new();
-        metrics.record_scan_error(Duration::from_millis(50), false);
+        metrics.record_scan_error(Duration::from_millis(50), None, "unnamed");
         assert_eq!(metrics.scans_total_error.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.sink_errors_total.load(Ordering::Relaxed), 0);
-        assert_eq!(metrics.scan_duration_seconds.snapshot().count, 1);
+        for class in SinkErrorClass::all() {
+            assert_eq!(
+                metrics.sink_errors[class.index()].load(Ordering::Relaxed),
+                0
+            );
+        }
+        assert_eq!(metrics.scan_duration.all.snapshot().count, 1);
     }
 
     #[test]
-    fn metrics_record_scan_error_with_sink_error_flag_increments_sink_counter() {
+    fn metrics_record_scan_error_with_sink_class_increments_class_counter() {
         let metrics = Metrics::new();
-        metrics.record_scan_error(Duration::from_millis(50), true);
+        metrics.record_scan_error(
+            Duration::from_millis(50),
+            Some(SinkErrorClass::PublishFailure),
+            "unnamed",
+        );
         assert_eq!(metrics.scans_total_error.load(Ordering::Relaxed), 1);
-        assert_eq!(metrics.sink_errors_total.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.sink_errors[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics.sink_errors[SinkErrorClass::AckRejection.index()].load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn metrics_record_dlq_delivery_credits_kafka_bucket_with_produce_failure() {
+        let metrics = Metrics::new();
+        let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
+        summary.dlq_records = 3;
+        summary.sink_type = Some(SinkType::Kafka);
+        metrics.record_scan_completion(&summary, "unnamed");
+        assert_eq!(
+            metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            metrics.dlq.nats[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn metrics_record_dlq_delivery_credits_nats_bucket_with_publish_failure() {
+        let metrics = Metrics::new();
+        let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
+        summary.dlq_records = 5;
+        summary.sink_type = Some(SinkType::Nats);
+        metrics.record_scan_completion(&summary, "unnamed");
+        assert_eq!(
+            metrics.dlq.nats[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
+            5
+        );
+    }
+
+    #[test]
+    fn metrics_config_default_uses_empty_allowlist_and_max_length_64() {
+        let cfg = MetricsConfig::default();
+        assert!(cfg.scenario_allowlist.is_empty());
+        assert_eq!(cfg.scenario_max_length, 64);
+    }
+
+    #[test]
+    fn metrics_scan_duration_routes_non_allowlisted_scenario_to_other() {
+        let metrics = Metrics::with_config(MetricsConfig {
+            scenario_allowlist: {
+                let mut s = HashSet::new();
+                s.insert("allowed".to_string());
+                s
+            },
+            scenario_max_length: 64,
+        });
+        metrics.record_scan_error(Duration::from_millis(50), None, "unlisted");
+        assert_eq!(metrics.scan_duration.other.snapshot().count, 1);
+        let guard = metrics.scan_duration.per_scenario.read().expect("lock");
+        assert_eq!(
+            guard.get("allowed").map(|s| s.snapshot().count),
+            Some(0),
+            "unlisted observation must not touch the allowlisted bucket"
+        );
+    }
+
+    #[test]
+    fn metrics_scan_duration_routes_allowlisted_scenario_to_named_bucket() {
+        let metrics = Metrics::with_config(MetricsConfig {
+            scenario_allowlist: {
+                let mut s = HashSet::new();
+                s.insert("prod".to_string());
+                s
+            },
+            scenario_max_length: 64,
+        });
+        metrics.record_scan_error(Duration::from_millis(50), None, "prod");
+        assert_eq!(metrics.scan_duration.all.snapshot().count, 1);
+        assert_eq!(metrics.scan_duration.other.snapshot().count, 0);
+        let guard = metrics.scan_duration.per_scenario.read().expect("lock");
+        assert_eq!(guard.get("prod").map(|s| s.snapshot().count), Some(1));
+    }
+
+    #[test]
+    fn metrics_scan_duration_truncates_scenario_name_to_max_length() {
+        let long_name = "a".repeat(200);
+        let truncated = &long_name[..5];
+        let metrics = Metrics::with_config(MetricsConfig {
+            scenario_allowlist: {
+                let mut s = HashSet::new();
+                s.insert(truncated.to_string());
+                s
+            },
+            scenario_max_length: 5,
+        });
+        metrics.record_scan_error(Duration::from_millis(50), None, &long_name);
+        let guard = metrics.scan_duration.per_scenario.read().expect("lock");
+        assert!(guard.contains_key(truncated));
+    }
+
+    #[test]
+    fn scenario_truncation_does_not_panic_on_multibyte_codepoint() {
+        let metrics = Metrics::with_config(MetricsConfig {
+            scenario_allowlist: HashSet::new(),
+            scenario_max_length: 5,
+        });
+        // Each CJK character is 3 bytes in UTF-8; `max_length=5` lands mid-codepoint.
+        metrics.record_scan_error(Duration::from_millis(50), None, "日本語日本語abcdef");
+        assert_eq!(metrics.scan_duration.other.snapshot().count, 1);
+    }
+
+    #[test]
+    fn observe_recovers_from_poisoned_per_scenario_lock() {
+        let metrics = Arc::new(Metrics::with_config(MetricsConfig {
+            scenario_allowlist: {
+                let mut s = HashSet::new();
+                s.insert("prod".to_string());
+                s
+            },
+            scenario_max_length: 64,
+        }));
+        let poisoner = Arc::clone(&metrics);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner
+                .scan_duration
+                .per_scenario
+                .write()
+                .expect("initial write lock");
+            panic!("intentional poison");
+        });
+        let _ = handle.join();
+        assert!(metrics.scan_duration.per_scenario.is_poisoned());
+        metrics.record_scan_error(Duration::from_millis(50), None, "prod");
+        assert_eq!(metrics.scan_duration.all.snapshot().count, 1);
+        let guard = metrics
+            .scan_duration
+            .per_scenario
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(guard.get("prod").map(|s| s.snapshot().count), Some(1));
+    }
+
+    #[test]
+    fn scenario_truncation_snaps_to_char_boundary_for_allowlist_match() {
+        let metrics = Metrics::with_config(MetricsConfig {
+            scenario_allowlist: {
+                let mut s = HashSet::new();
+                // 3 bytes: one CJK codepoint. `max_length=5` snaps down to 3.
+                s.insert("日".to_string());
+                s
+            },
+            scenario_max_length: 5,
+        });
+        metrics.record_scan_error(Duration::from_millis(50), None, "日本語");
+        let guard = metrics.scan_duration.per_scenario.read().expect("lock");
+        assert_eq!(guard.get("日").map(|s| s.snapshot().count), Some(1));
+    }
+
+    #[test]
+    fn metrics_config_from_env_default_when_unset() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST");
+            std::env::remove_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH");
+        }
+        let cfg = MetricsConfig::from_env().expect("from_env");
+        assert!(cfg.scenario_allowlist.is_empty());
+        assert_eq!(cfg.scenario_max_length, 64);
+    }
+
+    #[test]
+    fn metrics_config_from_env_parses_comma_separated_allowlist() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SCENARIO_LABEL_ALLOWLIST", "prod, staging ,lab , ,");
+            std::env::set_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH", "32");
+        }
+        let cfg = MetricsConfig::from_env().expect("from_env");
+        // SAFETY: same guard covers cleanup.
+        unsafe {
+            std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST");
+            std::env::remove_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH");
+        }
+        assert!(cfg.scenario_allowlist.contains("prod"));
+        assert!(cfg.scenario_allowlist.contains("staging"));
+        assert!(cfg.scenario_allowlist.contains("lab"));
+        assert_eq!(cfg.scenario_allowlist.len(), 3);
+        assert_eq!(cfg.scenario_max_length, 32);
+    }
+
+    #[test]
+    fn metrics_config_from_env_rejects_reserved_all_label() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SCENARIO_LABEL_ALLOWLIST", "prod,_all,lab");
+        }
+        let err = MetricsConfig::from_env().expect_err("must reject");
+        // SAFETY: same guard covers cleanup.
+        unsafe { std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST") };
+        let msg = err.to_string();
+        assert!(msg.contains("_all"), "msg was {msg}");
+        assert!(msg.contains("reserved"), "msg was {msg}");
+    }
+
+    #[test]
+    fn metrics_config_from_env_rejects_reserved_other_label() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SCENARIO_LABEL_ALLOWLIST", "other");
+        }
+        let err = MetricsConfig::from_env().expect_err("must reject");
+        // SAFETY: same guard covers cleanup.
+        unsafe { std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST") };
+        let msg = err.to_string();
+        assert!(msg.contains("other"), "msg was {msg}");
+        assert!(msg.contains("reserved"), "msg was {msg}");
+    }
+
+    #[test]
+    fn metrics_config_from_env_rejects_non_numeric_max_length() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH", "not-a-number");
+        }
+        let err = MetricsConfig::from_env().expect_err("must reject");
+        // SAFETY: same guard covers cleanup.
+        unsafe { std::env::remove_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH") };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("RASTREO_SCENARIO_LABEL_MAX_LENGTH"),
+            "msg: {msg}"
+        );
     }
 
     // Serialise env-var reads so parallel tests do not race each other.

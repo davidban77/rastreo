@@ -13,6 +13,7 @@ use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::Resource;
 use rastreo_core::observability::otlp_config::http_endpoint_for_signal;
+use rastreo_core::{ProbeKind, SinkErrorClass, SinkType};
 use tracing::Subscriber;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
@@ -138,12 +139,30 @@ fn register_instruments(metrics: &Arc<Metrics>) {
     let m = Arc::clone(metrics);
     let _ = meter
         .u64_observable_counter("rastreo_server_probes_total")
-        .with_description("Probes executed across all scans, partitioned by outcome.")
+        .with_description(
+            "Probes executed across all scans, partitioned by outcome and probe kind.",
+        )
         .with_callback(move |observer| {
-            let succeeded = m.probes_succeeded_total.load(Ordering::Relaxed);
-            let errored = m.probes_errored_total.load(Ordering::Relaxed);
-            observer.observe(succeeded, &[KeyValue::new("outcome", "success")]);
-            observer.observe(errored, &[KeyValue::new("outcome", "error")]);
+            for kind in ProbeKind::all() {
+                let idx = kind.index();
+                let label = kind.label();
+                let succeeded = m.probes.succeeded[idx].load(Ordering::Relaxed);
+                let errored = m.probes.errored[idx].load(Ordering::Relaxed);
+                observer.observe(
+                    succeeded,
+                    &[
+                        KeyValue::new("outcome", "success"),
+                        KeyValue::new("probe_kind", label),
+                    ],
+                );
+                observer.observe(
+                    errored,
+                    &[
+                        KeyValue::new("outcome", "error"),
+                        KeyValue::new("probe_kind", label),
+                    ],
+                );
+            }
         })
         .build();
 
@@ -159,9 +178,37 @@ fn register_instruments(metrics: &Arc<Metrics>) {
     let m = Arc::clone(metrics);
     let _ = meter
         .u64_observable_counter("rastreo_server_sink_errors_total")
-        .with_description("Internal sink errors surfaced via POST /scans.")
+        .with_description(
+            "Internal sink errors surfaced via POST /scans, partitioned by error class.",
+        )
         .with_callback(move |observer| {
-            observer.observe(m.sink_errors_total.load(Ordering::Relaxed), &[]);
+            for class in SinkErrorClass::all() {
+                let value = m.sink_errors[class.index()].load(Ordering::Relaxed);
+                observer.observe(value, &[KeyValue::new("error_class", class.as_label())]);
+            }
+        })
+        .build();
+
+    let m = Arc::clone(metrics);
+    let _ = meter
+        .u64_observable_counter("rastreo_server_dlq_records_total")
+        .with_description(
+            "Records delivered to a dead-letter destination, partitioned by sink type and error class.",
+        )
+        .with_callback(move |observer| {
+            let sinks = [(SinkType::Kafka, &m.dlq.kafka), (SinkType::Nats, &m.dlq.nats)];
+            for (sink, bucket) in sinks {
+                for class in SinkErrorClass::all() {
+                    let value = bucket[class.index()].load(Ordering::Relaxed);
+                    observer.observe(
+                        value,
+                        &[
+                            KeyValue::new("sink_type", sink.as_label()),
+                            KeyValue::new("error_class", class.as_label()),
+                        ],
+                    );
+                }
+            }
         })
         .build();
 

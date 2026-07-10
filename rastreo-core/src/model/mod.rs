@@ -8,6 +8,6 @@ pub use device::{
     AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, CURRENT_SCHEMA_ID,
     CURRENT_SCHEMA_VERSION,
 };
-pub use outcome::{ProbeCtx, ProbeKind, ProbeOutcome, Signal};
+pub use outcome::{ProbeCtx, ProbeKind, ProbeOutcome, Signal, PROBE_KIND_COUNT};
 pub use scan::ScanMetadata;
 pub use target::{ResolvedTarget, Target};

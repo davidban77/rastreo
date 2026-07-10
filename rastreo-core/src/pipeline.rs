@@ -8,26 +8,47 @@ use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, EncoderConfig};
 use crate::error::{ConfigError, RastreoError};
 use crate::fuser::{create_fuser, FuserConfig};
-use crate::model::{ProbeCtx, ProbeOutcome, ScanMetadata};
+use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ScanMetadata, PROBE_KIND_COUNT};
 use crate::prober::create_prober;
 use crate::resolver::{HickoryResolver, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler};
-use crate::sink::{create_sink, Sink, SinkConfig};
+use crate::sink::{create_sink, Sink, SinkConfig, SinkErrorClass, SinkType};
 
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CONCURRENCY: u32 = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
 pub struct DiscoverySummary {
     pub targets_resolved: usize,
     pub probe_attempts: usize,
     pub probe_errors: usize,
     pub records_emitted: usize,
+    /// Per-`ProbeKind` attempted / errored breakdown; empty when no probes ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes_by_kind: Vec<ProbeKindSummary>,
+    /// Records delivered to a DLQ destination during this scan.
+    #[serde(default)]
+    pub dlq_records: usize,
+    /// Concrete sink kind the scan wrote against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink_type: Option<SinkType>,
+    /// Sink error class when the scan terminated with a sink error; `None` when the scan completed or errored on a non-sink path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink_error_class: Option<SinkErrorClass>,
     /// True when the run terminated early via the cancellation token; counters reflect partial progress.
     #[serde(default)]
     pub cancelled: bool,
     #[serde(rename = "elapsed_ms", serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct ProbeKindSummary {
+    pub kind: ProbeKind,
+    pub attempted: usize,
+    pub errored: usize,
 }
 
 fn serialize_duration_as_millis<S: serde::Serializer>(
@@ -119,6 +140,11 @@ pub async fn run_discovery_with_components_cancellable(
     let mut probe_attempts: usize = 0;
     let mut probe_errors: usize = 0;
     let mut cancelled = false;
+    let mut attempts_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
+    let mut errors_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
+
+    let sink_type = sink.kind();
+    let dlq_before = sink.dlq_records_delivered();
 
     for prober_config in &scenario.probers {
         if *cancel.borrow_and_update() {
@@ -126,13 +152,16 @@ pub async fn run_discovery_with_components_cancellable(
             break;
         }
         let prober: Arc<dyn crate::prober::Prober> = Arc::from(create_prober(prober_config)?);
+        let prober_kind = prober.kind();
         let results = scheduler.run(prober, resolved.clone(), ctx.clone()).await;
         probe_attempts += results.len();
+        attempts_by_kind[prober_kind.index()] += results.len();
         for result in results {
             match result {
                 Ok(outcome) => all_outcomes.push(outcome),
                 Err(err) => {
                     probe_errors += 1;
+                    errors_by_kind[prober_kind.index()] += 1;
                     tracing::debug!(error = %err, "probe failed");
                 }
             }
@@ -172,6 +201,10 @@ pub async fn run_discovery_with_components_cancellable(
         tracing::info!(records_emitted, "discovery cancelled; sink flushed");
     }
 
+    let dlq_after = sink.dlq_records_delivered();
+    let dlq_records = dlq_after.saturating_sub(dlq_before) as usize;
+    let probes_by_kind = build_probes_by_kind(&attempts_by_kind, &errors_by_kind);
+
     if let Some(e) = emit_err {
         return Err(e);
     }
@@ -184,9 +217,32 @@ pub async fn run_discovery_with_components_cancellable(
         probe_attempts,
         probe_errors,
         records_emitted,
+        probes_by_kind,
+        dlq_records,
+        sink_type: Some(sink_type),
+        sink_error_class: None,
         cancelled,
         elapsed: start.elapsed(),
     })
+}
+
+fn build_probes_by_kind(
+    attempts: &[usize; PROBE_KIND_COUNT],
+    errors: &[usize; PROBE_KIND_COUNT],
+) -> Vec<ProbeKindSummary> {
+    let mut out = Vec::new();
+    for kind in ProbeKind::all() {
+        let idx = kind.index();
+        if attempts[idx] == 0 && errors[idx] == 0 {
+            continue;
+        }
+        out.push(ProbeKindSummary {
+            kind: *kind,
+            attempted: attempts[idx],
+            errored: errors[idx],
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -387,8 +443,8 @@ mod tests {
             probe_attempts: 2,
             probe_errors: 0,
             records_emitted: 1,
-            cancelled: false,
             elapsed: Duration::from_millis(142),
+            ..Default::default()
         };
         let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(json["elapsed_ms"], 142);
@@ -405,9 +461,50 @@ mod tests {
             records_emitted: 1,
             cancelled: true,
             elapsed: Duration::from_millis(7),
+            ..Default::default()
         };
         let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(json["cancelled"], true);
+    }
+
+    #[tokio::test]
+    async fn run_discovery_populates_probes_by_kind_and_sink_type() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+        Box::leak(Box::new(listener));
+
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("run_discovery_with_components");
+        assert_eq!(summary.sink_type, Some(crate::sink::SinkType::Memory));
+        assert_eq!(summary.dlq_records, 0);
+        assert!(summary.sink_error_class.is_none());
+        assert_eq!(summary.probes_by_kind.len(), 1);
+        assert_eq!(summary.probes_by_kind[0].kind, ProbeKind::TcpConnect);
+        assert_eq!(summary.probes_by_kind[0].attempted, 1);
+        assert_eq!(summary.probes_by_kind[0].errored, 0);
+    }
+
+    #[test]
+    fn discovery_summary_default_has_none_sink_type_and_empty_kind_breakdown() {
+        let summary = DiscoverySummary::default();
+        assert_eq!(summary.probes_by_kind.len(), 0);
+        assert_eq!(summary.dlq_records, 0);
+        assert!(summary.sink_type.is_none());
+        assert!(summary.sink_error_class.is_none());
     }
 
     #[tokio::test]

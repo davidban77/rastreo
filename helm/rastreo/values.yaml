@@ -33,6 +33,17 @@ readiness: {}
   # sinkErrorQuarantineSeconds: 30
   # scanErrorQuarantineSeconds: 30
 
+# Metric label cardinality guard for the `scenario` dimension on
+# `rastreo_server_scan_duration_seconds`. Any scenario name outside the
+# allow-list falls into the shared `other` bucket. Empty allow-list (default)
+# means every scan bucket into `_all` and `other` only — no per-scenario
+# breakdown. Add names one per line to opt those scenarios into a labeled
+# series; keep the list short (a handful at most) to bound Prometheus
+# cardinality.
+metrics:
+  scenarioAllowlist: []
+  scenarioMaxLength: 64
+
 # Log line format on stderr. `text` (default) is human-readable; `json` emits
 # one JSON object per line for Loki / ELK / Splunk ingestion. Leave null to
 # inherit the binary default (text); set to `text` or `json` to render

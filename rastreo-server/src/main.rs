@@ -7,7 +7,7 @@ use clap::Parser;
 use rastreo_core::{HickoryResolver, Resolver};
 use rastreo_server::{
     build_app_with_timeout,
-    state::{AppState, OtlpConfig, ReadinessConfig},
+    state::{AppState, MetricsConfig, OtlpConfig, ReadinessConfig},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -60,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
     let resolver: Arc<dyn Resolver> =
         Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
     let readiness = ReadinessConfig::from_env().context("failed to load readiness config")?;
-    let state = AppState::with_readiness(resolver, readiness);
+    let metrics_config = MetricsConfig::from_env().context("failed to load metrics config")?;
+    let state = AppState::with_config(resolver, readiness, metrics_config);
 
     // Guard must outlive the axum serve loop so pending OTLP exports flush on shutdown.
     let _otlp_guard = init_otlp(otlp_config.as_ref(), Arc::clone(&state.metrics))?;

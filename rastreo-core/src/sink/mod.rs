@@ -20,6 +20,111 @@ use schemars::JsonSchema;
 
 use crate::error::RastreoError;
 
+/// Bounded taxonomy of sink failure classes surfaced on `sink_errors_total` and `dlq_records_total`.
+///
+/// The classifier maps `io::Error` messages produced by concrete sinks to one of these
+/// variants. Variants are `#[non_exhaustive]` so future sinks can add classes without
+/// breaking downstream exhaustive matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, JsonSchema)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum SinkErrorClass {
+    PublishFailure,
+    AckRejection,
+    ProduceFailure,
+    WriteFailure,
+    FlushFailure,
+    Other,
+}
+
+/// Number of `SinkErrorClass` variants — indexes fixed-size counter arrays without heap allocation.
+pub const SINK_ERROR_CLASS_COUNT: usize = 6;
+
+impl SinkErrorClass {
+    /// Every variant in a stable, deterministic order — used for iterating fixed-size counter arrays.
+    pub const fn all() -> &'static [SinkErrorClass; SINK_ERROR_CLASS_COUNT] {
+        &[
+            SinkErrorClass::PublishFailure,
+            SinkErrorClass::AckRejection,
+            SinkErrorClass::ProduceFailure,
+            SinkErrorClass::WriteFailure,
+            SinkErrorClass::FlushFailure,
+            SinkErrorClass::Other,
+        ]
+    }
+
+    /// Stable index for use in fixed-size `[T; SINK_ERROR_CLASS_COUNT]` arrays.
+    pub const fn index(self) -> usize {
+        match self {
+            SinkErrorClass::PublishFailure => 0,
+            SinkErrorClass::AckRejection => 1,
+            SinkErrorClass::ProduceFailure => 2,
+            SinkErrorClass::WriteFailure => 3,
+            SinkErrorClass::FlushFailure => 4,
+            SinkErrorClass::Other => 5,
+        }
+    }
+
+    /// snake_case wire label used in `/metrics` and OTLP attribute values.
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            SinkErrorClass::PublishFailure => "publish_failure",
+            SinkErrorClass::AckRejection => "ack_rejection",
+            SinkErrorClass::ProduceFailure => "produce_failure",
+            SinkErrorClass::WriteFailure => "write_failure",
+            SinkErrorClass::FlushFailure => "flush_failure",
+            SinkErrorClass::Other => "other",
+        }
+    }
+}
+
+/// Concrete sink kind — surfaced on `dlq_records_total{sink_type}` and set on `DiscoverySummary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, JsonSchema)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum SinkType {
+    Stdout,
+    File,
+    Memory,
+    Kafka,
+    Nats,
+}
+
+impl SinkType {
+    /// snake_case wire label used in `/metrics` and OTLP attribute values.
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            SinkType::Stdout => "stdout",
+            SinkType::File => "file",
+            SinkType::Memory => "memory",
+            SinkType::Kafka => "kafka",
+            SinkType::Nats => "nats",
+        }
+    }
+}
+
+/// Map a sink-produced `io::Error` to a bounded `SinkErrorClass` for metric labelling.
+///
+/// The mapping keys off message prefixes that concrete sinks emit — the classifier is
+/// intentionally structural (string-based) because the underlying error types differ
+/// across sinks and stringifying is already the shared surface via `io::Error`.
+pub fn classify_sink_error(err: &std::io::Error) -> SinkErrorClass {
+    let msg = err.to_string();
+    if msg.contains("was not acked") {
+        SinkErrorClass::AckRejection
+    } else if msg.contains("failed to publish") {
+        SinkErrorClass::PublishFailure
+    } else if msg.contains("failed to produce") {
+        SinkErrorClass::ProduceFailure
+    } else if msg.contains("failed to flush") {
+        SinkErrorClass::FlushFailure
+    } else if msg.contains("failed to write") {
+        SinkErrorClass::WriteFailure
+    } else {
+        SinkErrorClass::Other
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Sink: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError>;
@@ -29,6 +134,20 @@ pub trait Sink: Send + Sync {
     // Default: every write is delivered. Batching sinks override to reflect buffered state.
     fn last_write_delivered(&self) -> bool {
         true
+    }
+
+    /// Concrete sink kind; overridden by every built-in implementation.
+    fn kind(&self) -> SinkType {
+        SinkType::Memory
+    }
+
+    /// Cumulative count of records delivered to a dead-letter destination.
+    ///
+    /// Default is `0`; sinks with DLQ support increment the counter only when a
+    /// record is successfully accepted by the DLQ (publish AND ack when applicable).
+    /// Failures to DLQ do not count.
+    fn dlq_records_delivered(&self) -> u64 {
+        0
     }
 }
 
@@ -132,6 +251,94 @@ mod tests {
     fn default_last_write_delivered_is_true() {
         let s: Box<dyn Sink> = Box::new(MockSink { buffer: Vec::new() });
         assert!(s.last_write_delivered());
+    }
+
+    #[test]
+    fn default_dlq_records_delivered_is_zero() {
+        let s: Box<dyn Sink> = Box::new(MockSink { buffer: Vec::new() });
+        assert_eq!(s.dlq_records_delivered(), 0);
+    }
+
+    #[test]
+    fn sink_error_class_all_and_indices_are_dense() {
+        let all = SinkErrorClass::all();
+        assert_eq!(all.len(), SINK_ERROR_CLASS_COUNT);
+        for (i, class) in all.iter().enumerate() {
+            assert_eq!(class.index(), i);
+        }
+    }
+
+    #[test]
+    fn sink_error_class_labels_are_unique_snake_case() {
+        let mut labels: Vec<&str> = SinkErrorClass::all().iter().map(|c| c.as_label()).collect();
+        labels.sort();
+        for pair in labels.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+        for label in labels {
+            assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        }
+    }
+
+    #[test]
+    fn sink_type_labels_match_snake_case_variant_names() {
+        assert_eq!(SinkType::Stdout.as_label(), "stdout");
+        assert_eq!(SinkType::File.as_label(), "file");
+        assert_eq!(SinkType::Memory.as_label(), "memory");
+        assert_eq!(SinkType::Kafka.as_label(), "kafka");
+        assert_eq!(SinkType::Nats.as_label(), "nats");
+    }
+
+    #[test]
+    fn classify_produce_failure_matches_kafka_produce_message() {
+        let io_err = std::io::Error::other(
+            "kafka sink: failed to produce record to topic 't' at broker(s) 'b:9092': boom",
+        );
+        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::ProduceFailure);
+    }
+
+    #[test]
+    fn classify_publish_failure_matches_nats_publish_message() {
+        let io_err = std::io::Error::other(
+            "nats sink: failed to publish to subject 'x' at server(s) 'n:4222': boom",
+        );
+        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::PublishFailure);
+    }
+
+    #[test]
+    fn classify_ack_rejection_matches_nats_ack_message() {
+        let io_err = std::io::Error::other(
+            "nats sink: publish to subject 'x' at server(s) 'n:4222' was not acked: rejected",
+        );
+        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::AckRejection);
+    }
+
+    #[test]
+    fn classify_other_falls_through_for_unknown_message() {
+        let io_err = std::io::Error::other("some unrelated io failure");
+        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::Other);
+    }
+
+    #[tokio::test]
+    async fn stdout_sink_reports_kind_stdout() {
+        let sink: Box<dyn Sink> = create_sink(&SinkConfig::Stdout).await.expect("create");
+        assert_eq!(sink.kind(), SinkType::Stdout);
+    }
+
+    #[tokio::test]
+    async fn memory_sink_reports_kind_memory() {
+        let sink: Box<dyn Sink> = create_sink(&SinkConfig::Memory).await.expect("create");
+        assert_eq!(sink.kind(), SinkType::Memory);
+    }
+
+    #[tokio::test]
+    async fn file_sink_reports_kind_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("kind.ndjson");
+        let sink: Box<dyn Sink> = create_sink(&SinkConfig::File { path })
+            .await
+            .expect("create");
+        assert_eq!(sink.kind(), SinkType::File);
     }
 
     #[test]
