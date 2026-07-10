@@ -1,18 +1,10 @@
 //! OpenTelemetry OTLP exporter wiring for the `rastreo` CLI.
 
-/// OTLP transport protocol selected at startup via `RASTREO_OTLP_PROTOCOL`.
 #[cfg(feature = "otlp")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum OtlpProtocol {
-    /// gRPC via tonic. Default. Endpoint is a URL like `http://collector:4317`.
-    #[default]
-    Grpc,
-    /// HTTP+protobuf via reqwest. Endpoint is a base URL like `http://collector:4318`;
-    /// rastreo appends `/v1/logs` per signal. Pass a fully-qualified URL
-    /// (`http://collector:4318/v1/logs`) when your collector is on a non-standard route.
-    HttpProtobuf,
-}
+pub use rastreo_core::observability::otlp_config::OtlpProtocol;
+
+#[cfg(feature = "otlp")]
+use rastreo_core::observability::otlp_config::{parse_env_bool, parse_env_protocol};
 
 /// OpenTelemetry OTLP exporter configuration read from `RASTREO_OTLP_*` environment variables.
 ///
@@ -84,64 +76,14 @@ impl OtlpConfig {
 }
 
 #[cfg(feature = "otlp")]
-fn parse_env_protocol(name: &str, default: OtlpProtocol) -> anyhow::Result<OtlpProtocol> {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "grpc" => Ok(OtlpProtocol::Grpc),
-            "http-protobuf" | "http" => Ok(OtlpProtocol::HttpProtobuf),
-            other => Err(anyhow::anyhow!(
-                "invalid value for {name}: {other:?} is not a supported OTLP protocol \
-                 (expected `grpc`, `http-protobuf`, or `http`)"
-            )),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
-        }
-    }
-}
-
-#[cfg(feature = "otlp")]
-fn parse_env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Ok(true),
-            "false" | "0" | "no" | "off" => Ok(false),
-            _ => Err(anyhow::anyhow!(
-                "invalid value for {name}: {raw:?} is not a boolean (expected true/false)"
-            )),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
-        }
-    }
-}
-
-/// Append the OTLP HTTP signal path to a bare endpoint. The opentelemetry-otlp SDK
-/// applies signal-path defaults only on the `OTEL_EXPORTER_OTLP_ENDPOINT` env-var
-/// fallback path; the programmatic `.with_endpoint()` builder uses the URL verbatim,
-/// so users setting `RASTREO_OTLP_ENDPOINT=http://collector:4318` on HTTP+protobuf
-/// would POST to `/` and get 404s. We do the append here so the same endpoint value
-/// works for logs (CLI) and for both logs and metrics (server).
-#[cfg(feature = "otlp")]
-fn http_endpoint_for_signal(base: &str, signal_path: &str) -> String {
-    let trimmed = base.trim_end_matches('/');
-    if trimmed.ends_with(signal_path) {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}{signal_path}")
-    }
-}
-
-#[cfg(feature = "otlp")]
 mod otlp_runtime {
-    use super::{http_endpoint_for_signal, OtlpConfig, OtlpProtocol};
+    use super::{OtlpConfig, OtlpProtocol};
     use anyhow::Context;
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::logs::SdkLoggerProvider;
     use opentelemetry_sdk::Resource;
+    use rastreo_core::observability::otlp_config::http_endpoint_for_signal;
     use tracing::Subscriber;
     use tracing_subscriber::registry::LookupSpan;
     use tracing_subscriber::Layer;
@@ -182,6 +124,7 @@ mod otlp_runtime {
                 .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/logs"))
                 .build()
                 .context("failed to build OTLP HTTP+protobuf log exporter")?,
+            _ => anyhow::bail!("unsupported OTLP protocol variant: {:?}", config.protocol),
         };
         let resource = Resource::builder()
             .with_service_name(config.service_name.clone())

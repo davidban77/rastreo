@@ -12,26 +12,12 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::Resource;
+use rastreo_core::observability::otlp_config::http_endpoint_for_signal;
 use tracing::Subscriber;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use crate::state::{Metrics, OtlpConfig, OtlpProtocol};
-
-/// Append the OTLP HTTP signal path to a bare endpoint. The opentelemetry-otlp SDK
-/// applies signal-path defaults only on the `OTEL_EXPORTER_OTLP_ENDPOINT` env-var
-/// fallback path; the programmatic `.with_endpoint()` builder uses the URL verbatim,
-/// so users setting `RASTREO_OTLP_ENDPOINT=http://collector:4318` on HTTP+protobuf
-/// would POST to `/` and get 404s. We do the append here so a single endpoint value
-/// works for both logs and metrics from the same config.
-fn http_endpoint_for_signal(base: &str, signal_path: &str) -> String {
-    let trimmed = base.trim_end_matches('/');
-    if trimmed.ends_with(signal_path) {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}{signal_path}")
-    }
-}
 
 /// RAII guard that shuts down the OTLP providers on drop so pending exports flush before exit.
 #[non_exhaustive]
@@ -80,6 +66,7 @@ where
             .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/logs"))
             .build()
             .context("failed to build OTLP HTTP+protobuf log exporter")?,
+        _ => anyhow::bail!("unsupported OTLP protocol variant: {:?}", config.protocol),
     };
     let resource = Resource::builder()
         .with_service_name(config.service_name.clone())
@@ -108,6 +95,7 @@ pub fn init_metrics(
             .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/metrics"))
             .build()
             .context("failed to build OTLP HTTP+protobuf metric exporter")?,
+        _ => anyhow::bail!("unsupported OTLP protocol variant: {:?}", config.protocol),
     };
     let reader = PeriodicReader::builder(exporter)
         .with_interval(config.metrics_interval)
@@ -221,41 +209,4 @@ pub fn init_metrics_only(config: &OtlpConfig, metrics: Arc<Metrics>) -> anyhow::
 /// Attach an already-built `SdkLoggerProvider` to the guard so it shuts down with metrics.
 pub fn attach_logger(guard: &mut OtlpGuard, logger: SdkLoggerProvider) {
     guard.logger = Some(logger);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::http_endpoint_for_signal;
-
-    #[test]
-    fn http_endpoint_appends_signal_path_to_bare_url() {
-        assert_eq!(
-            http_endpoint_for_signal("http://collector:4318", "/v1/logs"),
-            "http://collector:4318/v1/logs"
-        );
-        assert_eq!(
-            http_endpoint_for_signal("http://collector:4318", "/v1/metrics"),
-            "http://collector:4318/v1/metrics"
-        );
-    }
-
-    #[test]
-    fn http_endpoint_strips_trailing_slash_before_appending() {
-        assert_eq!(
-            http_endpoint_for_signal("http://collector:4318/", "/v1/logs"),
-            "http://collector:4318/v1/logs"
-        );
-    }
-
-    #[test]
-    fn http_endpoint_preserves_already_qualified_url() {
-        assert_eq!(
-            http_endpoint_for_signal("http://collector:4318/v1/logs", "/v1/logs"),
-            "http://collector:4318/v1/logs"
-        );
-        assert_eq!(
-            http_endpoint_for_signal("http://collector:4318/v1/logs/", "/v1/logs"),
-            "http://collector:4318/v1/logs"
-        );
-    }
 }

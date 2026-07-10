@@ -4,6 +4,7 @@ pub mod encoder;
 pub mod error;
 pub mod fuser;
 pub mod model;
+pub mod observability;
 pub mod pipeline;
 pub mod prober;
 pub mod resolver;

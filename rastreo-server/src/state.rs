@@ -2,12 +2,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rastreo_core::observability::otlp_config::parse_env_u64;
 use rastreo_core::{DiscoverySummary, Resolver};
 
 #[cfg(feature = "otlp")]
+pub use rastreo_core::observability::otlp_config::OtlpProtocol;
+#[cfg(feature = "otlp")]
+use rastreo_core::observability::otlp_config::{parse_env_bool, parse_env_protocol};
+#[cfg(feature = "otlp")]
 use std::sync::OnceLock;
 
-pub struct HistogramShard {
+pub(crate) struct HistogramShard {
     pub buckets: [AtomicU64; 11],
     pub plus_inf: AtomicU64,
     pub sum_bits: AtomicU64,
@@ -79,7 +84,7 @@ impl Default for HistogramShard {
     }
 }
 
-pub struct HistogramSnapshot {
+pub(crate) struct HistogramSnapshot {
     pub buckets: [u64; 11],
     pub plus_inf: u64,
     pub sum: f64,
@@ -96,7 +101,7 @@ pub struct Metrics {
     pub probes_succeeded_total: AtomicU64,
     pub records_emitted_total: AtomicU64,
     pub sink_errors_total: AtomicU64,
-    pub scan_duration_seconds: HistogramShard,
+    pub(crate) scan_duration_seconds: HistogramShard,
     #[cfg(feature = "otlp")]
     otlp_scan_duration: OnceLock<opentelemetry::metrics::Histogram<f64>>,
 }
@@ -213,21 +218,6 @@ impl ReadinessConfig {
     }
 }
 
-/// OTLP transport protocol selected at startup via `RASTREO_OTLP_PROTOCOL`.
-#[cfg(feature = "otlp")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum OtlpProtocol {
-    /// gRPC via tonic. Default. Endpoint is a URL like `http://collector:4317`.
-    #[default]
-    Grpc,
-    /// HTTP+protobuf via reqwest. Endpoint is a base URL like `http://collector:4318`;
-    /// rastreo appends `/v1/metrics` and `/v1/logs` per signal so one endpoint value works
-    /// for both. Pass a fully-qualified URL (`http://collector:4318/v1/logs`) when your
-    /// collector is on a non-standard route.
-    HttpProtobuf,
-}
-
 /// OpenTelemetry OTLP exporter configuration read from `RASTREO_OTLP_*` environment variables.
 #[cfg(feature = "otlp")]
 #[derive(Debug, Clone)]
@@ -290,55 +280,6 @@ pub struct OtlpConfig;
 impl OtlpConfig {
     pub fn from_env() -> anyhow::Result<Option<Self>> {
         Ok(None)
-    }
-}
-
-#[cfg(feature = "otlp")]
-fn parse_env_protocol(name: &str, default: OtlpProtocol) -> anyhow::Result<OtlpProtocol> {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "grpc" => Ok(OtlpProtocol::Grpc),
-            "http-protobuf" | "http" => Ok(OtlpProtocol::HttpProtobuf),
-            other => Err(anyhow::anyhow!(
-                "invalid value for {name}: {other:?} is not a supported OTLP protocol \
-                 (expected `grpc`, `http-protobuf`, or `http`)"
-            )),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
-        }
-    }
-}
-
-#[cfg(feature = "otlp")]
-fn parse_env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Ok(true),
-            "false" | "0" | "no" | "off" => Ok(false),
-            _ => Err(anyhow::anyhow!(
-                "invalid value for {name}: {raw:?} is not a boolean (expected true/false)"
-            )),
-        },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
-        }
-    }
-}
-
-fn parse_env_u64(name: &str, default: u64) -> anyhow::Result<u64> {
-    match std::env::var(name) {
-        Ok(raw) => raw.parse::<u64>().map_err(|err| {
-            anyhow::anyhow!(
-                "invalid value for {name}: {raw:?} is not a non-negative integer ({err})"
-            )
-        }),
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
-        }
     }
 }
 

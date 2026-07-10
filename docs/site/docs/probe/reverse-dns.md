@@ -45,6 +45,18 @@ When more than one resolver is configured, the prober queries them in the listed
 
 Resolver-list validation runs at scenario load. An invalid IP is rejected during config parsing. A resolver that fails to initialize (rare — usually a malformed `/etc/resolv.conf`) surfaces as a scenario-config error.
 
+### Distroless / minimal container images
+
+Distroless (`FROM scratch`) and other minimal container images do not ship `/etc/resolv.conf`. Building the system resolver on those images fails at startup with a clear pointer: set the `resolvers` field to a non-empty list of IP addresses so the prober bypasses the system configuration and queries the listed resolvers directly. The default `ghcr.io/davidban77/rastreo` image is `FROM scratch`, so any scenario that uses the reverse DNS prober on that image must set `resolvers` explicitly:
+
+```yaml
+probers:
+  - type: reverse_dns
+    resolvers:
+      - 1.1.1.1
+      - 8.8.8.8
+```
+
 ## Build feature
 
 The reverse DNS prober is always available — no build feature is required. It is present in every build of `rastreo-core`, including builds with `--no-default-features`.

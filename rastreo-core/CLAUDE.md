@@ -48,6 +48,9 @@ src/
 │   ├── mod.rs           ← Classifier trait + ClassifierConfig + create_classifier factory + NoopClassifier / RulesClassifier
 │   ├── platform_rules.rs ← Baked-in default PlatformRule table
 │   └── role_rules.rs    ← Baked-in default RoleRule table
+├── observability/
+│   ├── mod.rs           ← module root
+│   └── otlp_config.rs   ← OtlpProtocol enum + shared env-var parsers (parse_env_bool / parse_env_u64 / parse_env_protocol) + http_endpoint_for_signal; consumed by rastreo and rastreo-server. No OpenTelemetry deps — pure types + string parsing.
 ├── pipeline.rs     ← run_discovery + DiscoverySummary
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
