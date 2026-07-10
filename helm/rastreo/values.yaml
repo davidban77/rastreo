@@ -106,6 +106,21 @@ podDisruptionBudget:
   minAvailable: 1
   # maxUnavailable: 1
 
+# PrometheusRule alerts for rastreo-server.
+# Requires the Prometheus Operator CRD `monitoring.coreos.com/v1` in the cluster.
+# Off by default — enable when your monitoring stack is ready to page on rastreo.
+alerts:
+  # Deploy the PrometheusRule resource.
+  enabled: false
+  # Extra labels merged onto the PrometheusRule metadata.
+  # Prometheus Operator's ruleSelector typically matches on a `release` or
+  # `role: alert-rules` label; add whatever your Operator selects here.
+  additionalLabels: {}
+  # Threshold for the RastreoBuildOld alert: number of seconds a single pod may
+  # have been running the same build before we page.
+  # Default 30 days = 2592000 seconds.
+  buildAgeThresholdSeconds: 2592000
+
 # Ingress configuration.
 ingress:
   enabled: false
@@ -125,6 +140,18 @@ serviceMonitor:
   scrapeTimeout: 10s
   path: "/metrics"
   additionalLabels: {}
+
+# Grafana dashboard delivery.
+# Deploys a labeled ConfigMap the Grafana sidecar auto-discovers.
+grafana:
+  # Deploy the dashboard ConfigMap.
+  dashboardsEnabled: false
+  # Label the ConfigMap so the Grafana sidecar picks it up.
+  # Default matches the Grafana chart's convention (`grafana_dashboard: "1"`);
+  # override if your Grafana chart uses a different sidecar label.
+  dashboardLabel:
+    name: grafana_dashboard
+    value: "1"
 
 # Node selector for pod scheduling.
 nodeSelector: {}

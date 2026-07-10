@@ -1,0 +1,74 @@
+{{- if .Values.alerts.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "rastreo.fullname" . }}
+  labels:
+    {{- include "rastreo.labels" . | nindent 4 }}
+    {{- with .Values.alerts.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: rastreo.rules
+      interval: 60s
+      rules:
+        - alert: RastreoScanFailureRate
+          expr: |
+            (
+              sum(rate(rastreo_server_probes_total{outcome="error"}[10m]))
+              /
+              clamp_min(sum(rate(rastreo_server_probes_total[10m])), 1)
+            ) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "rastreo-server probe error rate exceeds 50% over 10 minutes"
+            description: |
+              Probe error ratio has stayed above 50% for the last 10 minutes on
+              {{ `{{ $labels.instance }}` }}. Investigate target reachability or
+              scenario configuration before continuing.
+
+        - alert: RastreoSinkErrorSpike
+          expr: rate(rastreo_server_sink_errors_total[5m]) > (1 / 60)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "rastreo-server sink error rate is above 1 per minute"
+            description: |
+              Sink error rate exceeds 1 per minute for 5+ consecutive minutes on
+              {{ `{{ $labels.instance }}` }}. Check the sink configuration and
+              downstream broker / topic availability. If DLQ is configured, DLQ
+              traffic may also be elevated.
+
+        - alert: RastreoNoRecordsEmitted10min
+          expr: |
+            (increase(rastreo_server_records_emitted_total[10m]) == 0)
+            and
+            (sum without (outcome) (rate(rastreo_server_scans_total[10m])) > 0)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "rastreo-server has not emitted records for 10 minutes despite active scans"
+            description: |
+              No records have been emitted in the last 10 minutes on
+              {{ `{{ $labels.instance }}` }}, yet scans are still running.
+              This suggests probes are failing to observe live devices or the
+              sink is silently swallowing records.
+
+        - alert: RastreoBuildOld
+          expr: |
+            rastreo_server_uptime_seconds > {{ int .Values.alerts.buildAgeThresholdSeconds }}
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: "rastreo-server is running an old build"
+            description: |
+              rastreo-server has been running the same build for more than the
+              configured age threshold. Version: {{ `{{ $labels.version }}` }}.
+              Consider upgrading to pick up recent fixes and features.
+{{- end }}
