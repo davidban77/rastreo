@@ -42,6 +42,8 @@ The most useful `values.yaml` knobs are:
 | `podDisruptionBudget.enabled`    | `false`                       | Create a PDB with `minAvailable: 1`.                      |
 | `ingress.enabled`                | `false`                       | Create an `Ingress` for the service.                      |
 | `serviceMonitor.enabled`         | `false`                       | Create a Prometheus Operator `ServiceMonitor` that scrapes `/metrics`. |
+| `alerts.enabled`                 | `false`                       | Create a Prometheus Operator `PrometheusRule` with four packaged alerts. See [Observability · Alerts](../reference/observability.md#alerts). |
+| `grafana.dashboardsEnabled`      | `false`                       | Deploy the bundled Grafana dashboard as a labeled `ConfigMap` for sidecar auto-discovery. See [Observability · Grafana dashboard](../reference/observability.md#grafana-dashboard). |
 | `podSecurity.netRaw`             | `false`                       | Add `NET_RAW` to the container capabilities. Required for the ARP and NDP probers. See [`podSecurity.netRaw`](#podsecuritynetraw-arp-and-ndp-probers). |
 | `logFormat`                      | unset (binary default `text`) | Log line format on stderr. Set to `json` for Loki / ELK / Splunk ingestion; renders `RASTREO_LOG_FORMAT` on the pod. See [Logging](../reference/logging.md). |
 | `config`                         | `{}`                          | Inline YAML mounted at `/etc/rastreo` as a `ConfigMap`.   |
@@ -84,7 +86,7 @@ serviceMonitor:
   path: "/metrics"
 ```
 
-All metric names use the `rastreo_server_` prefix. See [rastreo-server · GET /metrics](server.md#get-metrics) for the per-metric table.
+All metric names use the `rastreo_server_` prefix. See [rastreo-server · GET /metrics](server.md#get-metrics) for the per-metric table, and [Observability](../reference/observability.md) for the bundled Grafana dashboard and `PrometheusRule` alerts.
 
 ## `podSecurity.netRaw` — ARP and NDP probers
 
@@ -127,4 +129,5 @@ The chart renders `RASTREO_LOG_FORMAT=json` on the container's env. Leave the ke
 
 - [Docker](docker.md) — the image the chart deploys.
 - [rastreo-server](server.md) — the HTTP API the pods expose.
+- [Observability](../reference/observability.md) — Grafana dashboard and PrometheusRule alerts shipped by the chart.
 - [Logging](../reference/logging.md) — log format and aggregator ingestion examples.
