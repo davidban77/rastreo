@@ -18,7 +18,7 @@ use tracing::Subscriber;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-use crate::state::{Metrics, OtlpConfig, OtlpProtocol};
+use crate::state::{Metrics, OtlpConfig, OtlpProtocol, SinkReachability};
 
 /// RAII guard that shuts down the OTLP providers on drop so pending exports flush before exit.
 #[non_exhaustive]
@@ -84,6 +84,7 @@ where
 pub fn init_metrics(
     config: &OtlpConfig,
     metrics: Arc<Metrics>,
+    sink_reachability: Arc<SinkReachability>,
 ) -> anyhow::Result<SdkMeterProvider> {
     let exporter = match config.protocol {
         OtlpProtocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
@@ -110,6 +111,7 @@ pub fn init_metrics(
         .build();
     global::set_meter_provider(provider.clone());
     register_instruments(&metrics);
+    register_sink_reachability_instruments(&metrics, &sink_reachability);
     Ok(provider)
 }
 
@@ -244,11 +246,63 @@ fn register_instruments(metrics: &Arc<Metrics>) {
     }
 }
 
+fn register_sink_reachability_instruments(
+    metrics: &Arc<Metrics>,
+    reachability: &Arc<SinkReachability>,
+) {
+    let Some(sink_label) = reachability.sink_type_label() else {
+        return;
+    };
+    let meter = global::meter("rastreo-server");
+
+    let m = Arc::clone(metrics);
+    let _ = meter
+        .u64_observable_counter("rastreo_server_sink_reachability_probe_total")
+        .with_description(
+            "Server-side sink reachability probes, partitioned by outcome and sink type.",
+        )
+        .with_callback(move |observer| {
+            observer.observe(
+                m.sink_probe_success.load(Ordering::Relaxed),
+                &[
+                    KeyValue::new("outcome", "success"),
+                    KeyValue::new("sink_type", sink_label),
+                ],
+            );
+            observer.observe(
+                m.sink_probe_failure.load(Ordering::Relaxed),
+                &[
+                    KeyValue::new("outcome", "failure"),
+                    KeyValue::new("sink_type", sink_label),
+                ],
+            );
+        })
+        .build();
+
+    let r = Arc::clone(reachability);
+    let _ = meter
+        .u64_observable_gauge("rastreo_server_sink_reachable")
+        .with_description("1 when the last sink probe succeeded, 0 otherwise.")
+        .with_callback(move |observer| {
+            let value: u64 = if r.reachable.load(Ordering::Relaxed) {
+                1
+            } else {
+                0
+            };
+            observer.observe(value, &[KeyValue::new("sink_type", sink_label)]);
+        })
+        .build();
+}
+
 /// Build the metrics exporter when enabled, returning the RAII shutdown guard.
-pub fn init_metrics_only(config: &OtlpConfig, metrics: Arc<Metrics>) -> anyhow::Result<OtlpGuard> {
+pub fn init_metrics_only(
+    config: &OtlpConfig,
+    metrics: Arc<Metrics>,
+    sink_reachability: Arc<SinkReachability>,
+) -> anyhow::Result<OtlpGuard> {
     let mut guard = OtlpGuard::empty();
     if config.metrics_enabled {
-        guard.meter = Some(init_metrics(config, metrics)?);
+        guard.meter = Some(init_metrics(config, metrics, sink_reachability)?);
     }
     Ok(guard)
 }

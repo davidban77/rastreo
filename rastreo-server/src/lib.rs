@@ -2,6 +2,7 @@ pub mod error;
 #[cfg(feature = "otlp")]
 pub mod observability;
 pub mod routes;
+pub mod sink_probe;
 pub mod state;
 
 use std::time::Duration;
@@ -13,6 +14,8 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
+
+pub use sink_probe::spawn_sink_probe;
 
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 

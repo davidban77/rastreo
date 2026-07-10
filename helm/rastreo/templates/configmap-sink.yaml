@@ -1,0 +1,11 @@
+{{- if and .Values.sink .Values.sink.config (gt (len .Values.sink.config) 0) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rastreo.fullname" . }}-sink
+  labels:
+    {{- include "rastreo.labels" . | nindent 4 }}
+data:
+  sink.yaml: |
+    {{- toYaml .Values.sink.config | nindent 4 }}
+{{- end }}

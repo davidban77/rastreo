@@ -33,6 +33,29 @@ readiness: {}
   # sinkErrorQuarantineSeconds: 30
   # scanErrorQuarantineSeconds: 30
 
+# Server-side sink reachability probe. When `sink.config` is set the chart
+# renders a ConfigMap containing the YAML, mounts it at /etc/rastreo/sink.yaml,
+# and the server periodically probes the resulting sink. `/readyz` reports the
+# cached result on `sink_reachable` and gates on `sink_unreachable`; `/metrics`
+# exposes `rastreo_server_sink_reachable{sink_type}` and
+# `rastreo_server_sink_reachability_probe_total{outcome,sink_type}`. Leave
+# `sink.config` empty (default) to run without a server-configured sink — the
+# reachability axis reports null and does not gate `/readyz`.
+sink:
+  # SinkConfig YAML — mirrors the shape of the `sink:` field in a scenario file.
+  # Example:
+  #   sink:
+  #     config:
+  #       type: kafka
+  #       brokers: ["kafka.observability.svc:9092"]
+  #       topic: rastreo.discovery.records.v1
+  config: {}
+  # Probe cadence in seconds. Clamped to a minimum of 1s.
+  probeIntervalSeconds: 10
+  # Per-probe timeout in seconds. Elapsed probes count as failure. Clamped to a
+  # minimum of 1s.
+  probeTimeoutSeconds: 5
+
 # Metric label cardinality guard for the `scenario` dimension on
 # `rastreo_server_scan_duration_seconds`. Any scenario name outside the
 # allow-list falls into the shared `other` bucket. Empty allow-list (default)

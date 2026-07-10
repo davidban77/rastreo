@@ -29,6 +29,9 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 | `--port`                | `RASTREO_SERVER_PORT`                  | `8080`  | TCP port to bind.                                      |
 | `--bind`                | `RASTREO_SERVER_BIND`                  | `0.0.0.0` | Bind address.                                        |
 | `--request-timeout-ms`  | `RASTREO_SERVER_REQUEST_TIMEOUT_MS`    | `60000` | Per-request timeout in milliseconds. Minimum 1.        |
+| —                       | `RASTREO_SINK_CONFIG_PATH`             | unset   | Path to a YAML file with a `SinkConfig`. When set, the server builds the sink at startup and probes it every `RASTREO_SINK_PROBE_INTERVAL_SECS`. Sink construction failure is non-fatal — the pod stays up, `/readyz` reports `sink_unreachable`. |
+| —                       | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`    | Sink reachability probe cadence in seconds. Minimum 1. |
+| —                       | `RASTREO_SINK_PROBE_TIMEOUT_SECS`      | `5`     | Per-probe timeout in seconds. Probes exceeding this count as failures. Minimum 1. |
 
 The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
 
@@ -56,11 +59,35 @@ curl -sS http://localhost:8080/readyz
   "inflight_scans": 0,
   "max_inflight_scans": 100,
   "seconds_since_sink_error": null,
-  "seconds_since_scan_error": null
+  "seconds_since_scan_error": null,
+  "sink_reachable": null,
+  "sink_type": null,
+  "seconds_since_last_probe": null,
+  "last_probe_error": null
 }
 ```
 
-The gates and the `reason` values are documented in full in the [Health endpoints reference](../reference/health-endpoints.md), along with the three environment-variable knobs (`RASTREO_MAX_INFLIGHT_SCANS`, `RASTREO_SINK_ERROR_QUARANTINE_SECS`, `RASTREO_SCAN_ERROR_QUARANTINE_SECS`).
+The gates and the `reason` values are documented in full in the [Health endpoints reference](../reference/health-endpoints.md), along with the three environment-variable knobs (`RASTREO_MAX_INFLIGHT_SCANS`, `RASTREO_SINK_ERROR_QUARANTINE_SECS`, `RASTREO_SCAN_ERROR_QUARANTINE_SECS`) and the sink-reachability trio (`RASTREO_SINK_CONFIG_PATH`, `RASTREO_SINK_PROBE_INTERVAL_SECS`, `RASTREO_SINK_PROBE_TIMEOUT_SECS`).
+
+## Sink reachability probe
+
+When `RASTREO_SINK_CONFIG_PATH` is unset the reachability axis reports null on `/readyz` and no series is emitted on `/metrics` — the server is a pure `POST /scans` control plane. When the env var points at a YAML file with a `SinkConfig`, the server builds the sink at startup and spawns a background probe task that fires every `RASTREO_SINK_PROBE_INTERVAL_SECS` (default 10s) with a per-probe timeout of `RASTREO_SINK_PROBE_TIMEOUT_SECS` (default 5s). The cached result feeds `/readyz` (`sink_reachable`, `sink_type`, `seconds_since_last_probe`, `last_probe_error`) and `/metrics` (`rastreo_server_sink_reachable{sink_type}`, `rastreo_server_sink_reachability_probe_total{outcome,sink_type}`).
+
+The probe is proactive: a broker outage flips `sink_reachable` to `false` on the next tick, and `/readyz` returns 503 with `reason: "sink_unreachable"` before any scan-triggered sink write catches the fault. Sink construction failure at startup does not crash the pod — the server stays up with `sink_reachable: false` and a `last_probe_error` string, so an operator can debug through the same endpoints. Records still return in the `POST /scans` response body; the server-configured sink does not currently receive record traffic.
+
+Kubernetes example (Helm values):
+
+```yaml
+sink:
+  config:
+    type: kafka
+    brokers: ["kafka.observability.svc:9092"]
+    topic: rastreo.discovery.records.v1
+  probeIntervalSeconds: 10
+  probeTimeoutSeconds: 5
+```
+
+The chart renders a ConfigMap with the sink YAML, mounts it at `/etc/rastreo/sink/sink.yaml`, and sets `RASTREO_SINK_CONFIG_PATH` on the container. Leave `sink.config` empty (default) to run the server without a probe.
 
 `GET /health` is preserved as a backward-compat alias for `/healthz`. New deployments should point liveness at `/healthz` and readiness at `/readyz`.
 
@@ -81,6 +108,8 @@ Metrics exposed:
 | `rastreo_server_records_emitted_total` | counter | — | `DeviceRecord` events emitted across all scans. |
 | `rastreo_server_sink_errors_total` | counter | — | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant). |
 | `rastreo_server_scan_duration_seconds` | histogram | — | `POST /scans` request handling duration. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. |
+| `rastreo_server_sink_reachability_probe_total` | counter | `outcome`, `sink_type` | Server-side sink reachability probes. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
+| `rastreo_server_sink_reachable` | gauge | `sink_type` | `1` when the last sink probe succeeded, `0` otherwise. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `rastreo_server_uptime_seconds` | gauge | — | Seconds since the server process started. |
 | `rastreo_server_build_info` | gauge | `version` | Static `1`; the `version` label carries the binary's `CARGO_PKG_VERSION`. |
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rastreo_server::observability;
-use rastreo_server::state::{Metrics, OtlpConfig, OtlpProtocol};
+use rastreo_server::state::{Metrics, OtlpConfig, OtlpProtocol, SinkReachability};
 
 fn tokio_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -26,7 +26,8 @@ fn init_metrics_only_with_unreachable_endpoint_does_not_panic() {
             service_name: "rastreo-server-test".to_string(),
         };
         let metrics = Arc::new(Metrics::new());
-        let guard = observability::init_metrics_only(&cfg, Arc::clone(&metrics))
+        let reach = Arc::new(SinkReachability::not_configured());
+        let guard = observability::init_metrics_only(&cfg, Arc::clone(&metrics), reach)
             .expect("init_metrics_only");
         // Drop the guard synchronously — shutdown must not panic even with a dead endpoint.
         drop(guard);
@@ -46,7 +47,8 @@ fn init_metrics_only_with_http_protobuf_protocol_builds_exporter() {
             service_name: "rastreo-server-test".to_string(),
         };
         let metrics = Arc::new(Metrics::new());
-        let guard = observability::init_metrics_only(&cfg, Arc::clone(&metrics))
+        let reach = Arc::new(SinkReachability::not_configured());
+        let guard = observability::init_metrics_only(&cfg, Arc::clone(&metrics), reach)
             .expect("init_metrics_only with http-protobuf");
         drop(guard);
     });
@@ -183,7 +185,8 @@ fn init_metrics_only_with_disabled_metrics_returns_empty_guard() {
             service_name: "rastreo-server-test".to_string(),
         };
         let metrics = Arc::new(Metrics::new());
-        let guard = observability::init_metrics_only(&cfg, metrics).expect("guard");
+        let reach = Arc::new(SinkReachability::not_configured());
+        let guard = observability::init_metrics_only(&cfg, metrics, reach).expect("guard");
         drop(guard);
     });
 }

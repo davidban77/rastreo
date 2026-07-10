@@ -13,7 +13,7 @@ readme = "../README.md"
 
 [features]
 default = ["config"]
-config = ["rastreo-core/config"]
+config = ["rastreo-core/config", "dep:serde_yaml_ng"]
 http = ["rastreo-core/http"]
 kafka = ["rastreo-core/kafka"]
 nats = ["rastreo-core/nats"]
@@ -45,8 +45,10 @@ axum = "0.8"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true, optional = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["env"] }
+async-trait = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 tower = "0.5"
@@ -59,6 +61,7 @@ opentelemetry-appender-tracing = { version = "0.32", optional = true }
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

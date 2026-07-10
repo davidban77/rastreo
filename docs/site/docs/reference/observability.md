@@ -18,6 +18,8 @@ Every metric uses the `rastreo_server_` prefix. All counters are monotonic acros
 | `rastreo_server_sink_errors_total` | counter | `error_class` | errors | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant), partitioned by error class. See the [error_class taxonomy](#error_class-taxonomy) below. |
 | `rastreo_server_dlq_records_total` | counter | `sink_type`, `error_class` | records | Records delivered to a dead-letter destination during scan handling, partitioned by sink type and error class. See [DLQ classification (v1)](#dlq-classification-v1) below. |
 | `rastreo_server_scan_duration_seconds` | histogram | `scenario` | seconds | `POST /scans` request handling duration, partitioned by scenario name. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. See the [scenario label](#scenario-label) below. |
+| `rastreo_server_sink_reachability_probe_total` | counter | `outcome="success"\|"failure"`, `sink_type` | probes | Server-side sink reachability probes. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. See [Sink reachability probe](#sink-reachability-probe) below. |
+| `rastreo_server_sink_reachable` | gauge | `sink_type` | — | `1` when the last sink probe succeeded, `0` otherwise. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `rastreo_server_uptime_seconds` | gauge | — | seconds | Seconds since the server process started. |
 | `rastreo_server_build_info` | gauge | `version` | — | Static `1`; the `version` label carries the binary's `CARGO_PKG_VERSION`. |
 
@@ -38,6 +40,16 @@ The `error_class` label groups sink failures by their observable shape so ops te
 Every observation of `rastreo_server_scan_duration_seconds` lands under `scenario="_all"`. If the scenario name (from `base.name` in the scenario config, truncated to `RASTREO_SCENARIO_LABEL_MAX_LENGTH` — default 64 chars) is in `RASTREO_SCENARIO_LABEL_ALLOWLIST`, the observation also lands under `scenario="<name>"`. Otherwise it also lands under `scenario="other"`. The default allow-list is empty — every scan buckets into `_all` and `other` only, keeping label cardinality bounded regardless of how many distinct scenarios the server accepts. Set the env var (or the `metrics.scenarioAllowlist` Helm value) to a comma-separated list to opt specific scenarios into their own labeled series. The names `_all` and `other` are reserved for the aggregate and catch-all buckets and are rejected if listed in the allow-list. Every scan writes exactly two observations per histogram — one to `_all`, one to either `<name>` or `other` — so the series count per histogram bucket is `2 × (buckets + sum + count)` for allow-listed scenarios.
 
 Cardinality guard rationale: scenario names are user-supplied strings on `POST /scans`. Without the allow-list, a client could name each request differently and blow up the Prometheus label set. The allow-list makes the operator opt in to the labels they actually want to monitor.
+
+### Sink reachability probe
+
+The server-side sink reachability probe is a proactive gate on top of the existing sink-error quarantine. When `RASTREO_SINK_CONFIG_PATH` points at a YAML file containing a `SinkConfig`, the server builds the sink at startup, spawns a background probe task, and caches the result. `/readyz` consumes the cache: it exposes `sink_reachable`, `sink_type`, `seconds_since_last_probe`, and `last_probe_error`, and it gates on the `sink_unreachable` reason when the last probe failed. `/metrics` exposes `rastreo_server_sink_reachable` (gauge) and `rastreo_server_sink_reachability_probe_total{outcome}` (counter). Both series carry a `sink_type` label so alerts can partition per broker family.
+
+The probe fires on a fixed cadence (`RASTREO_SINK_PROBE_INTERVAL_SECS`, default `10`) with a per-probe timeout (`RASTREO_SINK_PROBE_TIMEOUT_SECS`, default `5`). A probe that hangs past the timeout counts as a failure — a stuck broker cannot stall the probe task. Kafka probes issue a `ListOffsets` request against the configured partition; NATS probes issue a client-level flush (ping). Local sinks (`stdout`, `file`, `memory`) always succeed — they carry the metrics and the gate, but never fail.
+
+When the sink is not configured (`RASTREO_SINK_CONFIG_PATH` unset), the gauge and counter series are not emitted at all, and `/readyz` reports `sink_reachable: null` and does not gate on this axis. Alerts against `rastreo_server_sink_reachable == 0` fire only for configured sinks — operators who don't configure a sink don't get the alert.
+
+Records still flow via the `POST /scans` response body; the server-configured sink does not currently receive record traffic. The probe is a reachability signal for downstream integration health, not a record-forwarding path.
 
 ## Grafana dashboard
 
@@ -67,7 +79,7 @@ Panels shipped:
 - **Traffic** — Scans per second by outcome (stacked), records emitted per second, probes per second by outcome (stacked), per-prober success rate (line per `probe_kind`).
 - **Errors** — Sink errors per second (aggregate), scan error ratio (percent), probe error ratio (percent), sink errors by error class (stacked per `error_class`), DLQ records per second (stacked per `sink_type` × `error_class`).
 - **Latency** — Scan duration percentiles (p50 / p95 / p99 from `histogram_quantile` on `scenario="_all"`), scan duration heatmap, scan duration p95 per scenario (line per `scenario`, populated only for allow-listed names).
-- **Health** — Uptime (stat panel, seconds formatted as d/h/m/s), build version (stat panel, taken from the `version` label via a `labels to fields` transform).
+- **Health** — Uptime (stat panel, seconds formatted as d/h/m/s), build version (stat panel, taken from the `version` label via a `labels to fields` transform), sink reachability (stat panel showing `rastreo_server_sink_reachable` — green at 1, red at 0; blank when no sink is configured).
 
 The dashboard has UID `rastreo-server` so bookmarked URLs stay stable across upgrades. It defaults to a 1-hour time window with 30-second auto-refresh.
 
@@ -101,6 +113,7 @@ The packaged alerts:
 | `RastreoSinkErrorSpikePerClass` | `sum by (error_class) (rate(rastreo_server_sink_errors_total[5m])) > (1 / 60)` | 5m | warning | Sink error rate for a single `error_class` exceeds 1 per minute for 5+ consecutive minutes. `publish_failure` typically means the broker is unreachable; `ack_rejection` typically means a stream binding or quota is wrong. Split triage by class before opening the sink config. |
 | `RastreoDlqTrafficSurge` | `sum(rate(rastreo_server_dlq_records_total[5m])) > 0.1` | 5m | warning | Records are being quarantined at more than 0.1/sec. The primary destination is refusing at least some payloads; the DLQ is absorbing them. Inspect the DLQ topic / stream, verify the primary destination is healthy, drain the quarantine once the underlying issue is fixed. |
 | `RastreoNoRecordsEmitted10min` | `increase(rastreo_server_records_emitted_total[10m]) == 0 and sum without (outcome) (rate(rastreo_server_scans_total[10m])) > 0` | 10m | warning | No records have been emitted in the last 10 minutes despite active scans. Either every prober is failing to observe live devices, or the sink is silently swallowing records. |
+| `RastreoSinkUnreachable` | `max_over_time(rastreo_server_sink_reachable[2m]) == 0` | 2m | warning | The server-side sink reachability probe has reported unreachable for at least 2 minutes for the sink type on the alert label. Only fires when `RASTREO_SINK_CONFIG_PATH` is set — operators without a server-configured sink never see this alert. Records still flow via `POST /scans` response bodies; the downstream broker is offline. |
 | `RastreoBuildOld` | `rastreo_server_uptime_seconds > <threshold>` | 1h | info | The pod has been running the same build longer than `alerts.buildAgeThresholdSeconds`. This is a proxy for "old build" — it does not check the actual release age, only the pod uptime. Bumping the image tag (or any rolling restart) resets it. |
 
 The `clamp_min(..., 1)` in the ratio expressions prevents division-by-zero and stops the alert from firing spuriously when the denominator is zero. The `RastreoBuildOld` alert uses `rastreo_server_uptime_seconds > threshold` because "how long has this pod been running the same binary" is what the metric can actually observe; a rolling restart or an image bump resets the gauge to zero.

@@ -20,6 +20,7 @@ pub async fn get_metrics(State(state): State<AppState>) -> Result<Response, Resp
     write_records_emitted_total(&state, &mut buf).map_err(internal)?;
     write_sink_errors_total(&state, &mut buf).map_err(internal)?;
     write_dlq_records_total(&state, &mut buf).map_err(internal)?;
+    write_sink_reachability(&state, &mut buf).map_err(internal)?;
     write_scan_duration_seconds(&state, &mut buf).map_err(internal)?;
     write_uptime_seconds(&state, &mut buf).map_err(internal)?;
     write_build_info(&mut buf).map_err(internal)?;
@@ -138,6 +139,45 @@ fn write_dlq_records_total(state: &AppState, buf: &mut String) -> std::fmt::Resu
         }
     }
     Ok(())
+}
+
+fn write_sink_reachability(state: &AppState, buf: &mut String) -> std::fmt::Result {
+    let reach = state.sink_reachability.as_ref();
+    let Some(sink_label) = reach.sink_type_label() else {
+        return Ok(());
+    };
+    let success = state.metrics.sink_probe_success.load(Ordering::Relaxed);
+    let failure = state.metrics.sink_probe_failure.load(Ordering::Relaxed);
+    writeln!(
+        buf,
+        "# HELP rastreo_server_sink_reachability_probe_total Server-side sink reachability probes, partitioned by outcome and sink type."
+    )?;
+    writeln!(
+        buf,
+        "# TYPE rastreo_server_sink_reachability_probe_total counter"
+    )?;
+    writeln!(
+        buf,
+        "rastreo_server_sink_reachability_probe_total{{outcome=\"success\",sink_type=\"{sink_label}\"}} {success}"
+    )?;
+    writeln!(
+        buf,
+        "rastreo_server_sink_reachability_probe_total{{outcome=\"failure\",sink_type=\"{sink_label}\"}} {failure}"
+    )?;
+    let reachable_value: u64 = if reach.reachable.load(std::sync::atomic::Ordering::Relaxed) {
+        1
+    } else {
+        0
+    };
+    writeln!(
+        buf,
+        "# HELP rastreo_server_sink_reachable 1 when the last sink probe succeeded, 0 otherwise."
+    )?;
+    writeln!(buf, "# TYPE rastreo_server_sink_reachable gauge")?;
+    writeln!(
+        buf,
+        "rastreo_server_sink_reachable{{sink_type=\"{sink_label}\"}} {reachable_value}"
+    )
 }
 
 fn write_scan_duration_seconds(state: &AppState, buf: &mut String) -> std::fmt::Result {
@@ -452,5 +492,77 @@ mod tests {
         assert_eq!(escape_label(r#"a\b"c"#), r#"a\\b\"c"#);
         assert_eq!(escape_label("line\nbreak"), "line\\nbreak");
         assert_eq!(escape_label("plain"), "plain");
+    }
+
+    #[tokio::test]
+    async fn get_metrics_omits_sink_reachability_series_when_sink_not_configured() {
+        let state = build_state();
+        let resp = get_metrics(State(state)).await.expect("ok");
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("rastreo_server_sink_reachable"),
+            "no sink series expected when unconfigured; body was:\n{body}"
+        );
+        assert!(
+            !body.contains("rastreo_server_sink_reachability_probe_total"),
+            "no probe counter expected when unconfigured; body was:\n{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_metrics_reports_sink_reachable_gauge_and_probe_counters_when_configured() {
+        use std::sync::Arc;
+
+        use crate::state::SinkReachability;
+
+        let mut state = build_state();
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        reach.record_success();
+        state.metrics.record_sink_probe_success();
+        state.metrics.record_sink_probe_success();
+        state.metrics.record_sink_probe_failure();
+        state.sink_reachability = reach;
+        let resp = get_metrics(State(state)).await.expect("ok");
+        let body = body_string(resp).await;
+        for expected in [
+            "# HELP rastreo_server_sink_reachability_probe_total",
+            "# TYPE rastreo_server_sink_reachability_probe_total counter",
+            "rastreo_server_sink_reachability_probe_total{outcome=\"success\",sink_type=\"kafka\"} 2",
+            "rastreo_server_sink_reachability_probe_total{outcome=\"failure\",sink_type=\"kafka\"} 1",
+            "# HELP rastreo_server_sink_reachable",
+            "# TYPE rastreo_server_sink_reachable gauge",
+            "rastreo_server_sink_reachable{sink_type=\"kafka\"} 1",
+        ] {
+            assert!(
+                body.contains(expected),
+                "metrics body must contain `{expected}`; body was:\n{body}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn get_metrics_sink_reachable_gauge_reports_zero_when_unreachable() {
+        use std::sync::Arc;
+
+        use crate::state::SinkReachability;
+
+        let mut state = build_state();
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Nats,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        reach.record_failure("no route".into());
+        state.sink_reachability = reach;
+        let resp = get_metrics(State(state)).await.expect("ok");
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("rastreo_server_sink_reachable{sink_type=\"nats\"} 0"),
+            "gauge must be 0 when unreachable; body was:\n{body}"
+        );
     }
 }
