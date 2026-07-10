@@ -51,8 +51,14 @@ fn apply_resolver_opts(builder: &mut hickory_resolver::ResolverBuilder<TokioRunt
 }
 
 fn build_system_resolver() -> Result<TokioResolver, RastreoError> {
-    let mut builder = TokioResolver::builder_tokio()
-        .map_err(|e| ConfigError::invalid(format!("failed to load system resolver: {e}")))?;
+    let mut builder = TokioResolver::builder_tokio().map_err(|e| {
+        ConfigError::invalid(format!(
+            "failed to load system resolver: {e}. \
+             On distroless / minimal container images without /etc/resolv.conf, \
+             supply explicit DNS servers via the reverse_dns prober's \
+             `resolvers: [1.1.1.1, 8.8.8.8]` config field to bypass the system resolver."
+        ))
+    })?;
     apply_resolver_opts(&mut builder);
     builder
         .build()
@@ -162,6 +168,16 @@ mod tests {
         let ip: IpAddr = "2606:4700:4700::1111".parse().expect("parse ipv6");
         let prober = ReverseDnsProber::new(vec![ip]).expect("build ok");
         assert_eq!(prober.resolvers(), &[ip]);
+    }
+
+    #[test]
+    fn new_with_explicit_resolvers_bypasses_system_conf_on_distroless() {
+        let resolvers = vec![
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        ];
+        let prober = ReverseDnsProber::new(resolvers.clone()).expect("bypass system resolver");
+        assert_eq!(prober.resolvers(), resolvers.as_slice());
     }
 
     #[test]

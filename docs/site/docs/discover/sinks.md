@@ -81,6 +81,8 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 
 **Consumer guidance.** A DLQ consumer typically re-publishes the payload to the primary topic once the underlying issue (broker outage, topic ACL, partition offline) is resolved. Filter on `x-rastreo-source-topic` when the same DLQ is shared across multiple discovery pipelines; use `x-rastreo-dlq-timestamp` to skip records older than a retention window.
 
+**See also.** Sink failures surface operationally through the [`/readyz` readiness gate](../reference/health-endpoints.md#readyz-readiness) on `rastreo-server`: a sink error observed within `RASTREO_SINK_ERROR_QUARANTINE_SECS` flips the pod to `503 not_ready`. Caveat: the current server-side gate only trips when a scan attempts a write and fails; it does not detect pre-request unreachability against a broker that is already down. True broker-reachability probing is tracked as a Phase 3 close-out follow-up.
+
 ## NATS
 
 The NATS sink publishes `DeviceRecord` events to a NATS JetStream subject, encoded as NDJSON. Because the wire options are richer than Kafka (four auth methods, two delivery modes, a stream binding), the NATS sink is configured through YAML scenarios loaded with `--file` or through the `POST /scans` request body — there are no dedicated CLI flags. Two delivery modes are available: per-record (the default, publishes each record and waits for the JetStream ack) and batched (accumulates NDJSON bytes into one publish at a configurable byte threshold). See [Integrate · NATS](../integrate/nats.md) for the full wire contract, auth details, and stream setup.
@@ -149,6 +151,8 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 **Failure model.** Primary publish OK, ack OK → the payload lands on the primary subject. Primary publish fails, DLQ publish + ack succeed → the payload lands on the DLQ subject, a `WARN` log is emitted, and the pipeline continues. Primary publish OK but ack fails, DLQ publish + ack succeed → same outcome, `WARN` log, pipeline continues. Any DLQ publish or ack failure → an `ERROR` log records the DLQ failure, the sink returns the original error, and the buffer / pending queue is retained for the caller to retry via `flush()`.
 
 **Consumer guidance.** A DLQ consumer typically re-publishes the payload to the primary subject once the underlying issue (broker outage, stream misconfiguration, quota) is resolved. Filter on `x-rastreo-source-subject` when the same DLQ is shared across multiple discovery pipelines; filter on `x-rastreo-error-class` to split triage between broker-connectivity issues (`publish_failure`) and stream-durability issues (`ack_rejection`); use `x-rastreo-dlq-timestamp` to skip records older than a retention window.
+
+**See also.** Sink failures surface operationally through the [`/readyz` readiness gate](../reference/health-endpoints.md#readyz-readiness) on `rastreo-server`: a sink error observed within `RASTREO_SINK_ERROR_QUARANTINE_SECS` flips the pod to `503 not_ready`. Caveat: the current server-side gate only trips when a scan attempts a write and fails; it does not detect pre-request unreachability against a broker that is already down. True broker-reachability probing is tracked as a Phase 3 close-out follow-up.
 
 ## NDJSON contract
 
