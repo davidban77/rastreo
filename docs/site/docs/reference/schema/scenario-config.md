@@ -123,6 +123,16 @@ One of:
 - { `auth_type`: `token`, `token`: [`Password`](#password) }
 - { `auth_type`: `creds`, `creds_file`: string }
 
+### `NatsDeadLetterConfig` {#natsdeadletterconfig}
+
+Quarantine JetStream target for records the primary NATS publish or ack rejected.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `include_error_metadata` | boolean | no | — |
+| `stream` | string | yes | — |
+| `subject` | string | yes | — |
+
 ### `NatsDelivery` {#natsdelivery}
 
 One of:
@@ -199,7 +209,7 @@ One of:
 - { `path`: string, `type`: `file` }
 - { `type`: `memory` }
 - { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `topic`: string, `type`: `kafka` }
-- { `credentials`: [`NatsCredentials`](#natscredentials), `delivery`: [`NatsDelivery`](#natsdelivery), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
+- { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `delivery`: [`NatsDelivery`](#natsdelivery), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
 
 ### `SnmpVersion` {#snmpversion}
 

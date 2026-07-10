@@ -456,6 +456,26 @@
         }
       ]
     },
+    "NatsDeadLetterConfig": {
+      "description": "Quarantine JetStream target for records the primary NATS publish or ack rejected.",
+      "properties": {
+        "include_error_metadata": {
+          "default": true,
+          "type": "boolean"
+        },
+        "stream": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "stream",
+        "subject"
+      ],
+      "type": "object"
+    },
     "NatsDelivery": {
       "oneOf": [
         {
@@ -1157,6 +1177,16 @@
               "default": {
                 "auth_type": "anonymous"
               }
+            },
+            "dead_letter": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/NatsDeadLetterConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "delivery": {
               "allOf": [

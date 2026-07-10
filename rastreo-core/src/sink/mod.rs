@@ -11,7 +11,7 @@ pub use file::FileSink;
 pub use kafka::{DeadLetterConfig, KafkaFlushMode, KafkaSink};
 pub use memory::{MemorySink, MemorySinkHandle};
 #[cfg(feature = "nats")]
-pub use nats::{NatsCredentials, NatsDelivery, NatsSink};
+pub use nats::{NatsCredentials, NatsDeadLetterConfig, NatsDelivery, NatsSink};
 pub use stdout::StdoutSink;
 
 use std::path::PathBuf;
@@ -59,6 +59,8 @@ pub enum SinkConfig {
         credentials: NatsCredentials,
         #[serde(default)]
         delivery: NatsDelivery,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dead_letter: Option<NatsDeadLetterConfig>,
     },
 }
 
@@ -88,15 +90,20 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             stream,
             credentials,
             delivery,
+            dead_letter,
         } => {
-            let sink = NatsSink::new(
+            let mut sink = NatsSink::new(
                 servers.clone(),
                 subject.clone(),
                 stream.clone(),
                 credentials.clone(),
             )
             .await?;
-            Ok(Box::new(sink.with_delivery(delivery.clone())))
+            sink = sink.with_delivery(delivery.clone());
+            if let Some(dlq) = dead_letter {
+                sink = sink.with_dead_letter(dlq.clone()).await?;
+            }
+            Ok(Box::new(sink))
         }
     }
 }
@@ -227,12 +234,14 @@ mod tests {
                 stream,
                 credentials,
                 delivery,
+                dead_letter,
             } => {
                 assert_eq!(servers, vec!["nats://nats:4222".to_string()]);
                 assert_eq!(subject, "rastreo.discovery.records.v1");
                 assert_eq!(stream, "rastreo");
                 assert!(matches!(credentials, NatsCredentials::Anonymous));
                 assert!(matches!(delivery, NatsDelivery::PerRecord));
+                assert!(dead_letter.is_none());
             }
             other => panic!("expected Nats, got {other:?}"),
         }
@@ -365,6 +374,35 @@ mod tests {
                 assert!(dead_letter.is_none());
             }
             other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn sink_config_nats_deserializes_dead_letter_field() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ndead_letter:\n  stream: dlq-stream\n  subject: rastreo.dlq\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { dead_letter, .. } => {
+                let dlq = dead_letter.expect("dead_letter present");
+                assert_eq!(dlq.stream, "dlq-stream");
+                assert_eq!(dlq.subject, "rastreo.dlq");
+                assert!(dlq.include_error_metadata);
+            }
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn sink_config_nats_without_dead_letter_deserializes_as_none() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { dead_letter, .. } => {
+                assert!(dead_letter.is_none());
+            }
+            other => panic!("expected Nats, got {other:?}"),
         }
     }
 }

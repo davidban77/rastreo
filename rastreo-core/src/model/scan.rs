@@ -252,6 +252,7 @@ mod tests {
                         password: Password(pw.to_string()),
                     },
                     delivery: Default::default(),
+                    dead_letter: None,
                 }),
                 ..Default::default()
             },

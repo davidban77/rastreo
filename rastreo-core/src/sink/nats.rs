@@ -1,16 +1,22 @@
-use std::future::IntoFuture;
 use std::io;
 
-use async_nats::jetstream::context::PublishAckFuture;
+use async_nats::jetstream::context::{PublishAckFuture, PublishError};
 use async_nats::jetstream::{self, Context};
-use async_nats::{Client, ConnectOptions};
+use async_nats::{Client, ConnectOptions, HeaderMap};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::join_all;
+use chrono::Utc;
 
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
 use crate::sink::Sink;
+
+const HEADER_SOURCE_SUBJECT: &str = "x-rastreo-source-subject";
+const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
+const HEADER_DLQ_TIMESTAMP: &str = "x-rastreo-dlq-timestamp";
+
+const ERROR_CLASS_PUBLISH_FAILURE: &str = "publish_failure";
+const ERROR_CLASS_ACK_REJECTION: &str = "ack_rejection";
 
 fn clamp_threshold(bytes: usize) -> usize {
     bytes.max(1)
@@ -63,6 +69,38 @@ impl NatsDelivery {
     }
 }
 
+/// Quarantine JetStream target for records the primary NATS publish or ack rejected.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[non_exhaustive]
+pub struct NatsDeadLetterConfig {
+    pub stream: String,
+    pub subject: String,
+    #[serde(default = "default_include_error_metadata")]
+    pub include_error_metadata: bool,
+}
+
+impl NatsDeadLetterConfig {
+    /// Reject empty / whitespace-only stream and subject at config-load time rather than at broker-connect time.
+    pub fn validate(&self) -> Result<(), RastreoError> {
+        if self.stream.trim().is_empty() {
+            return Err(ConfigError::invalid("nats sink: dead-letter stream is empty").into());
+        }
+        if self.subject.trim().is_empty() {
+            return Err(ConfigError::invalid("nats sink: dead-letter subject is empty").into());
+        }
+        Ok(())
+    }
+}
+
+fn default_include_error_metadata() -> bool {
+    true
+}
+
+struct PendingPublish {
+    payload: Bytes,
+    ack: PublishAckFuture,
+}
+
 pub struct NatsSink {
     subject: String,
     stream: String,
@@ -70,8 +108,11 @@ pub struct NatsSink {
     ctx: Context,
     buffer: Vec<u8>,
     buffer_threshold: usize,
-    pending_acks: Vec<PublishAckFuture>,
+    pending_acks: Vec<PendingPublish>,
     last_write_delivered: bool,
+    dlq_stream: Option<String>,
+    dlq_subject: Option<String>,
+    include_error_metadata: bool,
 }
 
 impl std::fmt::Debug for NatsSink {
@@ -84,8 +125,34 @@ impl std::fmt::Debug for NatsSink {
             .field("buffer_threshold", &self.buffer_threshold)
             .field("pending_acks", &self.pending_acks.len())
             .field("last_write_delivered", &self.last_write_delivered)
+            .field("dlq_stream", &self.dlq_stream)
+            .field("dlq_subject", &self.dlq_subject)
             .finish_non_exhaustive()
     }
+}
+
+fn build_publish_error(subject: &str, servers: &[String], err: PublishError) -> RastreoError {
+    let servers_for_err = servers.join(",");
+    RastreoError::Sink(io::Error::other(format!(
+        "nats sink: failed to publish to subject '{subject}' at server(s) '{servers_for_err}': {err}"
+    )))
+}
+
+fn build_ack_error(subject: &str, servers: &[String], err: PublishError) -> RastreoError {
+    let servers_for_err = servers.join(",");
+    RastreoError::Sink(io::Error::other(format!(
+        "nats sink: publish to subject '{subject}' at server(s) '{servers_for_err}' was not acked: {err}"
+    )))
+}
+
+/// Envelope headers follow the `x-<vendor>-<name>` convention so downstream
+/// consumers can filter DLQ records without inspecting the payload.
+fn build_dlq_headers(source_subject: &str, error_class: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(HEADER_SOURCE_SUBJECT, source_subject);
+    headers.insert(HEADER_ERROR_CLASS, error_class);
+    headers.insert(HEADER_DLQ_TIMESTAMP, Utc::now().to_rfc3339().as_str());
+    headers
 }
 
 impl NatsSink {
@@ -142,6 +209,9 @@ impl NatsSink {
             buffer_threshold: 1,
             pending_acks: Vec::new(),
             last_write_delivered: false,
+            dlq_stream: None,
+            dlq_subject: None,
+            include_error_metadata: false,
         })
     }
 
@@ -150,25 +220,110 @@ impl NatsSink {
         self
     }
 
+    pub async fn with_dead_letter(
+        mut self,
+        config: NatsDeadLetterConfig,
+    ) -> Result<Self, RastreoError> {
+        config.validate()?;
+
+        let servers_for_err = self.servers.join(",");
+        let dlq_stream = config.stream.clone();
+        self.ctx
+            .get_stream(&dlq_stream)
+            .await
+            .map_err(|e| {
+                io::Error::other(format!(
+                    "nats sink: JetStream dead-letter stream '{dlq_stream}' not found or unreachable at server(s) '{servers_for_err}': {e}"
+                ))
+            })
+            .map_err(RastreoError::Sink)?;
+
+        self.dlq_stream = Some(dlq_stream);
+        self.dlq_subject = Some(config.subject);
+        self.include_error_metadata = config.include_error_metadata;
+        Ok(self)
+    }
+
+    async fn publish_to_dlq(
+        &self,
+        payload: Bytes,
+        error_class: &str,
+    ) -> Result<PublishAckFuture, PublishError> {
+        let dlq_subject = self
+            .dlq_subject
+            .as_ref()
+            .expect("publish_to_dlq called without DLQ configured");
+        if self.include_error_metadata {
+            let headers = build_dlq_headers(&self.subject, error_class);
+            self.ctx
+                .publish_with_headers(dlq_subject.clone(), headers, payload)
+                .await
+        } else {
+            self.ctx.publish(dlq_subject.clone(), payload).await
+        }
+    }
+
     async fn publish_buffer(&mut self) -> Result<(), RastreoError> {
         if self.buffer.is_empty() {
             return Ok(());
         }
         let payload = Bytes::from(self.buffer.clone());
-        let servers_for_err = self.servers.join(",");
         let subject = self.subject.clone();
-        let ack_future = self
-            .ctx
-            .publish(subject.clone(), payload)
+
+        let primary_err = match self.ctx.publish(subject.clone(), payload.clone()).await {
+            Ok(ack_future) => {
+                self.buffer.clear();
+                self.pending_acks.push(PendingPublish {
+                    payload,
+                    ack: ack_future,
+                });
+                return Ok(());
+            }
+            Err(e) => e,
+        };
+
+        let (Some(_), Some(dlq_subject)) = (self.dlq_stream.as_ref(), self.dlq_subject.as_ref())
+        else {
+            return Err(build_publish_error(&subject, &self.servers, primary_err));
+        };
+
+        tracing::warn!(
+            subject = subject.as_str(),
+            dlq_subject = dlq_subject.as_str(),
+            error = %primary_err,
+            "nats sink: primary publish failed; shipping payload to DLQ",
+        );
+
+        let dlq_ack_fut = match self
+            .publish_to_dlq(payload, ERROR_CLASS_PUBLISH_FAILURE)
             .await
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "nats sink: failed to publish to subject '{subject}' at server(s) '{servers_for_err}': {e}"
-                ))
-            })
-            .map_err(RastreoError::Sink)?;
+        {
+            Ok(fut) => fut,
+            Err(dlq_err) => {
+                tracing::error!(
+                    subject = subject.as_str(),
+                    dlq_subject = dlq_subject.as_str(),
+                    dlq_error = %dlq_err,
+                    "nats sink: DLQ publish also failed; retaining buffer",
+                );
+                return Err(build_publish_error(&subject, &self.servers, primary_err));
+            }
+        };
+
+        // DLQ replay is awaited synchronously: quarantined records can't be batched with
+        // primary-path acks, and reporting DLQ failure post-hoc via drain_pending_acks
+        // would lose the causal link to the primary failure.
+        if let Err(dlq_ack_err) = dlq_ack_fut.await {
+            tracing::error!(
+                subject = subject.as_str(),
+                dlq_subject = dlq_subject.as_str(),
+                dlq_error = %dlq_ack_err,
+                "nats sink: DLQ publish accepted but ack rejected; retaining buffer",
+            );
+            return Err(build_ack_error(&subject, &self.servers, dlq_ack_err));
+        }
+
         self.buffer.clear();
-        self.pending_acks.push(ack_future);
         Ok(())
     }
 
@@ -176,21 +331,68 @@ impl NatsSink {
         if self.pending_acks.is_empty() {
             return Ok(());
         }
-        let futures = std::mem::take(&mut self.pending_acks);
-        let awaited = futures.into_iter().map(IntoFuture::into_future);
-        let results = join_all(awaited).await;
-        let servers_for_err = self.servers.join(",");
-        let subject = &self.subject;
-        for result in results {
-            result
-                .map_err(|e| {
-                    io::Error::other(format!(
-                        "nats sink: publish to subject '{subject}' at server(s) '{servers_for_err}' was not acked: {e}"
-                    ))
-                })
-                .map_err(RastreoError::Sink)?;
+        let pending = std::mem::take(&mut self.pending_acks);
+        let subject = self.subject.clone();
+        // Collect only the first non-recovered ack error; every ack is still awaited so
+        // JetStream drains and the DLQ receives every quarantinable payload.
+        let mut first_error: Option<RastreoError> = None;
+
+        for PendingPublish { payload, ack } in pending {
+            let ack_err = match ack.await {
+                Ok(_) => continue,
+                Err(e) => e,
+            };
+
+            let Some(dlq_subject) = self.dlq_subject.as_ref() else {
+                if first_error.is_none() {
+                    first_error = Some(build_ack_error(&subject, &self.servers, ack_err));
+                }
+                continue;
+            };
+
+            tracing::warn!(
+                subject = subject.as_str(),
+                dlq_subject = dlq_subject.as_str(),
+                error = %ack_err,
+                "nats sink: ack rejected; shipping payload to DLQ",
+            );
+
+            match self
+                .publish_to_dlq(payload, ERROR_CLASS_ACK_REJECTION)
+                .await
+            {
+                Ok(dlq_ack_fut) => match dlq_ack_fut.await {
+                    Ok(_) => continue,
+                    Err(dlq_ack_err) => {
+                        tracing::error!(
+                            subject = subject.as_str(),
+                            dlq_subject = dlq_subject.as_str(),
+                            dlq_error = %dlq_ack_err,
+                            "nats sink: DLQ ack rejected on replay; propagating original ack error",
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(build_ack_error(&subject, &self.servers, ack_err));
+                        }
+                    }
+                },
+                Err(dlq_publish_err) => {
+                    tracing::error!(
+                        subject = subject.as_str(),
+                        dlq_subject = dlq_subject.as_str(),
+                        dlq_error = %dlq_publish_err,
+                        "nats sink: DLQ publish failed on replay; propagating original ack error",
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(build_ack_error(&subject, &self.servers, ack_err));
+                    }
+                }
+            }
         }
-        Ok(())
+
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
 
@@ -547,5 +749,123 @@ mod tests {
             }
             other => panic!("expected Sink error, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn nats_dead_letter_config_include_error_metadata_defaults_to_true() {
+        let yaml = "stream: dlq-stream\nsubject: rastreo.dlq\n";
+        let config: NatsDeadLetterConfig =
+            serde_yaml_ng::from_str(yaml).expect("deserialize dead-letter config");
+        assert_eq!(config.stream, "dlq-stream");
+        assert_eq!(config.subject, "rastreo.dlq");
+        assert!(config.include_error_metadata);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn nats_dead_letter_config_explicit_false_deserializes() {
+        let yaml = "stream: dlq-stream\nsubject: rastreo.dlq\ninclude_error_metadata: false\n";
+        let config: NatsDeadLetterConfig =
+            serde_yaml_ng::from_str(yaml).expect("deserialize dead-letter config");
+        assert!(!config.include_error_metadata);
+    }
+
+    #[test]
+    fn nats_dead_letter_config_validate_rejects_empty_stream() {
+        let cfg = NatsDeadLetterConfig {
+            stream: "  ".into(),
+            subject: "rastreo.dlq".into(),
+            include_error_metadata: true,
+        };
+        let err = cfg.validate().expect_err("blank stream must error");
+        match err {
+            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                assert!(msg.contains("stream"), "msg was: {msg}");
+                assert!(msg.contains("dead-letter"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nats_dead_letter_config_validate_rejects_empty_subject() {
+        let cfg = NatsDeadLetterConfig {
+            stream: "dlq-stream".into(),
+            subject: "  ".into(),
+            include_error_metadata: true,
+        };
+        let err = cfg.validate().expect_err("blank subject must error");
+        match err {
+            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                assert!(msg.contains("subject"), "msg was: {msg}");
+                assert!(msg.contains("dead-letter"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nats_dead_letter_config_validate_accepts_non_empty_fields() {
+        let cfg = NatsDeadLetterConfig {
+            stream: "dlq-stream".into(),
+            subject: "rastreo.dlq".into(),
+            include_error_metadata: false,
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn build_dlq_headers_contains_source_subject_and_error_class_and_timestamp() {
+        let headers =
+            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        assert!(headers.get(HEADER_SOURCE_SUBJECT).is_some());
+        assert!(headers.get(HEADER_ERROR_CLASS).is_some());
+        assert!(headers.get(HEADER_DLQ_TIMESTAMP).is_some());
+    }
+
+    #[test]
+    fn build_dlq_headers_source_subject_matches_input() {
+        let headers =
+            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        let value = headers
+            .get(HEADER_SOURCE_SUBJECT)
+            .expect("source-subject header present");
+        assert_eq!(value.as_str(), "rastreo.discovery.records.v1");
+    }
+
+    #[test]
+    fn build_dlq_headers_error_class_is_publish_failure_when_publish_class_supplied() {
+        let headers =
+            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        let value = headers
+            .get(HEADER_ERROR_CLASS)
+            .expect("error-class header present");
+        assert_eq!(value.as_str(), "publish_failure");
+    }
+
+    #[test]
+    fn build_dlq_headers_error_class_is_ack_rejection_when_ack_class_supplied() {
+        let headers = build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_ACK_REJECTION);
+        let value = headers
+            .get(HEADER_ERROR_CLASS)
+            .expect("error-class header present");
+        assert_eq!(value.as_str(), "ack_rejection");
+    }
+
+    #[test]
+    fn build_dlq_headers_timestamp_parses_as_rfc3339() {
+        let headers =
+            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        let value = headers
+            .get(HEADER_DLQ_TIMESTAMP)
+            .expect("timestamp header present");
+        chrono::DateTime::parse_from_rfc3339(value.as_str()).expect("valid rfc3339 timestamp");
+    }
+
+    #[test]
+    fn error_class_constants_are_stable_wire_values() {
+        assert_eq!(ERROR_CLASS_PUBLISH_FAILURE, "publish_failure");
+        assert_eq!(ERROR_CLASS_ACK_REJECTION, "ack_rejection");
     }
 }

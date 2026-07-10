@@ -111,6 +111,45 @@ sink:
 rastreo discover --file scenario.yaml
 ```
 
+### Dead-letter queue
+
+The NATS sink can quarantine records the primary subject refused instead of dropping them silently. Configure a second JetStream stream + subject under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). Unlike Kafka, NATS has two failure surfaces the DLQ absorbs: the synchronous `publish()` call (broker unreachable, subject invalid) and the JetStream ack (broker accepted the publish for routing but refused durable storage — stream retention limits, wrong stream binding, quota exceeded). When either surface fails and a DLQ is configured, the sink publishes the same payload to the DLQ subject, logs a `WARN`, and returns success. When no DLQ is configured, the failure surfaces as an error and the buffer / pending queue is retained.
+
+```yaml
+sink:
+  type: nats
+  servers: ["nats://nats-0.internal:4222"]
+  subject: rastreo.discovery.records.v1
+  stream: rastreo
+  dead_letter:
+    stream: rastreo-dlq
+    subject: rastreo.discovery.dlq
+    include_error_metadata: true
+```
+
+The DLQ subject must be bound to a JetStream stream that exists on the same NATS cluster; construction fails fast if the stream is missing so records never silently drop. Both primary and DLQ publishes share the sink's single NATS connection.
+
+DLQ messages default to carrying a small header envelope so downstream consumers can filter and diagnose without inspecting the payload:
+
+| Header | Value | Encoding |
+|---|---|---|
+| `x-rastreo-source-subject` | Primary subject name (e.g. `rastreo.discovery.records.v1`) | NATS header string |
+| `x-rastreo-error-class` | `publish_failure` or `ack_rejection` (see below) | NATS header string |
+| `x-rastreo-dlq-timestamp` | RFC 3339 UTC timestamp of the DLQ publish | NATS header string |
+
+The two error classes are diagnostically distinct so an ops team can triage DLQ traffic:
+
+| Class | Meaning |
+|---|---|
+| `publish_failure` | The synchronous `publish()` to the primary subject failed. Typically broker unreachable or the subject/stream binding is wrong. |
+| `ack_rejection` | JetStream accepted the publish for routing but refused durable storage. Typically stream retention hit, quota exceeded, or the subject is bound to a different stream than expected. |
+
+Set `include_error_metadata: false` to ship the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary subject.
+
+**Failure model.** Primary publish OK, ack OK → the payload lands on the primary subject. Primary publish fails, DLQ publish + ack succeed → the payload lands on the DLQ subject, a `WARN` log is emitted, and the pipeline continues. Primary publish OK but ack fails, DLQ publish + ack succeed → same outcome, `WARN` log, pipeline continues. Any DLQ publish or ack failure → an `ERROR` log records the DLQ failure, the sink returns the original error, and the buffer / pending queue is retained for the caller to retry via `flush()`.
+
+**Consumer guidance.** A DLQ consumer typically re-publishes the payload to the primary subject once the underlying issue (broker outage, stream misconfiguration, quota) is resolved. Filter on `x-rastreo-source-subject` when the same DLQ is shared across multiple discovery pipelines; filter on `x-rastreo-error-class` to split triage between broker-connectivity issues (`publish_failure`) and stream-durability issues (`ack_rejection`); use `x-rastreo-dlq-timestamp` to skip records older than a retention window.
+
 ## NDJSON contract
 
 The stdout and file sinks emit one `DeviceRecord` per NDJSON line. Each line is a complete JSON object — no surrounding array, no trailing comma. The Kafka and NATS sinks use the same NDJSON encoding for their payload bytes; see the [Integrate](../integrate/index.md) section for how those bytes map to Kafka records or NATS JetStream messages.
