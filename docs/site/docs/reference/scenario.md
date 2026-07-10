@@ -310,6 +310,7 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
 | `stream` | string | yes | JetStream stream name bound to the subject. |
 | `credentials` | object | no | Auth details. Defaults to anonymous. See below. |
 | `delivery` | object | no | Delivery / flush mode. Defaults to `per_record`. See below. |
+| `dead_letter` | object | no | Optional quarantine subject for records the primary publish or JetStream ack refused. Omit to preserve the pre-existing "return error, retain buffer/pending" behavior on failure. |
 
 ```json
 {
@@ -348,6 +349,12 @@ The `delivery` field is an internally-tagged object with two variants. `per_reco
 
 ```json
 {"mode": "batched", "threshold_bytes": 65536}
+```
+
+The `dead_letter` field carries three properties: `stream` (required, the DLQ JetStream stream name), `subject` (required, the DLQ subject), and `include_error_metadata` (optional, default `true`). When enabled, DLQ messages carry three headers: `x-rastreo-source-subject`, `x-rastreo-error-class` (either `publish_failure` for a synchronous `publish()` failure or `ack_rejection` when JetStream refused durable storage), and `x-rastreo-dlq-timestamp` (RFC 3339 UTC). The DLQ stream must exist on the same NATS cluster as the primary stream; construction fails fast if it is missing. See [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue_1) for the failure model, error-class taxonomy, and consumer guidance.
+
+```json
+{"stream": "rastreo-dlq", "subject": "rastreo.discovery.dlq", "include_error_metadata": true}
 ```
 
 ## Fusers
