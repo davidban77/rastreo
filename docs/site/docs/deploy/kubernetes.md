@@ -46,6 +46,10 @@ The most useful `values.yaml` knobs are:
 | `grafana.dashboardsEnabled`      | `false`                       | Deploy the bundled Grafana dashboard as a labeled `ConfigMap` for sidecar auto-discovery. See [Observability · Grafana dashboard](../reference/observability.md#grafana-dashboard). |
 | `podSecurity.netRaw`             | `false`                       | Add `NET_RAW` to the container capabilities. Required for the ARP and NDP probers. See [`podSecurity.netRaw`](#podsecuritynetraw-arp-and-ndp-probers). |
 | `logFormat`                      | unset (binary default `text`) | Log line format on stderr. Set to `json` for Loki / ELK / Splunk ingestion; renders `RASTREO_LOG_FORMAT` on the pod. See [Logging](../reference/logging.md). |
+| `otlp.metricsEnabled`            | `false`                       | Push metrics via OpenTelemetry OTLP. Requires an OTLP-enabled image build (see `image.tag: <VERSION>-otlp`). See [OTLP](../reference/otlp.md). |
+| `otlp.logsEnabled`               | `false`                       | Push logs via OpenTelemetry OTLP. Requires an OTLP-enabled image build. See [OTLP](../reference/otlp.md). |
+| `otlp.endpoint`                  | `""`                          | OTLP collector URL, e.g. `http://otel-collector.observability.svc:4317` (gRPC) or `http://otel-collector.observability.svc:4318` (HTTP+protobuf). Required when either OTLP toggle is on. |
+| `otlp.protocol`                  | `grpc`                        | OTLP transport protocol. `grpc` targets a collector's gRPC port (4317). `http-protobuf` targets the HTTP+protobuf port (4318). See [OTLP · Transport protocol](../reference/otlp.md#transport-protocol). |
 | `config`                         | `{}`                          | Inline YAML mounted at `/etc/rastreo` as a `ConfigMap`.   |
 
 A worked example of `config`:
@@ -131,3 +135,4 @@ The chart renders `RASTREO_LOG_FORMAT=json` on the container's env. Leave the ke
 - [rastreo-server](server.md) — the HTTP API the pods expose.
 - [Observability](../reference/observability.md) — Grafana dashboard and PrometheusRule alerts shipped by the chart.
 - [Logging](../reference/logging.md) — log format and aggregator ingestion examples.
+- [OTLP](../reference/otlp.md) — OpenTelemetry OTLP export for metrics and logs.

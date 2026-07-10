@@ -1,13 +1,23 @@
+use anyhow::Context;
 use clap::Parser;
 
 mod cli;
+mod otlp;
 
 pub use cli::LogFormat;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let parsed = cli::Cli::parse();
-    init_tracing(parsed.verbose, parsed.quiet, parsed.log_format);
+    let otlp_config = otlp::OtlpConfig::from_env().context("failed to load OTLP config")?;
+    init_tracing(
+        parsed.verbose,
+        parsed.quiet,
+        parsed.log_format,
+        otlp_config.as_ref(),
+    )?;
+    // Guard must outlive the discover run so pending OTLP exports flush before we exit.
+    let _otlp_guard = init_otlp_metrics(otlp_config.as_ref())?;
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -48,19 +58,54 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-fn init_tracing(verbose: u8, quiet: bool, log_format: LogFormat) {
+#[cfg(feature = "otlp")]
+fn init_tracing(
+    verbose: u8,
+    quiet: bool,
+    log_format: LogFormat,
+    otlp_config: Option<&otlp::OtlpConfig>,
+) -> anyhow::Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
-    let level = if quiet {
-        "error"
-    } else {
-        match verbose {
-            0 => "info",
-            1 => "debug",
-            _ => "trace",
-        }
-    };
+
+    let level = default_level(verbose, quiet);
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
-    // Stderr keeps stdout clean for NDJSON output from the stdout sink.
+    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
+        LogFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr)),
+        LogFormat::Json => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .json(),
+        ),
+    };
+    let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
+
+    match otlp_config {
+        Some(cfg) if cfg.logs_enabled => {
+            let (otlp_layer, provider) = otlp::logs_layer(cfg)?;
+            OTLP_LOGGER_PROVIDER
+                .set(provider)
+                .map_err(|_| anyhow::anyhow!("OTLP logger provider already initialized"))?;
+            registry.with(otlp_layer).init();
+        }
+        _ => {
+            registry.init();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_tracing(
+    verbose: u8,
+    quiet: bool,
+    log_format: LogFormat,
+    _otlp_config: Option<&otlp::OtlpConfig>,
+) -> anyhow::Result<()> {
+    use tracing_subscriber::EnvFilter;
+    let level = default_level(verbose, quiet);
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
     match log_format {
         LogFormat::Text => {
             tracing_subscriber::fmt()
@@ -76,6 +121,38 @@ fn init_tracing(verbose: u8, quiet: bool, log_format: LogFormat) {
                 .init();
         }
     }
+    Ok(())
+}
+
+fn default_level(verbose: u8, quiet: bool) -> &'static str {
+    if quiet {
+        "error"
+    } else {
+        match verbose {
+            0 => "info",
+            1 => "debug",
+            _ => "trace",
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
+static OTLP_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "otlp")]
+fn init_otlp_metrics(config: Option<&otlp::OtlpConfig>) -> anyhow::Result<Option<otlp::OtlpGuard>> {
+    let Some(cfg) = config else { return Ok(None) };
+    let mut guard = otlp::init_metrics_only(cfg)?;
+    if let Some(provider) = OTLP_LOGGER_PROVIDER.get() {
+        otlp::attach_logger(&mut guard, provider.clone());
+    }
+    Ok(Some(guard))
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_otlp_metrics(_config: Option<&otlp::OtlpConfig>) -> anyhow::Result<Option<()>> {
+    Ok(None)
 }
 
 #[cfg(test)]

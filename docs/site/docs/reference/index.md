@@ -18,4 +18,5 @@ Topics covered here include the full `rastreo` and `rastreo-server` CLI flag ref
 - [Health endpoints](health-endpoints.md) — `/healthz`, `/readyz`, the `/health` alias, and the readiness gates.
 - [Observability](observability.md) — the `/metrics` endpoint inventory, the bundled Grafana dashboard, and the packaged PrometheusRule alerts.
 - [Logging](logging.md) — text and JSON log formats, log-level control, and aggregator ingestion examples.
+- [OTLP](otlp.md) — OpenTelemetry OTLP export for metrics and logs, behind the `otlp` Cargo feature.
 - [Glossary](glossary.md) — domain terms used across the docs.

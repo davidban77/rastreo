@@ -1,4 +1,6 @@
 pub mod error;
+#[cfg(feature = "otlp")]
+pub mod observability;
 pub mod routes;
 pub mod state;
 

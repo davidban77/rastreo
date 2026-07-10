@@ -7,7 +7,7 @@ use clap::Parser;
 use rastreo_core::{HickoryResolver, Resolver};
 use rastreo_server::{
     build_app_with_timeout,
-    state::{AppState, ReadinessConfig},
+    state::{AppState, OtlpConfig, ReadinessConfig},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -54,12 +54,16 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    init_tracing(cli.log_format);
+    let otlp_config = OtlpConfig::from_env().context("failed to load OTLP config")?;
+    init_tracing(cli.log_format, otlp_config.as_ref())?;
 
     let resolver: Arc<dyn Resolver> =
         Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
     let readiness = ReadinessConfig::from_env().context("failed to load readiness config")?;
     let state = AppState::with_readiness(resolver, readiness);
+
+    // Guard must outlive the axum serve loop so pending OTLP exports flush on shutdown.
+    let _otlp_guard = init_otlp(otlp_config.as_ref(), Arc::clone(&state.metrics))?;
 
     let app = build_app_with_timeout(state, Duration::from_millis(cli.request_timeout_ms));
     let addr = SocketAddr::new(cli.bind, cli.port);
@@ -71,7 +75,42 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing(log_format: LogFormat) {
+#[cfg(feature = "otlp")]
+fn init_tracing(log_format: LogFormat, otlp: Option<&OtlpConfig>) -> anyhow::Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
+        LogFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr)),
+        LogFormat::Json => Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .json(),
+        ),
+    };
+
+    let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
+
+    match otlp {
+        Some(cfg) if cfg.logs_enabled => {
+            let (otlp_layer, provider) = rastreo_server::observability::logs_layer(cfg)?;
+            // Stash the provider on a global static so its Drop runs at process exit.
+            OTLP_LOGGER_PROVIDER
+                .set(provider)
+                .map_err(|_| anyhow::anyhow!("OTLP logger provider already initialized"))?;
+            registry.with(otlp_layer).init();
+        }
+        _ => {
+            registry.init();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_tracing(log_format: LogFormat, _otlp: Option<&OtlpConfig>) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     match log_format {
@@ -89,6 +128,32 @@ fn init_tracing(log_format: LogFormat) {
                 .init();
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "otlp")]
+static OTLP_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "otlp")]
+fn init_otlp(
+    config: Option<&OtlpConfig>,
+    metrics: Arc<rastreo_server::state::Metrics>,
+) -> anyhow::Result<Option<rastreo_server::observability::OtlpGuard>> {
+    let Some(cfg) = config else { return Ok(None) };
+    let mut guard = rastreo_server::observability::init_metrics_only(cfg, metrics)?;
+    if let Some(provider) = OTLP_LOGGER_PROVIDER.get() {
+        rastreo_server::observability::attach_logger(&mut guard, provider.clone());
+    }
+    Ok(Some(guard))
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_otlp(
+    _config: Option<&OtlpConfig>,
+    _metrics: Arc<rastreo_server::state::Metrics>,
+) -> anyhow::Result<Option<()>> {
+    Ok(None)
 }
 
 #[cfg(test)]

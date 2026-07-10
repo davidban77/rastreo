@@ -65,6 +65,29 @@ spec:
           {{- if .Values.logFormat }}
           {{- $envs = append $envs (dict "name" "RASTREO_LOG_FORMAT" "value" (printf "%v" .Values.logFormat)) }}
           {{- end }}
+          {{- if .Values.otlp }}
+          {{- if or .Values.otlp.metricsEnabled .Values.otlp.logsEnabled }}
+          {{- if not .Values.otlp.endpoint }}
+          {{- fail "otlp.endpoint must be set when otlp.metricsEnabled or otlp.logsEnabled is true" }}
+          {{- end }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_ENDPOINT" "value" (printf "%v" .Values.otlp.endpoint)) }}
+          {{- if .Values.otlp.protocol }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_PROTOCOL" "value" (printf "%v" .Values.otlp.protocol)) }}
+          {{- end }}
+          {{- if .Values.otlp.metricsEnabled }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_METRICS_ENABLED" "value" "true") }}
+          {{- end }}
+          {{- if .Values.otlp.logsEnabled }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_LOGS_ENABLED" "value" "true") }}
+          {{- end }}
+          {{- if and .Values.otlp.metricsEnabled .Values.otlp.metricsIntervalSeconds }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_METRICS_INTERVAL_SECS" "value" (printf "%v" .Values.otlp.metricsIntervalSeconds)) }}
+          {{- end }}
+          {{- if .Values.otlp.serviceName }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_SERVICE_NAME" "value" (printf "%v" .Values.otlp.serviceName)) }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
           {{- if $envs }}
           env:
             {{- toYaml $envs | nindent 12 }}

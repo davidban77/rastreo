@@ -4,6 +4,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rastreo_core::{DiscoverySummary, Resolver};
 
+#[cfg(feature = "otlp")]
+use std::sync::OnceLock;
+
 pub struct HistogramShard {
     pub buckets: [AtomicU64; 11],
     pub plus_inf: AtomicU64,
@@ -90,9 +93,12 @@ pub struct Metrics {
     pub scans_total_cancelled: AtomicU64,
     pub probes_attempted_total: AtomicU64,
     pub probes_errored_total: AtomicU64,
+    pub probes_succeeded_total: AtomicU64,
     pub records_emitted_total: AtomicU64,
     pub sink_errors_total: AtomicU64,
     pub scan_duration_seconds: HistogramShard,
+    #[cfg(feature = "otlp")]
+    otlp_scan_duration: OnceLock<opentelemetry::metrics::Histogram<f64>>,
 }
 
 impl Metrics {
@@ -104,10 +110,21 @@ impl Metrics {
             scans_total_cancelled: AtomicU64::new(0),
             probes_attempted_total: AtomicU64::new(0),
             probes_errored_total: AtomicU64::new(0),
+            probes_succeeded_total: AtomicU64::new(0),
             records_emitted_total: AtomicU64::new(0),
             sink_errors_total: AtomicU64::new(0),
             scan_duration_seconds: HistogramShard::new(),
+            #[cfg(feature = "otlp")]
+            otlp_scan_duration: OnceLock::new(),
         }
+    }
+
+    #[cfg(feature = "otlp")]
+    pub fn attach_otlp_scan_duration(
+        &self,
+        histogram: opentelemetry::metrics::Histogram<f64>,
+    ) -> Result<(), opentelemetry::metrics::Histogram<f64>> {
+        self.otlp_scan_duration.set(histogram)
     }
 
     pub fn record_scan_completion(&self, summary: &DiscoverySummary) {
@@ -120,10 +137,14 @@ impl Metrics {
             .fetch_add(summary.probe_attempts as u64, Ordering::Relaxed);
         self.probes_errored_total
             .fetch_add(summary.probe_errors as u64, Ordering::Relaxed);
+        let succeeded = summary.probe_attempts.saturating_sub(summary.probe_errors);
+        self.probes_succeeded_total
+            .fetch_add(succeeded as u64, Ordering::Relaxed);
         self.records_emitted_total
             .fetch_add(summary.records_emitted as u64, Ordering::Relaxed);
-        self.scan_duration_seconds
-            .observe(summary.elapsed.as_secs_f64());
+        let seconds = summary.elapsed.as_secs_f64();
+        self.scan_duration_seconds.observe(seconds);
+        self.record_otlp_scan_duration(seconds);
     }
 
     pub fn record_scan_error(&self, elapsed: Duration, is_sink_error: bool) {
@@ -131,8 +152,20 @@ impl Metrics {
         if is_sink_error {
             self.sink_errors_total.fetch_add(1, Ordering::Relaxed);
         }
-        self.scan_duration_seconds.observe(elapsed.as_secs_f64());
+        let seconds = elapsed.as_secs_f64();
+        self.scan_duration_seconds.observe(seconds);
+        self.record_otlp_scan_duration(seconds);
     }
+
+    #[cfg(feature = "otlp")]
+    fn record_otlp_scan_duration(&self, seconds: f64) {
+        if let Some(h) = self.otlp_scan_duration.get() {
+            h.record(seconds, &[]);
+        }
+    }
+
+    #[cfg(not(feature = "otlp"))]
+    fn record_otlp_scan_duration(&self, _seconds: f64) {}
 }
 
 impl Default for Metrics {
@@ -177,6 +210,121 @@ impl ReadinessConfig {
                 default.scan_error_quarantine.as_secs(),
             )?),
         })
+    }
+}
+
+/// OTLP transport protocol selected at startup via `RASTREO_OTLP_PROTOCOL`.
+#[cfg(feature = "otlp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OtlpProtocol {
+    /// gRPC via tonic. Default. Endpoint is a URL like `http://collector:4317`.
+    #[default]
+    Grpc,
+    /// HTTP+protobuf via reqwest. Endpoint is a base URL like `http://collector:4318`;
+    /// rastreo appends `/v1/metrics` and `/v1/logs` per signal so one endpoint value works
+    /// for both. Pass a fully-qualified URL (`http://collector:4318/v1/logs`) when your
+    /// collector is on a non-standard route.
+    HttpProtobuf,
+}
+
+/// OpenTelemetry OTLP exporter configuration read from `RASTREO_OTLP_*` environment variables.
+#[cfg(feature = "otlp")]
+#[derive(Debug, Clone)]
+pub struct OtlpConfig {
+    pub endpoint: String,
+    pub protocol: OtlpProtocol,
+    pub metrics_enabled: bool,
+    pub logs_enabled: bool,
+    pub metrics_interval: Duration,
+    pub service_name: String,
+}
+
+#[cfg(feature = "otlp")]
+impl OtlpConfig {
+    pub fn from_env() -> anyhow::Result<Option<Self>> {
+        let metrics_enabled = parse_env_bool("RASTREO_OTLP_METRICS_ENABLED", false)?;
+        let logs_enabled = parse_env_bool("RASTREO_OTLP_LOGS_ENABLED", false)?;
+        if !metrics_enabled && !logs_enabled {
+            return Ok(None);
+        }
+        let endpoint = match std::env::var("RASTREO_OTLP_ENDPOINT") {
+            Ok(raw) if !raw.trim().is_empty() => raw,
+            Ok(_) | Err(std::env::VarError::NotPresent) => {
+                return Err(anyhow::anyhow!(
+                    "RASTREO_OTLP_ENDPOINT is required when RASTREO_OTLP_METRICS_ENABLED or \
+                     RASTREO_OTLP_LOGS_ENABLED is true; set it to your OTLP collector URL \
+                     (for example http://otel-collector:4317 for gRPC or \
+                     http://otel-collector:4318 for HTTP+protobuf)"
+                ));
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(anyhow::anyhow!(
+                    "invalid value for RASTREO_OTLP_ENDPOINT: not valid UTF-8"
+                ));
+            }
+        };
+        let protocol = parse_env_protocol("RASTREO_OTLP_PROTOCOL", OtlpProtocol::Grpc)?;
+        let metrics_interval =
+            Duration::from_secs(parse_env_u64("RASTREO_OTLP_METRICS_INTERVAL_SECS", 30)?);
+        let service_name = std::env::var("RASTREO_OTLP_SERVICE_NAME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "rastreo-server".to_string());
+        Ok(Some(Self {
+            endpoint,
+            protocol,
+            metrics_enabled,
+            logs_enabled,
+            metrics_interval,
+            service_name,
+        }))
+    }
+}
+
+#[cfg(not(feature = "otlp"))]
+#[derive(Debug, Clone)]
+pub struct OtlpConfig;
+
+#[cfg(not(feature = "otlp"))]
+impl OtlpConfig {
+    pub fn from_env() -> anyhow::Result<Option<Self>> {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "otlp")]
+fn parse_env_protocol(name: &str, default: OtlpProtocol) -> anyhow::Result<OtlpProtocol> {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "grpc" => Ok(OtlpProtocol::Grpc),
+            "http-protobuf" | "http" => Ok(OtlpProtocol::HttpProtobuf),
+            other => Err(anyhow::anyhow!(
+                "invalid value for {name}: {other:?} is not a supported OTLP protocol \
+                 (expected `grpc`, `http-protobuf`, or `http`)"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
+fn parse_env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Ok(true),
+            "false" | "0" | "no" | "off" => Ok(false),
+            _ => Err(anyhow::anyhow!(
+                "invalid value for {name}: {raw:?} is not a boolean (expected true/false)"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(anyhow::anyhow!("invalid value for {name}: not valid UTF-8"))
+        }
     }
 }
 
@@ -333,8 +481,35 @@ mod tests {
         assert_eq!(metrics.scans_total_cancelled.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.probes_attempted_total.load(Ordering::Relaxed), 10);
         assert_eq!(metrics.probes_errored_total.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.probes_succeeded_total.load(Ordering::Relaxed), 8);
         assert_eq!(metrics.records_emitted_total.load(Ordering::Relaxed), 5);
         assert_eq!(metrics.scan_duration_seconds.snapshot().count, 1);
+    }
+
+    #[test]
+    fn probes_succeeded_total_is_monotonic_across_multiple_scans() {
+        let metrics = Metrics::new();
+        metrics.record_scan_completion(&DiscoverySummary {
+            targets_resolved: 1,
+            probe_attempts: 10,
+            probe_errors: 8,
+            records_emitted: 2,
+            cancelled: false,
+            elapsed: Duration::from_millis(50),
+        });
+        let first = metrics.probes_succeeded_total.load(Ordering::Relaxed);
+        metrics.record_scan_completion(&DiscoverySummary {
+            targets_resolved: 1,
+            probe_attempts: 100,
+            probe_errors: 90,
+            records_emitted: 10,
+            cancelled: false,
+            elapsed: Duration::from_millis(50),
+        });
+        let second = metrics.probes_succeeded_total.load(Ordering::Relaxed);
+        assert_eq!(first, 2);
+        assert_eq!(second, 12);
+        assert!(second >= first);
     }
 
     #[test]
@@ -379,10 +554,16 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    const ENV_KEYS: [&str; 3] = [
+    const ENV_KEYS: [&str; 9] = [
         "RASTREO_MAX_INFLIGHT_SCANS",
         "RASTREO_SINK_ERROR_QUARANTINE_SECS",
         "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
+        "RASTREO_OTLP_ENDPOINT",
+        "RASTREO_OTLP_METRICS_ENABLED",
+        "RASTREO_OTLP_LOGS_ENABLED",
+        "RASTREO_OTLP_METRICS_INTERVAL_SECS",
+        "RASTREO_OTLP_SERVICE_NAME",
+        "RASTREO_OTLP_PROTOCOL",
     ];
 
     fn clear_env() {
@@ -499,5 +680,233 @@ mod tests {
         let state = build_state();
         let clone = state.clone();
         assert!(Arc::ptr_eq(&state.readiness, &clone.readiness));
+    }
+
+    #[cfg(feature = "otlp")]
+    mod otlp_tests {
+        use super::{clear_env, env_guard};
+        use crate::state::{OtlpConfig, OtlpProtocol};
+        use std::time::Duration;
+
+        #[test]
+        fn otlp_config_from_env_returns_none_when_both_disabled() {
+            let _guard = env_guard();
+            clear_env();
+            let cfg = OtlpConfig::from_env().expect("from_env");
+            assert!(cfg.is_none());
+        }
+
+        #[test]
+        fn otlp_config_from_env_returns_some_when_metrics_enabled() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert!(cfg.metrics_enabled);
+            assert!(!cfg.logs_enabled);
+            assert_eq!(cfg.endpoint, "http://collector:4317");
+            assert_eq!(cfg.metrics_interval, Duration::from_secs(30));
+            assert_eq!(cfg.service_name, "rastreo-server");
+        }
+
+        #[test]
+        fn otlp_config_from_env_returns_some_when_logs_enabled() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "1");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                std::env::set_var("RASTREO_OTLP_SERVICE_NAME", "custom-name");
+                std::env::set_var("RASTREO_OTLP_METRICS_INTERVAL_SECS", "10");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert!(!cfg.metrics_enabled);
+            assert!(cfg.logs_enabled);
+            assert_eq!(cfg.metrics_interval, Duration::from_secs(10));
+            assert_eq!(cfg.service_name, "custom-name");
+        }
+
+        #[test]
+        fn otlp_config_from_env_rejects_metrics_enabled_without_endpoint() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe { std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true") };
+            let err = OtlpConfig::from_env().expect_err("must reject");
+            clear_env();
+            let msg = err.to_string();
+            assert!(msg.contains("RASTREO_OTLP_ENDPOINT"), "msg was {msg}");
+        }
+
+        #[test]
+        fn otlp_config_from_env_rejects_logs_enabled_with_blank_endpoint() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "   ");
+            }
+            let err = OtlpConfig::from_env().expect_err("blank endpoint rejected");
+            clear_env();
+            assert!(err.to_string().contains("RASTREO_OTLP_ENDPOINT"));
+        }
+
+        #[test]
+        fn otlp_config_from_env_rejects_invalid_boolean() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe { std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "maybe") };
+            let err = OtlpConfig::from_env().expect_err("non-boolean rejected");
+            clear_env();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("RASTREO_OTLP_METRICS_ENABLED"),
+                "msg was {msg}"
+            );
+            assert!(msg.contains("maybe"), "msg was {msg}");
+        }
+
+        #[test]
+        fn otlp_config_from_env_rejects_invalid_interval() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                std::env::set_var("RASTREO_OTLP_METRICS_INTERVAL_SECS", "not-a-number");
+            }
+            let err = OtlpConfig::from_env().expect_err("non-numeric rejected");
+            clear_env();
+            assert!(err
+                .to_string()
+                .contains("RASTREO_OTLP_METRICS_INTERVAL_SECS"));
+        }
+
+        #[test]
+        fn otlp_config_accepts_boolean_variants() {
+            let _guard = env_guard();
+            for variant in ["true", "TRUE", "yes", "on", "1"] {
+                clear_env();
+                // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+                unsafe {
+                    std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", variant);
+                    std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                }
+                let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+                assert!(cfg.metrics_enabled, "variant {variant} should enable");
+            }
+            clear_env();
+        }
+
+        #[test]
+        fn otlp_config_protocol_defaults_to_grpc() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+        }
+
+        #[test]
+        fn otlp_config_protocol_parses_grpc() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                std::env::set_var("RASTREO_OTLP_PROTOCOL", "grpc");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+        }
+
+        #[test]
+        fn otlp_config_protocol_parses_http_protobuf() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4318");
+                std::env::set_var("RASTREO_OTLP_PROTOCOL", "http-protobuf");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
+        }
+
+        #[test]
+        fn otlp_config_protocol_parses_http_alias() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4318");
+                std::env::set_var("RASTREO_OTLP_PROTOCOL", "http");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
+        }
+
+        #[test]
+        fn otlp_config_protocol_case_insensitive() {
+            let _guard = env_guard();
+            for (variant, expected) in [
+                ("GRPC", OtlpProtocol::Grpc),
+                ("Grpc", OtlpProtocol::Grpc),
+                ("HTTP-PROTOBUF", OtlpProtocol::HttpProtobuf),
+                ("Http-Protobuf", OtlpProtocol::HttpProtobuf),
+                ("HTTP", OtlpProtocol::HttpProtobuf),
+            ] {
+                clear_env();
+                // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+                unsafe {
+                    std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                    std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                    std::env::set_var("RASTREO_OTLP_PROTOCOL", variant);
+                }
+                let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+                assert_eq!(cfg.protocol, expected, "variant {variant} misparsed");
+            }
+            clear_env();
+        }
+
+        #[test]
+        fn otlp_config_rejects_unknown_protocol() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                std::env::set_var("RASTREO_OTLP_PROTOCOL", "yaml");
+            }
+            let err = OtlpConfig::from_env().expect_err("unknown protocol rejected");
+            clear_env();
+            let msg = err.to_string();
+            assert!(msg.contains("RASTREO_OTLP_PROTOCOL"), "msg was {msg}");
+            assert!(msg.contains("yaml"), "msg was {msg}");
+            assert!(msg.contains("grpc"), "msg was {msg}");
+            assert!(msg.contains("http-protobuf"), "msg was {msg}");
+        }
     }
 }
