@@ -36,7 +36,7 @@ services:
       start_period: 20s
 
   nats:
-    image: nats:2.11-alpine
+    image: nats:2.14-alpine
     container_name: rastreo-nats
     command:
       - "-js"
