@@ -4,6 +4,69 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0](https://github.com/davidban77/rastreo/compare/v0.5.0...v0.6.0) (2026-07-11)
+
+
+### Features
+
+* **classifier:** role rules classifier + 5 baked port heuristics ([#89](https://github.com/davidban77/rastreo/issues/89)) ([b5ea57f](https://github.com/davidban77/rastreo/commit/b5ea57f19011502febfa2a3b4ecb90803ee1f4a1))
+* **classifier:** rules-based platform classifier + os_version field ([#88](https://github.com/davidban77/rastreo/issues/88)) ([7dbe50b](https://github.com/davidban77/rastreo/commit/7dbe50b53a7514324443f8f2c94306225d4ce956))
+* **classifier:** three-dimensional platform / server / SSH split ([#94](https://github.com/davidban77/rastreo/issues/94)) ([fd26c12](https://github.com/davidban77/rastreo/commit/fd26c1259d387d2467d02edcafc0d1c99ab37387))
+* **cli:** add --dry-run flag to rastreo discover ([#106](https://github.com/davidban77/rastreo/issues/106)) ([ab79332](https://github.com/davidban77/rastreo/commit/ab79332d13bcde6dd701408506c3e5f42db94267))
+* **cli:** catalog references ([@name](https://github.com/name)) for reusable scenarios ([#110](https://github.com/davidban77/rastreo/issues/110)) ([e1f767f](https://github.com/davidban77/rastreo/commit/e1f767fab0776f9f68aaceae48b77af2571cd3ae))
+* **cli:** runtime probe-error hints for common failure modes ([#108](https://github.com/davidban77/rastreo/issues/108)) ([8e5a7bd](https://github.com/davidban77/rastreo/commit/8e5a7bd9649f68a1e45ff0e1b31d3884fcc51052))
+* **config:** env-var and file-tag secret expansion at scenario load ([#95](https://github.com/davidban77/rastreo/issues/95)) ([b350a68](https://github.com/davidban77/rastreo/commit/b350a685a26f0f9aa4c5984db565d0264cef352c))
+* **core:** add versioned schema surface to DeviceRecord ([#74](https://github.com/davidban77/rastreo/issues/74)) ([095833a](https://github.com/davidban77/rastreo/commit/095833a601e3cc095ea2f6c68820d84a272ad809))
+* **examples:** Infrahub reference consumer for DeviceRecord ingest ([#93](https://github.com/davidban77/rastreo/issues/93)) ([d22a67d](https://github.com/davidban77/rastreo/commit/d22a67d1c9800bcaf8a208201e5bd82e0748a78b))
+* **examples:** Nautobot reference consumer for DeviceRecord ingest ([#92](https://github.com/davidban77/rastreo/issues/92)) ([a8aa95d](https://github.com/davidban77/rastreo/commit/a8aa95d3f15ee0d90606976f9b72366c4cbedcfd))
+* **examples:** NetBox reference consumer for DeviceRecord ingest ([#91](https://github.com/davidban77/rastreo/issues/91)) ([26c99b6](https://github.com/davidban77/rastreo/commit/26c99b65d75a98e3c1112d6fddd4bd7a56af83e7))
+* **fuser:** consume SshHostKey as third identity signal + cli_ssh UAT ([#81](https://github.com/davidban77/rastreo/issues/81)) ([7656387](https://github.com/davidban77/rastreo/commit/765638707a8718dfc2130eb36b364c35244f2c12))
+* **fuser:** correlate multi-IP devices via shared identity signals ([#75](https://github.com/davidban77/rastreo/issues/75)) ([29453c9](https://github.com/davidban77/rastreo/commit/29453c973b12b327733cb46e86ee86bce9f88984))
+* **helm:** Grafana dashboard + PrometheusRule alerts ([#100](https://github.com/davidban77/rastreo/issues/100)) ([2b82869](https://github.com/davidban77/rastreo/commit/2b828698be03a965cdf975caa0bfe8687e1a159c))
+* **lab:** Phase 5 — real network validation harness (SR Linux + 3 SoT stacks) ([#118](https://github.com/davidban77/rastreo/issues/118)) ([1ed3884](https://github.com/davidban77/rastreo/commit/1ed38845eb2c4782d73755c91b5bb2c1d4a08135))
+* **logging:** --log-format text|json flag on both binaries ([#97](https://github.com/davidban77/rastreo/issues/97)) ([ff358c9](https://github.com/davidban77/rastreo/commit/ff358c9c6a7af07a6d93a7f04e6077f669f901cc))
+* **observability:** enrich metric labels + fill dashboard and alert gaps ([#103](https://github.com/davidban77/rastreo/issues/103)) ([eac6ef6](https://github.com/davidban77/rastreo/commit/eac6ef6aed171dc66286726ae76f3c9820c80053))
+* **otlp:** opt-in OTLP export for metrics + logs behind `otlp` feature ([#101](https://github.com/davidban77/rastreo/issues/101)) ([af6d5ec](https://github.com/davidban77/rastreo/commit/af6d5ec91884fd201b10bc0f7502b611712f2a0f))
+* **phase2-prep:** Classifier stage + IdentityFuser pair_weight iterator ([#87](https://github.com/davidban77/rastreo/issues/87)) ([4355213](https://github.com/davidban77/rastreo/commit/435521335d64817deae5c8a68b651b8a27308115))
+* **prober:** add ICMP echo prober behind the icmp feature ([#83](https://github.com/davidban77/rastreo/issues/83)) ([56669c3](https://github.com/davidban77/rastreo/commit/56669c396690cef323162f38816d43db23730d14))
+* **prober:** add reverse DNS prober ([#85](https://github.com/davidban77/rastreo/issues/85)) ([f3ded80](https://github.com/davidban77/rastreo/commit/f3ded80aadafd9a30814a038b268703a0f267601))
+* **prober:** add SSH prober behind the ssh feature ([#80](https://github.com/davidban77/rastreo/issues/80)) ([5b5e70e](https://github.com/davidban77/rastreo/commit/5b5e70e0b3eaef3f4d19fd78b0549e1394bf6483))
+* **prober:** add TLS handshake prober behind the tls feature ([#84](https://github.com/davidban77/rastreo/issues/84)) ([a6c6210](https://github.com/davidban77/rastreo/commit/a6c6210c32bf9cf5a89eb489988f6dc4d60f3400))
+* **schema:** render v1 JSON Schemas to docs pages and ship AsyncAPI spec ([#76](https://github.com/davidban77/rastreo/issues/76)) ([c04904e](https://github.com/davidban77/rastreo/commit/c04904e5250a5b301909c543faec5a020b0251d8))
+* **schemas:** publish JSON Schemas at davidban77.github.io/rastreo/schemas/ ([#107](https://github.com/davidban77/rastreo/issues/107)) ([3b58f0e](https://github.com/davidban77/rastreo/commit/3b58f0e6a686ae3396f343b3fc81f8972004a380))
+* **server:** dual-write records to server-configured sink ([#105](https://github.com/davidban77/rastreo/issues/105)) ([e9e1e2e](https://github.com/davidban77/rastreo/commit/e9e1e2ed3069c561fbab5fa8c819972245bf7c67))
+* **server:** real /readyz sink reachability probe ([#104](https://github.com/davidban77/rastreo/issues/104)) ([2f4e8ad](https://github.com/davidban77/rastreo/commit/2f4e8ad0452ca4bf37121f27c441ff3027e2f202))
+* **server:** split /health into /healthz + /readyz ([#96](https://github.com/davidban77/rastreo/issues/96)) ([ba6fc45](https://github.com/davidban77/rastreo/commit/ba6fc455b80eb08d4ac928162813b30e4c58dd2f))
+* **sink/kafka:** dead-letter queue on primary produce failure ([#98](https://github.com/davidban77/rastreo/issues/98)) ([a2f1284](https://github.com/davidban77/rastreo/commit/a2f1284a0c73840374c3d30cdb08f149193edb6a))
+* **sink/nats:** dead-letter queue on publish + ack failure surfaces ([#99](https://github.com/davidban77/rastreo/issues/99)) ([c011112](https://github.com/davidban77/rastreo/commit/c01111232da671ecf9048f03d0ef7437b1333958))
+* **sink:** add NATS JetStream sink ([#77](https://github.com/davidban77/rastreo/issues/77)) ([e6cc69d](https://github.com/davidban77/rastreo/commit/e6cc69d6aaed8fd1da51b64fdf9a804ae7bb12d5))
+
+
+### Bug Fixes
+
+* **schema:** stabilize http.user_agent schema default across release bumps ([#90](https://github.com/davidban77/rastreo/issues/90)) ([e5f46cb](https://github.com/davidban77/rastreo/commit/e5f46cb4b4c70b1a77052774118c370fbeb35789))
+* **server:** graceful probe-task shutdown + sink-config-path trim ([#111](https://github.com/davidban77/rastreo/issues/111)) ([b06d52a](https://github.com/davidban77/rastreo/commit/b06d52af3d9e21c1280b0b6b3f4913b764068445))
+* **server:** sink_type="unknown" surfaces broken sink config to alerts ([#112](https://github.com/davidban77/rastreo/issues/112)) ([7a0f3b7](https://github.com/davidban77/rastreo/commit/7a0f3b7b54dc8c8d2a5cbef51a12bfa2496949fb))
+* **sink/kafka:** probe covers dead-letter partition when configured ([#109](https://github.com/davidban77/rastreo/issues/109)) ([c5dadd9](https://github.com/davidban77/rastreo/commit/c5dadd90978cb6ec54b9d793eeda8d1d106bee04))
+
+
+### Documentation
+
+* **claude:** refresh rastreo-core module tree + features table ([#82](https://github.com/davidban77/rastreo/issues/82)) ([3fbe847](https://github.com/davidban77/rastreo/commit/3fbe8472ada161496b86f84e3c621200884c5742))
+
+
+### Miscellaneous
+
+* **ci:** expand dependabot ignore list for coupled deps ([#69](https://github.com/davidban77/rastreo/issues/69)) ([3d2b51a](https://github.com/davidban77/rastreo/commit/3d2b51ad6aa41d7c41a47bde68ac001c4fe36ec2))
+* **phase-1-close:** CLI hints + CI matrix + docs freshness ([#86](https://github.com/davidban77/rastreo/issues/86)) ([fa60276](https://github.com/davidban77/rastreo/commit/fa602767ffbad0c232b747a90bdc603f39fc6679))
+* **phase-3-close:** docs reconciliation, OTLP config dedup, distroless fix ([#102](https://github.com/davidban77/rastreo/issues/102)) ([7886bfc](https://github.com/davidban77/rastreo/commit/7886bfc7ea332067fe199aac2f3adf985ab004de))
+
+
+### Refactoring
+
+* **fuser:** rename CorrelationFuser to IdentityFuser ([#78](https://github.com/davidban77/rastreo/issues/78)) ([4834e72](https://github.com/davidban77/rastreo/commit/4834e723c6f248af776ef82cb4f233c0616b24e9))
+* **model:** AltIp object for DeviceRecord.alt_ips ([#79](https://github.com/davidban77/rastreo/issues/79)) ([c92863f](https://github.com/davidban77/rastreo/commit/c92863fc05ffc308fda76fab4269391d06de7944))
+
 ## [0.5.0](https://github.com/davidban77/rastreo/compare/v0.4.0...v0.5.0) (2026-07-05)
 
 
