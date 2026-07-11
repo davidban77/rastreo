@@ -53,9 +53,17 @@ SOT_CONFIG: dict[str, dict[str, str]] = {
         "header": "Authorization: Token",
     },
     "infrahub": {
-        # Infrahub GraphQL query for RastreoDevice by identity_key.
-        "url": "http://infrahub-server:8000/api/graphql/rastreo-updates?query={RastreoDevice(identity_key__value:\"ip:198.51.100.11\"){count}}",
-        "url_alt": "http://infrahub-server:8000/api/graphql/rastreo-updates?query={RastreoDevice(identity_key__value:\"ip:198.51.100.12\"){count}}",
+        "method": "POST",
+        "checks": [
+            {
+                "url": "http://infrahub-server:8000/graphql/main",
+                "body": '{"query":"{ RastreoDevice(identity_key__value: \\"ip:198.51.100.11\\") { count } }"}',
+            },
+            {
+                "url": "http://infrahub-server:8000/graphql/main",
+                "body": '{"query":"{ RastreoDevice(identity_key__value: \\"ip:198.51.100.12\\") { count } }"}',
+            },
+        ],
         "token": "06438eb2-8019-4776-878c-0941b1f1d1ec",
         "header": "X-INFRAHUB-KEY:",
     },
@@ -171,26 +179,33 @@ def poll_sot(sot: str, network: str, orb_machine: str | None, timeout_s: int) ->
     config = SOT_CONFIG[sot]
     header_prefix = config["header"]
     token = config["token"]
-    urls = [config["url"], config["url_alt"]]
     header = f"{header_prefix} {token}"
     deadline = time.monotonic() + timeout_s
+    method = config.get("method", "GET")
     while time.monotonic() < deadline:
         found = 0
-        for url in urls:
+        entries = config.get("checks") or [{"url": config["url"]}, {"url": config["url_alt"]}]
+        for entry in entries:
+            url = entry["url"]
+            body = entry.get("body")
             probe_cmd = [
                 "sudo", "docker", "run", "--rm",
                 "--network", network,
                 "curlimages/curl:8.10.1",
-                "-sf", "-H", header, url,
+                "-sf", "-X", method, "-H", header,
             ]
+            if body is not None:
+                probe_cmd += ["-H", "Content-Type: application/json", "-d", body]
+            probe_cmd.append(url)
             if orb_machine:
-                cmd = ["orb", "-m", orb_machine, "bash", "-c", " ".join(f'"{p}"' if " " in p else p for p in probe_cmd)]
+                cmd = ["orb", "-m", orb_machine, "bash", "-c", " ".join(f"'{p}'" if any(c in p for c in " \"") else p for p in probe_cmd)]
             else:
                 cmd = probe_cmd
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if proc.returncode == 0 and (b'"identity_key"' in proc.stdout.encode() or b'"count":1' in proc.stdout.encode() or b'"count": 1' in proc.stdout.encode() or (b'"results"' in proc.stdout.encode() and b'"count":1' in proc.stdout.encode())):
+            out = proc.stdout
+            if proc.returncode == 0 and ('"identity_key"' in out or '"count": 1' in out or '"count":1' in out):
                 found += 1
-        if found == len(urls):
+        if found == len(entries):
             return found
         time.sleep(2)
     return 0

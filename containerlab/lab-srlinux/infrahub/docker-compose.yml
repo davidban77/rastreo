@@ -1,118 +1,119 @@
 # Infrahub SoT + consumer stack for Phase 5 validation.
 #
+# Config shape adapted from the network-observability/workshops autocon5
+# lab, which is a known-working Infrahub 1.x reference deployment.
+#
 # Prerequisites (from parent lab-srlinux/ directory):
 #   1. containerlab topology:  sudo containerlab deploy -t lab.clab.yml
 #   2. shared Kafka broker:    docker compose -f kafka/docker-compose.yml up -d
 #
 # Then from THIS directory:  docker compose up -d
-# Wait for infrahub to become healthy (first boot ~5 min for schema init),
-# then run ./bootstrap.sh to load the RastreoDevice schema.
-#
-# Infrahub is heavier than Nautobot/NetBox: memgraph (graph DB) + rabbitmq
-# (task queue) + redis (cache) + infrahub-server (API/GraphQL) +
-# infrahub-git (git task worker). Config via env vars matches the
-# OpsMill reference deployment.
+# Wait for infrahub-server to become healthy (first boot ~2-3 min), then
+# run ./bootstrap.sh to load the RastreoDevice schema.
 
 networks:
   rastreo-lab:
     external: true
 
 services:
-  memgraph:
-    image: memgraph/memgraph-mage:latest
-    container_name: rastreo-lab-infrahub-memgraph
-    command:
-      - --storage-mode=IN_MEMORY_TRANSACTIONAL
-      - --storage-snapshot-interval-sec=300
-      - --storage-wal-enabled=true
-      - --log-level=WARNING
-      - --also-log-to-stderr
-      - --telemetry-enabled=false
+  infrahub-db:
+    image: neo4j:5-community
+    container_name: rastreo-lab-infrahub-db
     networks:
       - rastreo-lab
+    environment:
+      NEO4J_AUTH: neo4j/admin
+      NEO4J_dbms_security_auth__minimum__password__length: "4"
     healthcheck:
-      test: ["CMD-SHELL", "echo 'RETURN 0;' | mgconsole || exit 1"]
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:7474 || exit 1"]
       interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
 
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    container_name: rastreo-lab-infrahub-rabbitmq
+  infrahub-cache:
+    image: redis:7.2
+    container_name: rastreo-lab-infrahub-cache
+    networks:
+      - rastreo-lab
+
+  infrahub-message-queue:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rastreo-lab-infrahub-mq
     networks:
       - rastreo-lab
     environment:
       RABBITMQ_DEFAULT_USER: infrahub
       RABBITMQ_DEFAULT_PASS: infrahub
     healthcheck:
-      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 20s
-
-  redis:
-    image: redis/redis-stack-server:7.4.0-v0
-    container_name: rastreo-lab-infrahub-redis
-    networks:
-      - rastreo-lab
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
-      timeout: 3s
-      retries: 6
+      timeout: 30s
+      retries: 5
 
   infrahub-server:
-    image: registry.opsmill.io/opsmill/infrahub:1.3
+    image: registry.opsmill.io/opsmill/infrahub:1.5
     container_name: rastreo-lab-infrahub
     depends_on:
-      memgraph:
+      infrahub-db:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      redis:
+      infrahub-cache:
+        condition: service_started
+      infrahub-message-queue:
         condition: service_healthy
     ports:
       - "8082:8000"
     networks:
       - rastreo-lab
-    command: ["infrahub", "server", "start", "--listen", "0.0.0.0", "--port", "8000"]
+    command: ["gunicorn", "--config", "backend/infrahub/serve/gunicorn_config.py", "--logger-class", "infrahub.serve.log.GunicornLogger", "-w", "2", "infrahub.server:app"]
     environment:
-      INFRAHUB_DB_TYPE: memgraph
-      INFRAHUB_DB_ADDRESS: memgraph
-      INFRAHUB_BROKER_ADDRESS: rabbitmq
+      INFRAHUB_PRODUCTION: "true"
+      INFRAHUB_WORKFLOW_DRIVER: local
+      INFRAHUB_INITIAL_ADMIN_TOKEN: "06438eb2-8019-4776-878c-0941b1f1d1ec"
+      INFRAHUB_INITIAL_AGENT_TOKEN: "a4f3c1d2-9b8e-4a7f-8c5d-1e2f3a4b5c6d"
+      INFRAHUB_SECURITY_SECRET_KEY: "327f747f-efac-42be-9e73-999f08f86b92"
+      INFRAHUB_DB_TYPE: neo4j
+      INFRAHUB_DB_ADDRESS: infrahub-db
+      INFRAHUB_DB_PORT: "7687"
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: admin
+      INFRAHUB_BROKER_ADDRESS: infrahub-message-queue
       INFRAHUB_BROKER_USERNAME: infrahub
       INFRAHUB_BROKER_PASSWORD: infrahub
-      INFRAHUB_CACHE_ADDRESS: redis
-      INFRAHUB_INITIAL_ADMIN_TOKEN: "06438eb2-8019-4776-878c-0941b1f1d1ec"
-      INFRAHUB_PRODUCTION: "false"
-      INFRAHUB_LOG_LEVEL: WARNING
+      INFRAHUB_CACHE_ADDRESS: infrahub-cache
+      INFRAHUB_LOG_LEVEL: INFO
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/schema/summary > /dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 120s
+      start_period: 60s
 
-  infrahub-tasks:
-    image: registry.opsmill.io/opsmill/infrahub:1.3
+  infrahub-task-worker:
+    image: registry.opsmill.io/opsmill/infrahub:1.5
     container_name: rastreo-lab-infrahub-tasks
-    command: ["infrahub", "git-agent", "start", "--debug"]
+    command: ["infrahub", "git-agent", "start"]
     depends_on:
       infrahub-server:
+        condition: service_started
+      infrahub-message-queue:
         condition: service_healthy
     networks:
       - rastreo-lab
     environment:
-      INFRAHUB_ADDRESS: "http://infrahub-server:8000"
-      INFRAHUB_DB_TYPE: memgraph
-      INFRAHUB_DB_ADDRESS: memgraph
-      INFRAHUB_BROKER_ADDRESS: rabbitmq
+      INFRAHUB_PRODUCTION: "true"
+      INFRAHUB_WORKFLOW_DRIVER: local
+      INFRAHUB_DB_TYPE: neo4j
+      INFRAHUB_DB_ADDRESS: infrahub-db
+      INFRAHUB_DB_PORT: "7687"
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: admin
+      INFRAHUB_BROKER_ADDRESS: infrahub-message-queue
       INFRAHUB_BROKER_USERNAME: infrahub
       INFRAHUB_BROKER_PASSWORD: infrahub
-      INFRAHUB_CACHE_ADDRESS: redis
-      INFRAHUB_INITIAL_AGENT_TOKEN: "06438eb2-8019-4776-878c-0941b1f1d1ec"
+      INFRAHUB_CACHE_ADDRESS: infrahub-cache
+      INFRAHUB_INTERNAL_ADDRESS: "http://infrahub-server:8000"
+      INFRAHUB_API_TOKEN: "06438eb2-8019-4776-878c-0941b1f1d1ec"
 
   infrahub-consumer:
     build:
@@ -130,6 +131,6 @@ services:
       KAFKA_AUTO_OFFSET_RESET: earliest
       INFRAHUB_URL: "http://infrahub-server:8000"
       INFRAHUB_TOKEN: "06438eb2-8019-4776-878c-0941b1f1d1ec"
-      INFRAHUB_BRANCH: "rastreo-updates"
+      INFRAHUB_BRANCH: "main"
       INFRAHUB_AUTO_MERGE: "true"
       LOG_LEVEL: INFO
