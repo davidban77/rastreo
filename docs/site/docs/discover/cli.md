@@ -33,7 +33,7 @@ Flag-driven mode always uses the TCP-connect prober. To reach the HTTP, DNS, UDP
 
 ## YAML-driven mode
 
-`--file <PATH>` (`-f <PATH>`) loads a `ScenarioFile` and runs every scenario entry in order. The file must set `version: 1` and `kind: discovery`; other values are rejected. See [Scenario schema](../reference/scenario.md) for the full field list. `@name` catalog references are not supported yet — only file paths.
+`--file <PATH>` (`-f <PATH>`) loads a `ScenarioFile` and runs every scenario entry in order. The file must set `version: 1` and `kind: discovery`; other values are rejected. See [Scenario schema](../reference/scenario.md) for the full field list. The argument also accepts a `@name` catalog reference that resolves to a scenario file in `~/.config/rastreo/catalog/` or `/etc/rastreo/catalog/` — see [Catalog](catalog.md) for the search order and setup.
 
 A single-scenario file that probes an HTTP target and a DNS resolver:
 
@@ -211,5 +211,6 @@ When no probe error was captured but `records_emitted=0` with at least one probe
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — the full YAML shape accepted by `--file`.
+- [Catalog](catalog.md) — `@name` references and the catalog directory search order.
 - [Targets](targets.md) — the four target forms and how the CLI detects each one.
 - [Sinks](sinks.md) — stdout, file, and Kafka output in depth.

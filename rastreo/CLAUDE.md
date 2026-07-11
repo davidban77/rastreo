@@ -21,6 +21,7 @@ src/
 ├── main.rs   ← entrypoint: tokio::main, tracing init, ctrl-c handler
 └── cli/
     ├── mod.rs       ← Cli struct + Command enum + clap dispatch
+    ├── catalog.rs   ← @name resolution across catalog directories (feature = "config")
     └── discover.rs  ← discover subcommand handler + arg parsing
 ```
 
@@ -32,14 +33,14 @@ src/
 
 ### `rastreo discover`
 
-Flags: `--target` (repeatable; IP / CIDR / range / DNS), `--port` (repeatable or comma-separated), `--file` / `-f` (YAML scenario file; mutually exclusive with `--target` / `--port`), `--sink` (`stdout` | `file` | `kafka` with `--features kafka` | `nats` with `--features nats`), `--output` (file sink path), `--brokers` and `--topic` (kafka sink), `--concurrency` (default 64), `--timeout-ms` (default 1000), `--dry-run` (resolve targets and print the plan; no probes, no sink IO), the global `-v` / `-q` verbosity flags, and the global `--log-format` flag (`text` or `json`, env var `RASTREO_LOG_FORMAT`, default `text`).
+Flags: `--target` (repeatable; IP / CIDR / range / DNS), `--port` (repeatable or comma-separated), `--file` / `-f` (YAML scenario file path or `@name` catalog reference; mutually exclusive with `--target` / `--port`), `--sink` (`stdout` | `file` | `kafka` with `--features kafka` | `nats` with `--features nats`), `--output` (file sink path), `--brokers` and `--topic` (kafka sink), `--concurrency` (default 64), `--timeout-ms` (default 1000), `--dry-run` (resolve targets and print the plan; no probes, no sink IO), the global `-v` / `-q` verbosity flags, and the global `--log-format` flag (`text` or `json`, env var `RASTREO_LOG_FORMAT`, default `text`).
 
 Two modes:
 
 - **Flag-driven** (`--target` + `--port`): builds an in-memory `DiscoverScenarioConfig` that runs a single TCP-connect prober against the listed targets. Suitable for quick reachability sweeps.
 - **YAML-driven** (`--file`): loads a `ScenarioFile` from disk, validates `version: 1` + `kind: discovery`, and executes each entry sequentially. This is the only CLI path to the HTTP, DNS, Reverse DNS, UDP, SNMP, ARP, NDP, SSH, ICMP, TLS, and OUI-enrichment surface. Sink and per-scenario knob overrides via `--sink`, `--concurrency`, `--timeout-ms` follow the precedence rule below (CLI > YAML).
 
-Catalog references (`@name`) are not yet supported — only file paths.
+Catalog references (`@name`) resolve `--file` to a scenario file in `RASTREO_CATALOG_DIR` (colon-separated PATH-style) if set, otherwise `$XDG_CONFIG_HOME/rastreo/catalog/` (fallback `$HOME/.config/rastreo/catalog/`) then `/etc/rastreo/catalog/`. First hit wins, `.yml` before `.yaml` within each directory. Names may not contain path separators.
 
 Output: one NDJSON `DeviceRecord` per line on the chosen sink. Tracing logs always go to stderr so a stdout sink stays clean for downstream `jq` / NDJSON consumers.
 

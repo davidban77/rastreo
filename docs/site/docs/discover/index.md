@@ -11,6 +11,7 @@ Topics covered here include the full CLI flag reference, the YAML scenario file 
 ## Pages in this section
 
 - [CLI](cli.md) — every flag `rastreo discover` accepts, plus YAML-driven mode with `--file`. See the [Scenario schema](../reference/scenario.md) for the file shape.
+- [Catalog](catalog.md) — `@name` references and the search order across `~/.config/rastreo/catalog/`, `/etc/rastreo/catalog/`, and `RASTREO_CATALOG_DIR`.
 - [Targets](targets.md) — the four target forms (IP, CIDR, range, DNS) and how the CLI detects each one.
 - [Sinks](sinks.md) — stdout, file, and Kafka output, plus the NDJSON contract.
 - [Enrichment](enrichment.md) — OUI vendor lookup from MAC addresses, the bundled Wireshark manuf snapshot, and how to override it.
