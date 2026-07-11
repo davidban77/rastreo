@@ -57,7 +57,7 @@ services:
       retries: 6
 
   netbox:
-    image: netboxcommunity/netbox:v4.3-3.4.0
+    image: netboxcommunity/netbox:v4.3-3.3.0
     container_name: rastreo-lab-netbox
     depends_on:
       postgres:
@@ -94,7 +94,7 @@ services:
       start_period: 120s
 
   netbox-worker:
-    image: netboxcommunity/netbox:v4.3-3.4.0
+    image: netboxcommunity/netbox:v4.3-3.3.0
     container_name: rastreo-lab-netbox-worker
     command: ["/opt/netbox/venv/bin/python", "/opt/netbox/netbox/manage.py", "rqworker"]
     depends_on:
