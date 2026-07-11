@@ -7,16 +7,52 @@ description: rastreo emits records conforming to a versioned JSON Schema. This p
 Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (currently `v1`) and a `schema_id` URL pointing at the canonical JSON Schema for the record shape. Per-scan provenance is exposed on each record via a nested `ScanMetadata` object, whose schema is published alongside the record schema at `schemas/scan-metadata-v1.json`. The streaming surface — how those records flow over Kafka or NATS — is described in an AsyncAPI document at `schemas/asyncapi.yaml`.
 
 - Version: **v1**
-- Schema ID: `https://schemas.rastreo.dev/device-record/v1.json`
+- Schema ID: `https://davidban77.github.io/rastreo/schemas/device-record-v1.json`
 - Source of truth: `rastreo-core/src/model/device.rs::DeviceRecord`
-- Generated JSON Schema files ship in `schemas/` in the source repo. Field-by-field reference pages are generated from those files and live under this section.
+- Generated JSON Schema files ship in `schemas/` in the source repo AND at `https://davidban77.github.io/rastreo/schemas/` alongside these docs, so editors and consumers can fetch them directly over HTTPS. Field-by-field reference pages are generated from those files and live under this section.
 
 ## Pages in this section
 
 - [DeviceRecord](device-record.md) — every field on the emitted record. Generated from the schemars derives.
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
-- [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo run --scenario`. Generated. Point an IDE YAML plugin at `schemas/scenario-v1.json` for autocomplete and validation. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
+- [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo discover --file`. Generated. Point an IDE YAML plugin at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json` for autocomplete and validation; see [Editor setup](#editor-setup) below for the concrete snippets. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
 - [Streaming API](streaming-api.md) — Kafka topic / NATS subject conventions, correlation IDs, the AsyncAPI spec.
+
+## Editor setup
+
+The scenario schema is served alongside these docs at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json`. Two patterns wire it into an editor.
+
+**Inline `# yaml-language-server` header.** Add one line at the top of a scenario file and every yaml-language-server-based editor (VS Code + YAML extension, Neovim / Helix with `yaml-language-server`, JetBrains YAML plugin) picks up autocomplete and validation with zero further configuration:
+
+```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    targets:
+      - Ip: "10.0.0.1"
+    probers:
+      - type: tcp_connect
+        ports: [22, 80, 443]
+```
+
+**VS Code `yaml.schemas` mapping.** For teams that prefer not to touch scenario files, associate the schema with a glob in `.vscode/settings.json`:
+
+```json
+{
+  "yaml.schemas": {
+    "https://davidban77.github.io/rastreo/schemas/scenario-v1.json": [
+      "*.rastreo.yaml",
+      "*.rastreo.yml"
+    ]
+  }
+}
+```
+
+Rename scenario files to end in `.rastreo.yaml` or `.rastreo.yml` and the schema binds automatically — no inline header needed.
+
+Both patterns validate against the same schema. Pick whichever fits the workflow; they can also be combined.
 
 ## Versioning policy
 

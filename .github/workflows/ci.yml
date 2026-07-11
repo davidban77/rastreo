@@ -115,7 +115,7 @@ jobs:
 
       - name: Verify no drift
         run: |
-          if ! git diff --exit-code schemas/ docs/site/docs/reference/schema/; then
+          if ! git diff --exit-code schemas/ docs/site/docs/schemas/ docs/site/docs/reference/schema/; then
             echo "::error::Committed schemas or rendered docs are out of sync with the Rust type derives."
             echo "Run \`task schema:all\` locally and commit the result."
             exit 1

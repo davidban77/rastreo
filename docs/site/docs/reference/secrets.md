@@ -13,6 +13,7 @@ Both syntaxes are resolved before deserialization runs, so a missing value fails
 Any string scalar in the scenario YAML may reference an environment variable using the shell-style `${VAR}` syntax. The identifier must match `[A-Za-z_][A-Za-z0-9_]*` — the same character set as POSIX shell variable names.
 
 ```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
 version: 1
 kind: discovery
 scenarios:
@@ -47,6 +48,7 @@ Only string scalars in the scenario body are affected. YAML booleans, numbers, s
 Any string scalar may be replaced with the `!file` YAML tag followed by an absolute path. rastreo reads the file at scenario load and substitutes its contents (with the trailing newline trimmed) into the scalar position. This matches the Kubernetes secret-mount pattern where the secret material sits at `/run/secrets/<name>` in the pod filesystem.
 
 ```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
 version: 1
 kind: discovery
 scenarios:

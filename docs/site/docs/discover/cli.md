@@ -38,6 +38,7 @@ Flag-driven mode always uses the TCP-connect prober. To reach the HTTP, DNS, UDP
 A single-scenario file that probes an HTTP target and a DNS resolver:
 
 ```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
 version: 1
 kind: discovery
 scenarios:
@@ -63,6 +64,7 @@ rastreo discover --file /etc/rastreo/scan.yml
 A multi-scenario file that runs two independent probes sequentially. The `defaults:` block applies to every scenario unless the scenario re-declares the field.
 
 ```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
 version: 1
 kind: discovery
 defaults:

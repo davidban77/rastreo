@@ -8,7 +8,7 @@ description: Deserialization of `DeviceRecord` requires `schema_version` and `sc
 
 Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Legacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize; consumers should tag legacy records with an explicit v0 marker before ingest.
 
-- Schema ID: `n/a`
+- Schema ID: `https://davidban77.github.io/rastreo/schemas/device-record-v1.json`
 - JSON Schema draft: `http://json-schema.org/draft-07/schema#`
 - Source of truth: `rastreo-core/src/model/device.rs`
 

@@ -74,6 +74,7 @@ Release tarballs and the published Docker image ship with `oui` enabled — no s
 Discover an IPv4 lab subnet, ARP for MACs, and tag vendors:
 
 ```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
 version: 1
 kind: discovery
 scenarios:

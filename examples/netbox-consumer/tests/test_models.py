@@ -26,7 +26,7 @@ def test_minimal_record_parses(minimal_record_payload: dict[str, Any]) -> None:
 def test_full_record_parses(full_record_payload: dict[str, Any]) -> None:
     record = DeviceRecord.model_validate(full_record_payload)
     assert record.schema_version == "v1"
-    assert record.schema_id == "https://schemas.rastreo.dev/device-record/v1.json"
+    assert record.schema_id == "https://davidban77.github.io/rastreo/schemas/device-record-v1.json"
     assert record.identity_key == "mac:aa:bb:cc:11:22:33"
     assert record.platform == "cisco_ios"
     assert record.os_version == "15.7"

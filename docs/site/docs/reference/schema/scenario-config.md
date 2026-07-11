@@ -8,7 +8,7 @@ description: Wire schema for ScenarioFile emitted by rastreo.
 
 Wire schema for ScenarioFile emitted by rastreo.
 
-- Schema ID: `https://schemas.rastreo.dev/scenario-config/v1.json`
+- Schema ID: `https://davidban77.github.io/rastreo/schemas/scenario-v1.json`
 - JSON Schema draft: `http://json-schema.org/draft-07/schema#`
 - Source of truth: `rastreo-core/src/config/mod.rs`
 
