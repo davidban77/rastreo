@@ -1,0 +1,79 @@
+# Lab validation — Nokia SR Linux
+
+Real-network validation harness for rastreo. Deploys a Nokia SR Linux topology in [containerlab](https://containerlab.dev/), runs rastreo scans against it, and (in later slices) reconciles the emitted DeviceRecords into a real SoT (Nautobot / NetBox / Infrahub).
+
+Unlike the compose-based Live Infra UAT — which validates TCP-connect against nginx targets — this harness exercises the full prober matrix (SNMP, SSH, HTTPS, NETCONF, LLDP, BGP peer-count) against a real network OS image.
+
+## Prerequisites
+
+- macOS on Apple Silicon (arm64) with [OrbStack](https://orbstack.dev/) installed, OR a Linux host with Docker
+- On macOS, an OrbStack Linux VM: `orb create ubuntu clab`
+- Inside the VM: containerlab and Docker
+  ```
+  orb -m clab bash -c "curl -sL https://containerlab.dev/setup | sudo -E bash -s all"
+  orb -m clab sudo apt-get install -y docker.io
+  ```
+- SR Linux image (arm64-native, no emulation): `sudo docker pull ghcr.io/nokia/srlinux:latest`
+
+## Topology
+
+Two SR Linux nodes on the `rastreo-lab` bridge network (`198.51.100.0/24`):
+
+```
+                 rastreo-lab (198.51.100.0/24)
+                            │
+               ┌────────────┴────────────┐
+               │                         │
+        ┌──────┴──────┐           ┌──────┴──────┐
+        │   srl-01    │           │   srl-02    │
+        │ .11         │◄─e1-1─────┤ .12         │
+        └─────────────┘           └─────────────┘
+```
+
+Single point-to-point link between `e1-1` on both nodes for LLDP + BGP.
+
+## Deploy
+
+From your Mac (files auto-mount into the VM at the same path):
+
+```
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux && sudo containerlab deploy -t lab.clab.yml"
+```
+
+Boot takes ~60s. Verify SSH is listening:
+
+```
+orb -m clab bash -c "nc -zv 198.51.100.11 22 && nc -zv 198.51.100.12 22"
+```
+
+## Run a scan
+
+Rastreo runs as a container on the same `rastreo-lab` bridge network (so it can reach the mgmt IPs directly):
+
+```
+orb -m clab bash -c "sudo docker run --rm --entrypoint /rastreo --network rastreo-lab \
+  ghcr.io/davidban77/rastreo:latest \
+  discover --target 198.51.100.11 --target 198.51.100.12 -p 22 --sink stdout"
+```
+
+Expected output (one `DeviceRecord` per node):
+
+```
+{"identity_key":"ip:198.51.100.11","mgmt_ip":"198.51.100.11","signals":[{"OpenPort":22}], ...}
+{"identity_key":"ip:198.51.100.12","mgmt_ip":"198.51.100.12","signals":[{"OpenPort":22}], ...}
+discovery complete: targets_resolved=2 probe_attempts=2 probe_errors=0 records_emitted=2 elapsed_ms=8
+```
+
+## Teardown
+
+```
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux && sudo containerlab destroy -t lab.clab.yml"
+```
+
+## Scope
+
+**Slice 1 (this commit)** — 2-node SR Linux topology, default boot config, TCP-connect scan verified. Baseline `OpenPort` signal emitted for both nodes.
+
+**Slice 2 (next)** — startup configs enable SNMPv2c (community `rastreo-lab`), NETCONF, JSON-RPC HTTPS, BGP session between the nodes, LLDP on the p2p link. Full prober matrix scenarios under `scenarios/`.
+
+**Slice 3** — Kafka broker + Nautobot consumer added to the compose sidecar. End-to-end validation: scan → DeviceRecords on Kafka → reconciled into Nautobot device inventory. Golden-record NDJSON snapshots checked in for regression.
