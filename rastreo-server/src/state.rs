@@ -598,7 +598,11 @@ impl SinkReachability {
     }
 
     pub fn sink_type_label(&self) -> Option<&'static str> {
-        self.sink_type.map(SinkType::as_label)
+        match self.sink_type {
+            Some(t) => Some(t.as_label()),
+            None if self.configured => Some("unknown"),
+            None => None,
+        }
     }
 }
 
@@ -1352,6 +1356,33 @@ mod tests {
         assert!(r.reachable.load(Ordering::Relaxed));
         assert!(r.last_error_snapshot().is_none());
         assert!(r.last_probe_epoch_ms.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn sink_type_label_returns_none_when_not_configured() {
+        let r = SinkReachability::not_configured();
+        assert!(r.sink_type_label().is_none());
+    }
+
+    #[test]
+    fn sink_type_label_returns_known_label_when_configured_with_type() {
+        let r = SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        assert_eq!(r.sink_type_label(), Some("kafka"));
+    }
+
+    #[test]
+    fn sink_type_label_returns_unknown_when_configured_but_type_none() {
+        let r = SinkReachability::construction_failed(
+            None,
+            "yaml parse failed".into(),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        assert_eq!(r.sink_type_label(), Some("unknown"));
     }
 
     #[test]
