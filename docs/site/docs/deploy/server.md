@@ -35,6 +35,10 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 
 The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
 
+## Graceful shutdown
+
+On `SIGTERM` (production) or `SIGINT` (`Ctrl+C` during local dev), the server stops accepting new connections, lets inflight requests drain against the per-request timeout above, and stops the background sink-reachability probe after its current iteration. Provided the deploy-side grace period is large enough, a scan in flight completes and its records reach the server-configured sink before shutdown; if the platform kills the process before drain completes (SIGKILL after the grace period elapses, or an unclean pod eviction), the in-flight scan is lost. The chart ships `terminationGracePeriodSeconds: 75` — see the [Kubernetes deploy page](kubernetes.md) for sizing guidance.
+
 ## GET /healthz and GET /readyz
 
 `GET /healthz` is a liveness probe. It always returns `200 OK` with a static JSON body, and never runs any discovery work. Use it from Kubernetes liveness probes, from external uptime monitors, or from a quick `curl` to verify the server is up.

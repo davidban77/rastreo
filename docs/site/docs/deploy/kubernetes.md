@@ -110,6 +110,10 @@ The image ships with `cap_net_raw+ep` set on both `/rastreo` and `/rastreo-serve
 
 Without this toggle, scenarios that reference `type: arp` or `type: ndp` will fail at probe time with `raw socket permission denied; ARP requires CAP_NET_RAW` (or the analogous NDP message). The pod itself continues running; only those specific probes fail.
 
+## Graceful shutdown and `terminationGracePeriodSeconds`
+
+`rastreo-server` handles `SIGTERM` by refusing new connections, draining inflight `POST /scans` requests against the per-request timeout, and stopping the background sink-reachability probe. The process exits only once both drains complete. Set `terminationGracePeriodSeconds` on the pod spec to cover the longest expected scan plus the probe-iteration budget — for the binary defaults (60s request timeout, 5s probe timeout) `terminationGracePeriodSeconds: 75` gives a ~10s safety margin. The chart ships this value out of the box. If the grace period expires before drain completes, the kubelet sends `SIGKILL` and any inflight scan is aborted mid-flight without landing records in the server-configured sink.
+
 ## Security context
 
 The chart's `podSecurityContext` and container `securityContext` are restrictive by default:

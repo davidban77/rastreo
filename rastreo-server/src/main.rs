@@ -9,6 +9,7 @@ use rastreo_server::{
     build_app_with_timeout, spawn_sink_probe,
     state::{AppState, MetricsConfig, OtlpConfig, ReadinessConfig, SinkProbeConfig},
 };
+use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 enum LogFormat {
@@ -63,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
     let metrics_config = MetricsConfig::from_env().context("failed to load metrics config")?;
     let sink_probe = SinkProbeConfig::from_env().context("failed to load sink-probe config")?;
     let state = AppState::with_config(resolver, readiness, metrics_config);
-    let state = spawn_sink_probe(state, &sink_probe).await;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (state, probe_handle) = spawn_sink_probe(state, &sink_probe, shutdown_rx.clone()).await;
 
     // Guard must outlive the axum serve loop so pending OTLP exports flush on shutdown.
     let _otlp_guard = init_otlp(
@@ -78,8 +81,52 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind to {addr}"))?;
     tracing::info!(%addr, "rastreo-server listening");
-    axum::serve(listener, app).await?;
+
+    let signal_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        let _ = signal_tx.send(true);
+    });
+
+    let mut shutdown_wait = shutdown_rx.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_wait.changed().await;
+        })
+        .await?;
+
+    if let Some(handle) = probe_handle {
+        let _ = handle.await;
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let sigint = tokio::signal::ctrl_c();
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(?e, "could not install SIGTERM handler; SIGINT only");
+            sigint.await.ok();
+            tracing::warn!("SIGINT received, draining inflight requests and probe task");
+            return;
+        }
+    };
+
+    tokio::select! {
+        _ = sigint => tracing::warn!("SIGINT received, draining inflight requests and probe task"),
+        _ = sigterm.recv() => tracing::warn!("SIGTERM received, draining inflight requests and probe task"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_ok() {
+        tracing::warn!("SIGINT received, draining inflight requests and probe task");
+    }
 }
 
 #[cfg(feature = "otlp")]

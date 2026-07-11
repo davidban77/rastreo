@@ -640,7 +640,7 @@ impl SinkProbeConfig {
     /// Read `RASTREO_SINK_CONFIG_PATH`, `RASTREO_SINK_PROBE_INTERVAL_SECS`, and `RASTREO_SINK_PROBE_TIMEOUT_SECS`, falling back to defaults when unset.
     pub fn from_env() -> anyhow::Result<Self> {
         let config_path = match std::env::var("RASTREO_SINK_CONFIG_PATH") {
-            Ok(raw) if !raw.trim().is_empty() => Some(std::path::PathBuf::from(raw)),
+            Ok(raw) if !raw.trim().is_empty() => Some(std::path::PathBuf::from(raw.trim())),
             Ok(_) | Err(std::env::VarError::NotPresent) => None,
             Err(std::env::VarError::NotUnicode(_)) => {
                 return Err(anyhow::anyhow!(
@@ -1455,6 +1455,38 @@ mod tests {
         let cfg = SinkProbeConfig::from_env().expect("from_env");
         clear_env();
         assert!(cfg.config_path.is_none());
+    }
+
+    #[test]
+    fn sink_probe_config_from_env_trims_whitespace_around_path() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "  /tmp/foo.yaml\t");
+        }
+        let cfg = SinkProbeConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(
+            cfg.config_path.as_deref(),
+            Some(std::path::Path::new("/tmp/foo.yaml"))
+        );
+    }
+
+    #[test]
+    fn sink_probe_config_from_env_preserves_interior_whitespace() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "/tmp/foo bar.yaml");
+        }
+        let cfg = SinkProbeConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(
+            cfg.config_path.as_deref(),
+            Some(std::path::Path::new("/tmp/foo bar.yaml"))
+        );
     }
 
     #[test]

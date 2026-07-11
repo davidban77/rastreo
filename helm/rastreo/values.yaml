@@ -25,6 +25,12 @@ server:
   # Bind address for the rastreo-server.
   bind: "0.0.0.0"
 
+# Time the kubelet waits between SIGTERM and SIGKILL. Must exceed the longest
+# expected in-flight scan so `axum` can drain requests before the process is
+# killed. Default sizing: `--request-timeout-ms` (60s) + probe drain (5s) +
+# margin.
+terminationGracePeriodSeconds: 75
+
 # Readiness gate configuration for /readyz. Leave a key unset to inherit the
 # server's built-in default (100 inflight, 30s sink quarantine, 30s scan
 # quarantine). Set any value to 0 to disable that check entirely.
