@@ -27,8 +27,9 @@ pub use model::{
     PROBE_KIND_COUNT,
 };
 pub use pipeline::{
-    run_discovery, run_discovery_cancellable, run_discovery_with_components,
-    run_discovery_with_components_cancellable, DiscoverySummary, ProbeKindSummary,
+    resolve_scenario_targets, run_discovery, run_discovery_cancellable,
+    run_discovery_with_components, run_discovery_with_components_cancellable, DiscoverySummary,
+    ProbeKindSummary, ResolvedScenarioTarget,
 };
 #[cfg(feature = "icmp")]
 pub use prober::IcmpProber;

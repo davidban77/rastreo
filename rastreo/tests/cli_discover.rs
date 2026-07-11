@@ -681,6 +681,196 @@ async fn scenario_label_is_consistent_across_running_and_summary_lines() {
     );
 }
 
+#[tokio::test]
+async fn dry_run_flag_driven_prints_plan_and_exits_zero_without_probing() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let start = std::time::Instant::now();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--port",
+                "22,80,443",
+                "--dry-run",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+    let elapsed = start.elapsed();
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "dry-run must not perform TCP connects; took {elapsed:?}"
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("[dry-run]"),
+        "stdout missing dry-run marker: {stdout}"
+    );
+    assert!(
+        stdout.contains("would run 1 scenario"),
+        "stdout missing scenario-count header: {stdout}"
+    );
+    assert!(
+        !stdout.contains("0 probes will execute"),
+        "stdout should no longer include misleading '0 probes will execute' line: {stdout}"
+    );
+    assert!(
+        stdout.contains("total probes: 1"),
+        "stdout missing total-probes footer (1 IP × 1 tcp_connect prober = 1): {stdout}"
+    );
+    assert!(
+        stdout.contains("tcp_connect (ports 22, 80, 443)"),
+        "stdout missing prober line: {stdout}"
+    );
+    assert!(
+        stdout.contains("sink: stdout"),
+        "stdout missing sink line: {stdout}"
+    );
+    assert!(
+        stdout.contains("127.0.0.1 → 127.0.0.1"),
+        "stdout missing target line: {stdout}"
+    );
+}
+
+#[cfg(feature = "kafka")]
+#[tokio::test]
+async fn dry_run_with_kafka_sink_does_not_connect_to_broker() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let start = std::time::Instant::now();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--port",
+                "22",
+                "--sink",
+                "kafka",
+                "--brokers",
+                "127.0.0.1:1",
+                "--topic",
+                "unreachable",
+                "--dry-run",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+    let elapsed = start.elapsed();
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed.as_secs() < 5,
+        "dry-run must not try to reach kafka; took {elapsed:?}"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("kafka:"), "{stdout}");
+    assert!(stdout.contains("brokers=127.0.0.1:1"), "{stdout}");
+    assert!(stdout.contains("topic=unreachable"), "{stdout}");
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn dry_run_yaml_mode_prints_per_scenario_blocks_and_total_probes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: stdout\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n  - signal_type: discover\n    name: second\n    targets:\n      - Cidr: \"10.0.0.0/30\"\n    probers:\n      - type: tcp_connect\n        ports: [80, 443]\n";
+    let path = write_yaml(&dir, "multi.yml", yaml);
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .arg("--dry-run")
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("would run 2 scenarios"),
+        "expected scenario count header: {stdout}"
+    );
+    assert!(
+        stdout.contains("scenario: 'first' (1 of 2)"),
+        "missing first scenario label: {stdout}"
+    );
+    assert!(
+        stdout.contains("scenario: 'second' (2 of 2)"),
+        "missing second scenario label: {stdout}"
+    );
+    // Total probes: scenario 1 (1 IP × 1 prober = 1) + scenario 2 (2 IPs × 1 prober = 2) = 3
+    assert!(
+        stdout.contains("total probes: 3"),
+        "missing total probes line: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_dns_failure_prints_inline_error_and_still_exits_zero() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--target",
+                "nx-does-not-exist-99e2c31b.example.invalid",
+                "--port",
+                "22",
+                "--dry-run",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "one good target should keep exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("<error:"),
+        "expected inline error: {stdout}"
+    );
+    assert!(
+        stdout.contains("127.0.0.1 → 127.0.0.1"),
+        "resolved target still listed: {stdout}"
+    );
+}
+
 #[cfg(feature = "config")]
 #[tokio::test]
 async fn sink_flag_overrides_yaml_sink() {

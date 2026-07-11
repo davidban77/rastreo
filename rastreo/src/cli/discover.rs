@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 #[cfg(feature = "config")]
 use std::path::Path;
@@ -12,7 +13,12 @@ use rastreo_core::config::{parse_scenario_file, ScenarioEntry, ScenarioFile, Sce
 use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
-use rastreo_core::{run_discovery_cancellable, ConfigError, ProberConfig, SinkConfig, Target};
+#[cfg(feature = "config")]
+use rastreo_core::Resolver;
+use rastreo_core::{
+    resolve_scenario_targets, run_discovery_cancellable, ConfigError, HickoryResolver,
+    ProberConfig, ResolvedScenarioTarget, SinkConfig, Target,
+};
 use tokio::sync::watch;
 
 const DEFAULT_CONCURRENCY: u32 = 64;
@@ -84,6 +90,10 @@ pub struct DiscoverArgs {
     /// Per-probe timeout in milliseconds. Defaults to 1000. With --file, overrides the YAML timeout_ms.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub timeout_ms: Option<u64>,
+
+    /// Print what would run without executing any probe or opening any sink. Targets are still resolved (DNS lookups execute) so operators see the expanded plan.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[cfg(feature = "kafka")]
@@ -106,11 +116,311 @@ pub enum SinkKind {
 }
 
 pub async fn run(args: DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
+    if args.dry_run {
+        return run_dry_run(&args).await;
+    }
     #[cfg(feature = "config")]
     if args.file.is_some() {
         return run_from_file(&args, cancel).await;
     }
     run_legacy(&args, cancel).await
+}
+
+const DRY_RUN_CIDR_LIST_CUTOFF: usize = 6;
+
+async fn run_dry_run(args: &DiscoverArgs) -> Result<()> {
+    let resolver = HickoryResolver::from_system()?;
+
+    #[cfg(feature = "config")]
+    if args.file.is_some() {
+        return run_dry_run_from_file(args, &resolver).await;
+    }
+
+    let scenario = build_scenario(args)?;
+    let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+    let mut out = String::new();
+    write_dry_run_header(&mut out, 1);
+    let total_probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolutions, args);
+    write_totals(&mut out, 1, total_probes);
+    print!("{out}");
+    dry_run_exit_status(&[resolutions])
+}
+
+#[cfg(feature = "config")]
+async fn run_dry_run_from_file(args: &DiscoverArgs, resolver: &dyn Resolver) -> Result<()> {
+    let path = args.file.as_deref().expect("file present per dispatch");
+    let file = load_scenario_file(path)?;
+
+    if file.version != 1 {
+        return Err(anyhow!(
+            "unsupported scenario file version {}: only version 1 is supported",
+            file.version
+        ));
+    }
+    if file.kind != ScenarioKind::Discovery {
+        return Err(anyhow!(
+            "unsupported scenario kind: only 'discovery' is supported"
+        ));
+    }
+    if file.scenarios.is_empty() {
+        return Err(anyhow!(
+            "scenario file '{}' has no scenarios",
+            path.display()
+        ));
+    }
+
+    let cli_sink = build_cli_sink_override(args)?;
+    let total = file.scenarios.len();
+
+    let mut scenarios: Vec<(String, DiscoverScenarioConfig)> = Vec::with_capacity(total);
+    for (idx, entry) in file.scenarios.into_iter().enumerate() {
+        let mut cfg = match entry {
+            ScenarioEntry::Discover(cfg) => cfg,
+            #[allow(unreachable_patterns)]
+            _ => return Err(anyhow!("unsupported scenario entry variant")),
+        };
+        merge_defaults(&mut cfg.base, &file.defaults);
+        apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref());
+        let label = dry_run_scenario_label(&cfg.base, idx, total);
+        scenarios.push((label, cfg));
+    }
+
+    let mut out = String::new();
+    let mut total_probes: usize = 0;
+    let mut all_resolutions: Vec<Vec<ResolvedScenarioTarget>> = Vec::with_capacity(scenarios.len());
+    write_dry_run_header(&mut out, scenarios.len());
+    for (label, scenario) in &scenarios {
+        let resolutions = resolve_scenario_targets(scenario, resolver).await;
+        let scenario_probes = write_scenario_plan(&mut out, label, scenario, &resolutions, args);
+        total_probes += scenario_probes;
+        all_resolutions.push(resolutions);
+    }
+    write_totals(&mut out, scenarios.len(), total_probes);
+    print!("{out}");
+    dry_run_exit_status(&all_resolutions)
+}
+
+#[cfg(feature = "config")]
+fn dry_run_scenario_label(base: &BaseProbeConfig, idx: usize, total: usize) -> String {
+    match &base.name {
+        Some(n) => format!("'{n}' ({} of {total})", idx + 1),
+        None => format!("{} of {total}", idx + 1),
+    }
+}
+
+fn write_dry_run_header(out: &mut String, scenario_count: usize) {
+    use std::fmt::Write as _;
+    let noun = if scenario_count == 1 {
+        "scenario"
+    } else {
+        "scenarios"
+    };
+    writeln!(out, "[dry-run] would run {scenario_count} {noun}").expect("write to String");
+}
+
+fn write_scenario_plan(
+    out: &mut String,
+    label: &str,
+    scenario: &DiscoverScenarioConfig,
+    resolutions: &[ResolvedScenarioTarget],
+    args: &DiscoverArgs,
+) -> usize {
+    use std::fmt::Write as _;
+
+    writeln!(out, "  scenario: {label}").expect("write to String");
+
+    writeln!(out, "    targets:").expect("write to String");
+    let mut unique_ips: HashSet<IpAddr> = HashSet::new();
+    for entry in resolutions {
+        let head = target_display(&entry.target);
+        match &entry.result {
+            Ok(ips) => {
+                unique_ips.extend(ips.iter().copied());
+                writeln!(out, "      {head} → {}", format_ip_list(ips)).expect("write to String");
+            }
+            Err(err) => {
+                writeln!(out, "      {head} → <error: {err}>").expect("write to String");
+            }
+        }
+    }
+
+    writeln!(out, "    probers: {}", format_probers(&scenario.probers)).expect("write to String");
+    writeln!(
+        out,
+        "    sink: {}",
+        format_sink(scenario.base.sink.as_ref())
+    )
+    .expect("write to String");
+
+    let concurrency = scenario
+        .base
+        .rate_limit
+        .unwrap_or_else(|| args.concurrency.unwrap_or(DEFAULT_CONCURRENCY));
+    let timeout_ms = scenario
+        .base
+        .timeout_ms
+        .unwrap_or_else(|| args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    writeln!(out, "    concurrency: {concurrency}").expect("write to String");
+    writeln!(out, "    timeout_ms: {timeout_ms}").expect("write to String");
+
+    unique_ips.len().saturating_mul(scenario.probers.len())
+}
+
+fn write_totals(out: &mut String, _scenario_count: usize, total_probes: usize) {
+    use std::fmt::Write as _;
+    writeln!(out, "total probes: {total_probes}").expect("write to String");
+}
+
+fn dry_run_exit_status(all: &[Vec<ResolvedScenarioTarget>]) -> Result<()> {
+    let mut had_any = false;
+    let mut had_success = false;
+    for scenario in all {
+        for entry in scenario {
+            had_any = true;
+            if entry.result.is_ok() {
+                had_success = true;
+            }
+        }
+    }
+    if had_any && !had_success {
+        return Err(anyhow!(
+            "no targets resolved successfully — nothing would probe"
+        ));
+    }
+    Ok(())
+}
+
+fn target_display(target: &Target) -> String {
+    match target {
+        Target::Ip(ip) => ip.to_string(),
+        Target::Cidr(net) => net.to_string(),
+        Target::Range { start, end } => format!("{start}-{end}"),
+        Target::DnsName(name) => name.clone(),
+        #[allow(unreachable_patterns)]
+        _ => "<unknown target>".to_string(),
+    }
+}
+
+fn format_ip_list(ips: &[IpAddr]) -> String {
+    if ips.len() <= DRY_RUN_CIDR_LIST_CUTOFF {
+        let mut buf = String::new();
+        for (i, ip) in ips.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            buf.push_str(&ip.to_string());
+        }
+        return buf;
+    }
+    let mut buf = String::new();
+    for ip in ips.iter().take(3) {
+        if !buf.is_empty() {
+            buf.push_str(", ");
+        }
+        buf.push_str(&ip.to_string());
+    }
+    let plural = if ips.len() == 1 {
+        "address"
+    } else {
+        "addresses"
+    };
+    let count = ips.len();
+    format!("{buf}, ... ({count} {plural})")
+}
+
+fn format_probers(probers: &[ProberConfig]) -> String {
+    if probers.is_empty() {
+        return "<none>".to_string();
+    }
+    let mut parts = Vec::with_capacity(probers.len());
+    for p in probers {
+        parts.push(describe_prober(p));
+    }
+    parts.join(", ")
+}
+
+fn describe_prober(p: &ProberConfig) -> String {
+    match p {
+        ProberConfig::TcpConnect { ports } => {
+            format!("tcp_connect (ports {})", format_ports(ports))
+        }
+        #[cfg(feature = "http")]
+        ProberConfig::Http { ports, .. } => format!("http (ports {})", format_ports(ports)),
+        ProberConfig::Dns {
+            ports, query_names, ..
+        } => format!(
+            "dns (ports {}, queries {})",
+            format_ports(ports),
+            query_names.join(", ")
+        ),
+        ProberConfig::Udp { ports, protocol } => format!(
+            "udp (ports {}, protocol {:?})",
+            format_ports(ports),
+            protocol
+        ),
+        #[cfg(feature = "snmp")]
+        ProberConfig::Snmp { ports, version, .. } => {
+            format!("snmp (ports {}, {:?})", format_ports(ports), version)
+        }
+        #[cfg(feature = "arp")]
+        ProberConfig::Arp { interface } => format!("arp (interface {interface:?})"),
+        #[cfg(feature = "ndp")]
+        ProberConfig::Ndp { interface } => format!("ndp (interface {interface:?})"),
+        #[cfg(feature = "ssh")]
+        ProberConfig::Ssh { ports } => format!("ssh (ports {})", format_ports(ports)),
+        #[cfg(feature = "icmp")]
+        ProberConfig::Icmp { count, interval_ms } => {
+            format!("icmp (count {count}, interval_ms {interval_ms})")
+        }
+        #[cfg(feature = "tls")]
+        ProberConfig::Tls { ports } => format!("tls (ports {})", format_ports(ports)),
+        ProberConfig::ReverseDns { resolvers } => {
+            if resolvers.is_empty() {
+                "reverse_dns (system resolvers)".to_string()
+            } else {
+                let list: Vec<String> = resolvers.iter().map(|r| r.to_string()).collect();
+                format!("reverse_dns (resolvers {})", list.join(", "))
+            }
+        }
+        #[allow(unreachable_patterns)]
+        _ => "<unknown prober>".to_string(),
+    }
+}
+
+fn format_ports(ports: &[u16]) -> String {
+    let mut buf = String::new();
+    for (i, p) in ports.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        buf.push_str(&p.to_string());
+    }
+    buf
+}
+
+fn format_sink(sink: Option<&SinkConfig>) -> String {
+    match sink {
+        None => "stdout (default)".to_string(),
+        Some(SinkConfig::Stdout) => "stdout".to_string(),
+        Some(SinkConfig::File { path }) => format!("file: {}", path.display()),
+        Some(SinkConfig::Memory) => "memory".to_string(),
+        #[cfg(feature = "kafka")]
+        Some(SinkConfig::Kafka { brokers, topic, .. }) => {
+            format!("kafka: brokers={} topic={topic}", brokers.join(","))
+        }
+        #[cfg(feature = "nats")]
+        Some(SinkConfig::Nats {
+            servers,
+            subject,
+            stream,
+            ..
+        }) => format!(
+            "nats: servers={} subject={subject} stream={stream}",
+            servers.join(",")
+        ),
+        #[allow(unreachable_patterns)]
+        Some(_) => "<unknown sink>".to_string(),
+    }
 }
 
 async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
@@ -431,6 +741,7 @@ mod tests {
             kafka_batch_threshold: None,
             concurrency: None,
             timeout_ms: None,
+            dry_run: false,
         }
     }
 
@@ -989,5 +1300,304 @@ mod tests {
     fn scenario_label_unnamed_scenario_uses_bare_index() {
         let base = BaseProbeConfig::new();
         assert_eq!(scenario_label(&base, 1, 3), "scenario 2 of 3");
+    }
+
+    #[test]
+    fn parse_accepts_dry_run_flag() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "22",
+            "--dry-run",
+        ])
+        .expect("parses");
+        assert!(parsed.dry_run);
+    }
+
+    #[test]
+    fn parse_dry_run_defaults_to_false() {
+        let parsed =
+            DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1", "--port", "22"])
+                .expect("parses");
+        assert!(!parsed.dry_run);
+    }
+
+    #[test]
+    fn format_ip_list_under_cutoff_prints_all_addresses() {
+        let ips: Vec<IpAddr> = (1..=DRY_RUN_CIDR_LIST_CUTOFF)
+            .map(|i| IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8)))
+            .collect();
+        let out = format_ip_list(&ips);
+        assert!(!out.contains("..."), "no ellipsis at cutoff: {out}");
+        assert!(out.contains("10.0.0.1"));
+        assert!(out.contains("10.0.0.6"));
+    }
+
+    #[test]
+    fn format_ip_list_over_cutoff_uses_ellipsis_and_count() {
+        let ips: Vec<IpAddr> = (1..=8)
+            .map(|i| IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)))
+            .collect();
+        let out = format_ip_list(&ips);
+        assert!(
+            out.starts_with("10.0.0.1, 10.0.0.2, 10.0.0.3, ..."),
+            "got: {out}"
+        );
+        assert!(out.ends_with("(8 addresses)"), "got: {out}");
+    }
+
+    #[test]
+    fn format_ip_list_single_entry_uses_singular_noun_when_over_cutoff() {
+        // Guardrail: single-entry never hits the ellipsis branch (1 <= cutoff),
+        // but this pins the singular formatting for readers.
+        let ips = vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))];
+        assert_eq!(format_ip_list(&ips), "10.0.0.1");
+    }
+
+    #[test]
+    fn format_sink_stdout_prints_stdout() {
+        assert_eq!(format_sink(Some(&SinkConfig::Stdout)), "stdout");
+    }
+
+    #[test]
+    fn format_sink_file_prints_path() {
+        let sink = SinkConfig::File {
+            path: PathBuf::from("/tmp/x.ndjson"),
+        };
+        assert_eq!(format_sink(Some(&sink)), "file: /tmp/x.ndjson");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn format_sink_kafka_shows_brokers_and_topic_without_instantiating() {
+        let sink = SinkConfig::Kafka {
+            brokers: vec!["127.0.0.1:1".into(), "127.0.0.1:2".into()],
+            topic: "rastreo.devices".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+        };
+        let s = format_sink(Some(&sink));
+        assert!(s.contains("kafka:"), "{s}");
+        assert!(s.contains("brokers=127.0.0.1:1,127.0.0.1:2"), "{s}");
+        assert!(s.contains("topic=rastreo.devices"), "{s}");
+    }
+
+    #[test]
+    fn format_probers_lists_kind_and_ports() {
+        let probers = vec![ProberConfig::TcpConnect {
+            ports: vec![22, 80, 443],
+        }];
+        let out = format_probers(&probers);
+        assert_eq!(out, "tcp_connect (ports 22, 80, 443)");
+    }
+
+    #[test]
+    fn target_display_uses_natural_form_per_variant() {
+        assert_eq!(
+            target_display(&Target::Ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))),
+            "10.0.0.1"
+        );
+        assert_eq!(
+            target_display(&Target::Cidr("10.0.0.0/24".parse().expect("cidr"))),
+            "10.0.0.0/24"
+        );
+        assert_eq!(
+            target_display(&Target::DnsName("example.com".into())),
+            "example.com"
+        );
+        assert_eq!(
+            target_display(&Target::Range {
+                start: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                end: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+            }),
+            "10.0.0.1-10.0.0.5"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_flag_driven_prints_plan_and_exits_ok() {
+        let mut a = args(&["127.0.0.1"], &[22, 80]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        write_dry_run_header(&mut out, 1);
+        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolutions, &a);
+        write_totals(&mut out, 1, probes);
+        assert_eq!(probes, 1, "1 IP × 1 prober = 1 probe");
+        assert!(out.contains("[dry-run] would run 1 scenario"), "{out}");
+        assert!(!out.contains("0 probes will execute"), "{out}");
+        assert!(out.contains("targets:"), "{out}");
+        assert!(out.contains("127.0.0.1 → 127.0.0.1"), "{out}");
+        assert!(out.contains("tcp_connect (ports 22, 80)"), "{out}");
+        assert!(out.contains("sink: stdout"), "{out}");
+        assert!(out.contains("concurrency: 64"), "{out}");
+        assert!(out.contains("timeout_ms: 1000"), "{out}");
+        assert!(
+            out.contains("total probes: 1"),
+            "single-scenario prints total: {out}"
+        );
+        dry_run_exit_status(&[resolutions]).expect("exit ok");
+    }
+
+    #[tokio::test]
+    async fn dry_run_cidr_expansion_below_cutoff_lists_all_addresses() {
+        let mut a = args(&["10.0.0.0/29"], &[22]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        assert!(out.contains("10.0.0.1"), "{out}");
+        assert!(out.contains("10.0.0.6"), "{out}");
+        assert!(!out.contains("..."), "no ellipsis under cutoff: {out}");
+    }
+
+    #[tokio::test]
+    async fn dry_run_cidr_expansion_above_cutoff_uses_ellipsis_with_count() {
+        let mut a = args(&["10.0.0.0/24"], &[22]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        assert_eq!(probes, 254, "1 prober × 254 hosts in /24");
+        assert!(out.contains("..."), "ellipsis expected: {out}");
+        assert!(out.contains("(254 addresses)"), "count expected: {out}");
+    }
+
+    #[tokio::test]
+    async fn dry_run_dns_failure_prints_inline_error_and_continues() {
+        let mut a = args(&["invalid.nx.does-not-exist.example", "127.0.0.1"], &[22]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        assert!(
+            out.contains("<error:"),
+            "expected inline error for failing DNS target: {out}"
+        );
+        assert!(out.contains("127.0.0.1 → 127.0.0.1"), "{out}");
+        dry_run_exit_status(&[resolutions]).expect("at least one resolved => exit 0");
+    }
+
+    #[tokio::test]
+    async fn dry_run_all_targets_failing_returns_error() {
+        let resolutions = vec![
+            ResolvedScenarioTarget::new(
+                Target::DnsName("x.invalid".into()),
+                Err(rastreo_core::RastreoError::Resolver(
+                    rastreo_core::ResolverError::DnsNoRecords {
+                        name: "x.invalid".into(),
+                    },
+                )),
+            ),
+            ResolvedScenarioTarget::new(
+                Target::DnsName("y.invalid".into()),
+                Err(rastreo_core::RastreoError::Resolver(
+                    rastreo_core::ResolverError::DnsNoRecords {
+                        name: "y.invalid".into(),
+                    },
+                )),
+            ),
+        ];
+        let err = dry_run_exit_status(&[resolutions]).expect_err("all-failed => Err");
+        let msg = format!("{err}");
+        assert!(msg.contains("no targets resolved"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[tokio::test]
+    async fn dry_run_kafka_sink_never_instantiates_client() {
+        // Build a scenario with kafka sink pointing at a bogus broker.
+        // The dry-run path must NOT try to connect — completes instantly.
+        let mut a = args(&["127.0.0.1"], &[22]);
+        a.dry_run = true;
+        a.sink = Some(SinkKind::Kafka);
+        a.brokers = vec!["127.0.0.1:1".into()];
+        a.topic = Some("t".into());
+
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let start = std::time::Instant::now();
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 2,
+            "dry-run must not attempt kafka connect; took {elapsed:?}"
+        );
+        assert!(out.contains("kafka:"), "{out}");
+        assert!(out.contains("brokers=127.0.0.1:1"), "{out}");
+        assert!(out.contains("topic=t"), "{out}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn dry_run_scenario_label_uses_quoted_name_when_present() {
+        let mut base = BaseProbeConfig::new();
+        base.name = Some("routers".into());
+        assert_eq!(dry_run_scenario_label(&base, 0, 3), "'routers' (1 of 3)");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn dry_run_scenario_label_uses_bare_index_when_unnamed() {
+        let base = BaseProbeConfig::new();
+        assert_eq!(dry_run_scenario_label(&base, 2, 4), "3 of 4");
+    }
+
+    #[test]
+    fn write_totals_multi_scenario_prints_total_probe_count() {
+        let mut out = String::new();
+        write_totals(&mut out, 3, 42);
+        assert!(out.contains("total probes: 42"), "{out}");
+    }
+
+    #[test]
+    fn write_totals_single_scenario_also_prints_total_line() {
+        let mut out = String::new();
+        write_totals(&mut out, 1, 5);
+        assert!(out.contains("total probes: 5"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dry_run_single_scenario_now_prints_total_probes_footer() {
+        let mut a = args(&["127.0.0.1"], &[22]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        write_dry_run_header(&mut out, 1);
+        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolutions, &a);
+        write_totals(&mut out, 1, probes);
+        assert!(
+            out.contains("total probes: 1"),
+            "single-scenario dry-run must print total probes footer: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_probe_count_deduplicates_overlapping_ips() {
+        let mut a = args(&["10.0.0.1", "10.0.0.0/29"], &[22]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        // /29 usable hosts: 10.0.0.1..10.0.0.6 (6). Explicit 10.0.0.1 overlaps → still 6 unique.
+        assert_eq!(probes, 6, "expected deduped unique-IP count, got {probes}");
+        // Per-target lines still show duplicates verbatim — dedup is only for the total.
+        assert!(out.contains("10.0.0.1 → 10.0.0.1"), "{out}");
     }
 }
