@@ -43,7 +43,10 @@ for field in \
     '{"name":"rastreo_ssh_version","label":"rastreo SSH version","type":"text","object_types":['"$OT"']}' \
     '{"name":"rastreo_http_server","label":"rastreo HTTP server","type":"text","object_types":['"$OT"']}' \
     '{"name":"rastreo_http_version","label":"rastreo HTTP version","type":"text","object_types":['"$OT"']}' \
-    '{"name":"rastreo_signals","label":"rastreo signals","type":"json","object_types":['"$OT"']}'
+    '{"name":"rastreo_signals","label":"rastreo signals","type":"json","object_types":['"$OT"']}' \
+    '{"name":"rastreo_probe_kinds","label":"rastreo probe kinds","type":"json","object_types":['"$OT"']}' \
+    '{"name":"rastreo_alt_ips","label":"rastreo alt ips","type":"json","object_types":['"$OT"']}' \
+    '{"name":"rastreo_scan_metadata","label":"rastreo scan metadata","type":"json","object_types":['"$OT"']}'
 do
     name=$(echo "$field" | jq -r '.name')
     get_or_create "extras/custom-fields" "name" "$name" "$field"

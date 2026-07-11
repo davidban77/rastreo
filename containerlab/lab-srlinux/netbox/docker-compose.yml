@@ -87,7 +87,7 @@ services:
       SKIP_SUPERUSER: "false"
       ALLOWED_HOSTS: "*"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/ > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -so /dev/null -w '%{http_code}' http://localhost:8080/api/ | grep -qE '^(200|403)$'"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -130,4 +130,7 @@ services:
       NETBOX_URL: "http://netbox:8080"
       NETBOX_TOKEN: "abcdef0123456789abcdef0123456789abcdef01"
       NETBOX_VERIFY_TLS: "false"
+      NETBOX_DEFAULT_DEVICE_TYPE: "rastreo-generic"
+      NETBOX_DEFAULT_SITE: "rastreo-lab"
+      NETBOX_DEFAULT_DEVICE_ROLE: "rastreo-discovered"
       LOG_LEVEL: INFO

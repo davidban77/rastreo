@@ -45,6 +45,9 @@ def run(config: Config) -> None:
         else NetBoxClient(
             config.netbox_url,
             config.netbox_token,
+            default_device_type=config.default_device_type,
+            default_site=config.default_site,
+            default_device_role=config.default_device_role,
             verify_tls=config.netbox_verify_tls,
             timeout_seconds=config.netbox_timeout_seconds,
         )

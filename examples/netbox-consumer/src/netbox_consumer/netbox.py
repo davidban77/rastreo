@@ -24,11 +24,32 @@ class NetBoxClient:
     """Reconciler-shaped view of the pynetbox API."""
 
     def __init__(
-        self, url: str, token: str, *, verify_tls: bool = True, timeout_seconds: int = 30
+        self,
+        url: str,
+        token: str,
+        *,
+        default_device_type: str,
+        default_site: str,
+        default_device_role: str,
+        verify_tls: bool = True,
+        timeout_seconds: int = 30,
     ) -> None:
         self._api = pynetbox.api(url, token=token)
         self._api.http_session.verify = verify_tls
         self._api.http_session.timeout = timeout_seconds
+        self._default_device_type_id = self._require("device_types", "model", default_device_type)
+        self._default_site_id = self._require("sites", "name", default_site)
+        self._default_role_id = self._require("device_roles", "name", default_device_role)
+
+    def _require(self, path: str, field: str, value: str) -> int:
+        endpoint = getattr(self._api.dcim, path)
+        record = endpoint.get(**{field: value})
+        if record is None:
+            raise RuntimeError(
+                f"required NetBox dcim.{path} with {field}={value!r} not found; "
+                "run the bootstrap first or set an existing value"
+            )
+        return record.id
 
     def upsert_device(self, payload: NetBoxPayload) -> Record:
         identity_key: str = payload["custom_fields"]["rastreo_identity_key"]
@@ -46,6 +67,9 @@ class NetBoxClient:
     def _create(self, payload: NetBoxPayload) -> Record:
         body: dict[str, Any] = {
             "name": payload["custom_fields"]["rastreo_identity_key"],
+            "device_type": self._default_device_type_id,
+            "site": self._default_site_id,
+            "role": self._default_role_id,
             "custom_fields": payload["custom_fields"],
         }
         platform = self._lookup("platforms", payload.get("platform"))
