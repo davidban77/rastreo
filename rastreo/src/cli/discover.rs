@@ -52,7 +52,9 @@ pub struct DiscoverArgs {
     )]
     pub port: Vec<u16>,
 
-    /// YAML scenario file to load. When present, --target and --port are not permitted; each scenario in the file is executed in order.
+    /// YAML scenario file to load, or `@name` to resolve a scenario from the catalog
+    /// directories (see the CLI docs for search order). When present, --target and
+    /// --port are not permitted; each scenario in the file is executed in order.
     #[cfg(feature = "config")]
     #[arg(short = 'f', long)]
     pub file: Option<PathBuf>,
@@ -148,8 +150,9 @@ async fn run_dry_run(args: &DiscoverArgs) -> Result<()> {
 
 #[cfg(feature = "config")]
 async fn run_dry_run_from_file(args: &DiscoverArgs, resolver: &dyn Resolver) -> Result<()> {
-    let path = args.file.as_deref().expect("file present per dispatch");
-    let file = load_scenario_file(path)?;
+    let raw = args.file.as_deref().expect("file present per dispatch");
+    let path = resolve_scenario_source(raw)?;
+    let file = load_scenario_file(&path)?;
 
     if file.version != 1 {
         return Err(anyhow!(
@@ -442,8 +445,9 @@ async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Resul
 
 #[cfg(feature = "config")]
 async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
-    let path = args.file.as_deref().expect("file present per dispatch");
-    let file = load_scenario_file(path)?;
+    let raw = args.file.as_deref().expect("file present per dispatch");
+    let path = resolve_scenario_source(raw)?;
+    let file = load_scenario_file(&path)?;
 
     if file.version != 1 {
         return Err(anyhow!(
@@ -512,6 +516,15 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
         ));
     }
     Ok(())
+}
+
+#[cfg(feature = "config")]
+fn resolve_scenario_source(input: &Path) -> Result<PathBuf> {
+    let as_str = input.to_string_lossy();
+    if let Some(name) = as_str.strip_prefix('@') {
+        return super::catalog::resolve_catalog_name(name);
+    }
+    Ok(input.to_path_buf())
 }
 
 #[cfg(feature = "config")]

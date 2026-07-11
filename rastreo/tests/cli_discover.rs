@@ -945,6 +945,175 @@ async fn dry_run_dns_failure_prints_inline_error_and_still_exits_zero() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
+async fn catalog_reference_resolves_and_dry_run_prints_plan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: office\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+    write_yaml(&dir, "office.yml", yaml);
+    let catalog_path = dir.path().to_path_buf();
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .env("RASTREO_CATALOG_DIR", &catalog_path)
+            .args(["discover", "--file", "@office", "--dry-run"])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("[dry-run]"), "stdout: {stdout}");
+    assert!(stdout.contains("127.0.0.1 → 127.0.0.1"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("tcp_connect (ports 22)"),
+        "stdout: {stdout}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn catalog_reference_accepts_yml_suffix_in_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: office\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+    write_yaml(&dir, "office.yml", yaml);
+    let catalog_path = dir.path().to_path_buf();
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .env("RASTREO_CATALOG_DIR", &catalog_path)
+            .args(["discover", "--file", "@office.yml", "--dry-run"])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn catalog_reference_not_found_prints_actionable_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_yaml(
+        &dir,
+        "alpha.yml",
+        "version: 1\nkind: discovery\nscenarios: []\n",
+    );
+    let catalog_path = dir.path().to_path_buf();
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .env("RASTREO_CATALOG_DIR", &catalog_path)
+            .args(["discover", "--file", "@nonexistent", "--dry-run"])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(!output.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("@nonexistent"), "stderr: {stderr}");
+    assert!(stderr.contains("searched directories"), "stderr: {stderr}");
+    assert!(stderr.contains("@alpha"), "stderr: {stderr}");
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn catalog_reference_rejects_path_separators() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file", "@../etc/passwd", "--dry-run"])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(!output.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("path separators"), "stderr: {stderr}");
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn catalog_reference_rejects_empty_name() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file", "@", "--dry-run"])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(!output.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("empty"), "stderr: {stderr}");
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn plain_path_still_works_when_catalog_env_set() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = format!(
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n"
+    );
+    let path = write_yaml(&dir, "plain.yml", &yaml);
+    let catalog_path = dir.path().to_path_buf();
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .env("RASTREO_CATALOG_DIR", &catalog_path)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    drop(listener);
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("records_emitted=1"),
+        "expected one record: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
 async fn sink_flag_overrides_yaml_sink() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

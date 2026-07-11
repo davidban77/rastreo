@@ -1,3 +1,5 @@
+#[cfg(feature = "config")]
+pub mod catalog;
 pub mod discover;
 
 use anyhow::Result;
