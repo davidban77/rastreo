@@ -83,7 +83,9 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 
 **Metric.** Each successful Kafka DLQ delivery increments `rastreo_server_dlq_records_total{sink_type="kafka",error_class="produce_failure"}`, surfaced on `/metrics` and via OTLP. The v1 classifier uses a sink-type-hint mapping — Kafka DLQ traffic always credits `produce_failure` regardless of the specific error that triggered the fallback. See [Observability · DLQ classification](../reference/observability.md#dlq-classification-v1) for the taxonomy and roadmap.
 
-**See also.** Sink failures surface operationally through the [`/readyz` readiness gate](../reference/health-endpoints.md#readyz-readiness) on `rastreo-server`: a sink error observed within `RASTREO_SINK_ERROR_QUARANTINE_SECS` flips the pod to `503 not_ready`. Caveat: the current server-side gate only trips when a scan attempts a write and fails; it does not detect pre-request unreachability against a broker that is already down. True broker-reachability probing is tracked as a Phase 3 close-out follow-up.
+**Reachability probe.** When a DLQ is configured, the server-side sink reachability probe covers both partitions: it issues a `ListOffsets` against the primary partition **and** a `ListOffsets` against the DLQ partition on every tick, regardless of whether the primary succeeded. Either side returning an error flips `sink_reachable` to `false` on `/readyz`. `last_probe_error` names the failed side (`primary partition unreachable ...` or `dead-letter partition unreachable ...`); when both sides fail, both segments are included, joined by `; `. Operators get advance warning that DLQ fallback would fail — including the case where the primary is already down and the DLQ is the only remaining safety net.
+
+**See also.** Sink failures surface operationally through the [`/readyz` readiness gate](../reference/health-endpoints.md#readyz-readiness) on `rastreo-server`: a sink error observed within `RASTREO_SINK_ERROR_QUARANTINE_SECS` flips the pod to `503 not_ready`.
 
 ## NATS
 
