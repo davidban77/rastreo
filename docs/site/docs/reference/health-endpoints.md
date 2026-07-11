@@ -62,7 +62,7 @@ curl -sS http://localhost:8080/readyz
 }
 ```
 
-`seconds_since_*_error` is `null` when no such error has been observed since the process started, and a fractional-seconds `f64` otherwise. `sink_reachable` is `null` when `RASTREO_SINK_CONFIG_PATH` is unset (no sink configured — this axis does not gate readiness); `true` after the last probe succeeded; `false` after the last probe failed or after startup sink construction failed. `sink_type` carries the sink kind label (`kafka`, `nats`, `stdout`, `file`, `memory`) when a sink is configured. `seconds_since_last_probe` reports the age of the cached probe result; `last_probe_error` carries the last failure message verbatim (or `null` after a success).
+`seconds_since_*_error` is `null` when no such error has been observed since the process started, and a fractional-seconds `f64` otherwise. `sink_reachable` is `null` when `RASTREO_SINK_CONFIG_PATH` is unset (no sink configured — this axis does not gate readiness); `true` after the last probe succeeded; `false` after the last probe failed or after startup sink construction failed. `sink_type` carries the sink kind label (`kafka`, `nats`, `stdout`, `file`, `memory`) when a sink is configured; when the sink is configured but its type cannot be determined at startup (missing config file, malformed YAML), the label is `"unknown"`. `seconds_since_last_probe` reports the age of the cached probe result; `last_probe_error` carries the last failure message verbatim (or `null` after a success).
 
 ### Not-ready response
 

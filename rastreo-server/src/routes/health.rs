@@ -416,6 +416,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readyz_reports_unknown_sink_type_when_construction_failed_without_type() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::state::SinkReachability;
+
+        let mut state = build_state();
+        let reach = Arc::new(SinkReachability::construction_failed(
+            None,
+            "sink construction failed: yaml parse error".into(),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        state.sink_reachability = reach;
+        let (status, Json(body)) = readyz(State(state)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["reason"], "sink_unreachable");
+        assert_eq!(body["sink_reachable"], false);
+        assert_eq!(body["sink_type"], "unknown");
+        assert_eq!(
+            body["last_probe_error"],
+            "sink construction failed: yaml parse error"
+        );
+        assert!(body["seconds_since_last_probe"].is_number());
+    }
+
+    #[tokio::test]
     async fn readyz_inflight_beats_sink_unreachable() {
         use std::sync::Arc;
         use std::time::Duration;

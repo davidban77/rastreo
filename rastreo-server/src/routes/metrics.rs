@@ -545,6 +545,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_metrics_reports_sink_reachable_zero_with_unknown_label_on_construction_failure() {
+        use std::sync::Arc;
+
+        use crate::state::SinkReachability;
+
+        let mut state = build_state();
+        let reach = Arc::new(SinkReachability::construction_failed(
+            None,
+            "yaml parse failed".into(),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        state.metrics.record_sink_probe_failure();
+        state.sink_reachability = reach;
+        let resp = get_metrics(State(state)).await.expect("ok");
+        let body = body_string(resp).await;
+        for expected in [
+            "rastreo_server_sink_reachable{sink_type=\"unknown\"} 0",
+            "rastreo_server_sink_reachability_probe_total{outcome=\"success\",sink_type=\"unknown\"} 0",
+            "rastreo_server_sink_reachability_probe_total{outcome=\"failure\",sink_type=\"unknown\"} 1",
+        ] {
+            assert!(
+                body.contains(expected),
+                "metrics body must contain `{expected}`; body was:\n{body}",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn get_metrics_sink_reachable_gauge_reports_zero_when_unreachable() {
         use std::sync::Arc;
 
