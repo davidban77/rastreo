@@ -114,4 +114,49 @@ Not exposed: `BGP4-MIB` (1.3.6.1.2.1.15). BGP peer signals for SR Linux need to 
 
 **Slice 2d (this commit)** — Rolling `:main` docker tag published by `.github/workflows/docker-main.yml` on every push to `main`, unblocking use of features that haven't been tagged yet. SSH prober now captures OpenSSH banner + ED25519 host key from real SR Linux nodes.
 
-**Slice 3 (next)** — Kafka broker + Nautobot consumer sidecar, `scripts/lab_validation.py` harness, golden-record NDJSON snapshots.
+**Slice 3a** — `scripts/lab_validation.py` harness + golden NDJSON snapshots for all four stdout scenarios. Regression pass on `rastreo:lab`.
+
+**Slice 3b** — Three SoT stacks + shared Kafka broker + per-SoT bootstrap scripts + `--sot` flag on the harness. `kafka-scan.yml` publishes to Kafka; the target SoT's consumer reconciles; the harness polls the SoT API and asserts 2 devices reconciled.
+
+## SoT reconciliation
+
+Three SoT stacks are shipped as sibling compose files. All three can run simultaneously against the same containerlab topology — they only conflict on host ports (Nautobot 8080, NetBox 8081, Infrahub 8082).
+
+| SoT | Host port | Compose path | Bootstrap |
+|-----|-----------|--------------|-----------|
+| Nautobot | 8080 | `nautobot/docker-compose.yml` | `nautobot/bootstrap.sh` |
+| NetBox   | 8081 | `netbox/docker-compose.yml`   | `netbox/bootstrap.sh`   |
+| Infrahub | 8082 | `infrahub/docker-compose.yml` | `infrahub/bootstrap.sh` |
+
+Order of operations (per SoT):
+
+```
+# from containerlab/lab-srlinux/
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux && sudo containerlab deploy -t lab.clab.yml"
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux/kafka && sudo docker compose up -d"
+
+# Nautobot flow
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux/nautobot && sudo docker compose up -d"
+# wait for `docker ps` to show nautobot healthy (~5 min first boot)
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux/nautobot && ./bootstrap.sh"
+python3 scripts/lab_validation.py --sot nautobot --image rastreo:lab
+
+# NetBox flow (parallel-safe with Nautobot)
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux/netbox && sudo docker compose up -d"
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux/netbox && ./bootstrap.sh"
+python3 scripts/lab_validation.py --sot netbox --image rastreo:lab
+
+# Infrahub flow
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux/infrahub && sudo docker compose up -d"
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux/infrahub && ./bootstrap.sh"
+python3 scripts/lab_validation.py --sot infrahub --image rastreo:lab
+```
+
+Each `--sot <name>` run:
+1. Executes `scenarios/kafka-scan.yml` (full prober matrix, sink=kafka)
+2. Publishes 2 DeviceRecords to `rastreo.devices` on the shared broker
+3. The per-SoT consumer picks them up, applies field mapping, writes to the SoT API
+4. The harness polls the SoT for both expected identity keys (`ip:198.51.100.11`, `ip:198.51.100.12`) with a 60s timeout
+5. Reports pass/fail
+
+Nautobot and NetBox consumers key on the `rastreo_identity_key` custom field. Infrahub uses branch-based writes — records land on a `rastreo-updates` branch and (with `INFRAHUB_AUTO_MERGE=true`) merge onto `main`.
