@@ -340,19 +340,36 @@ impl Sink for KafkaSink {
     }
 
     async fn probe(&self) -> Result<(), io::Error> {
-        // Single ListOffsets round-trip against the configured partition — cheap
-        // reachability signal that exercises the same broker path produce uses.
-        self.client
-            .get_offset(OffsetAt::Latest)
-            .await
-            .map(|_| ())
-            .map_err(|e| {
-                let brokers_for_err = self.brokers.join(",");
-                io::Error::other(format!(
-                    "kafka sink probe failed for topic '{}' at broker(s) '{}': {e}",
-                    self.topic, brokers_for_err
-                ))
-            })
+        let brokers_for_err = self.brokers.join(",");
+        let primary_result = self.client.get_offset(OffsetAt::Latest).await;
+        let dlq_result = match (self.dlq_client.as_ref(), self.dlq_topic.as_ref()) {
+            (Some(dlq_client), Some(dlq_topic)) => {
+                Some((dlq_client.get_offset(OffsetAt::Latest).await, dlq_topic))
+            }
+            _ => None,
+        };
+
+        let mut failures: Vec<String> = Vec::with_capacity(2);
+        if let Err(e) = primary_result {
+            failures.push(format!(
+                "primary partition unreachable for topic '{}' at broker(s) '{brokers_for_err}': {e}",
+                self.topic
+            ));
+        }
+        if let Some((Err(e), dlq_topic)) = dlq_result {
+            failures.push(format!(
+                "dead-letter partition unreachable for topic '{dlq_topic}' at broker(s) '{brokers_for_err}': {e}"
+            ));
+        }
+
+        if failures.is_empty() {
+            return Ok(());
+        }
+
+        Err(io::Error::other(format!(
+            "kafka sink probe: {}",
+            failures.join("; ")
+        )))
     }
 }
 
@@ -650,6 +667,101 @@ mod tests {
             .await
             .expect("connect to live broker");
         <KafkaSink as Sink>::probe(&sink).await.expect("probe");
+    }
+
+    #[ignore = "requires a live Kafka broker with primary + DLQ topics; exercised in Live Infra UAT"]
+    #[tokio::test]
+    async fn probe_returns_ok_when_primary_and_dlq_both_reachable() {
+        let sink = KafkaSink::new(vec!["localhost:9092".into()], "rastreo.probe".into())
+            .await
+            .expect("connect to live broker")
+            .with_dead_letter(DeadLetterConfig {
+                topic: "rastreo.probe.dlq".into(),
+                include_error_metadata: true,
+            })
+            .await
+            .expect("attach dlq");
+        <KafkaSink as Sink>::probe(&sink)
+            .await
+            .expect("probe both sides");
+    }
+
+    #[ignore = "requires a live Kafka broker where the DLQ topic partition is offline / non-existent"]
+    #[tokio::test]
+    async fn probe_reports_unreachable_when_dlq_partition_offline() {
+        let sink = KafkaSink::new(vec!["localhost:9092".into()], "rastreo.probe".into())
+            .await
+            .expect("connect to live broker")
+            .with_dead_letter(DeadLetterConfig {
+                topic: "rastreo.probe.dlq.does-not-exist".into(),
+                include_error_metadata: true,
+            })
+            .await
+            .expect("attach dlq");
+        let err = <KafkaSink as Sink>::probe(&sink)
+            .await
+            .expect_err("dlq partition offline must fail probe");
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("kafka sink probe: "),
+            "expected canonical prefix, got: {msg}"
+        );
+        assert!(
+            msg.contains("dead-letter partition unreachable"),
+            "expected DLQ-attributed failure, got: {msg}"
+        );
+        assert!(
+            msg.contains("rastreo.probe.dlq.does-not-exist"),
+            "expected DLQ topic in message, got: {msg}"
+        );
+    }
+
+    #[ignore = "requires a live Kafka broker where both primary and DLQ partitions are offline / non-existent"]
+    #[tokio::test]
+    async fn probe_reports_both_sides_unreachable_when_primary_and_dlq_both_offline() {
+        let sink = KafkaSink::new(
+            vec!["localhost:9092".into()],
+            "rastreo.probe.does-not-exist".into(),
+        )
+        .await
+        .expect("connect to live broker")
+        .with_dead_letter(DeadLetterConfig {
+            topic: "rastreo.probe.dlq.does-not-exist".into(),
+            include_error_metadata: true,
+        })
+        .await
+        .expect("attach dlq");
+        let err = <KafkaSink as Sink>::probe(&sink)
+            .await
+            .expect_err("both partitions offline must fail probe");
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("kafka sink probe: "),
+            "expected canonical prefix, got: {msg}"
+        );
+        assert!(
+            msg.contains("primary partition unreachable"),
+            "expected primary-attributed failure segment, got: {msg}"
+        );
+        assert!(
+            msg.contains("dead-letter partition unreachable"),
+            "expected DLQ-attributed failure segment, got: {msg}"
+        );
+        let primary_idx = msg
+            .find("primary partition unreachable")
+            .expect("primary segment present");
+        let dlq_idx = msg
+            .find("dead-letter partition unreachable")
+            .expect("dlq segment present");
+        assert!(
+            primary_idx < dlq_idx,
+            "expected primary segment before DLQ segment, got: {msg}"
+        );
+        let between = &msg[primary_idx..dlq_idx];
+        assert!(
+            between.contains("; "),
+            "expected '; ' separator between failure segments, got: {msg}"
+        );
     }
 
     #[test]
