@@ -53,7 +53,7 @@ services:
       start_period: 20s
 
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack-server:7.4.0-v0
     container_name: rastreo-lab-infrahub-redis
     networks:
       - rastreo-lab
@@ -77,7 +77,7 @@ services:
       - "8082:8000"
     networks:
       - rastreo-lab
-    command: ["gunicorn", "--config", "backend/infrahub/api/gunicorn_config.py", "--logger-class=infrahub.serve.log.GunicornLogger", "infrahub.server:app"]
+    command: ["infrahub", "server", "start", "--listen", "0.0.0.0", "--port", "8000"]
     environment:
       INFRAHUB_DB_TYPE: memgraph
       INFRAHUB_DB_ADDRESS: memgraph
