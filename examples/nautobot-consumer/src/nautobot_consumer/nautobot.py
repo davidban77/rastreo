@@ -40,6 +40,7 @@ class NautobotClient:
         default_device_type: str,
         default_location: str,
         default_device_status: str,
+        default_device_role: str,
         verify_tls: bool = True,
         timeout_seconds: int = 30,
     ) -> None:
@@ -50,6 +51,7 @@ class NautobotClient:
         self._default_device_type_id = self._require("dcim.device_types", default_device_type)
         self._default_location_id = self._require("dcim.locations", default_location)
         self._default_status_id = self._require("extras.statuses", default_device_status)
+        self._default_role_id = self._require("extras.roles", default_device_role)
 
     def upsert_device(self, payload: NautobotPayload) -> Record:
         identity_key: str = payload["custom_fields"]["rastreo_identity_key"]
@@ -70,6 +72,7 @@ class NautobotClient:
             "device_type": self._default_device_type_id,
             "location": self._default_location_id,
             "status": self._default_status_id,
+            "role": self._default_role_id,
             "custom_fields": payload["custom_fields"],
         }
         platform = self._lookup("dcim.platforms", payload.get("platform"))
@@ -152,12 +155,18 @@ class NautobotClient:
         if _fk_id(getattr(device, primary_field, None)) != ip.id:
             device.update({primary_field: ip.id})
 
+    # Nautobot 2.x endpoints that don't have a `name` field — key the lookup on
+    # the display field the API actually filters by.
+    _LOOKUP_FIELD = {
+        "dcim.device_types": "model",
+    }
+
     def _lookup(self, path: str, name: str | None) -> str | None:
         """Return the record ID for ``name`` on ``path``, or None with a WARN."""
         if name is None:
             return None
         endpoint = self._endpoint(path)
-        record = endpoint.get(name=name)
+        record = endpoint.get(**{self._LOOKUP_FIELD.get(path, "name"): name})
         if record is None:
             logger.warning(f"{path} not found in Nautobot", extra={"lookup_name": name})
             return None
@@ -166,7 +175,7 @@ class NautobotClient:
     def _require(self, path: str, name: str) -> str:
         """Return the record ID for ``name`` on ``path``, or raise NautobotLookupError."""
         endpoint = self._endpoint(path)
-        record = endpoint.get(name=name)
+        record = endpoint.get(**{self._LOOKUP_FIELD.get(path, "name"): name})
         if record is None:
             raise NautobotLookupError(
                 f"required Nautobot {path} named {name!r} was not found; "

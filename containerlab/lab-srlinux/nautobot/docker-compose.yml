@@ -111,4 +111,5 @@ services:
       NAUTOBOT_DEFAULT_DEVICE_TYPE: "rastreo-generic"
       NAUTOBOT_DEFAULT_LOCATION: "rastreo-lab"
       NAUTOBOT_DEFAULT_DEVICE_STATUS: "Active"
+      NAUTOBOT_DEFAULT_DEVICE_ROLE: "rastreo-discovered"
       LOG_LEVEL: INFO

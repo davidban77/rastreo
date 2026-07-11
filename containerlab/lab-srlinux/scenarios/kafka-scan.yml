@@ -12,6 +12,8 @@ scenarios:
       brokers:
         - "kafka:29092"
       topic: rastreo.devices
+      flush_mode:
+        type: per_record
     targets:
       - Ip: "198.51.100.11"
       - Ip: "198.51.100.12"
