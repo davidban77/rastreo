@@ -46,13 +46,31 @@ Boot takes ~60s. Verify SSH is listening:
 orb -m clab bash -c "nc -zv 198.51.100.11 22 && nc -zv 198.51.100.12 22"
 ```
 
+## Rastreo image
+
+Two images available on `ghcr.io/davidban77/rastreo`:
+
+- `:latest` (or `:v0.5.0`, `:v0.6.0`, …) — pinned to the most recent tagged release.
+- `:main` — rolling build that tracks the `main` branch. Best for lab iteration when you need features that haven't been tagged yet (e.g. the SSH prober before v0.6.0).
+
+Both variants have an `-otlp` sibling with OpenTelemetry export enabled (`:main-otlp`, `:latest-otlp`). All variants ship the same prober set: `kafka`, `http`, `snmp`, `arp`, `ndp`, `oui`, `nats`, `ssh`, `icmp`, `tls`.
+
+For fully local iteration against uncommitted changes, build inside the VM:
+
+```
+orb -m clab bash -c "cd /Users/$USER/projects/rastreo && sudo docker build \
+  --build-arg TARGETARCH=arm64 \
+  --build-arg FEATURES=kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls \
+  -t rastreo:lab ."
+```
+
 ## Run a scan
 
 Rastreo runs as a container on the same `rastreo-lab` bridge network (so it can reach the mgmt IPs directly):
 
 ```
 orb -m clab bash -c "sudo docker run --rm --entrypoint /rastreo --network rastreo-lab \
-  ghcr.io/davidban77/rastreo:latest \
+  ghcr.io/davidban77/rastreo:main \
   discover --target 198.51.100.11 --target 198.51.100.12 -p 22 --sink stdout"
 ```
 
@@ -92,6 +110,8 @@ Not exposed: `BGP4-MIB` (1.3.6.1.2.1.15). BGP peer signals for SR Linux need to 
 
 **Slice 2b** — HTTP scenario against JSON-RPC (fingerprints gunicorn banner). SSH scenario shipped but blocked pending full-features image.
 
-**Slice 2c (this commit)** — Per-node startup configs with e-BGP (65001 ↔ 65002) over point-to-point 10.1.1.0/30, LLDP on `e1-1`. BGP session establishes; interface + LLDP + IF-MIB signals now available to the SNMP prober.
+**Slice 2c** — Per-node startup configs with e-BGP (65001 ↔ 65002) over point-to-point 10.1.1.0/30, LLDP on `e1-1`. BGP session establishes; interface + LLDP + IF-MIB signals now available to the SNMP prober.
 
-**Slice 3 (next)** — Full-features rastreo image (unblocks SSH), Kafka broker + Nautobot consumer sidecar, `scripts/lab_validation.py` harness, golden-record NDJSON snapshots.
+**Slice 2d (this commit)** — Rolling `:main` docker tag published by `.github/workflows/docker-main.yml` on every push to `main`, unblocking use of features that haven't been tagged yet. SSH prober now captures OpenSSH banner + ED25519 host key from real SR Linux nodes.
+
+**Slice 3 (next)** — Kafka broker + Nautobot consumer sidecar, `scripts/lab_validation.py` harness, golden-record NDJSON snapshots.
