@@ -1,0 +1,114 @@
+# Nautobot SoT + consumer stack for Phase 5 validation.
+#
+# Prerequisites (bring up FIRST from the parent lab-srlinux/ directory):
+#   1. containerlab topology:   sudo containerlab deploy -t lab.clab.yml
+#   2. shared Kafka broker:     docker compose -f kafka/docker-compose.yml up -d
+#
+# Then from THIS directory:  docker compose up -d
+#
+# All services join the containerlab-managed `rastreo-lab` network so they can
+# reach the SR Linux nodes (198.51.100.11-12), the shared kafka broker
+# (kafka:29092), and each other by service name.
+
+networks:
+  rastreo-lab:
+    external: true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rastreo-lab-postgres
+    networks:
+      - rastreo-lab
+    environment:
+      POSTGRES_USER: nautobot
+      POSTGRES_PASSWORD: nautobot
+      POSTGRES_DB: nautobot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nautobot -d nautobot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: rastreo-lab-redis
+    networks:
+      - rastreo-lab
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  nautobot:
+    image: networktocode/nautobot:2.4-py3.11
+    container_name: rastreo-lab-nautobot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - rastreo-lab
+    environment:
+      NAUTOBOT_DB_HOST: postgres
+      NAUTOBOT_DB_USER: nautobot
+      NAUTOBOT_DB_PASSWORD: nautobot
+      NAUTOBOT_DB_NAME: nautobot
+      NAUTOBOT_REDIS_HOST: redis
+      NAUTOBOT_ALLOWED_HOSTS: "*"
+      NAUTOBOT_SECRET_KEY: "lab-secret-not-for-production"
+      NAUTOBOT_SUPERUSER_NAME: admin
+      NAUTOBOT_SUPERUSER_PASSWORD: admin
+      NAUTOBOT_SUPERUSER_API_TOKEN: "0123456789abcdef0123456789abcdef01234567"
+      NAUTOBOT_CREATE_SUPERUSER: "true"
+      NAUTOBOT_LOG_LEVEL: WARNING
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  nautobot-worker:
+    image: networktocode/nautobot:2.4-py3.11
+    container_name: rastreo-lab-nautobot-worker
+    command: ["nautobot-server", "celery", "worker", "-l", "INFO"]
+    depends_on:
+      nautobot:
+        condition: service_healthy
+    networks:
+      - rastreo-lab
+    environment:
+      NAUTOBOT_DB_HOST: postgres
+      NAUTOBOT_DB_USER: nautobot
+      NAUTOBOT_DB_PASSWORD: nautobot
+      NAUTOBOT_DB_NAME: nautobot
+      NAUTOBOT_REDIS_HOST: redis
+      NAUTOBOT_ALLOWED_HOSTS: "*"
+      NAUTOBOT_SECRET_KEY: "lab-secret-not-for-production"
+
+  nautobot-consumer:
+    build:
+      context: ../../../examples/nautobot-consumer
+    container_name: rastreo-lab-nautobot-consumer
+    depends_on:
+      nautobot:
+        condition: service_healthy
+    networks:
+      - rastreo-lab
+    environment:
+      KAFKA_BROKERS: "kafka:29092"
+      KAFKA_TOPIC: "rastreo.devices"
+      KAFKA_GROUP_ID: "rastreo-lab-nautobot-consumer"
+      KAFKA_AUTO_OFFSET_RESET: earliest
+      NAUTOBOT_URL: "http://nautobot:8080"
+      NAUTOBOT_TOKEN: "0123456789abcdef0123456789abcdef01234567"
+      NAUTOBOT_VERIFY_TLS: "false"
+      NAUTOBOT_DEFAULT_DEVICE_TYPE: "rastreo-generic"
+      NAUTOBOT_DEFAULT_LOCATION: "rastreo-lab"
+      NAUTOBOT_DEFAULT_DEVICE_STATUS: "Active"
+      LOG_LEVEL: INFO
