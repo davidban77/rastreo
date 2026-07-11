@@ -1,0 +1,133 @@
+# NetBox SoT + consumer stack for Phase 5 validation.
+#
+# Prerequisites (from parent lab-srlinux/ directory):
+#   1. containerlab topology:  sudo containerlab deploy -t lab.clab.yml
+#   2. shared Kafka broker:    docker compose -f kafka/docker-compose.yml up -d
+#
+# Then from THIS directory:  docker compose up -d
+# Wait for netbox to become healthy (first boot ~3-5 min for migrations),
+# then run ./bootstrap.sh to install custom fields.
+#
+# NetBox 4.x needs postgres, redis (queue), and redis-cache. The bootstrap
+# script populates the rastreo custom fields, default device-type, and
+# default site so the consumer can reconcile.
+
+networks:
+  rastreo-lab:
+    external: true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rastreo-lab-netbox-postgres
+    networks:
+      - rastreo-lab
+    environment:
+      POSTGRES_USER: netbox
+      POSTGRES_PASSWORD: netbox
+      POSTGRES_DB: netbox
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netbox -d netbox"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: rastreo-lab-netbox-redis
+    networks:
+      - rastreo-lab
+    command: ["sh", "-c", "redis-server --requirepass netbox"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a netbox ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  redis-cache:
+    image: redis:7-alpine
+    container_name: rastreo-lab-netbox-redis-cache
+    networks:
+      - rastreo-lab
+    command: ["sh", "-c", "redis-server --requirepass netbox"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a netbox ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  netbox:
+    image: netboxcommunity/netbox:v4.3-3.4.0
+    container_name: rastreo-lab-netbox
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    networks:
+      - rastreo-lab
+    environment:
+      DB_HOST: postgres
+      DB_USER: netbox
+      DB_PASSWORD: netbox
+      DB_NAME: netbox
+      REDIS_HOST: redis
+      REDIS_PASSWORD: netbox
+      REDIS_CACHE_HOST: redis-cache
+      REDIS_CACHE_PASSWORD: netbox
+      SECRET_KEY: "lab-secret-not-for-production-at-least-50-chars-required-ok"
+      SUPERUSER_NAME: admin
+      SUPERUSER_PASSWORD: admin
+      SUPERUSER_API_TOKEN: "abcdef0123456789abcdef0123456789abcdef01"
+      SKIP_STARTUP_SCRIPTS: "false"
+      SKIP_SUPERUSER: "false"
+      ALLOWED_HOSTS: "*"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/ > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  netbox-worker:
+    image: netboxcommunity/netbox:v4.3-3.4.0
+    container_name: rastreo-lab-netbox-worker
+    command: ["/opt/netbox/venv/bin/python", "/opt/netbox/netbox/manage.py", "rqworker"]
+    depends_on:
+      netbox:
+        condition: service_healthy
+    networks:
+      - rastreo-lab
+    environment:
+      DB_HOST: postgres
+      DB_USER: netbox
+      DB_PASSWORD: netbox
+      DB_NAME: netbox
+      REDIS_HOST: redis
+      REDIS_PASSWORD: netbox
+      REDIS_CACHE_HOST: redis-cache
+      REDIS_CACHE_PASSWORD: netbox
+      SECRET_KEY: "lab-secret-not-for-production-at-least-50-chars-required-ok"
+
+  netbox-consumer:
+    build:
+      context: ../../../examples/netbox-consumer
+    container_name: rastreo-lab-netbox-consumer
+    depends_on:
+      netbox:
+        condition: service_healthy
+    networks:
+      - rastreo-lab
+    environment:
+      KAFKA_BROKERS: "kafka:29092"
+      KAFKA_TOPIC: "rastreo.devices"
+      KAFKA_GROUP_ID: "rastreo-lab-netbox-consumer"
+      KAFKA_AUTO_OFFSET_RESET: earliest
+      NETBOX_URL: "http://netbox:8080"
+      NETBOX_TOKEN: "abcdef0123456789abcdef0123456789abcdef01"
+      NETBOX_VERIFY_TLS: "false"
+      LOG_LEVEL: INFO
