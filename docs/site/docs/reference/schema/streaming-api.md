@@ -40,7 +40,7 @@ A consumer reads the record, checks `schema_id` against the URL it validates aga
 {
   "identity_key": "mac:aa:bb:cc:dd:ee:ff",
   "schema_version": "v1",
-  "schema_id": "https://schemas.rastreo.dev/device-record/v1.json",
+  "schema_id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
   "scan_metadata": {
     "scan_id": "01HZY8K5QW9V4P0C6R8T3XM2ZB",
     "initiated_at": "2026-07-01T12:00:00Z"

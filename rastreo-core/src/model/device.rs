@@ -11,8 +11,9 @@ use crate::model::scan::ScanMetadata;
 /// Version tag stamped on every emitted `DeviceRecord`. Increment when the wire shape changes in a backward-incompatible way.
 pub const CURRENT_SCHEMA_VERSION: &str = "v1";
 
-/// Canonical URL for the current `DeviceRecord` JSON Schema. Consumers may fetch the schema at this URL for validation.
-pub const CURRENT_SCHEMA_ID: &str = "https://schemas.rastreo.dev/device-record/v1.json";
+/// Canonical URL for the current `DeviceRecord` JSON Schema. The schema is served from the rastreo docs site, so consumers can fetch it directly for validation.
+pub const CURRENT_SCHEMA_ID: &str =
+    "https://davidban77.github.io/rastreo/schemas/device-record-v1.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
 #[schemars(with = "String")]
@@ -305,6 +306,14 @@ mod tests {
     }
 
     #[test]
+    fn current_schema_id_matches_served_url() {
+        assert_eq!(
+            CURRENT_SCHEMA_ID,
+            "https://davidban77.github.io/rastreo/schemas/device-record-v1.json"
+        );
+    }
+
+    #[test]
     fn device_record_alt_ips_defaults_to_empty() {
         let record = fresh_record();
         assert!(record.alt_ips.is_empty());
@@ -340,7 +349,7 @@ mod tests {
 
     #[test]
     fn device_record_missing_probe_kinds_deserializes_to_empty_vec() {
-        let json = r#"{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.1,"last_seen":"2024-07-03T15:16:40Z","signals":[],"schema_version":"v1","schema_id":"https://schemas.rastreo.dev/device-record/v1.json","alt_ips":[],"possible_alias_of":null,"scan_metadata":{"scan_id":"","scenario_name":null,"initiated_at":"1970-01-01T00:00:00Z","source_config_hash":null}}"#;
+        let json = r#"{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.1,"last_seen":"2024-07-03T15:16:40Z","signals":[],"schema_version":"v1","schema_id":"https://davidban77.github.io/rastreo/schemas/device-record-v1.json","alt_ips":[],"possible_alias_of":null,"scan_metadata":{"scan_id":"","scenario_name":null,"initiated_at":"1970-01-01T00:00:00Z","source_config_hash":null}}"#;
         let back: DeviceRecord = serde_json::from_str(json).expect("deserialize");
         assert!(back.probe_kinds.is_empty());
     }
@@ -441,7 +450,7 @@ mod tests {
 
     #[test]
     fn rfc3339_deserializer_accepts_non_utc_offset() {
-        let json = r#"{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.1,"last_seen":"2024-07-03T15:16:40+05:30","signals":[],"schema_version":"v1","schema_id":"https://schemas.rastreo.dev/device-record/v1.json","alt_ips":[],"possible_alias_of":null,"scan_metadata":{"scan_id":"","scenario_name":null,"initiated_at":"1970-01-01T00:00:00Z","source_config_hash":null}}"#;
+        let json = r#"{"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.1,"last_seen":"2024-07-03T15:16:40+05:30","signals":[],"schema_version":"v1","schema_id":"https://davidban77.github.io/rastreo/schemas/device-record-v1.json","alt_ips":[],"possible_alias_of":null,"scan_metadata":{"scan_id":"","scenario_name":null,"initiated_at":"1970-01-01T00:00:00Z","source_config_hash":null}}"#;
         let back: DeviceRecord = serde_json::from_str(json).expect("deserialize offset-input");
         let elapsed = back
             .last_seen

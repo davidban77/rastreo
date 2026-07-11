@@ -152,6 +152,7 @@ The rest of the enum (`loopback`, `carp`, `anycast`, `vip`) is reserved. The ide
 Discover a lab where a core switch answers on three IPs — the management IP `10.0.0.1`, a loopback `1.1.1.1`, and a second interface `10.0.0.2`:
 
 ```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
 version: 1
 kind: discovery
 scenarios:

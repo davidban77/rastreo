@@ -5,6 +5,9 @@ use anyhow::{Context, Result};
 use schemars::schema_for;
 use serde_json::Value;
 
+/// Canonical serving base for all JSON Schemas. Files under `docs/site/docs/schemas/` are picked up by mkdocs and served at this base by GitHub Pages.
+pub const SCHEMA_BASE_URL: &str = "https://davidban77.github.io/rastreo/schemas";
+
 pub fn workspace_root() -> Result<PathBuf> {
     Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -14,11 +17,20 @@ pub fn workspace_root() -> Result<PathBuf> {
 
 pub fn generate_all() -> Result<()> {
     let root = workspace_root()?;
-    let dir = root.join("schemas");
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    write_schema(&dir, "device-record-v1.json", device_record_schema()?)?;
-    write_schema(&dir, "scan-metadata-v1.json", scan_metadata_schema()?)?;
-    write_schema(&dir, "scenario-v1.json", scenario_file_schema()?)?;
+    let schemas_dir = root.join("schemas");
+    let docs_schemas_dir = root.join("docs").join("site").join("docs").join("schemas");
+    fs::create_dir_all(&schemas_dir)
+        .with_context(|| format!("create {}", schemas_dir.display()))?;
+    fs::create_dir_all(&docs_schemas_dir)
+        .with_context(|| format!("create {}", docs_schemas_dir.display()))?;
+    for (name, content) in [
+        ("device-record-v1.json", device_record_schema()?),
+        ("scan-metadata-v1.json", scan_metadata_schema()?),
+        ("scenario-v1.json", scenario_file_schema()?),
+    ] {
+        write_schema(&schemas_dir, name, &content)?;
+        write_schema(&docs_schemas_dir, name, &content)?;
+    }
     Ok(())
 }
 
@@ -52,32 +64,48 @@ pub fn render_all() -> Result<()> {
 }
 
 pub fn device_record_schema() -> Result<String> {
-    let schema = schema_for!(rastreo_core::DeviceRecord);
-    let json = serde_json::to_string_pretty(&schema).context("serialize DeviceRecord schema")?;
-    Ok(format!("{json}\n"))
+    render_schema_json(
+        schema_for!(rastreo_core::DeviceRecord),
+        "device-record-v1.json",
+        "DeviceRecord",
+    )
 }
 
 pub fn scan_metadata_schema() -> Result<String> {
-    let schema = schema_for!(rastreo_core::ScanMetadata);
-    let json = serde_json::to_string_pretty(&schema).context("serialize ScanMetadata schema")?;
-    Ok(format!("{json}\n"))
+    render_schema_json(
+        schema_for!(rastreo_core::ScanMetadata),
+        "scan-metadata-v1.json",
+        "ScanMetadata",
+    )
 }
 
 pub fn scenario_file_schema() -> Result<String> {
-    let schema = schema_for!(rastreo_core::config::ScenarioFile);
-    let mut value: Value =
-        serde_json::to_value(&schema).context("convert ScenarioFile schema to JSON value")?;
+    render_schema_json(
+        schema_for!(rastreo_core::config::ScenarioFile),
+        "scenario-v1.json",
+        "ScenarioFile",
+    )
+}
+
+fn render_schema_json(
+    schema: schemars::schema::RootSchema,
+    file_name: &str,
+    type_name: &str,
+) -> Result<String> {
+    let mut value: Value = serde_json::to_value(&schema)
+        .with_context(|| format!("convert {type_name} schema to JSON value"))?;
     if let Value::Object(map) = &mut value {
         map.insert(
             "$id".to_string(),
-            Value::String("https://schemas.rastreo.dev/scenario-config/v1.json".to_string()),
+            Value::String(format!("{SCHEMA_BASE_URL}/{file_name}")),
         );
     }
-    let json = serde_json::to_string_pretty(&value).context("serialize ScenarioFile schema")?;
+    let json = serde_json::to_string_pretty(&value)
+        .with_context(|| format!("serialize {type_name} schema"))?;
     Ok(format!("{json}\n"))
 }
 
-fn write_schema(dir: &Path, file_name: &str, content: String) -> Result<()> {
+fn write_schema(dir: &Path, file_name: &str, content: &str) -> Result<()> {
     let path = dir.join(file_name);
     fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
     println!("Wrote {}", path.display());
@@ -430,7 +458,34 @@ mod tests {
         let value = scenario_schema_value();
         assert_eq!(
             value["$id"].as_str(),
-            Some("https://schemas.rastreo.dev/scenario-config/v1.json")
+            Some("https://davidban77.github.io/rastreo/schemas/scenario-v1.json")
+        );
+    }
+
+    #[test]
+    fn scenario_schema_id_matches_served_url() {
+        let value = scenario_schema_value();
+        assert_eq!(
+            value["$id"].as_str(),
+            Some(format!("{SCHEMA_BASE_URL}/scenario-v1.json").as_str())
+        );
+    }
+
+    #[test]
+    fn device_record_schema_id_matches_served_url() {
+        let value = device_schema_value();
+        assert_eq!(
+            value["$id"].as_str(),
+            Some(format!("{SCHEMA_BASE_URL}/device-record-v1.json").as_str())
+        );
+    }
+
+    #[test]
+    fn scan_metadata_schema_id_matches_served_url() {
+        let value = scan_schema_value();
+        assert_eq!(
+            value["$id"].as_str(),
+            Some(format!("{SCHEMA_BASE_URL}/scan-metadata-v1.json").as_str())
         );
     }
 
