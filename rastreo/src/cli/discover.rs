@@ -425,14 +425,19 @@ fn format_sink(sink: Option<&SinkConfig>) -> String {
 
 async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
     let scenario = build_scenario(args)?;
-    let summary = run_discovery_cancellable(&scenario, cancel).await?;
-    print_summary("discovery", &summary);
-    if !summary.cancelled && summary.records_emitted == 0 && summary.probe_attempts > 0 {
-        eprintln!(
-            "hint: 0 records emitted — no probe reached an open port. Check target reachability and port list."
-        );
+    match run_discovery_cancellable(&scenario, cancel).await {
+        Ok(summary) => {
+            print_summary("discovery", &summary);
+            print_runtime_hints(&summary);
+            Ok(())
+        }
+        Err(err) => {
+            if let Some(hint) = enrich_probe_error_hint(&err.to_string()) {
+                eprintln!("{hint}");
+            }
+            Err(err.into())
+        }
     }
-    Ok(())
 }
 
 #[cfg(feature = "config")]
@@ -489,10 +494,14 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
         match run_discovery_cancellable(&cfg, cancel.clone()).await {
             Ok(summary) => {
                 print_summary(&label, &summary);
+                print_runtime_hints(&summary);
             }
             Err(err) => {
                 errors += 1;
                 eprintln!("{label} failed: {err:#}");
+                if let Some(hint) = enrich_probe_error_hint(&err.to_string()) {
+                    eprintln!("{hint}");
+                }
             }
         }
     }
@@ -537,6 +546,93 @@ const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
 
 #[cfg(feature = "config")]
 const RELEASE_BUNDLED_FEATURES: &str = "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls";
+
+const PROBE_ERROR_HINT_PATTERNS: &[(&str, &str)] = &[
+    (
+        "connection refused",
+        "hint: target is reachable but not listening on the probed port. Check the target's firewall or verify the service is running.",
+    ),
+    (
+        "target unreachable",
+        "hint: probe target is not reachable via the network. Check L3 route, target availability, or interface configuration.",
+    ),
+    (
+        "no route to host",
+        "hint: no L3 path to the target. Verify the target's subnet is reachable via a configured interface or route.",
+    ),
+    (
+        "network is unreachable",
+        "hint: no local interface is up on the target's subnet. Check `ip route` / interface state.",
+    ),
+    (
+        "nxdomain",
+        "hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
+    ),
+    (
+        "dns lookup failed",
+        "hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
+    ),
+    (
+        "no records found",
+        "hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
+    ),
+    (
+        "authentication failed",
+        "hint: probe authentication rejected. Verify SNMP community, USM credentials, or SSH credentials for the target.",
+    ),
+    (
+        "bad credentials",
+        "hint: probe authentication rejected. Verify SNMP community, USM credentials, or SSH credentials for the target.",
+    ),
+    (
+        "permission denied",
+        "hint: rastreo lacks the OS capability the probe requires (e.g. CAP_NET_RAW for ARP/NDP/ICMP). Rerun with sufficient privileges.",
+    ),
+    (
+        "operation not permitted",
+        "hint: rastreo lacks the OS capability the probe requires (e.g. CAP_NET_RAW for ARP/NDP/ICMP). Rerun with sufficient privileges.",
+    ),
+    (
+        "tls handshake",
+        "hint: TLS handshake failed. Set `tls_verify: false` on the HTTP prober for self-signed / expired certs; on the TLS prober, this is expected for endpoints without a valid chain.",
+    ),
+    (
+        "certificate",
+        "hint: TLS handshake failed. Set `tls_verify: false` on the HTTP prober for self-signed / expired certs; on the TLS prober, this is expected for endpoints without a valid chain.",
+    ),
+    (
+        "timed out",
+        "hint: target didn't respond within the timeout window. Increase `--timeout-ms` or check network reachability.",
+    ),
+];
+
+fn enrich_probe_error_hint(error_msg: &str) -> Option<String> {
+    let lower = error_msg.to_lowercase();
+    PROBE_ERROR_HINT_PATTERNS
+        .iter()
+        .find(|(needle, _)| lower.contains(needle))
+        .map(|(_, hint)| (*hint).to_string())
+}
+
+fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary) {
+    if summary.cancelled {
+        return;
+    }
+    if summary.records_emitted > 0 {
+        return;
+    }
+    if let Some(msg) = summary.first_probe_error.as_deref() {
+        if let Some(hint) = enrich_probe_error_hint(msg) {
+            eprintln!("{hint}");
+            return;
+        }
+    }
+    if summary.probe_attempts > 0 {
+        eprintln!(
+            "hint: 0 records emitted — no probe reached an open port. Check target reachability and port list."
+        );
+    }
+}
 
 #[cfg(feature = "config")]
 fn enrich_feature_hint(error_msg: &str) -> Option<String> {
@@ -1599,5 +1695,142 @@ mod tests {
         assert_eq!(probes, 6, "expected deduped unique-IP count, got {probes}");
         // Per-target lines still show duplicates verbatim — dedup is only for the total.
         assert!(out.contains("10.0.0.1 → 10.0.0.1"), "{out}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_connection_refused() {
+        let hint = enrich_probe_error_hint("probe error: connection refused").expect("hint");
+        assert!(
+            hint.contains("not listening on the probed port"),
+            "hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_timed_out() {
+        let hint =
+            enrich_probe_error_hint("probe error: probe timed out after 1000ms").expect("hint");
+        assert!(hint.contains("timeout window"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_no_route_to_host() {
+        let hint = enrich_probe_error_hint("probe error: no route to host").expect("hint");
+        assert!(hint.contains("no L3 path"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_network_is_unreachable() {
+        let hint = enrich_probe_error_hint("probe error: network is unreachable").expect("hint");
+        assert!(hint.contains("no local interface"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_target_unreachable() {
+        let hint = enrich_probe_error_hint("probe target unreachable: 10.0.0.1").expect("hint");
+        assert!(
+            hint.contains("not reachable via the network"),
+            "hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_nxdomain() {
+        let hint =
+            enrich_probe_error_hint("resolver error: NXDOMAIN for example.com").expect("hint");
+        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_dns_lookup_failed() {
+        let hint = enrich_probe_error_hint("resolver error: DNS lookup failed for x.invalid")
+            .expect("hint");
+        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_no_records_found() {
+        let hint = enrich_probe_error_hint("resolver error: no records found").expect("hint");
+        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_authentication_failed() {
+        let hint =
+            enrich_probe_error_hint("probe error: SNMP authentication failed").expect("hint");
+        assert!(hint.contains("authentication rejected"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_bad_credentials() {
+        let hint = enrich_probe_error_hint("probe error: bad credentials").expect("hint");
+        assert!(hint.contains("authentication rejected"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_permission_denied() {
+        let hint =
+            enrich_probe_error_hint("probe error: raw socket: Permission denied").expect("hint");
+        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_operation_not_permitted() {
+        let hint = enrich_probe_error_hint("probe error: operation not permitted (os error 1)")
+            .expect("hint");
+        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_tls_handshake() {
+        let hint =
+            enrich_probe_error_hint("probe error: TLS handshake error: bad cert").expect("hint");
+        assert!(hint.contains("TLS handshake failed"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_matches_certificate() {
+        let hint = enrich_probe_error_hint("probe error: invalid certificate chain").expect("hint");
+        assert!(hint.contains("TLS handshake failed"), "hint: {hint}");
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_is_case_insensitive() {
+        let hint = enrich_probe_error_hint("PROBE ERROR: Connection Refused").expect("hint");
+        assert!(
+            hint.contains("not listening on the probed port"),
+            "hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_returns_none_for_unknown_message() {
+        assert!(enrich_probe_error_hint("some totally novel failure mode").is_none());
+    }
+
+    #[test]
+    fn enrich_probe_error_hint_returns_none_for_empty_message() {
+        assert!(enrich_probe_error_hint("").is_none());
+    }
+
+    #[test]
+    fn print_runtime_hints_no_op_when_records_emitted() {
+        let mut summary = rastreo_core::DiscoverySummary::default();
+        summary.targets_resolved = 1;
+        summary.probe_attempts = 1;
+        summary.records_emitted = 1;
+        // no panic + no output verification is enough — this is a regression anchor
+        print_runtime_hints(&summary);
+    }
+
+    #[test]
+    fn print_runtime_hints_no_op_when_cancelled() {
+        let mut summary = rastreo_core::DiscoverySummary::default();
+        summary.targets_resolved = 1;
+        summary.probe_attempts = 1;
+        summary.probe_errors = 1;
+        summary.cancelled = true;
+        summary.first_probe_error = Some("connection refused".into());
+        print_runtime_hints(&summary);
     }
 }

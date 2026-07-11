@@ -130,7 +130,7 @@ curl -sS -X POST http://localhost:8080/scans \
   }'
 ```
 
-The response is `{summary, records}`. `summary` is a `DiscoverySummary` with counters and elapsed time; `records` is the list of `DeviceRecord` events produced by the scan.
+The response is `{summary, records}`. `summary` is a `DiscoverySummary` with counters and elapsed time; `records` is the list of `DeviceRecord` events produced by the scan. When at least one probe errored during the scan, the summary carries `first_probe_error` — a sample error message from the first failing probe. The field is omitted from the response when no probe errored.
 
 ```json
 {
