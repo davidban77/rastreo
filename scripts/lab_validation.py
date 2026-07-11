@@ -29,6 +29,38 @@ GOLDEN_DIR = LAB_ROOT / "golden"
 DEFAULT_IMAGE = "ghcr.io/davidban77/rastreo:main"
 DEFAULT_NETWORK = "rastreo-lab"
 
+# The kafka-scan scenario sinks records to Kafka instead of stdout; it is
+# NOT compared against goldens by the scenario-loop. The `--sot <name>` flow
+# uses it end-to-end.
+SOT_SCAN_SCENARIO = "kafka-scan.yml"
+EXPECTED_IDENTITY_KEYS = ["ip:198.51.100.11", "ip:198.51.100.12"]
+
+# Per-SoT reconciliation query. Each returns the count of devices whose
+# identity key matches one of the expected values. Called via urllib inside
+# the OrbStack VM (the OrbStack machine's Docker network is where the SoT
+# containers live).
+SOT_CONFIG: dict[str, dict[str, str]] = {
+    "nautobot": {
+        "url": "http://nautobot:8080/api/dcim/devices/?cf_rastreo_identity_key=ip:198.51.100.11",
+        "url_alt": "http://nautobot:8080/api/dcim/devices/?cf_rastreo_identity_key=ip:198.51.100.12",
+        "token": "0123456789abcdef0123456789abcdef01234567",
+        "header": "Authorization: Token",
+    },
+    "netbox": {
+        "url": "http://netbox:8080/api/dcim/devices/?cf_rastreo_identity_key=ip:198.51.100.11",
+        "url_alt": "http://netbox:8080/api/dcim/devices/?cf_rastreo_identity_key=ip:198.51.100.12",
+        "token": "abcdef0123456789abcdef0123456789abcdef01",
+        "header": "Authorization: Token",
+    },
+    "infrahub": {
+        # Infrahub GraphQL query for RastreoDevice by identity_key.
+        "url": "http://infrahub-server:8000/api/graphql/rastreo-updates?query={RastreoDevice(identity_key__value:\"ip:198.51.100.11\"){count}}",
+        "url_alt": "http://infrahub-server:8000/api/graphql/rastreo-updates?query={RastreoDevice(identity_key__value:\"ip:198.51.100.12\"){count}}",
+        "token": "06438eb2-8019-4776-878c-0941b1f1d1ec",
+        "header": "X-INFRAHUB-KEY:",
+    },
+}
+
 # Fields whose values are non-deterministic across runs. Set to a fixed
 # placeholder before comparing to (or writing) the golden.
 VOLATILE_FIELDS = ("last_seen", "scan_id", "initiated_at")
@@ -114,6 +146,56 @@ def diff_records(scenario: str, actual: list[dict[str, Any]], golden: list[dict[
     return diffs
 
 
+def run_sot_scan(image: str, network: str, orb_machine: str | None) -> None:
+    scenario_path = SCENARIOS_DIR / SOT_SCAN_SCENARIO
+    docker_cmd = [
+        "sudo", "docker", "run", "--rm",
+        "--entrypoint", "/rastreo",
+        "--network", network,
+        "-v", f"{SCENARIOS_DIR}:/scenarios",
+        image,
+        "discover",
+        "--file", f"/scenarios/{SOT_SCAN_SCENARIO}",
+    ]
+    if orb_machine:
+        cmd = ["orb", "-m", orb_machine, "bash", "-c", " ".join(docker_cmd)]
+    else:
+        cmd = docker_cmd
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"kafka-scan failed:\n{proc.stderr}")
+
+
+def poll_sot(sot: str, network: str, orb_machine: str | None, timeout_s: int) -> int:
+    import time
+    config = SOT_CONFIG[sot]
+    header_prefix = config["header"]
+    token = config["token"]
+    urls = [config["url"], config["url_alt"]]
+    header = f"{header_prefix} {token}"
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        found = 0
+        for url in urls:
+            probe_cmd = [
+                "sudo", "docker", "run", "--rm",
+                "--network", network,
+                "curlimages/curl:8.10.1",
+                "-sf", "-H", header, url,
+            ]
+            if orb_machine:
+                cmd = ["orb", "-m", orb_machine, "bash", "-c", " ".join(f'"{p}"' if " " in p else p for p in probe_cmd)]
+            else:
+                cmd = probe_cmd
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode == 0 and (b'"identity_key"' in proc.stdout.encode() or b'"count":1' in proc.stdout.encode() or b'"count": 1' in proc.stdout.encode() or (b'"results"' in proc.stdout.encode() and b'"count":1' in proc.stdout.encode())):
+                found += 1
+        if found == len(urls):
+            return found
+        time.sleep(2)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default=DEFAULT_IMAGE, help=f"rastreo image tag to run (default: {DEFAULT_IMAGE})")
@@ -121,11 +203,31 @@ def main() -> int:
     parser.add_argument("--orb-machine", default="clab", help="OrbStack machine to run docker in (empty string to run against host docker directly)")
     parser.add_argument("--update", action="store_true", help="regenerate goldens instead of comparing")
     parser.add_argument("--scenario", help="run only a specific scenario file (basename)")
+    parser.add_argument("--sot", choices=list(SOT_CONFIG), help="run kafka-scan and validate the target SoT reconciled the records (skips the stdout-scenario loop)")
+    parser.add_argument("--sot-timeout", type=int, default=60, help="seconds to poll the SoT before giving up (default: 60)")
     args = parser.parse_args()
 
     orb_machine = args.orb_machine if args.orb_machine else None
 
+    if args.sot:
+        print(f"running {SOT_SCAN_SCENARIO} against kafka ...", flush=True)
+        try:
+            run_sot_scan(args.image, args.network, orb_machine)
+        except RuntimeError as e:
+            print(f"  ERROR: {e}", file=sys.stderr)
+            return 1
+        print(f"  kafka publish complete; polling {args.sot} for reconciled devices (timeout {args.sot_timeout}s) ...", flush=True)
+        found = poll_sot(args.sot, args.network, orb_machine, args.sot_timeout)
+        expected = len(EXPECTED_IDENTITY_KEYS)
+        if found == expected:
+            print(f"  pass ({found}/{expected} devices reconciled in {args.sot})")
+            return 0
+        print(f"  FAIL: {found}/{expected} devices reconciled in {args.sot}", file=sys.stderr)
+        return 1
+
     scenarios = sorted(SCENARIOS_DIR.glob("*.yml"))
+    # kafka-scan is the SoT-flow scenario; not comparable against a stdout golden.
+    scenarios = [s for s in scenarios if s.name != SOT_SCAN_SCENARIO]
     if args.scenario:
         scenarios = [s for s in scenarios if s.name == args.scenario]
         if not scenarios:
