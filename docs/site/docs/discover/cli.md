@@ -104,6 +104,7 @@ Each scenario prints its own status line to stderr. If ANY single scenario fails
 | `--kafka-batch-threshold <BYTES>` | `65536` (64 KiB) | Batch threshold in bytes. Records accumulate until the buffer reaches this size, then flush as a single Kafka message. Minimum 1. Only meaningful with `--sink kafka`. |
 | `--concurrency <N>` | `64` (flag-driven) / YAML `rate_limit` (YAML-driven) | Maximum number of in-flight probes. Minimum value is 1. In YAML-driven mode, setting `--concurrency` overrides the scenario's `rate_limit`. |
 | `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
+| `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
 | `-q`, `--quiet` | — | Drop the log level to `error`. Mutually exclusive in spirit with `-v`. |
 
@@ -146,6 +147,32 @@ rastreo discover \
   --sink kafka \
   --brokers localhost:9092 \
   --topic rastreo.devices
+```
+
+## Dry-run mode
+
+`--dry-run` validates the scenario, resolves targets (DNS lookups run for real), prints the expanded plan to stdout, and exits without probing anything or opening a sink. It works in both flag-driven mode (`--target` + `--port`) and YAML-driven mode (`--file`). CLI overrides (`--sink`, `--concurrency`, `--timeout-ms`) are applied to the plan — what you see is what would run.
+
+The output shows one block per scenario listing each target's DNS / CIDR / range expansion, the configured probers with their parameters, the sink kind and destination, and the effective concurrency and per-probe timeout. A bottom line reports the total probe count (unique IPs × configured probers, deduplicated across overlapping targets), matching the count the real pipeline would dispatch.
+
+CIDRs and ranges that expand to more than six addresses are truncated with an ellipsis and a count. DNS resolution failures are printed inline (`example.com → <error: DNS lookup failed: ...>`) and the run continues with the remaining targets. The exit code is `0` when at least one target resolves and `1` only when every target fails to resolve — in that case there is nothing left to probe.
+
+Kafka, NATS, and file sinks are described from the configured values only. `--dry-run` never opens a network connection to the sink or writes to the output file, so a bogus broker address in `--brokers` completes in milliseconds instead of hanging.
+
+```bash
+rastreo discover --target 10.0.0.0/24 --port 22,80 --dry-run
+```
+
+```text
+[dry-run] would run 1 scenario
+  scenario: discovery
+    targets:
+      10.0.0.0/24 → 10.0.0.1, 10.0.0.2, 10.0.0.3, ... (254 addresses)
+    probers: tcp_connect (ports 22, 80)
+    sink: stdout
+    concurrency: 64
+    timeout_ms: 1000
+total probes: 254
 ```
 
 ## Override precedence in YAML-driven mode
