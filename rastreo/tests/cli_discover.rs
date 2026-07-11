@@ -161,6 +161,78 @@ async fn discover_emits_zero_records_hint_when_no_records() {
     );
 }
 
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn discover_prints_runtime_hint_on_dns_probe_error_against_refused_port() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: dns\n        ports: [1]\n        query_names: [\"example.com\"]\n";
+    let path = write_yaml(&dir, "dns-refused.yml", yaml);
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "rastreo exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("records_emitted=0"),
+        "stderr missing zero-records summary: {stderr}"
+    );
+    assert!(
+        stderr.contains("hint:"),
+        "stderr missing runtime hint line: {stderr}"
+    );
+    assert!(
+        !stderr.contains("hint: 0 records emitted"),
+        "runtime hint should take precedence over the 0-records fallback: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_prints_no_runtime_hint() {
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--port",
+                "22",
+                "--dry-run",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        !stderr.contains("hint:"),
+        "dry-run must not print any runtime hint: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        !stdout.contains("hint:"),
+        "dry-run stdout must not print any runtime hint: {stdout}"
+    );
+}
+
 #[tokio::test]
 async fn discover_no_hint_when_records_emitted_greater_than_zero() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

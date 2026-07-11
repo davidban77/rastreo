@@ -43,6 +43,9 @@ pub struct DiscoverySummary {
     /// True when the run terminated early via the cancellation token; counters reflect partial progress.
     #[serde(default)]
     pub cancelled: bool,
+    /// Sample error message from the first probe that failed; populated once per scan, `None` when no probe errored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_probe_error: Option<String>,
     #[serde(rename = "elapsed_ms", serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
 }
@@ -173,6 +176,7 @@ pub async fn run_discovery_with_components_cancellable(
     let mut all_outcomes: Vec<ProbeOutcome> = Vec::new();
     let mut probe_attempts: usize = 0;
     let mut probe_errors: usize = 0;
+    let mut first_probe_error: Option<String> = None;
     let mut cancelled = false;
     let mut attempts_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
     let mut errors_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
@@ -196,6 +200,12 @@ pub async fn run_discovery_with_components_cancellable(
                     probe_errors += 1;
                     errors_by_kind[prober_kind.index()] += 1;
                     tracing::debug!(error = %err, "probe failed");
+                    if first_probe_error.is_none() {
+                        let msg = err.to_string();
+                        if !msg.is_empty() {
+                            first_probe_error = Some(msg);
+                        }
+                    }
                 }
             }
         }
@@ -258,6 +268,7 @@ pub async fn run_discovery_with_components_cancellable(
         sink_type: Some(sink_type),
         sink_error_class: None,
         cancelled,
+        first_probe_error,
         elapsed: start.elapsed(),
     })
 }
@@ -542,6 +553,85 @@ mod tests {
         assert!(summary.dlq_records_by_type.is_empty());
         assert!(summary.sink_type.is_none());
         assert!(summary.sink_error_class.is_none());
+        assert!(summary.first_probe_error.is_none());
+    }
+
+    #[test]
+    fn discovery_summary_omits_first_probe_error_from_wire_when_none() {
+        let summary = DiscoverySummary::default();
+        let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
+        assert!(
+            json.get("first_probe_error").is_none(),
+            "first_probe_error must be skipped when None: {json}"
+        );
+    }
+
+    #[test]
+    fn discovery_summary_serializes_first_probe_error_when_some() {
+        let summary = DiscoverySummary {
+            first_probe_error: Some("connection refused".into()),
+            ..Default::default()
+        };
+        let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
+        assert_eq!(json["first_probe_error"], "connection refused");
+    }
+
+    #[tokio::test]
+    async fn run_discovery_captures_first_probe_error_and_ignores_subsequent() {
+        use crate::prober::UdpProtocol;
+
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(100),
+                ..Default::default()
+            },
+            targets: vec![
+                Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                Target::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+            ],
+            probers: vec![ProberConfig::Udp {
+                ports: vec![1],
+                protocol: UdpProtocol::Ntp,
+            }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("returns summary");
+
+        assert!(
+            summary.probe_errors >= 2,
+            "both targets should error against port 1, got {}",
+            summary.probe_errors
+        );
+        assert_eq!(summary.records_emitted, 0);
+        let first = summary
+            .first_probe_error
+            .as_deref()
+            .expect("first probe error must be captured");
+        assert!(
+            !first.is_empty(),
+            "first_probe_error must be non-empty when a probe errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_discovery_first_probe_error_is_none_when_no_errors() {
+        let port = open_loopback_port().await;
+        let scenario = scenario_for_port(port);
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("run_discovery_with_components");
+        assert_eq!(summary.records_emitted, 1);
+        assert!(
+            summary.first_probe_error.is_none(),
+            "first_probe_error must stay None when no probe errors: {:?}",
+            summary.first_probe_error
+        );
     }
 
     #[tokio::test]

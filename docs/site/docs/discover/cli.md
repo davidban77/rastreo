@@ -193,6 +193,17 @@ On `SIGINT` (ctrl-c) or `SIGTERM`, `rastreo discover` finishes any in-flight pro
 
 Records that hadn't been emitted yet at the moment of cancellation are still written if they came from outcomes the pipeline had already gathered. Records from probers that hadn't started yet are not produced — `--target 10.0.0.0/24 --port 22,80,443 ...` cancelled after the `22` sweep gives you records for port 22 only.
 
+## Runtime hints
+
+When a scan finishes with `records_emitted=0` and at least one probe reported an error, the CLI inspects a sample error message from the run and prints an actionable `hint: ...` line to stderr alongside the summary. Patterns such as `connection refused`, `timed out`, `target unreachable`, `no route to host`, `network is unreachable`, DNS resolution failures (`NXDOMAIN`, `no records found`), missing OS capabilities (`permission denied`), and TLS handshake / certificate failures each map to a specific suggestion — check firewall / listening service, increase `--timeout-ms`, verify L3 reachability, rerun with `CAP_NET_RAW`, and so on. Only one hint is printed per scan (the first matching pattern), and hints are suppressed when the run was cancelled, when records were emitted, or when `--dry-run` was used.
+
+```text
+discovery complete: targets_resolved=1 probe_attempts=1 probe_errors=1 records_emitted=0 elapsed_ms=112
+hint: target didn't respond within the timeout window. Increase `--timeout-ms` or check network reachability.
+```
+
+When no probe error was captured but `records_emitted=0` with at least one probe attempted, the CLI falls back to a generic `hint: 0 records emitted — no probe reached an open port` message.
+
 ## Exit codes
 
 `rastreo discover` exits `0` on success and `1` on any error. Errors are written to stderr as a single line. Validation errors (for example, `--sink file` without `--output`) fail before any probe runs.
