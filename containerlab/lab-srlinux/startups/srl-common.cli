@@ -1,0 +1,5 @@
+enter candidate
+    /system snmp access-group SNMPv2-RO-Community community-entry RO-Community community rastreo-lab
+    /interface ethernet-1/1 admin-state enable subinterface 0 admin-state enable ipv4 admin-state enable
+    /system lldp interface ethernet-1/1 admin-state enable
+commit save

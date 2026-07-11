@@ -13,9 +13,11 @@ topology:
     srl-01:
       kind: nokia_srlinux
       mgmt-ipv4: 198.51.100.11
+      startup-config: startups/srl-common.cli
     srl-02:
       kind: nokia_srlinux
       mgmt-ipv4: 198.51.100.12
+      startup-config: startups/srl-common.cli
 
   links:
     - endpoints: ["srl-01:e1-1", "srl-02:e1-1"]
