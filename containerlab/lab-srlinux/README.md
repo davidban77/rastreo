@@ -70,10 +70,28 @@ discovery complete: targets_resolved=2 probe_attempts=2 probe_errors=0 records_e
 orb -m clab bash -c "cd /Users/$USER/projects/rastreo/containerlab/lab-srlinux && sudo containerlab destroy -t lab.clab.yml"
 ```
 
+## SR Linux SNMP surface
+
+Per-platform reality: SR Linux 26.3 exposes a **narrower SNMP MIB set** than a Cisco/Juniper platform. Available (from `sysORTable`, 1.3.6.1.2.1.1.9):
+
+- `SNMPv2-MIB` (sysDescr, sysObjectId, sysName, sysUpTime, sysLocation, sysContact)
+- `IF-MIB` + IF-MIB extension (1.3.6.1.2.1.2.2, 31.1.1, 31.1.2)
+- `IP-MIB` (1.3.6.1.2.1.4.35)
+- `Ethernet-like MIB` (1.3.6.1.2.1.10.7.10)
+- `HOST-RESOURCES-MIB` (1.3.6.1.2.1.25.2.3)
+- `LLDP-MIB` (0.8802.1.1.2.1.3.7 and 0.8802.1.1.2.1.4.1)
+- Nokia enterprise MIB tree (1.3.6.1.4.1.6527.*)
+
+Not exposed: `BGP4-MIB` (1.3.6.1.2.1.15). BGP peer signals for SR Linux need to come from gNMI or SSH command-parse — not SNMP. This is a real-world data point the harness surfaces that a synthetic-target test cannot.
+
 ## Scope
 
-**Slice 1 (this commit)** — 2-node SR Linux topology, default boot config, TCP-connect scan verified. Baseline `OpenPort` signal emitted for both nodes.
+**Slice 1** — 2-node topology, default boot, TCP-connect verified. Baseline `OpenPort` signal.
 
-**Slice 2 (next)** — startup configs enable SNMPv2c (community `rastreo-lab`), NETCONF, JSON-RPC HTTPS, BGP session between the nodes, LLDP on the p2p link. Full prober matrix scenarios under `scenarios/`.
+**Slice 2a** — SNMP community rename to `rastreo-lab`. TCP + SNMP scenarios. First real Nokia vendor fingerprint (`SnmpSysObjectId: 1.3.6.1.4.1.6527.1.20.26`).
 
-**Slice 3** — Kafka broker + Nautobot consumer added to the compose sidecar. End-to-end validation: scan → DeviceRecords on Kafka → reconciled into Nautobot device inventory. Golden-record NDJSON snapshots checked in for regression.
+**Slice 2b** — HTTP scenario against JSON-RPC (fingerprints gunicorn banner). SSH scenario shipped but blocked pending full-features image.
+
+**Slice 2c (this commit)** — Per-node startup configs with e-BGP (65001 ↔ 65002) over point-to-point 10.1.1.0/30, LLDP on `e1-1`. BGP session establishes; interface + LLDP + IF-MIB signals now available to the SNMP prober.
+
+**Slice 3 (next)** — Full-features rastreo image (unblocks SSH), Kafka broker + Nautobot consumer sidecar, `scripts/lab_validation.py` harness, golden-record NDJSON snapshots.
