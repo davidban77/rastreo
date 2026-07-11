@@ -37,7 +37,7 @@ webpki-roots = "1"
 insta = { version = "1.40", features = ["json", "yaml"] }
 rstest = "0.26"
 tempfile = "3"
-schemars = "0.8"
+schemars = "1.2"
 ulid = "1"
 sha2 = "0.11"
 regex = "1"
