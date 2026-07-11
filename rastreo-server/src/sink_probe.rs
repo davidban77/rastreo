@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rastreo_core::{Sink, SinkType};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
 use crate::state::{AppState, Metrics, SharedSink, SinkProbeConfig, SinkReachability};
@@ -12,10 +13,14 @@ struct ConstructError {
     err: anyhow::Error,
 }
 
-/// Build the sink referenced by `RASTREO_SINK_CONFIG_PATH` and spawn a background probe task; failures surface via `/readyz` rather than crashing the server.
-pub async fn spawn_sink_probe(state: AppState, config: &SinkProbeConfig) -> AppState {
+/// Build the sink referenced by `RASTREO_SINK_CONFIG_PATH` and spawn a background probe task that exits when `shutdown` fires; failures surface via `/readyz` rather than crashing the server.
+pub async fn spawn_sink_probe(
+    state: AppState,
+    config: &SinkProbeConfig,
+    shutdown: watch::Receiver<bool>,
+) -> (AppState, Option<JoinHandle<()>>) {
     let Some(path) = config.config_path.as_ref() else {
-        return state;
+        return (state, None);
     };
 
     let sink_result = load_and_construct_sink(path, config.probe_timeout).await;
@@ -29,14 +34,15 @@ pub async fn spawn_sink_probe(state: AppState, config: &SinkProbeConfig) -> AppS
             ));
             let sink: SharedSink = Arc::new(Mutex::new(sink));
             run_probe(&sink, &reachability, &state.metrics, config.probe_timeout).await;
-            spawn_probe_task(
+            let handle = spawn_probe_task(
                 Arc::clone(&sink),
                 Arc::clone(&reachability),
                 Arc::clone(&state.metrics),
                 config.probe_interval,
                 config.probe_timeout,
+                shutdown,
             );
-            state.with_sink(Some(sink), reachability)
+            (state.with_sink(Some(sink), reachability), Some(handle))
         }
         Err(ConstructError { hint, err }) => {
             tracing::warn!(
@@ -51,7 +57,7 @@ pub async fn spawn_sink_probe(state: AppState, config: &SinkProbeConfig) -> AppS
                 config.probe_interval,
                 config.probe_timeout,
             ));
-            state.with_sink(None, reachability)
+            (state.with_sink(None, reachability), None)
         }
     }
 }
@@ -125,15 +131,21 @@ fn spawn_probe_task(
     metrics: Arc<Metrics>,
     interval_dur: Duration,
     timeout_dur: Duration,
-) {
+    mut shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = interval(interval_dur);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            ticker.tick().await;
-            run_probe(&sink, &reachability, &metrics, timeout_dur).await;
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                _ = ticker.tick() => {
+                    run_probe(&sink, &reachability, &metrics, timeout_dur).await;
+                }
+            }
         }
-    });
+    })
 }
 
 async fn run_probe(
@@ -383,6 +395,10 @@ mod tests {
         assert_eq!(metrics.sink_probe_success.load(Ordering::Relaxed), 1);
     }
 
+    fn make_shutdown() -> (watch::Sender<bool>, watch::Receiver<bool>) {
+        watch::channel(false)
+    }
+
     #[tokio::test]
     async fn spawn_sink_probe_with_no_config_path_leaves_state_untouched() {
         use std::sync::Arc as StdArc;
@@ -393,9 +409,11 @@ mod tests {
             StdArc::new(HickoryResolver::from_system().expect("resolver"));
         let state = AppState::new(resolver);
         let cfg = SinkProbeConfig::default();
-        let after = spawn_sink_probe(state, &cfg).await;
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(after.sink.is_none());
         assert!(!after.sink_reachability.configured);
+        assert!(handle.is_none(), "no task spawned when no sink configured");
     }
 
     #[cfg(feature = "config")]
@@ -418,10 +436,15 @@ mod tests {
             probe_interval: Duration::from_secs(60),
             probe_timeout: Duration::from_secs(5),
         };
-        let after = spawn_sink_probe(state, &cfg).await;
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(after.sink.is_some());
         assert!(after.sink_reachability.configured);
         assert_eq!(after.sink_reachability.sink_type, Some(SinkType::Stdout));
+        assert!(handle.is_some(), "handle returned for configured sink");
+        if let Some(h) = handle {
+            h.abort();
+        }
     }
 
     #[cfg(feature = "config")]
@@ -444,7 +467,8 @@ mod tests {
             probe_interval: Duration::from_secs(3600),
             probe_timeout: Duration::from_secs(5),
         };
-        let after = spawn_sink_probe(state, &cfg).await;
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(
             after
                 .sink_reachability
@@ -459,6 +483,9 @@ mod tests {
             1,
             "eager probe must credit the success counter",
         );
+        if let Some(h) = handle {
+            h.abort();
+        }
     }
 
     #[cfg(feature = "config")]
@@ -478,10 +505,12 @@ mod tests {
             probe_interval: Duration::from_secs(60),
             probe_timeout: Duration::from_secs(5),
         };
-        let after = spawn_sink_probe(state, &cfg).await;
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(after.sink.is_none());
         assert!(after.sink_reachability.configured);
         assert!(after.sink_reachability.last_error_snapshot().is_some());
+        assert!(handle.is_none(), "no task spawned on construction failure");
     }
 
     #[cfg(feature = "config")]
@@ -504,10 +533,12 @@ mod tests {
             probe_interval: Duration::from_secs(60),
             probe_timeout: Duration::from_secs(5),
         };
-        let after = spawn_sink_probe(state, &cfg).await;
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(after.sink.is_none());
         assert!(after.sink_reachability.configured);
         assert!(after.sink_reachability.last_error_snapshot().is_some());
+        assert!(handle.is_none(), "no task spawned on parse failure");
     }
 
     #[cfg(all(feature = "config", feature = "kafka"))]
@@ -536,7 +567,8 @@ mod tests {
         };
 
         let start = Instant::now();
-        let after = spawn_sink_probe(state, &cfg).await;
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -559,5 +591,39 @@ mod tests {
             0,
             "eager probe must not run when construction fails",
         );
+        assert!(handle.is_none(), "no task spawned on construction timeout");
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn spawn_sink_probe_task_exits_when_shutdown_signal_fires() {
+        use std::sync::Arc as StdArc;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sink.yaml");
+        tokio::fs::write(&path, "type: stdout\n")
+            .await
+            .expect("write yaml");
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let cfg = SinkProbeConfig {
+            config_path: Some(path),
+            probe_interval: Duration::from_secs(3600),
+            probe_timeout: Duration::from_secs(5),
+        };
+        let (tx, rx) = make_shutdown();
+        let (_after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let handle = handle.expect("task spawned");
+
+        tx.send(true).expect("send shutdown");
+        let joined = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        assert!(
+            joined.is_ok(),
+            "probe task must exit within 500ms of shutdown signal",
+        );
+        joined.unwrap().expect("task joined cleanly");
     }
 }
