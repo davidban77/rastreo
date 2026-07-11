@@ -41,7 +41,7 @@ def map_device_record(record: DeviceRecord) -> InfrahubPayload:
     payload: InfrahubPayload = {
         "identity_key": record.identity_key,
         "mgmt_ip": record.mgmt_ip,
-        "confidence": round(record.confidence, 2),
+        "confidence": f"{record.confidence:.2f}",
         "last_seen": record.last_seen.isoformat().replace("+00:00", "Z"),
         "signals": record.signals,
         "probe_kinds": record.probe_kinds,

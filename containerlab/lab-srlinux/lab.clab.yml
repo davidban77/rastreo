@@ -1,0 +1,23 @@
+name: rastreo-lab
+
+mgmt:
+  network: rastreo-lab
+  ipv4-subnet: 198.51.100.0/24
+
+topology:
+  kinds:
+    nokia_srlinux:
+      image: ghcr.io/nokia/srlinux:latest
+
+  nodes:
+    srl-01:
+      kind: nokia_srlinux
+      mgmt-ipv4: 198.51.100.11
+      startup-config: startups/srl-01.cli
+    srl-02:
+      kind: nokia_srlinux
+      mgmt-ipv4: 198.51.100.12
+      startup-config: startups/srl-02.cli
+
+  links:
+    - endpoints: ["srl-01:e1-1", "srl-02:e1-1"]

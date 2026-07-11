@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: srlinux-http
+    targets:
+      - Ip: "198.51.100.11"
+      - Ip: "198.51.100.12"
+    probers:
+      - type: http
+        ports: [443]
+        scheme: https
+        tls_verify: false

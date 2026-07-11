@@ -25,6 +25,9 @@ class Config:
     netbox_token: str
     netbox_verify_tls: bool
     netbox_timeout_seconds: int
+    default_device_type: str
+    default_site: str
+    default_device_role: str
     log_level: str
     dry_run: bool
 
@@ -36,7 +39,14 @@ class Config:
 
         missing = [
             name
-            for name in ("KAFKA_BROKERS", "NETBOX_URL", "NETBOX_TOKEN")
+            for name in (
+                "KAFKA_BROKERS",
+                "NETBOX_URL",
+                "NETBOX_TOKEN",
+                "NETBOX_DEFAULT_DEVICE_TYPE",
+                "NETBOX_DEFAULT_SITE",
+                "NETBOX_DEFAULT_DEVICE_ROLE",
+            )
             if not os.environ.get(name, "").strip()
         ]
         if missing:
@@ -64,6 +74,9 @@ class Config:
             netbox_token=os.environ["NETBOX_TOKEN"].strip(),
             netbox_verify_tls=_bool("NETBOX_VERIFY_TLS", "true"),
             netbox_timeout_seconds=_int("NETBOX_TIMEOUT_SECONDS", "30"),
+            default_device_type=os.environ["NETBOX_DEFAULT_DEVICE_TYPE"].strip(),
+            default_site=os.environ["NETBOX_DEFAULT_SITE"].strip(),
+            default_device_role=os.environ["NETBOX_DEFAULT_DEVICE_ROLE"].strip(),
             log_level=log_level,
             dry_run=_bool("DRY_RUN", "false"),
         )

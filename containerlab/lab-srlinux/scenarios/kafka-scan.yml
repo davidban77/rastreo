@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+# Full-matrix scan of both SR Linux nodes, records published to the shared
+# Kafka broker so the per-SoT consumers (Nautobot/NetBox/Infrahub) can
+# reconcile them into their respective inventories.
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: srlinux-e2e
+    sink:
+      type: kafka
+      brokers:
+        - "kafka:29092"
+      topic: rastreo.devices
+      flush_mode:
+        type: per_record
+    targets:
+      - Ip: "198.51.100.11"
+      - Ip: "198.51.100.12"
+    probers:
+      - type: tcp_connect
+        ports: [22, 161, 443, 50051]
+      - type: snmp
+        version: v2c
+        community: rastreo-lab
+      - type: ssh
+        ports: [22]
+      - type: http
+        ports: [443]
+        scheme: https
+        tls_verify: false

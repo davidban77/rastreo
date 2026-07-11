@@ -1,0 +1,19 @@
+enter candidate
+    /system snmp access-group SNMPv2-RO-Community community-entry RO-Community community rastreo-lab
+    /interface ethernet-1/1 admin-state enable
+    /interface ethernet-1/1 subinterface 0 admin-state enable
+    /interface ethernet-1/1 subinterface 0 ipv4 admin-state enable
+    /interface ethernet-1/1 subinterface 0 ipv4 address 10.1.1.2/30
+    /system lldp interface ethernet-1/1 admin-state enable
+    /network-instance default type default
+    /network-instance default admin-state enable
+    /network-instance default interface ethernet-1/1.0
+    /network-instance default router-id 10.0.0.2
+    /routing-policy policy accept-all default-action policy-result accept
+    /network-instance default protocols bgp admin-state enable
+    /network-instance default protocols bgp autonomous-system 65002
+    /network-instance default protocols bgp router-id 10.0.0.2
+    /network-instance default protocols bgp afi-safi ipv4-unicast admin-state enable
+    /network-instance default protocols bgp group ebgp export-policy [ accept-all ] import-policy [ accept-all ]
+    /network-instance default protocols bgp neighbor 10.1.1.1 admin-state enable peer-as 65001 peer-group ebgp
+commit save

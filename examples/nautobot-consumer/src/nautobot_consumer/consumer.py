@@ -48,6 +48,7 @@ def run(config: Config) -> None:
             default_device_type=config.default_device_type,
             default_location=config.default_location,
             default_device_status=config.default_device_status,
+            default_device_role=config.default_device_role,
             verify_tls=config.nautobot_verify_tls,
             timeout_seconds=config.nautobot_timeout_seconds,
         )

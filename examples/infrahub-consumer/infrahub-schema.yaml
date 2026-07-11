@@ -72,9 +72,9 @@ nodes:
         description: Operational role (e.g. router, switch, firewall).
 
       - name: confidence
-        kind: Number
+        kind: Text
         optional: true
-        description: Fuser confidence in [0.0, 1.0], stored as a number.
+        description: Fuser confidence in [0.0, 1.0], stored as a two-decimal string ("0.90") because Infrahub's Number attribute is integer-only.
 
       - name: last_seen
         kind: DateTime

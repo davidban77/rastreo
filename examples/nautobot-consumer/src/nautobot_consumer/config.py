@@ -28,6 +28,7 @@ class Config:
     default_device_type: str
     default_location: str
     default_device_status: str
+    default_device_role: str
     log_level: str
     dry_run: bool
 
@@ -43,6 +44,7 @@ class Config:
             "NAUTOBOT_TOKEN",
             "NAUTOBOT_DEFAULT_DEVICE_TYPE",
             "NAUTOBOT_DEFAULT_LOCATION",
+            "NAUTOBOT_DEFAULT_DEVICE_ROLE",
         )
         missing = [name for name in required if not os.environ.get(name, "").strip()]
         if missing:
@@ -75,6 +77,7 @@ class Config:
             default_device_status=os.environ.get(
                 "NAUTOBOT_DEFAULT_DEVICE_STATUS", "Active"
             ).strip(),
+            default_device_role=os.environ["NAUTOBOT_DEFAULT_DEVICE_ROLE"].strip(),
             log_level=log_level,
             dry_run=_bool("DRY_RUN", "false"),
         )
