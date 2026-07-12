@@ -394,7 +394,9 @@ async fn probe_authenticated(
         return match classify_io_error(&e) {
             PortOutcome::Timeout => AuthenticatedOutcome::Timeout,
             PortOutcome::Unreachable => AuthenticatedOutcome::Unreachable,
-            PortOutcome::Other(msg) => AuthenticatedOutcome::Other(msg),
+            PortOutcome::Fault(_, msg) | PortOutcome::Other(msg) => {
+                AuthenticatedOutcome::Other(msg)
+            }
             _ => AuthenticatedOutcome::Unreachable,
         };
     }
@@ -458,7 +460,9 @@ async fn probe_authenticated(
                 return match classify_io_error(&e) {
                     PortOutcome::Timeout => AuthenticatedOutcome::Timeout,
                     PortOutcome::Unreachable => AuthenticatedOutcome::Unreachable,
-                    PortOutcome::Other(msg) => AuthenticatedOutcome::Other(msg),
+                    PortOutcome::Fault(_, msg) | PortOutcome::Other(msg) => {
+                        AuthenticatedOutcome::Other(msg)
+                    }
                     _ => AuthenticatedOutcome::Unreachable,
                 }
             }

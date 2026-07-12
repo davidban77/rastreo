@@ -9,7 +9,7 @@ pub use v1_v2c::{
     OID_SYS_NAME, OID_SYS_OBJECT_ID,
 };
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::SystemTime;
 
 use rasn::types::ObjectIdentifier;
@@ -162,6 +162,7 @@ pub(super) enum PortOutcome {
     Timeout,
     Unreachable,
     DecodeFailed,
+    Fault(ProbeErrorKind, String),
     Other(String),
 }
 
@@ -180,7 +181,7 @@ pub(super) fn classify_io_error(err: &std::io::Error) -> PortOutcome {
     match classify::io_error(err) {
         Disposition::Absence if err.kind() == std::io::ErrorKind::TimedOut => PortOutcome::Timeout,
         Disposition::Absence => PortOutcome::Unreachable,
-        Disposition::Fault(_) => PortOutcome::Other(err.to_string()),
+        Disposition::Fault(kind) => PortOutcome::Fault(kind, err.to_string()),
     }
 }
 
@@ -205,7 +206,7 @@ impl Prober for SnmpProber {
         let mut signals = Vec::new();
         let mut any_reachable = false;
         let mut decode_failed_port: Option<u16> = None;
-        let mut last_fault: Option<String> = None;
+        let mut last_fault: Option<ProbeFault> = None;
 
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
@@ -218,47 +219,73 @@ impl Prober for SnmpProber {
                 PortOutcome::DecodeFailed => {
                     decode_failed_port.get_or_insert(port);
                 }
+                PortOutcome::Fault(kind, msg) => {
+                    last_fault = Some(ProbeFault::new(
+                        kind,
+                        format!("snmp probe failed on port {port}: {msg}"),
+                    ));
+                }
                 PortOutcome::Other(msg) => {
-                    last_fault = Some(format!("snmp probe failed on port {port}: {msg}"));
+                    last_fault = Some(ProbeFault::new(
+                        ProbeErrorKind::Other,
+                        format!("snmp probe failed on port {port}: {msg}"),
+                    ));
                 }
             }
         }
 
-        if !any_reachable {
-            // Silence on one port is not evidence against a fault on another, but an answer is:
-            // an agent that answered with something we cannot parse answered — the device is kept
-            // (reachable) with the decode fault recorded and no signals.
-            if let Some(port) = decode_failed_port {
-                return Ok(ProbeOutcome {
-                    kind: ProbeKind::Snmp,
-                    target_ip: target.ip,
-                    timestamp: SystemTime::now(),
-                    reachable: true,
-                    signals: Vec::new(),
-                    fault: Some(ProbeFault::new(
-                        ProbeErrorKind::DecodeFailed,
-                        format!("snmp reply on port {port} could not be decoded"),
-                    )),
-                });
-            }
-            return Ok(ProbeOutcome {
-                kind: ProbeKind::Snmp,
-                target_ip: target.ip,
-                timestamp: SystemTime::now(),
-                reachable: false,
-                signals: Vec::new(),
-                fault: last_fault.map(|detail| ProbeFault::new(ProbeErrorKind::Other, detail)),
-            });
-        }
+        Ok(assemble_outcome(
+            target.ip,
+            any_reachable,
+            signals,
+            decode_failed_port,
+            last_fault,
+        ))
+    }
+}
 
-        Ok(ProbeOutcome {
+fn assemble_outcome(
+    target_ip: IpAddr,
+    any_reachable: bool,
+    signals: Vec<Signal>,
+    decode_failed_port: Option<u16>,
+    last_fault: Option<ProbeFault>,
+) -> ProbeOutcome {
+    if any_reachable {
+        return ProbeOutcome {
             kind: ProbeKind::Snmp,
-            target_ip: target.ip,
+            target_ip,
             timestamp: SystemTime::now(),
-            reachable: any_reachable,
+            reachable: true,
             signals,
             fault: None,
-        })
+        };
+    }
+
+    // Silence on one port is not evidence against a fault on another, but an answer is: an agent
+    // that answered with something we cannot parse answered — the device is kept (reachable) with
+    // the decode fault recorded and no signals.
+    if let Some(port) = decode_failed_port {
+        return ProbeOutcome {
+            kind: ProbeKind::Snmp,
+            target_ip,
+            timestamp: SystemTime::now(),
+            reachable: true,
+            signals: Vec::new(),
+            fault: Some(ProbeFault::new(
+                ProbeErrorKind::DecodeFailed,
+                format!("snmp reply on port {port} could not be decoded"),
+            )),
+        };
+    }
+
+    ProbeOutcome {
+        kind: ProbeKind::Snmp,
+        target_ip,
+        timestamp: SystemTime::now(),
+        reachable: false,
+        signals: Vec::new(),
+        fault: last_fault,
     }
 }
 
@@ -637,5 +664,46 @@ mod tests {
             .expect("the decode failure is recorded on the outcome");
         assert_eq!(fault.kind, ProbeErrorKind::DecodeFailed);
         assert!(fault.detail.contains("decode"), "got: {}", fault.detail);
+    }
+
+    #[test]
+    fn classify_io_error_threads_permission_denied_kind() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(
+            matches!(
+                classify_io_error(&err),
+                PortOutcome::Fault(ProbeErrorKind::PermissionDenied, _)
+            ),
+            "a local egress deny must classify as a PermissionDenied fault, not Other or Unreachable"
+        );
+    }
+
+    #[test]
+    fn assemble_outcome_surfaces_the_latched_fault_kind() {
+        let outcome = assemble_outcome(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            false,
+            Vec::new(),
+            None,
+            Some(ProbeFault::new(
+                ProbeErrorKind::PermissionDenied,
+                "snmp egress denied on port 161",
+            )),
+        );
+        assert!(!outcome.reachable);
+        assert_eq!(
+            outcome.fault.expect("latched fault must surface").kind,
+            ProbeErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn permission_denied_egress_fault_maps_to_the_cap_net_raw_hint() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let PortOutcome::Fault(kind, _) = classify_io_error(&err) else {
+            panic!("a local egress deny must be a Fault");
+        };
+        let hint = crate::hint_for_error_kind(kind).expect("permission denied has a hint");
+        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
     }
 }

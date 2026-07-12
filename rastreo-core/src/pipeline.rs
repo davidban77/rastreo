@@ -10,7 +10,9 @@ use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, EncoderConfig};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::fuser::{create_fuser, FuserConfig};
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ScanMetadata, Target, PROBE_KIND_COUNT};
+use crate::model::{
+    ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ScanMetadata, Target, PROBE_KIND_COUNT,
+};
 use crate::prober::create_prober;
 use crate::resolver::{HickoryResolver, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler};
@@ -48,7 +50,7 @@ pub struct DiscoverySummary {
     pub cancelled: bool,
     /// Kind and sample detail of the first probe that faulted; latched once per scan, `None` when no probe faulted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_probe_error: Option<(ProbeErrorKind, String)>,
+    pub first_probe_error: Option<ProbeFault>,
     #[serde(rename = "elapsed_ms", serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
 }
@@ -179,7 +181,7 @@ pub async fn run_discovery_with_components_cancellable(
     let mut all_outcomes: Vec<ProbeOutcome> = Vec::new();
     let mut probe_attempts: usize = 0;
     let mut error_counts: BTreeMap<ProbeErrorKind, usize> = BTreeMap::new();
-    let mut first_probe_error: Option<(ProbeErrorKind, String)> = None;
+    let mut first_probe_error: Option<ProbeFault> = None;
     let mut cancelled = false;
     let mut attempts_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
     let mut errors_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
@@ -203,7 +205,7 @@ pub async fn run_discovery_with_components_cancellable(
                         errors_by_kind[prober_kind.index()] += 1;
                         *error_counts.entry(fault.kind).or_insert(0) += 1;
                         if first_probe_error.is_none() {
-                            first_probe_error = Some((fault.kind, fault.detail.clone()));
+                            first_probe_error = Some(fault.clone());
                         }
                     }
                     all_outcomes.push(outcome);
@@ -217,7 +219,7 @@ pub async fn run_discovery_with_components_cancellable(
                     if first_probe_error.is_none() {
                         let msg = err.to_string();
                         if !msg.is_empty() {
-                            first_probe_error = Some((ProbeErrorKind::Other, msg));
+                            first_probe_error = Some(ProbeFault::new(ProbeErrorKind::Other, msg));
                         }
                     }
                 }
@@ -588,13 +590,16 @@ mod tests {
         let mut error_counts = BTreeMap::new();
         error_counts.insert(ProbeErrorKind::DecodeFailed, 3);
         let summary = DiscoverySummary {
-            first_probe_error: Some((ProbeErrorKind::PermissionDenied, "permission denied".into())),
+            first_probe_error: Some(ProbeFault::new(
+                ProbeErrorKind::PermissionDenied,
+                "permission denied",
+            )),
             error_counts,
             ..Default::default()
         };
         let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
-        assert_eq!(json["first_probe_error"][0], "permission_denied");
-        assert_eq!(json["first_probe_error"][1], "permission denied");
+        assert_eq!(json["first_probe_error"]["kind"], "permission_denied");
+        assert_eq!(json["first_probe_error"]["detail"], "permission denied");
         assert_eq!(json["error_counts"]["decode_failed"], 3);
     }
 
@@ -742,22 +747,25 @@ mod tests {
             Some(2),
             "an undecodable agent reply is a probe fault, not an absent host"
         );
-        let (kind, detail) = summary
+        let fault = summary
             .first_probe_error
             .as_ref()
             .expect("first probe error must be latched");
-        assert_eq!(*kind, ProbeErrorKind::DecodeFailed);
+        assert_eq!(fault.kind, ProbeErrorKind::DecodeFailed);
         assert!(
-            detail.contains("decode"),
-            "must carry the fault, got: {detail}"
+            fault.detail.contains("decode"),
+            "must carry the fault, got: {}",
+            fault.detail
         );
         assert!(
-            detail.contains(&first_port.to_string()),
-            "the first fault must win the latch, got: {detail}"
+            fault.detail.contains(&first_port.to_string()),
+            "the first fault must win the latch, got: {}",
+            fault.detail
         );
         assert!(
-            !detail.contains(&second_port.to_string()),
-            "a later fault must not overwrite the latched first one, got: {detail}"
+            !fault.detail.contains(&second_port.to_string()),
+            "a later fault must not overwrite the latched first one, got: {}",
+            fault.detail
         );
     }
 

@@ -41,7 +41,7 @@ Each fault carries a named kind, and the summary tallies faults by kind in `erro
 - `dns_failed` — a name lookup the probe needed did not resolve.
 - `other` — a fault with no more specific kind.
 
-The summary also carries `first_probe_error`, a two-element `[kind, detail]` array holding the first fault's kind and a sample detail string.
+The summary also carries `first_probe_error`, an object with two fields — `kind` (the fault kind) and `detail` (a sample detail string) — for the first fault of the scan.
 
 One rule decides the third row: **a prober reports a fault only when the probe itself broke.** If it learned anything at all, it emits what it learned. A device that answers TCP on port 443 but refuses the TLS handshake still gives you an open port, so both the [HTTP](http.md) and [TLS](tls.md) probers emit a record carrying that open port rather than a fault. Discarding it would mean finding a device and then throwing it away — on exactly the legacy gear this tool exists to inventory.
 

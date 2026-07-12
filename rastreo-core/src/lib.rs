@@ -3,6 +3,7 @@ pub mod config;
 pub mod encoder;
 pub mod error;
 pub mod fuser;
+pub mod hints;
 pub mod model;
 pub mod observability;
 pub mod pipeline;
@@ -21,6 +22,7 @@ pub use error::{
     ResolverError, RuntimeError,
 };
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
+pub use hints::hint_for_error_kind;
 pub use model::{
     AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeFault, ProbeKind,
     ProbeOutcome, ResolvedTarget, ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID,
