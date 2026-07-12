@@ -24,9 +24,10 @@ To emit a record for every probed address, silent ones included, set `include_un
 
 The summary reads `probe_errors` equal to `probe_attempts`. Every probe hit a fault, which means no probe could run. Offline targets never cause this.
 
-Read the fault message the CLI prints next to the summary, then check the usual causes:
+The CLI prints a hint next to the summary, chosen from the fault's typed kind. A `permission_denied` fault, for example, tells you to grant `CAP_NET_RAW` or check local egress policy. Then check the usual causes:
 
 - The ARP, NDP, or ICMP prober is running without `CAP_NET_RAW`. See [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
+- An SNMP probe is blocked by a local firewall REJECT in the OUTPUT chain. This now surfaces as a `permission_denied` fault with the same egress-policy hint.
 - The ARP prober is aimed at IPv6 targets, or the NDP prober at IPv4 targets. Each is bound to one address family.
 - The selected interface has no address in the target's family, or no interface reaches the target subnet at all.
 - The scan host has run out of file descriptors or is denied a socket. A local socket failure is the one fault the connection-based probers report.

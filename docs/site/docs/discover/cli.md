@@ -195,18 +195,20 @@ Records that hadn't been emitted yet at the moment of cancellation are still wri
 
 ## Runtime hints
 
-When a scan finishes with `records_emitted=0`, the CLI prints an actionable `hint: ...` line to stderr next to the summary. Hints are suppressed when the run was cancelled, when at least one record was emitted, or when `--dry-run` was used.
+The CLI prints one `hint:` line to stderr next to the summary. It appears when a probe faulted, or when a scan without a fault emitted zero records. Hints are suppressed only when the run was cancelled or when `--dry-run` was used.
 
-The usual case is a scan that reached nothing. Nobody answered, `probe_errors` stays at `0`, and you get the generic hint:
+One case is a scan that reached nothing. Nobody answered, `probe_errors` stays at `0`, and you get the generic hint:
 
 ```text
 discovery complete: targets_resolved=1 probe_attempts=1 probe_errors=0 records_emitted=0 elapsed_ms=1
 hint: 0 records emitted — no probe reached an open port. Check target reachability and port list.
 ```
 
-When `probe_errors` is above `0`, a probe hit a fault: it could not run at all. The CLI reads the first fault message and prints a matching suggestion when it recognises the cause. A probe blocked by a missing `CAP_NET_RAW` capability, for example, gets a hint telling you to grant the capability and rerun. A fault the CLI does not recognise falls back to the generic hint above. Only one hint is printed per scan.
+When `probe_errors` is above `0`, a probe hit a fault. The CLI derives the hint from the fault's typed kind, not from the wording of the error. The same fault always gives the same advice. The fault hint prints whenever a fault occurred, even when the scan also produced records. An SNMP agent that answers with a reply rastreo cannot decode keeps the device and emits a record. The CLI still prints the `decode_failed` hint next to that summary. A probe blocked by a missing `CAP_NET_RAW` capability gets a `permission_denied` fault. The hint then tells you to grant the capability or check local egress policy. A probe that needed a name lookup gets a `dns_failed` fault when the lookup did not resolve, and the hint points at the resolver. A fault kind with no specific remedy (`other`) prints no hint. Only one hint is printed per scan.
 
-The same hint patterns run when the scan itself fails — a target name that does not resolve, for example. The CLI prints the error on stderr and adds the hint next to it.
+An SNMP probe blocked by a local firewall REJECT in the OUTPUT chain also surfaces as `permission_denied` and gets the same egress-policy hint.
+
+The same hints run when the scan itself fails — a target name that does not resolve, for example. The CLI prints the error on stderr and adds the hint next to it.
 
 ## Exit codes
 

@@ -134,7 +134,7 @@ curl -sS -X POST http://localhost:8080/scans \
   }'
 ```
 
-The response is `{summary, records}`. `summary` carries the counters and the elapsed time; `records` is the list of `DeviceRecord` events the scan produced.
+The response is `{summary, records}`, plus an optional `hint` when a probe faulted. `summary` carries the counters and the elapsed time; `records` is the list of `DeviceRecord` events the scan produced. A clean scan omits `hint` — see [The hint field](#the-hint-field) below.
 
 ```json
 {
@@ -175,7 +175,7 @@ The summary fields:
 | `error_counts` | Faulted probes tallied by fault kind, as a JSON object — for example `{"decode_failed": 1}`. A kind appears only when it happened at least once, so a scan with no faults omits the field. A target that stays silent is a normal result, not a fault. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). |
 | `records_emitted` | `DeviceRecord` events produced. By default only targets that at least one prober reached produce a record. |
 | `probes_by_kind` | Per-prober `attempted` / `errored` breakdown. Omitted when no probes ran. |
-| `first_probe_error` | The first probe fault, as a two-element `[kind, detail]` array: the fault kind, then a sample detail string. Omitted when no probe faulted. |
+| `first_probe_error` | The first probe fault, as an object with a `kind` field (the fault kind) and a `detail` field (a sample detail string). Omitted when no probe faulted. |
 | `dlq_records` | Records the sink diverted to a dead-letter destination. |
 | `sink_type` | Sink the scan wrote to. Always `tee` on `POST /scans`: the server writes every record to the in-memory buffer it returns in the response, and to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `cancelled` | `true` when the scan stopped early; the counters then reflect partial progress. |
@@ -196,7 +196,7 @@ When a probe faults, `error_counts` tallies it by kind and `first_probe_error` n
     "dlq_records": 0,
     "sink_type": "tee",
     "cancelled": false,
-    "first_probe_error": ["decode_failed", "snmp reply could not be decoded"],
+    "first_probe_error": { "kind": "decode_failed", "detail": "snmp reply could not be decoded" },
     "elapsed_ms": 0
   },
   "records": [
@@ -207,9 +207,16 @@ When a probe faults, `error_counts` tallies it by kind and `first_probe_error` n
       "signals": [],
       "probe_kinds": ["Snmp"]
     }
-  ]
+  ],
+  "hint": "the target answered with a reply the prober could not parse — check the protocol, credentials, and the service on the port"
 }
 ```
+
+### The hint field
+
+When a probe faults with a kind that has a specific remedy, the response adds a top-level `hint` field with one line of guidance. The server derives the hint from the fault kind in `first_probe_error`, so the same fault always gives the same advice. A clean scan omits the field. So does a fault kind with no specific action (`other`).
+
+You will see a hint for the faults that carry a clear next step. A `decode_failed` fault suggests checking the protocol, credentials, and the service on the port. A `permission_denied` fault points at granting `CAP_NET_RAW` or checking local egress policy. A `dns_failed` fault points at the resolver configuration and DNS reachability. The exact wording is guidance text and may change between releases — read it, do not match on it.
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).
 

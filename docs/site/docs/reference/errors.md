@@ -23,7 +23,7 @@ Probe faults are typed data, not returned errors. When a probe faults, it record
 !!! warning "A fault is the probe breaking, not a silent target"
     A timeout, a refused connection, an unreachable network, or a port that is not speaking the protocol you probed — each is a normal negative discovery result, and `error_counts` stays empty. A probe that learned something partial keeps it: a device that answers TCP but refuses the TLS handshake produces a record carrying the open port, no fault. One fault keeps the device even so — a reply rastreo cannot decode marks the target reachable, emits a record with no signals, and counts the fault as `decode_failed`.
 
-The scan summary reports faults in three fields. `error_counts` tallies them by kind. `first_probe_error` holds the first fault as a two-element `[kind, detail]` array. `probes_by_kind` gives a per-prober `attempted` / `errored` breakdown. A scan fails only when target resolution, encoding, or the sink fails.
+The scan summary reports faults in three fields. `error_counts` tallies them by kind. `first_probe_error` holds the first fault as an object with a `kind` field and a `detail` field. `probes_by_kind` gives a per-prober `attempted` / `errored` breakdown. A scan fails only when target resolution, encoding, or the sink fails.
 
 `RastreoError::Probe(ProbeError)` is separate and rare. It is returned only when a probe could not attempt a target at all, and the pipeline then counts that case under the `other` fault kind. The Display prefix on the outer variant is `probe error:`, and the HTTP server maps it to `500`.
 

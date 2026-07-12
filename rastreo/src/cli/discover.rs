@@ -16,8 +16,8 @@ use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
-    resolve_scenario_targets, run_discovery_cancellable, ConfigError, HickoryResolver,
-    ProberConfig, ResolvedScenarioTarget, SinkConfig, Target,
+    hint_for_error_kind, resolve_scenario_targets, run_discovery_cancellable, ConfigError,
+    HickoryResolver, ProberConfig, ResolvedScenarioTarget, SinkConfig, Target,
 };
 use tokio::sync::watch;
 
@@ -435,8 +435,8 @@ async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Resul
             Ok(())
         }
         Err(err) => {
-            if let Some(hint) = enrich_probe_error_hint(&err.to_string()) {
-                eprintln!("{hint}");
+            if let Some(hint) = enrich_scan_error_hint(&err.to_string()) {
+                eprintln!("hint: {hint}");
             }
             Err(err.into())
         }
@@ -503,8 +503,8 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
             Err(err) => {
                 errors += 1;
                 eprintln!("{label} failed: {err:#}");
-                if let Some(hint) = enrich_probe_error_hint(&err.to_string()) {
-                    eprintln!("{hint}");
+                if let Some(hint) = enrich_scan_error_hint(&err.to_string()) {
+                    eprintln!("hint: {hint}");
                 }
             }
         }
@@ -535,7 +535,7 @@ fn load_scenario_file(path: &Path) -> Result<ScenarioFile> {
         Ok(file) => Ok(file),
         Err(err) => {
             if let Some(hint) = enrich_feature_hint(&err.to_string()) {
-                eprintln!("{hint}");
+                eprintln!("hint: {hint}");
             }
             Err(anyhow::Error::new(err).context(format!(
                 "failed to parse scenario file '{}'",
@@ -560,90 +560,56 @@ const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
 #[cfg(feature = "config")]
 const RELEASE_BUNDLED_FEATURES: &str = "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls";
 
-const PROBE_ERROR_HINT_PATTERNS: &[(&str, &str)] = &[
-    (
-        "connection refused",
-        "hint: target is reachable but not listening on the probed port. Check the target's firewall or verify the service is running.",
-    ),
-    (
-        "target unreachable",
-        "hint: probe target is not reachable via the network. Check L3 route, target availability, or interface configuration.",
-    ),
-    (
-        "no route to host",
-        "hint: no L3 path to the target. Verify the target's subnet is reachable via a configured interface or route.",
-    ),
-    (
-        "network is unreachable",
-        "hint: no local interface is up on the target's subnet. Check `ip route` / interface state.",
-    ),
+// Resolver / sink errors abort the whole scan and are not kinded, so they hint by string match.
+const SCAN_ERROR_HINT_PATTERNS: &[(&str, &str)] = &[
     (
         "nxdomain",
-        "hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
+        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
     ),
     (
         "dns lookup failed",
-        "hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
+        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
     ),
     (
         "no records found",
-        "hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
-    ),
-    (
-        "authentication failed",
-        "hint: probe authentication rejected. Verify SNMP community, USM credentials, or SSH credentials for the target.",
-    ),
-    (
-        "bad credentials",
-        "hint: probe authentication rejected. Verify SNMP community, USM credentials, or SSH credentials for the target.",
-    ),
-    (
-        "permission denied",
-        "hint: rastreo lacks the OS capability the probe requires (e.g. CAP_NET_RAW for ARP/NDP/ICMP). Rerun with sufficient privileges.",
-    ),
-    (
-        "operation not permitted",
-        "hint: rastreo lacks the OS capability the probe requires (e.g. CAP_NET_RAW for ARP/NDP/ICMP). Rerun with sufficient privileges.",
-    ),
-    (
-        "tls handshake",
-        "hint: TLS handshake failed. Set `tls_verify: false` on the HTTP prober for self-signed / expired certs; on the TLS prober, this is expected for endpoints without a valid chain.",
-    ),
-    (
-        "certificate",
-        "hint: TLS handshake failed. Set `tls_verify: false` on the HTTP prober for self-signed / expired certs; on the TLS prober, this is expected for endpoints without a valid chain.",
-    ),
-    (
-        "timed out",
-        "hint: target didn't respond within the timeout window. Increase `--timeout-ms` or check network reachability.",
+        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
     ),
 ];
 
-fn enrich_probe_error_hint(error_msg: &str) -> Option<String> {
+fn enrich_scan_error_hint(error_msg: &str) -> Option<String> {
     let lower = error_msg.to_lowercase();
-    PROBE_ERROR_HINT_PATTERNS
+    SCAN_ERROR_HINT_PATTERNS
         .iter()
         .find(|(needle, _)| lower.contains(needle))
         .map(|(_, hint)| (*hint).to_string())
 }
 
-fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary) {
+fn runtime_probe_hint(summary: &rastreo_core::DiscoverySummary) -> Option<&'static str> {
+    summary
+        .first_probe_error
+        .as_ref()
+        .and_then(|fault| hint_for_error_kind(fault.kind))
+}
+
+const ZERO_RECORDS_HINT: &str =
+    "0 records emitted — no probe reached an open port. Check target reachability and port list.";
+
+fn runtime_hint_line(summary: &rastreo_core::DiscoverySummary) -> Option<String> {
     if summary.cancelled {
-        return;
+        return None;
     }
-    if summary.records_emitted > 0 {
-        return;
+    if summary.first_probe_error.is_some() {
+        return runtime_probe_hint(summary).map(str::to_string);
     }
-    if let Some((_, msg)) = summary.first_probe_error.as_ref() {
-        if let Some(hint) = enrich_probe_error_hint(msg) {
-            eprintln!("{hint}");
-            return;
-        }
+    if summary.records_emitted == 0 && summary.probe_attempts > 0 {
+        return Some(ZERO_RECORDS_HINT.to_string());
     }
-    if summary.probe_attempts > 0 {
-        eprintln!(
-            "hint: 0 records emitted — no probe reached an open port. Check target reachability and port list."
-        );
+    None
+}
+
+fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary) {
+    if let Some(hint) = runtime_hint_line(summary) {
+        eprintln!("hint: {hint}");
     }
 }
 
@@ -659,7 +625,7 @@ fn enrich_feature_hint(error_msg: &str) -> Option<String> {
         .find(|(name, _)| *name == variant)
         .map(|(_, feat)| *feat)?;
     Some(format!(
-        "hint: '{variant}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles {RELEASE_BUNDLED_FEATURES}."
+        "'{variant}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles {RELEASE_BUNDLED_FEATURES}."
     ))
 }
 
@@ -1712,119 +1678,101 @@ mod tests {
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_connection_refused() {
-        let hint = enrich_probe_error_hint("probe error: connection refused").expect("hint");
-        assert!(
-            hint.contains("not listening on the probed port"),
-            "hint: {hint}"
-        );
-    }
-
-    #[test]
-    fn enrich_probe_error_hint_matches_timed_out() {
+    fn enrich_scan_error_hint_matches_nxdomain() {
         let hint =
-            enrich_probe_error_hint("probe error: probe timed out after 1000ms").expect("hint");
-        assert!(hint.contains("timeout window"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_probe_error_hint_matches_no_route_to_host() {
-        let hint = enrich_probe_error_hint("probe error: no route to host").expect("hint");
-        assert!(hint.contains("no L3 path"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_probe_error_hint_matches_network_is_unreachable() {
-        let hint = enrich_probe_error_hint("probe error: network is unreachable").expect("hint");
-        assert!(hint.contains("no local interface"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_probe_error_hint_matches_target_unreachable() {
-        let hint = enrich_probe_error_hint("probe target unreachable: 10.0.0.1").expect("hint");
-        assert!(
-            hint.contains("not reachable via the network"),
-            "hint: {hint}"
-        );
-    }
-
-    #[test]
-    fn enrich_probe_error_hint_matches_nxdomain() {
-        let hint =
-            enrich_probe_error_hint("resolver error: NXDOMAIN for example.com").expect("hint");
+            enrich_scan_error_hint("resolver error: NXDOMAIN for example.com").expect("hint");
         assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_dns_lookup_failed() {
-        let hint = enrich_probe_error_hint("resolver error: DNS lookup failed for x.invalid")
+    fn enrich_scan_error_hint_matches_dns_lookup_failed() {
+        let hint = enrich_scan_error_hint("resolver error: DNS lookup failed for x.invalid")
             .expect("hint");
         assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_no_records_found() {
-        let hint = enrich_probe_error_hint("resolver error: no records found").expect("hint");
+    fn enrich_scan_error_hint_matches_no_records_found() {
+        let hint = enrich_scan_error_hint("resolver error: no records found").expect("hint");
         assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_authentication_failed() {
+    fn enrich_scan_error_hint_is_case_insensitive() {
         let hint =
-            enrich_probe_error_hint("probe error: SNMP authentication failed").expect("hint");
-        assert!(hint.contains("authentication rejected"), "hint: {hint}");
+            enrich_scan_error_hint("RESOLVER ERROR: NXDOMAIN for example.com").expect("hint");
+        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_bad_credentials() {
-        let hint = enrich_probe_error_hint("probe error: bad credentials").expect("hint");
-        assert!(hint.contains("authentication rejected"), "hint: {hint}");
+    fn enrich_scan_error_hint_returns_none_for_unknown_message() {
+        assert!(enrich_scan_error_hint("some totally novel failure mode").is_none());
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_permission_denied() {
-        let hint =
-            enrich_probe_error_hint("probe error: raw socket: Permission denied").expect("hint");
-        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
+    fn enrich_scan_error_hint_returns_none_for_empty_message() {
+        assert!(enrich_scan_error_hint("").is_none());
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_operation_not_permitted() {
-        let hint = enrich_probe_error_hint("probe error: operation not permitted (os error 1)")
-            .expect("hint");
-        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
+    fn enrich_scan_error_hint_ignores_probe_fault_strings() {
+        assert!(enrich_scan_error_hint("probe error: raw socket: Permission denied").is_none());
+    }
+
+    fn summary_with_fault(
+        kind: rastreo_core::ProbeErrorKind,
+        detail: &str,
+    ) -> rastreo_core::DiscoverySummary {
+        let mut summary = rastreo_core::DiscoverySummary::default();
+        summary.first_probe_error = Some(rastreo_core::ProbeFault::new(kind, detail));
+        summary
     }
 
     #[test]
-    fn enrich_probe_error_hint_matches_tls_handshake() {
-        let hint =
-            enrich_probe_error_hint("probe error: TLS handshake error: bad cert").expect("hint");
-        assert!(hint.contains("TLS handshake failed"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_probe_error_hint_matches_certificate() {
-        let hint = enrich_probe_error_hint("probe error: invalid certificate chain").expect("hint");
-        assert!(hint.contains("TLS handshake failed"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_probe_error_hint_is_case_insensitive() {
-        let hint = enrich_probe_error_hint("PROBE ERROR: Connection Refused").expect("hint");
-        assert!(
-            hint.contains("not listening on the probed port"),
-            "hint: {hint}"
+    fn runtime_probe_hint_derives_permission_denied_from_kind() {
+        // detail omits any "permission denied" substring: the hint must come from the kind.
+        let summary = summary_with_fault(
+            rastreo_core::ProbeErrorKind::PermissionDenied,
+            "snmp egress blocked",
         );
+        let hint = runtime_probe_hint(&summary).expect("hint");
+        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
     }
 
     #[test]
-    fn enrich_probe_error_hint_returns_none_for_unknown_message() {
-        assert!(enrich_probe_error_hint("some totally novel failure mode").is_none());
+    fn runtime_probe_hint_derives_decode_failed_from_kind() {
+        let summary = summary_with_fault(rastreo_core::ProbeErrorKind::DecodeFailed, "gibberish");
+        let hint = runtime_probe_hint(&summary).expect("hint");
+        assert!(hint.contains("could not parse"), "hint: {hint}");
     }
 
     #[test]
-    fn enrich_probe_error_hint_returns_none_for_empty_message() {
-        assert!(enrich_probe_error_hint("").is_none());
+    fn runtime_probe_hint_agrees_with_core_hint_for_the_same_kind() {
+        for kind in [
+            rastreo_core::ProbeErrorKind::PermissionDenied,
+            rastreo_core::ProbeErrorKind::DnsFailed,
+            rastreo_core::ProbeErrorKind::DecodeFailed,
+            rastreo_core::ProbeErrorKind::AuthFailed,
+        ] {
+            let summary = summary_with_fault(kind, "x");
+            assert_eq!(
+                runtime_probe_hint(&summary),
+                rastreo_core::hint_for_error_kind(kind),
+                "CLI runtime hint must match the shared core hint for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_probe_hint_is_none_for_other_kind() {
+        let summary = summary_with_fault(rastreo_core::ProbeErrorKind::Other, "unclassified");
+        assert!(runtime_probe_hint(&summary).is_none());
+    }
+
+    #[test]
+    fn runtime_probe_hint_is_none_without_a_fault() {
+        let summary = rastreo_core::DiscoverySummary::default();
+        assert!(runtime_probe_hint(&summary).is_none());
     }
 
     #[test]
@@ -1833,12 +1781,43 @@ mod tests {
         summary.targets_resolved = 1;
         summary.probe_attempts = 1;
         summary.records_emitted = 1;
-        // no panic + no output verification is enough — this is a regression anchor
+        assert!(
+            runtime_hint_line(&summary).is_none(),
+            "records emitted with no fault must produce no hint"
+        );
         print_runtime_hints(&summary);
     }
 
     #[test]
-    fn print_runtime_hints_no_op_when_cancelled() {
+    fn runtime_hint_line_returns_fault_hint_even_when_a_record_was_kept() {
+        // SNMP decode-failure keeps the device (records_emitted == 1) yet latches a fault.
+        let mut summary =
+            summary_with_fault(rastreo_core::ProbeErrorKind::DecodeFailed, "gibberish");
+        summary.probe_attempts = 1;
+        summary.records_emitted = 1;
+        let line = runtime_hint_line(&summary).expect("fault hint must fire despite a kept record");
+        assert_eq!(
+            line.as_str(),
+            rastreo_core::hint_for_error_kind(rastreo_core::ProbeErrorKind::DecodeFailed)
+                .expect("decode hint")
+        );
+    }
+
+    #[test]
+    fn runtime_hint_line_falls_back_to_zero_records_hint_without_a_fault() {
+        let mut summary = rastreo_core::DiscoverySummary::default();
+        summary.probe_attempts = 1;
+        summary.records_emitted = 0;
+        let line = runtime_hint_line(&summary).expect("fallback hint");
+        assert_eq!(line, ZERO_RECORDS_HINT);
+        assert!(
+            !line.starts_with("hint:"),
+            "content must be prefix-free; the label is added at the print layer: {line}"
+        );
+    }
+
+    #[test]
+    fn runtime_hint_line_no_op_when_cancelled() {
         let mut summary = rastreo_core::DiscoverySummary::default();
         summary.targets_resolved = 1;
         summary.probe_attempts = 1;
@@ -1846,10 +1825,11 @@ mod tests {
             .error_counts
             .insert(rastreo_core::ProbeErrorKind::PermissionDenied, 1);
         summary.cancelled = true;
-        summary.first_probe_error = Some((
+        summary.first_probe_error = Some(rastreo_core::ProbeFault::new(
             rastreo_core::ProbeErrorKind::PermissionDenied,
-            "permission denied".into(),
+            "permission denied",
         ));
+        assert!(runtime_hint_line(&summary).is_none());
         print_runtime_hints(&summary);
     }
 }
