@@ -37,19 +37,33 @@ impl ConfigError {
     }
 }
 
+/// The named reason a probe faulted, carried as data on the outcome's [`crate::ProbeFault`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ProbeErrorKind {
+    AuthFailed,
+    PermissionDenied,
+    DnsFailed,
+    DecodeFailed,
+    Other,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProbeError {
-    #[deprecated(
-        note = "a target that does not answer is Ok(ProbeOutcome { reachable: false }) — see the reachability contract"
-    )]
-    #[error("probe target unreachable: {target}")]
-    Unreachable { target: String },
-    #[deprecated(
-        note = "a target that does not answer is Ok(ProbeOutcome { reachable: false }) — see the reachability contract"
-    )]
-    #[error("probe timed out after {timeout_ms}ms")]
-    Timeout { timeout_ms: u64 },
     #[error("{0}")]
     Other(String),
 }
@@ -190,22 +204,33 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn probe_unreachable_display_includes_target() {
-        let err = RastreoError::Probe(ProbeError::Unreachable {
-            target: "10.0.0.1".into(),
-        });
+    fn probe_error_display_includes_message() {
+        let err = RastreoError::Probe(ProbeError::Other("snmp reply could not be decoded".into()));
         let msg = format!("{err}");
         assert!(msg.contains("probe error"));
-        assert!(msg.contains("10.0.0.1"));
+        assert!(msg.contains("could not be decoded"));
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn probe_timeout_display_includes_duration() {
-        let err = RastreoError::Probe(ProbeError::Timeout { timeout_ms: 750 });
-        let msg = format!("{err}");
-        assert!(msg.contains("750"));
+    fn probe_error_kind_serializes_snake_case() {
+        let json = serde_json::to_string(&ProbeErrorKind::DecodeFailed).expect("serialize");
+        assert_eq!(json, "\"decode_failed\"");
+        let back: ProbeErrorKind = serde_json::from_str("\"permission_denied\"").expect("parse");
+        assert_eq!(back, ProbeErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn probe_error_kind_orders_deterministically_for_btreemap_keys() {
+        use std::collections::BTreeMap;
+        let mut counts: BTreeMap<ProbeErrorKind, usize> = BTreeMap::new();
+        counts.insert(ProbeErrorKind::Other, 1);
+        counts.insert(ProbeErrorKind::AuthFailed, 1);
+        let first = counts.keys().next().copied().expect("non-empty");
+        assert_eq!(
+            first,
+            ProbeErrorKind::AuthFailed,
+            "AuthFailed precedes Other in declaration order"
+        );
     }
 
     #[test]
@@ -244,6 +269,7 @@ mod tests {
         assert_send_sync::<RastreoError>();
         assert_send_sync::<ConfigError>();
         assert_send_sync::<ProbeError>();
+        assert_send_sync::<ProbeErrorKind>();
         assert_send_sync::<ResolverError>();
         assert_send_sync::<EncoderError>();
         assert_send_sync::<RuntimeError>();

@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 use std::time::SystemTime;
 
-use crate::error::{ConfigError, ProbeError, RastreoError};
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
+use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
@@ -128,7 +128,7 @@ fn classify_error_chain(
     if is_connect {
         return Disposition::Absence;
     }
-    Disposition::Fault
+    Disposition::Fault(ProbeErrorKind::Other)
 }
 
 fn truncate_banner(raw: &str) -> String {
@@ -143,22 +143,22 @@ fn truncate_banner(raw: &str) -> String {
     trimmed[..end].to_string()
 }
 
-fn outcome_or_fault(
+fn build_outcome(
     target_ip: IpAddr,
     signals: Vec<Signal>,
-    last_fault: Option<String>,
-) -> Result<ProbeOutcome, RastreoError> {
+    last_fault: Option<ProbeFault>,
+) -> ProbeOutcome {
     // A port that answered emits `OpenPort`, so no signals means nothing answered — the only state
     // in which a connect fault is all this probe has to report.
-    match last_fault {
-        Some(msg) if signals.is_empty() => Err(ProbeError::Other(msg).into()),
-        _ => Ok(ProbeOutcome {
-            kind: ProbeKind::Http,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: !signals.is_empty(),
-            signals,
-        }),
+    let reachable = !signals.is_empty();
+    let fault = if reachable { None } else { last_fault };
+    ProbeOutcome {
+        kind: ProbeKind::Http,
+        target_ip,
+        timestamp: SystemTime::now(),
+        reachable,
+        signals,
+        fault,
     }
 }
 
@@ -174,7 +174,7 @@ impl Prober for HttpProber {
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
         let mut signals = Vec::new();
-        let mut last_fault: Option<String> = None;
+        let mut last_fault: Option<ProbeFault> = None;
 
         for &port in &self.ports {
             let scheme = scheme_for_port(port, self.scheme);
@@ -208,16 +208,18 @@ impl Prober for HttpProber {
                     // A rustls error is only reachable once the connect completed: the port is open.
                     if classify::rustls_error_in_chain(&reqwest_err).is_some() {
                         signals.push(Signal::OpenPort(port));
-                    } else if classify_request_error(&reqwest_err) == Disposition::Fault {
-                        last_fault =
-                            Some(format!("http probe failed on port {port}: {reqwest_err}"));
+                    } else if let Disposition::Fault(kind) = classify_request_error(&reqwest_err) {
+                        last_fault = Some(ProbeFault::new(
+                            kind,
+                            format!("http probe failed on port {port}: {reqwest_err}"),
+                        ));
                     }
                 }
                 Err(_) => {}
             }
         }
 
-        outcome_or_fault(target.ip, signals, last_fault)
+        Ok(build_outcome(target.ip, signals, last_fault))
     }
 }
 
@@ -860,7 +862,10 @@ mod tests {
     #[test]
     fn a_denied_connect_is_a_fault() {
         let err = connector_error(std::io::ErrorKind::PermissionDenied);
-        assert_eq!(classify_error_chain(&err, false, true), Disposition::Fault);
+        assert_eq!(
+            classify_error_chain(&err, false, true),
+            Disposition::Fault(ProbeErrorKind::PermissionDenied)
+        );
     }
 
     #[test]
@@ -868,7 +873,7 @@ mod tests {
         let emfile = Layer(Box::new(std::io::Error::from_raw_os_error(24)));
         assert_eq!(
             classify_error_chain(&emfile, false, true),
-            Disposition::Fault
+            Disposition::Fault(ProbeErrorKind::Other)
         );
     }
 
@@ -893,60 +898,71 @@ mod tests {
     #[test]
     fn a_request_failure_that_is_neither_connect_nor_timeout_nor_io_is_a_fault() {
         let err = Layer(Box::new(Opaque));
-        assert_eq!(classify_error_chain(&err, false, false), Disposition::Fault);
+        assert_eq!(
+            classify_error_chain(&err, false, false),
+            Disposition::Fault(ProbeErrorKind::Other)
+        );
     }
 
     const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 13));
 
+    fn sample_fault(detail: &str) -> ProbeFault {
+        ProbeFault::new(ProbeErrorKind::Other, detail.to_string())
+    }
+
     #[test]
     fn an_open_port_is_a_reachable_outcome() {
-        let outcome = outcome_or_fault(
+        let outcome = build_outcome(
             TARGET,
             vec![
                 Signal::OpenPort(443),
                 Signal::HttpBanner("nginx".to_string()),
             ],
             None,
-        )
-        .expect("an open port is an outcome");
+        );
         assert!(outcome.reachable);
         assert_eq!(outcome.kind, ProbeKind::Http);
         assert_eq!(outcome.signals.len(), 2);
+        assert!(outcome.fault.is_none());
     }
 
     #[test]
     fn an_open_port_outranks_a_connect_fault_on_another_port() {
-        let outcome = outcome_or_fault(
+        let outcome = build_outcome(
             TARGET,
             vec![Signal::OpenPort(443)],
-            Some("http probe failed on port 8443: too many open files".to_string()),
-        )
-        .expect("a port that answered makes the record truthful");
+            Some(sample_fault(
+                "http probe failed on port 8443: too many open files",
+            )),
+        );
         assert!(outcome.reachable);
+        assert!(outcome.fault.is_none());
     }
 
     #[test]
     fn no_signals_and_no_fault_is_an_absent_target() {
-        let outcome =
-            outcome_or_fault(TARGET, Vec::new(), None).expect("a silent target is an outcome");
+        let outcome = build_outcome(TARGET, Vec::new(), None);
         assert!(!outcome.reachable);
         assert!(outcome.signals.is_empty());
+        assert!(outcome.fault.is_none());
     }
 
     #[test]
-    fn no_open_port_and_a_connect_fault_is_a_probe_error() {
-        let err = outcome_or_fault(
+    fn no_open_port_and_a_connect_fault_is_a_kinded_fault_outcome() {
+        let outcome = build_outcome(
             TARGET,
             Vec::new(),
-            Some("http probe failed on port 443: too many open files".to_string()),
-        )
-        .expect_err("a broken probe is not a dark host");
-        match err {
-            RastreoError::Probe(ProbeError::Other(msg)) => {
-                assert!(msg.contains("http probe failed on port 443"), "got: {msg}");
-            }
-            other => panic!("expected ProbeError::Other, got {other:?}"),
-        }
+            Some(sample_fault(
+                "http probe failed on port 443: too many open files",
+            )),
+        );
+        assert!(!outcome.reachable);
+        let fault = outcome.fault.expect("a broken probe surfaces its fault");
+        assert!(
+            fault.detail.contains("http probe failed on port 443"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     #[test]

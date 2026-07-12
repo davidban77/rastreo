@@ -535,6 +535,7 @@ mod tests {
             timestamp: SystemTime::UNIX_EPOCH,
             reachable: true,
             signals: vec![Signal::Mac(mac.to_string()), Signal::OpenPort(22)],
+            fault: None,
         }
     }
 
@@ -545,6 +546,7 @@ mod tests {
             timestamp: SystemTime::UNIX_EPOCH,
             reachable: true,
             signals: vec![Signal::OpenPort(80)],
+            fault: None,
         }
     }
 

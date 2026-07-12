@@ -15,8 +15,8 @@ use std::time::SystemTime;
 use rasn::types::ObjectIdentifier;
 use tokio::net::UdpSocket;
 
-use crate::error::{ConfigError, ProbeError, RastreoError};
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
+use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
@@ -180,7 +180,7 @@ pub(super) fn classify_io_error(err: &std::io::Error) -> PortOutcome {
     match classify::io_error(err) {
         Disposition::Absence if err.kind() == std::io::ErrorKind::TimedOut => PortOutcome::Timeout,
         Disposition::Absence => PortOutcome::Unreachable,
-        Disposition::Fault => PortOutcome::Other(err.to_string()),
+        Disposition::Fault(_) => PortOutcome::Other(err.to_string()),
     }
 }
 
@@ -226,15 +226,20 @@ impl Prober for SnmpProber {
 
         if !any_reachable {
             // Silence on one port is not evidence against a fault on another, but an answer is:
-            // an agent that answered with something we cannot parse is a fault, never absence.
+            // an agent that answered with something we cannot parse answered — the device is kept
+            // (reachable) with the decode fault recorded and no signals.
             if let Some(port) = decode_failed_port {
-                return Err(ProbeError::Other(format!(
-                    "snmp reply on port {port} could not be decoded"
-                ))
-                .into());
-            }
-            if let Some(msg) = last_fault {
-                return Err(ProbeError::Other(msg).into());
+                return Ok(ProbeOutcome {
+                    kind: ProbeKind::Snmp,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::now(),
+                    reachable: true,
+                    signals: Vec::new(),
+                    fault: Some(ProbeFault::new(
+                        ProbeErrorKind::DecodeFailed,
+                        format!("snmp reply on port {port} could not be decoded"),
+                    )),
+                });
             }
             return Ok(ProbeOutcome {
                 kind: ProbeKind::Snmp,
@@ -242,6 +247,7 @@ impl Prober for SnmpProber {
                 timestamp: SystemTime::now(),
                 reachable: false,
                 signals: Vec::new(),
+                fault: last_fault.map(|detail| ProbeFault::new(ProbeErrorKind::Other, detail)),
             });
         }
 
@@ -251,6 +257,7 @@ impl Prober for SnmpProber {
             timestamp: SystemTime::now(),
             reachable: any_reachable,
             signals,
+            fault: None,
         })
     }
 }
@@ -574,7 +581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snmp_prober_errors_when_agent_reply_cannot_be_decoded() {
+    async fn snmp_decode_failure_keeps_the_device_with_a_decode_fault() {
         let port = spawn_undecodable_agent().await;
         let prober = SnmpProber::new(
             vec![port],
@@ -583,21 +590,32 @@ mod tests {
             UsmCredentials::default(),
         )
         .expect("valid");
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(500))
             .await
-            .expect_err("an undecodable reply is a probe fault");
-        match err {
-            RastreoError::Probe(ProbeError::Other(msg)) => {
-                assert!(msg.contains("decode"), "got: {msg}");
-                assert!(msg.contains(&port.to_string()), "got: {msg}");
-            }
-            other => panic!("expected ProbeError::Other, got {other:?}"),
-        }
+            .expect("an undecodable reply keeps the device, it is not an Err");
+        assert!(
+            outcome.reachable,
+            "the agent answered on the port, so the device is reachable"
+        );
+        assert!(
+            outcome.signals.is_empty(),
+            "an undecodable reply yields no signals"
+        );
+        let fault = outcome
+            .fault
+            .expect("the decode failure is recorded on the outcome");
+        assert_eq!(fault.kind, ProbeErrorKind::DecodeFailed);
+        assert!(fault.detail.contains("decode"), "got: {}", fault.detail);
+        assert!(
+            fault.detail.contains(&port.to_string()),
+            "got: {}",
+            fault.detail
+        );
     }
 
     #[tokio::test]
-    async fn snmp_decode_failure_is_a_fault_even_when_other_ports_are_dark() {
+    async fn snmp_decode_failure_wins_even_when_other_ports_are_dark() {
         let undecodable = spawn_undecodable_agent().await;
         let silent_a = dark_port().await;
         let silent_b = dark_port().await;
@@ -609,15 +627,15 @@ mod tests {
             UsmCredentials::default(),
         )
         .expect("valid");
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(200))
             .await
-            .expect_err("two dark ports must not mask an undecodable agent on a third");
-        match err {
-            RastreoError::Probe(ProbeError::Other(msg)) => {
-                assert!(msg.contains("decode"), "got: {msg}");
-            }
-            other => panic!("expected ProbeError::Other, got {other:?}"),
-        }
+            .expect("two dark ports must not mask an undecodable agent on a third");
+        assert!(outcome.reachable);
+        let fault = outcome
+            .fault
+            .expect("the decode failure is recorded on the outcome");
+        assert_eq!(fault.kind, ProbeErrorKind::DecodeFailed);
+        assert!(fault.detail.contains("decode"), "got: {}", fault.detail);
     }
 }

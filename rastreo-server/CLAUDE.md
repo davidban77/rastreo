@@ -58,7 +58,7 @@ src/
 Request body: JSON-encoded `DiscoverScenarioConfig`. Required fields: `targets`, `probers`. The optional `sink` field is ignored — the server captures records via a server-side `MemorySink` (returned in the response) AND fans them out to the server-configured sink from `RASTREO_SINK_CONFIG_PATH` (when set). The fan-out is performed by a `TeeSink` in `rastreo-core`; each record hits both destinations on the same pipeline pass, in order.
 
 Response body:
-- `summary`: `DiscoverySummary` — `targets_resolved`, `probe_attempts`, `probe_errors`, `records_emitted`, `elapsed_ms`.
+- `summary`: `DiscoverySummary` — `targets_resolved`, `probe_attempts`, `error_counts` (by `ProbeErrorKind`), `first_probe_error`, `records_emitted`, `elapsed_ms`.
 - `records`: array of `DeviceRecord` objects.
 
 Errors:

@@ -1655,6 +1655,7 @@ mod tests {
                 timestamp: SystemTime::UNIX_EPOCH,
                 reachable,
                 signals,
+                fault: None,
             };
         let f = make_fuser(IdentityHints::default());
         let outcomes = vec![

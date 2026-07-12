@@ -1,8 +1,8 @@
 //! The reachability contract every prober implements. A target that does not answer is
-//! `Ok(ProbeOutcome { reachable: false, signals: [] })`; `Err` is reserved for probe faults.
-//! Both halves are load-bearing: a fault booked as absence hides a broken probe behind a dark
-//! host, and absence booked as a fault floods a scan with errors for every port that is simply
-//! closed.
+//! `Ok(ProbeOutcome { reachable: false, signals: [] })`; a fault is carried as a typed
+//! `ProbeOutcome::fault`, never discarded as an `Err`. Both halves are load-bearing: a fault
+//! booked as absence hides a broken probe behind a dark host, and absence booked as a fault
+//! floods a scan with errors for every port that is simply closed.
 //!
 //! The fleet walk below is driven by `ProbeKind::all()`, so a new `ProbeKind` fails this suite
 //! until it declares BOTH halves of the contract in `contract_for`.
@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use rastreo_core::model::{ProbeCtx, ProbeKind, ResolvedTarget, Target};
 use rastreo_core::prober::{create_prober, DnsQueryType, DnsTransport, ProberConfig, UdpProtocol};
+use rastreo_core::ProbeErrorKind;
 
 /// TEST-NET-1 (RFC 5737): routable nowhere, answers nothing.
 const DARK_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
@@ -39,12 +40,12 @@ enum Absence {
 }
 
 enum Fault {
-    /// Asserted by the fleet walk: probe a target that breaks the probe. `expect` is the
-    /// substring the resulting error must carry.
+    /// Asserted by the fleet walk: probe a target that breaks the probe. `expect_kind` is the
+    /// [`ProbeErrorKind`] the resulting `ProbeOutcome::fault` must carry.
     Probe {
         config: ProberConfig,
         target: IpAddr,
-        expect: &'static str,
+        expect_kind: ProbeErrorKind,
     },
     /// Not assertable in-process; the named seam is the contract record.
     Seam(&'static str),
@@ -58,7 +59,7 @@ fn absent(config: ProberConfig, target: IpAddr) -> Absence {
 /// capability; the send arm faults on the same classifier verdict and stands for it.
 #[cfg(feature = "icmp")]
 const ICMP_FAULT_SEAM: &str =
-    "seam: icmp::a_send_that_fails_locally_is_a_probe_error_not_a_silent_host";
+    "seam: icmp::a_send_that_fails_locally_is_a_probe_fault_not_a_silent_host";
 
 async fn contract_for(kind: ProbeKind) -> Contract {
     match kind {
@@ -71,7 +72,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             ),
             fault: Fault::Seam(
                 "descriptor exhaustion / a denied capability is not inducible in-process; \
-                 seam: tcp_connect::no_signals_and_a_connect_fault_is_a_probe_error",
+                 seam: tcp_connect::no_signals_and_a_connect_fault_is_a_kinded_fault_outcome",
             ),
         },
         ProbeKind::Udp => Contract {
@@ -84,7 +85,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             ),
             fault: Fault::Seam(
                 "a local socket failure on bind/send is not inducible in-process; \
-                 seam: udp::no_answer_and_a_socket_fault_is_a_probe_error",
+                 seam: udp::no_answer_and_a_socket_fault_is_a_kinded_fault_outcome",
             ),
         },
         ProbeKind::Dns => Contract {
@@ -92,7 +93,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             fault: Fault::Probe {
                 config: dns_config(garbage_udp_port().await),
                 target: LOOPBACK,
-                expect: "dns probe failed",
+                expect_kind: ProbeErrorKind::DnsFailed,
             },
         },
         // Not loopback: hickory answers the loopback reverse zone from its built-in RFC 6761
@@ -118,7 +119,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             absence: absent(http_config(closed_tcp_port().await), LOOPBACK),
             fault: Fault::Seam(
                 "descriptor exhaustion / a denied capability is not inducible in-process; \
-                 seam: http::no_open_port_and_a_connect_fault_is_a_probe_error",
+                 seam: http::no_open_port_and_a_connect_fault_is_a_kinded_fault_outcome",
             ),
         },
         #[cfg(not(feature = "http"))]
@@ -132,7 +133,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             fault: Fault::Probe {
                 config: snmp_config(garbage_udp_port().await),
                 target: LOOPBACK,
-                expect: "could not be decoded",
+                expect_kind: ProbeErrorKind::DecodeFailed,
             },
         },
         #[cfg(not(feature = "snmp"))]
@@ -150,7 +151,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             ),
             fault: Fault::Seam(
                 "descriptor exhaustion / a denied capability is not inducible in-process; \
-                 seam: ssh::no_open_port_and_a_connect_fault_is_a_probe_error",
+                 seam: ssh::no_open_port_and_a_connect_fault_is_a_kinded_fault_outcome",
             ),
         },
         #[cfg(not(feature = "ssh"))]
@@ -170,7 +171,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             ),
             fault: Fault::Seam(
                 "descriptor exhaustion / a denied capability is not inducible in-process; \
-                 seam: tls::no_open_port_and_a_connect_fault_is_a_probe_error",
+                 seam: tls::no_open_port_and_a_connect_fault_is_a_kinded_fault_outcome",
             ),
         },
         #[cfg(not(feature = "tls"))]
@@ -215,7 +216,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
                     interface: String::new(),
                 },
                 target: "2001:db8::1".parse().expect("valid ipv6"),
-                expect: "IPv4",
+                expect_kind: ProbeErrorKind::Other,
             },
         },
         #[cfg(not(feature = "arp"))]
@@ -234,7 +235,7 @@ async fn contract_for(kind: ProbeKind) -> Contract {
                     interface: String::new(),
                 },
                 target: LOOPBACK,
-                expect: "IPv6",
+                expect_kind: ProbeErrorKind::Other,
             },
         },
         #[cfg(not(feature = "ndp"))]
@@ -295,10 +296,7 @@ fn target_at(ip: IpAddr) -> ResolvedTarget {
 }
 
 fn ctx() -> ProbeCtx {
-    ProbeCtx {
-        timeout: Duration::from_millis(500),
-        retries: 0,
-    }
+    ProbeCtx::new(Duration::from_millis(500), 0)
 }
 
 async fn closed_tcp_port() -> u16 {
@@ -376,19 +374,22 @@ async fn every_probe_kind_maps_a_fault_to_an_error() {
             Fault::Probe {
                 config,
                 target,
-                expect,
+                expect_kind,
             } => {
                 let prober = create_prober(&config).expect("factory builds prober");
-                let err = prober
+                let outcome = prober
                     .probe(&target_at(target), &ctx())
                     .await
-                    .err()
-                    .unwrap_or_else(|| {
-                        panic!("{kind:?}: a broken probe must be an error, not an absent host")
+                    .unwrap_or_else(|err| {
+                        panic!("{kind:?}: a fault is data on the outcome, not an Err: {err}")
                     });
-                assert!(
-                    err.to_string().contains(expect),
-                    "{kind:?}: fault must say what broke; wanted {expect:?}, got: {err}"
+                let fault = outcome.fault.unwrap_or_else(|| {
+                    panic!("{kind:?}: a broken probe must record a fault on the outcome")
+                });
+                assert_eq!(
+                    fault.kind, expect_kind,
+                    "{kind:?}: fault must be kinded {expect_kind:?}, got {:?} ({})",
+                    fault.kind, fault.detail
                 );
             }
             Fault::Seam(reason) => eprintln!("{kind:?}: fault not asserted here — {reason}"),

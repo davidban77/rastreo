@@ -229,6 +229,7 @@ mod tests {
                 timestamp: SystemTime::UNIX_EPOCH,
                 reachable: true,
                 signals: vec![Signal::OpenPort(22)],
+                fault: None,
             })
         }
     }

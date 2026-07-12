@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,7 +8,7 @@ use tokio::sync::watch;
 use crate::classifier::{create_classifier, ClassifierConfig};
 use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, EncoderConfig};
-use crate::error::{ConfigError, RastreoError};
+use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::fuser::{create_fuser, FuserConfig};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ScanMetadata, Target, PROBE_KIND_COUNT};
 use crate::prober::create_prober;
@@ -23,8 +24,10 @@ const DEFAULT_CONCURRENCY: u32 = 64;
 pub struct DiscoverySummary {
     pub targets_resolved: usize,
     pub probe_attempts: usize,
-    pub probe_errors: usize,
     pub records_emitted: usize,
+    /// Faulted probes tallied by [`ProbeErrorKind`]; empty when no probe faulted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub error_counts: BTreeMap<ProbeErrorKind, usize>,
     /// Per-`ProbeKind` attempted / errored breakdown; empty when no probes ran.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probes_by_kind: Vec<ProbeKindSummary>,
@@ -43,9 +46,9 @@ pub struct DiscoverySummary {
     /// True when the run terminated early via the cancellation token; counters reflect partial progress.
     #[serde(default)]
     pub cancelled: bool,
-    /// Sample error message from the first probe that failed; populated once per scan, `None` when no probe errored.
+    /// Kind and sample detail of the first probe that faulted; latched once per scan, `None` when no probe faulted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_probe_error: Option<String>,
+    pub first_probe_error: Option<(ProbeErrorKind, String)>,
     #[serde(rename = "elapsed_ms", serialize_with = "serialize_duration_as_millis")]
     pub elapsed: Duration,
 }
@@ -175,8 +178,8 @@ pub async fn run_discovery_with_components_cancellable(
 
     let mut all_outcomes: Vec<ProbeOutcome> = Vec::new();
     let mut probe_attempts: usize = 0;
-    let mut probe_errors: usize = 0;
-    let mut first_probe_error: Option<String> = None;
+    let mut error_counts: BTreeMap<ProbeErrorKind, usize> = BTreeMap::new();
+    let mut first_probe_error: Option<(ProbeErrorKind, String)> = None;
     let mut cancelled = false;
     let mut attempts_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
     let mut errors_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
@@ -195,15 +198,26 @@ pub async fn run_discovery_with_components_cancellable(
         attempts_by_kind[prober_kind.index()] += results.len();
         for result in results {
             match result {
-                Ok(outcome) => all_outcomes.push(outcome),
+                Ok(outcome) => {
+                    if let Some(fault) = &outcome.fault {
+                        errors_by_kind[prober_kind.index()] += 1;
+                        *error_counts.entry(fault.kind).or_insert(0) += 1;
+                        if first_probe_error.is_none() {
+                            first_probe_error = Some((fault.kind, fault.detail.clone()));
+                        }
+                    }
+                    all_outcomes.push(outcome);
+                }
+                // A prober now carries every fault as data on the outcome; a stray `Err` means it
+                // could not attempt at all. Keep the contract total by counting it as `Other`.
                 Err(err) => {
-                    probe_errors += 1;
                     errors_by_kind[prober_kind.index()] += 1;
+                    *error_counts.entry(ProbeErrorKind::Other).or_insert(0) += 1;
                     tracing::debug!(error = %err, "probe failed");
                     if first_probe_error.is_none() {
                         let msg = err.to_string();
                         if !msg.is_empty() {
-                            first_probe_error = Some(msg);
+                            first_probe_error = Some((ProbeErrorKind::Other, msg));
                         }
                     }
                 }
@@ -260,8 +274,8 @@ pub async fn run_discovery_with_components_cancellable(
     Ok(DiscoverySummary {
         targets_resolved,
         probe_attempts,
-        probe_errors,
         records_emitted,
+        error_counts,
         probes_by_kind,
         dlq_records,
         dlq_records_by_type,
@@ -348,7 +362,7 @@ mod tests {
         let summary = run_discovery(&scenario).await.expect("run_discovery");
         assert_eq!(summary.targets_resolved, 1);
         assert_eq!(summary.probe_attempts, 1);
-        assert_eq!(summary.probe_errors, 0);
+        assert!(summary.error_counts.is_empty());
         assert_eq!(summary.records_emitted, 1);
 
         let bytes = std::fs::read(&path).expect("read");
@@ -488,7 +502,6 @@ mod tests {
         let summary = DiscoverySummary {
             targets_resolved: 1,
             probe_attempts: 2,
-            probe_errors: 0,
             records_emitted: 1,
             elapsed: Duration::from_millis(142),
             ..Default::default()
@@ -504,7 +517,6 @@ mod tests {
         let summary = DiscoverySummary {
             targets_resolved: 1,
             probe_attempts: 2,
-            probe_errors: 0,
             records_emitted: 1,
             cancelled: true,
             elapsed: Duration::from_millis(7),
@@ -554,26 +566,36 @@ mod tests {
         assert!(summary.sink_type.is_none());
         assert!(summary.sink_error_class.is_none());
         assert!(summary.first_probe_error.is_none());
+        assert!(summary.error_counts.is_empty());
     }
 
     #[test]
-    fn discovery_summary_omits_first_probe_error_from_wire_when_none() {
+    fn discovery_summary_omits_first_probe_error_and_error_counts_from_wire_when_empty() {
         let summary = DiscoverySummary::default();
         let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
         assert!(
             json.get("first_probe_error").is_none(),
             "first_probe_error must be skipped when None: {json}"
         );
+        assert!(
+            json.get("error_counts").is_none(),
+            "error_counts must be skipped when empty: {json}"
+        );
     }
 
     #[test]
-    fn discovery_summary_serializes_first_probe_error_when_some() {
+    fn discovery_summary_serializes_first_probe_error_and_error_counts_when_present() {
+        let mut error_counts = BTreeMap::new();
+        error_counts.insert(ProbeErrorKind::DecodeFailed, 3);
         let summary = DiscoverySummary {
-            first_probe_error: Some("connection refused".into()),
+            first_probe_error: Some((ProbeErrorKind::PermissionDenied, "permission denied".into())),
+            error_counts,
             ..Default::default()
         };
         let json: serde_json::Value = serde_json::to_value(&summary).expect("serialize");
-        assert_eq!(json["first_probe_error"], "connection refused");
+        assert_eq!(json["first_probe_error"][0], "permission_denied");
+        assert_eq!(json["first_probe_error"][1], "permission denied");
+        assert_eq!(json["error_counts"]["decode_failed"], 3);
     }
 
     #[tokio::test]
@@ -602,8 +624,8 @@ mod tests {
             .expect("returns summary");
 
         assert_eq!(summary.probe_attempts, 2);
-        assert_eq!(
-            summary.probe_errors, 0,
+        assert!(
+            summary.error_counts.is_empty(),
             "a target that does not answer is a discovery result, not a probe error"
         );
         assert!(summary.first_probe_error.is_none());
@@ -636,7 +658,56 @@ mod tests {
 
     #[cfg(feature = "snmp")]
     #[tokio::test]
-    async fn run_discovery_captures_first_probe_error_and_ignores_subsequent() {
+    async fn run_discovery_snmp_decode_failure_keeps_the_device_and_counts_the_fault() {
+        use crate::prober::snmp::{SnmpVersion, UsmCredentials};
+
+        let port = spawn_undecodable_snmp_agent().await;
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::Snmp {
+                ports: vec![port],
+                version: SnmpVersion::V2c,
+                community: crate::prober::Community("public".into()),
+                credentials: UsmCredentials::default(),
+            }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("returns summary");
+
+        assert_eq!(
+            summary.records_emitted, 1,
+            "the agent answered on the port; the decode-failed device is kept, not dropped"
+        );
+        assert_eq!(
+            summary
+                .error_counts
+                .get(&ProbeErrorKind::DecodeFailed)
+                .copied(),
+            Some(1),
+            "the decode failure is tallied as a fault: {:?}",
+            summary.error_counts
+        );
+        let record: crate::model::DeviceRecord =
+            serde_json::from_str(&handle.ndjson_lines()[0]).expect("parse record");
+        assert!(
+            record.probe_kinds.contains(&ProbeKind::Snmp),
+            "the probe got a response, so Snmp is provenance: {:?}",
+            record.probe_kinds
+        );
+    }
+
+    #[cfg(feature = "snmp")]
+    #[tokio::test]
+    async fn run_discovery_latches_the_first_fault_and_ignores_subsequent() {
         use crate::prober::snmp::{SnmpVersion, UsmCredentials};
 
         let snmp_prober_on = |port: u16| ProberConfig::Snmp {
@@ -664,25 +735,29 @@ mod tests {
             .expect("returns summary");
 
         assert_eq!(
-            summary.probe_errors, 2,
+            summary
+                .error_counts
+                .get(&ProbeErrorKind::DecodeFailed)
+                .copied(),
+            Some(2),
             "an undecodable agent reply is a probe fault, not an absent host"
         );
-        assert_eq!(summary.records_emitted, 0);
-        let first = summary
+        let (kind, detail) = summary
             .first_probe_error
-            .as_deref()
-            .expect("first probe error must be captured");
+            .as_ref()
+            .expect("first probe error must be latched");
+        assert_eq!(*kind, ProbeErrorKind::DecodeFailed);
         assert!(
-            first.contains("decode"),
-            "first_probe_error must carry the fault, got: {first}"
+            detail.contains("decode"),
+            "must carry the fault, got: {detail}"
         );
         assert!(
-            first.contains(&first_port.to_string()),
-            "the first fault must win the latch, got: {first}"
+            detail.contains(&first_port.to_string()),
+            "the first fault must win the latch, got: {detail}"
         );
         assert!(
-            !first.contains(&second_port.to_string()),
-            "a later fault must not overwrite the latched first one, got: {first}"
+            !detail.contains(&second_port.to_string()),
+            "a later fault must not overwrite the latched first one, got: {detail}"
         );
     }
 
@@ -717,7 +792,7 @@ mod tests {
             .await
             .expect("returns summary");
 
-        assert_eq!(summary.probe_errors, 0);
+        assert!(summary.error_counts.is_empty());
         assert_eq!(
             summary.records_emitted, 2,
             "a dark host is an outcome, so include_unreachable emits one record per dark IP"
@@ -1011,7 +1086,7 @@ mod tests {
                 .expect("cancellation returns summary");
         assert!(summary.cancelled);
         assert_eq!(summary.probe_attempts, 0);
-        assert_eq!(summary.probe_errors, 0);
+        assert!(summary.error_counts.is_empty());
         assert_eq!(summary.records_emitted, 0);
     }
 
@@ -1209,6 +1284,7 @@ mod tests {
                 timestamp: SystemTime::UNIX_EPOCH,
                 reachable: true,
                 signals: vec![Signal::Mac(mac.into()), sysname.clone()],
+                fault: None,
             },
             ProbeOutcome {
                 kind: ProbeKind::Snmp,
@@ -1216,6 +1292,7 @@ mod tests {
                 timestamp: SystemTime::UNIX_EPOCH,
                 reachable: true,
                 signals: vec![Signal::Mac(mac.into()), sysname.clone()],
+                fault: None,
             },
             ProbeOutcome {
                 kind: ProbeKind::Snmp,
@@ -1223,6 +1300,7 @@ mod tests {
                 timestamp: SystemTime::UNIX_EPOCH,
                 reachable: true,
                 signals: vec![Signal::Mac(mac.into()), sysname.clone()],
+                fault: None,
             },
         ];
         let fuser_cfg = FuserConfig::Identity {

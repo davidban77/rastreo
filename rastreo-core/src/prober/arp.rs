@@ -7,8 +7,8 @@ use pnet_packet::arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPac
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet_packet::Packet;
 
-use crate::error::{ConfigError, ProbeError, RastreoError};
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
+use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::Prober;
 
 const ETH_HEADER_LEN: usize = 14;
@@ -188,27 +188,39 @@ fn run_probe_blocking(
     ProbeResolution::Timeout
 }
 
-fn resolution_to_outcome(
-    resolution: ProbeResolution,
-    target_ip: IpAddr,
-) -> Result<ProbeOutcome, RastreoError> {
+// A local resolution failure (privileged socket denied, no usable interface) is a broken probe,
+// carried as a fault on an unreachable outcome — never discarded.
+fn arp_fault(target_ip: IpAddr, detail: String) -> ProbeOutcome {
+    ProbeOutcome {
+        kind: ProbeKind::Arp,
+        target_ip,
+        timestamp: SystemTime::now(),
+        reachable: false,
+        signals: Vec::new(),
+        fault: Some(ProbeFault::new(ProbeErrorKind::Other, detail)),
+    }
+}
+
+fn resolution_to_outcome(resolution: ProbeResolution, target_ip: IpAddr) -> ProbeOutcome {
     match resolution {
-        ProbeResolution::Reached(signal) => Ok(ProbeOutcome {
+        ProbeResolution::Reached(signal) => ProbeOutcome {
             kind: ProbeKind::Arp,
             target_ip,
             timestamp: SystemTime::now(),
             reachable: true,
             signals: vec![signal],
-        }),
+            fault: None,
+        },
         // A silent host is a negative discovery result, not a probe fault.
-        ProbeResolution::Timeout => Ok(ProbeOutcome {
+        ProbeResolution::Timeout => ProbeOutcome {
             kind: ProbeKind::Arp,
             target_ip,
             timestamp: SystemTime::now(),
             reachable: false,
             signals: Vec::new(),
-        }),
-        ProbeResolution::Failed(msg) => Err(ProbeError::Other(msg).into()),
+            fault: None,
+        },
+        ProbeResolution::Failed(msg) => arp_fault(target_ip, msg),
     }
 }
 
@@ -226,35 +238,53 @@ impl Prober for ArpProber {
         let target_v4 = match target.ip {
             IpAddr::V4(ip) => ip,
             IpAddr::V6(_) => {
-                return Err(ProbeError::Other(
+                return Ok(arp_fault(
+                    target.ip,
                     "arp prober requires an IPv4 target; use ndp for IPv6".to_string(),
-                )
-                .into());
+                ));
             }
         };
 
         let iface = if self.interface.is_empty() {
-            select_interface_for(target_v4).ok_or_else(|| {
-                ProbeError::Other(format!("no local interface reaches {target_v4}"))
-            })?
+            match select_interface_for(target_v4) {
+                Some(iface) => iface,
+                None => {
+                    return Ok(arp_fault(
+                        target.ip,
+                        format!("no local interface reaches {target_v4}"),
+                    ))
+                }
+            }
         } else {
-            lookup_interface(&self.interface).ok_or_else(|| {
-                ProbeError::Other(format!("network interface '{}' not found", self.interface))
-            })?
+            match lookup_interface(&self.interface) {
+                Some(iface) => iface,
+                None => {
+                    return Ok(arp_fault(
+                        target.ip,
+                        format!("network interface '{}' not found", self.interface),
+                    ))
+                }
+            }
         };
 
-        let src_mac = iface.mac.ok_or_else(|| {
-            ProbeError::Other(format!("interface {} has no MAC address", iface.name))
-        })?;
-        let src_ip = first_ipv4(&iface).ok_or_else(|| {
-            ProbeError::Other(format!("interface {} has no ipv4 address", iface.name))
-        })?;
+        let Some(src_mac) = iface.mac else {
+            return Ok(arp_fault(
+                target.ip,
+                format!("interface {} has no MAC address", iface.name),
+            ));
+        };
+        let Some(src_ip) = first_ipv4(&iface) else {
+            return Ok(arp_fault(
+                target.ip,
+                format!("interface {} has no ipv4 address", iface.name),
+            ));
+        };
 
         if src_ip == target_v4 {
-            return Err(ProbeError::Other(format!(
-                "arp target {target_v4} is a local interface address"
-            ))
-            .into());
+            return Ok(arp_fault(
+                target.ip,
+                format!("arp target {target_v4} is a local interface address"),
+            ));
         }
 
         let iface_for_task = iface.clone();
@@ -267,7 +297,7 @@ impl Prober for ArpProber {
             RastreoError::Runtime(crate::error::RuntimeError::TaskPanicked(err.to_string()))
         })?;
 
-        resolution_to_outcome(result, target.ip)
+        Ok(resolution_to_outcome(result, target.ip))
     }
 }
 
@@ -487,37 +517,44 @@ mod tests {
     #[test]
     fn timeout_resolution_is_an_unreachable_outcome_not_an_error() {
         let target_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
-        let outcome = resolution_to_outcome(ProbeResolution::Timeout, target_ip)
-            .expect("silent host must not be a probe error");
+        let outcome = resolution_to_outcome(ProbeResolution::Timeout, target_ip);
         assert_eq!(outcome.kind, ProbeKind::Arp);
         assert_eq!(outcome.target_ip, target_ip);
         assert!(!outcome.reachable);
         assert!(outcome.signals.is_empty());
+        assert!(
+            outcome.fault.is_none(),
+            "a silent host is absence, not a fault"
+        );
     }
 
     #[test]
     fn reached_resolution_is_a_reachable_outcome_with_the_mac_signal() {
         let target_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
         let signal = Signal::Mac("aa:bb:cc:dd:ee:ff".to_string());
-        let outcome = resolution_to_outcome(ProbeResolution::Reached(signal), target_ip)
-            .expect("reached host is an outcome");
+        let outcome = resolution_to_outcome(ProbeResolution::Reached(signal), target_ip);
         assert!(outcome.reachable);
         assert!(matches!(&outcome.signals[0], Signal::Mac(m) if m == "aa:bb:cc:dd:ee:ff"));
+        assert!(outcome.fault.is_none());
     }
 
     #[test]
-    fn failed_resolution_stays_a_probe_error() {
-        let err = resolution_to_outcome(
+    fn failed_resolution_is_a_kinded_fault_outcome() {
+        let outcome = resolution_to_outcome(
             ProbeResolution::Failed("raw socket permission denied".to_string()),
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)),
-        )
-        .expect_err("a probe fault must error");
-        match err {
-            RastreoError::Probe(ProbeError::Other(msg)) => {
-                assert!(msg.contains("permission denied"), "got: {msg}");
-            }
-            other => panic!("expected ProbeError::Other, got {other:?}"),
-        }
+        );
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+        let fault = outcome
+            .fault
+            .expect("a probe fault is recorded on the outcome");
+        assert_eq!(fault.kind, ProbeErrorKind::Other);
+        assert!(
+            fault.detail.contains("permission denied"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     #[test]

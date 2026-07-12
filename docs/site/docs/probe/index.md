@@ -30,11 +30,23 @@ Every prober reports one of three results for a target. The rules are the same f
 |---|---|---|
 | Reachable | The target answered. The outcome carries `reachable: true` and any signals the prober could read. | No |
 | Unreachable | Nothing answered before the timeout, the connection was refused, or the network reported the host as unreachable. The outcome carries `reachable: false` and no signals. | No |
-| Probe fault | The probe learned nothing at all. Examples: a missing `CAP_NET_RAW` capability, an ARP probe aimed at an IPv6 target, a local socket failure such as descriptor exhaustion, or an SNMP agent whose only reply cannot be decoded. | Yes |
+| Probe fault | The probe itself broke, so it could read no signals. Examples: a missing `CAP_NET_RAW` capability, an ARP probe aimed at an IPv6 target, or a local socket failure such as descriptor exhaustion. | Yes |
 
-A target that does not answer is a normal discovery result. Most addresses in a healthy subnet are unused, so most probes come back unreachable. Only probe faults raise `probe_errors` in the scan summary and `rastreo_server_probes_total{outcome="error"}` on the server. A sweep of a mostly empty `/24` therefore reports zero probe errors.
+A target that does not answer is a normal discovery result. Most addresses in a healthy subnet are unused, so most probes come back unreachable. Only probe faults appear in the scan summary's `error_counts` and raise `rastreo_server_probes_total{outcome="error"}` on the server. A sweep of a mostly empty `/24` therefore reports zero probe faults.
 
-One rule decides the third row: **a prober reports a fault only when it learned nothing.** If it learned anything at all, it emits what it learned. A device that answers TCP on port 443 but refuses the TLS handshake still gives you an open port, so both the [HTTP](http.md) and [TLS](tls.md) probers emit a record carrying that open port rather than an error. Discarding it would mean finding a device and then throwing it away — on exactly the legacy gear this tool exists to inventory.
+Each fault carries a named kind, and the summary tallies faults by kind in `error_counts`. The kinds you will see are:
+
+- `decode_failed` — the target answered, but the reply could not be parsed.
+- `permission_denied` — the host refused a privileged operation, such as a raw socket without `CAP_NET_RAW`.
+- `dns_failed` — a name lookup the probe needed did not resolve.
+- `other` — a fault with no more specific kind.
+
+The summary also carries `first_probe_error`, a two-element `[kind, detail]` array holding the first fault's kind and a sample detail string.
+
+One rule decides the third row: **a prober reports a fault only when the probe itself broke.** If it learned anything at all, it emits what it learned. A device that answers TCP on port 443 but refuses the TLS handshake still gives you an open port, so both the [HTTP](http.md) and [TLS](tls.md) probers emit a record carrying that open port rather than a fault. Discarding it would mean finding a device and then throwing it away — on exactly the legacy gear this tool exists to inventory.
+
+!!! note "A reply it cannot read still proves the device is there"
+    One fault keeps the device instead of dropping it. When a target answers on the port but the reply cannot be decoded, the device is reachable, so rastreo keeps it. The classic case is an SNMP agent that speaks a dialect rastreo does not parse. The record carries `reachable: true` and no signals, and the summary counts the fault as `decode_failed`. A silent target is different: nothing answered, so `reachable` is `false` and no fault is recorded.
 
 !!! info "No answer, no record — unless you ask for one"
     When no prober reaches a target, the fuser drops it and the scan emits no `DeviceRecord` for that address. Set `include_unreachable: true` on the `direct` fuser to emit one record per probed address, silent ones included. See [Fusers](../reference/scenario.md#direct).

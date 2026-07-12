@@ -17,14 +17,14 @@ pub use classifier::{
 };
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{
-    ClassifierError, ConfigError, EncoderError, ProbeError, RastreoError, ResolverError,
-    RuntimeError,
+    ClassifierError, ConfigError, EncoderError, ProbeError, ProbeErrorKind, RastreoError,
+    ResolverError, RuntimeError,
 };
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
 pub use model::{
-    AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeKind, ProbeOutcome,
-    ResolvedTarget, ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
-    PROBE_KIND_COUNT,
+    AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeFault, ProbeKind,
+    ProbeOutcome, ResolvedTarget, ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID,
+    CURRENT_SCHEMA_VERSION, PROBE_KIND_COUNT,
 };
 pub use pipeline::{
     resolve_scenario_targets, run_discovery, run_discovery_cancellable,

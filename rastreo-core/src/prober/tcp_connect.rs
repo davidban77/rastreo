@@ -5,8 +5,8 @@ use std::time::SystemTime;
 use tokio::net::TcpStream;
 use tokio::time::error::Elapsed;
 
-use crate::error::{ConfigError, ProbeError, RastreoError};
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, RastreoError};
+use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
@@ -33,9 +33,12 @@ impl TcpConnectProber {
 
 // A refused / unreachable port is a discovery result; a local socket failure (descriptor
 // exhaustion, denied capability) is a broken probe.
-fn connect_fault(port: u16, err: &io::Error) -> Option<String> {
+fn connect_fault(port: u16, err: &io::Error) -> Option<ProbeFault> {
     match classify::io_error(err) {
-        Disposition::Fault => Some(format!("tcp connect failed on port {port}: {err}")),
+        Disposition::Fault(kind) => Some(ProbeFault::new(
+            kind,
+            format!("tcp connect failed on port {port}: {err}"),
+        )),
         Disposition::Absence => None,
     }
 }
@@ -44,34 +47,34 @@ fn fold_connect(
     port: u16,
     outcome: Result<io::Result<TcpStream>, Elapsed>,
     signals: &mut Vec<Signal>,
-    last_fault: &mut Option<String>,
+    last_fault: &mut Option<ProbeFault>,
 ) {
     match outcome {
         Ok(Ok(_stream)) => signals.push(Signal::OpenPort(port)),
         Ok(Err(err)) => {
-            if let Some(msg) = connect_fault(port, &err) {
-                *last_fault = Some(msg);
+            if let Some(fault) = connect_fault(port, &err) {
+                *last_fault = Some(fault);
             }
         }
         Err(_) => {}
     }
 }
 
-fn outcome_or_fault(
+fn build_outcome(
     target_ip: IpAddr,
     signals: Vec<Signal>,
-    last_fault: Option<String>,
-) -> Result<ProbeOutcome, RastreoError> {
+    last_fault: Option<ProbeFault>,
+) -> ProbeOutcome {
     // Silence on one port is not evidence against a fault on another, but an open port is.
-    match last_fault {
-        Some(msg) if signals.is_empty() => Err(ProbeError::Other(msg).into()),
-        _ => Ok(ProbeOutcome {
-            kind: ProbeKind::TcpConnect,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: !signals.is_empty(),
-            signals,
-        }),
+    let reachable = !signals.is_empty();
+    let fault = if reachable { None } else { last_fault };
+    ProbeOutcome {
+        kind: ProbeKind::TcpConnect,
+        target_ip,
+        timestamp: SystemTime::now(),
+        reachable,
+        signals,
+        fault,
     }
 }
 
@@ -87,7 +90,7 @@ impl Prober for TcpConnectProber {
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
         let mut signals = Vec::new();
-        let mut last_fault: Option<String> = None;
+        let mut last_fault: Option<ProbeFault> = None;
 
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
@@ -96,7 +99,7 @@ impl Prober for TcpConnectProber {
             fold_connect(port, outcome, &mut signals, &mut last_fault);
         }
 
-        outcome_or_fault(target.ip, signals, last_fault)
+        Ok(build_outcome(target.ip, signals, last_fault))
     }
 }
 
@@ -276,9 +279,14 @@ mod tests {
 
     #[test]
     fn a_local_socket_failure_on_connect_latches_a_fault() {
-        let msg = connect_fault(22, &io::Error::from(io::ErrorKind::PermissionDenied))
+        let fault = connect_fault(22, &io::Error::from(io::ErrorKind::PermissionDenied))
             .expect("a denied local socket is a broken probe");
-        assert!(msg.contains("tcp connect failed on port 22"), "got: {msg}");
+        assert_eq!(fault.kind, crate::error::ProbeErrorKind::PermissionDenied);
+        assert!(
+            fault.detail.contains("tcp connect failed on port 22"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     #[test]
@@ -342,8 +350,12 @@ mod tests {
         );
 
         assert!(signals.is_empty());
-        let msg = last_fault.expect("a denied local socket is a broken probe");
-        assert!(msg.contains("tcp connect failed on port 22"), "got: {msg}");
+        let fault = last_fault.expect("a denied local socket is a broken probe");
+        assert!(
+            fault.detail.contains("tcp connect failed on port 22"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     #[tokio::test]
@@ -357,48 +369,60 @@ mod tests {
         assert!(last_fault.is_none());
     }
 
+    fn sample_fault(detail: &str) -> ProbeFault {
+        ProbeFault::new(crate::error::ProbeErrorKind::Other, detail.to_string())
+    }
+
     #[test]
     fn an_open_port_is_a_reachable_outcome() {
-        let outcome = outcome_or_fault(TARGET, vec![Signal::OpenPort(22)], None)
-            .expect("an open port is an outcome");
+        let outcome = build_outcome(TARGET, vec![Signal::OpenPort(22)], None);
         assert!(outcome.reachable);
         assert_eq!(outcome.target_ip, TARGET);
         assert!(matches!(outcome.signals[0], Signal::OpenPort(22)));
+        assert!(outcome.fault.is_none());
     }
 
     #[test]
     fn an_open_port_outranks_a_connect_fault_on_another_port() {
-        let outcome = outcome_or_fault(
+        let outcome = build_outcome(
             TARGET,
             vec![Signal::OpenPort(22)],
-            Some("tcp connect failed on port 80: too many open files".to_string()),
-        )
-        .expect("a port that answered makes the record truthful");
+            Some(sample_fault(
+                "tcp connect failed on port 80: too many open files",
+            )),
+        );
         assert!(outcome.reachable);
+        assert!(
+            outcome.fault.is_none(),
+            "a port that answered makes the record truthful — the fault is dropped"
+        );
     }
 
     #[test]
     fn no_signals_and_no_fault_is_an_absent_target() {
-        let outcome =
-            outcome_or_fault(TARGET, Vec::new(), None).expect("a silent target is an outcome");
+        let outcome = build_outcome(TARGET, Vec::new(), None);
         assert!(!outcome.reachable);
         assert!(outcome.signals.is_empty());
+        assert!(outcome.fault.is_none());
     }
 
     #[test]
-    fn no_signals_and_a_connect_fault_is_a_probe_error() {
-        let err = outcome_or_fault(
+    fn no_signals_and_a_connect_fault_is_a_kinded_fault_outcome() {
+        let outcome = build_outcome(
             TARGET,
             Vec::new(),
-            Some("tcp connect failed on port 22: too many open files".to_string()),
-        )
-        .expect_err("a broken probe is not a dark host");
-        match err {
-            RastreoError::Probe(ProbeError::Other(msg)) => {
-                assert!(msg.contains("tcp connect failed on port 22"), "got: {msg}");
-            }
-            other => panic!("expected ProbeError::Other, got {other:?}"),
-        }
+            Some(sample_fault(
+                "tcp connect failed on port 22: too many open files",
+            )),
+        );
+        assert!(!outcome.reachable);
+        let fault = outcome.fault.expect("a broken probe surfaces its fault");
+        assert_eq!(fault.kind, crate::error::ProbeErrorKind::Other);
+        assert!(
+            fault.detail.contains("tcp connect failed on port 22"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     #[test]

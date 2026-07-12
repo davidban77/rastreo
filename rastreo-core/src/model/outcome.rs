@@ -3,6 +3,8 @@ use std::time::{Duration, SystemTime};
 
 use schemars::JsonSchema;
 
+use crate::error::ProbeErrorKind;
+
 #[derive(
     Debug,
     Clone,
@@ -114,18 +116,46 @@ pub enum Signal {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ProbeCtx {
     pub timeout: Duration,
     pub retries: u32,
 }
 
+impl ProbeCtx {
+    pub fn new(timeout: Duration, retries: u32) -> Self {
+        Self { timeout, retries }
+    }
+}
+
+/// A typed probe fault carried on the outcome: the probe attempted a target and learned that
+/// something broke, without discarding the signals it may have gathered on other ports.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct ProbeFault {
+    pub kind: ProbeErrorKind,
+    pub detail: String,
+}
+
+impl ProbeFault {
+    pub fn new(kind: ProbeErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
 pub struct ProbeOutcome {
     pub kind: ProbeKind,
     pub target_ip: IpAddr,
     pub timestamp: SystemTime,
     pub reachable: bool,
     pub signals: Vec<Signal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<ProbeFault>,
 }
 
 #[cfg(test)]
@@ -165,6 +195,7 @@ mod tests {
                 Signal::OpenPort(22),
                 Signal::HttpBanner("nginx/1.25".into()),
             ],
+            fault: None,
         };
         let s = serde_json::to_string(&outcome).expect("serialize");
         let back: ProbeOutcome = serde_json::from_str(&s).expect("deserialize");
@@ -172,6 +203,45 @@ mod tests {
         assert_eq!(back.target_ip, outcome.target_ip);
         assert!(back.reachable);
         assert_eq!(back.signals.len(), 2);
+        assert!(back.fault.is_none());
+    }
+
+    #[test]
+    fn probe_outcome_round_trips_a_reachable_fault() {
+        let outcome = ProbeOutcome {
+            kind: ProbeKind::Snmp,
+            target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+            timestamp: SystemTime::UNIX_EPOCH,
+            reachable: true,
+            signals: Vec::new(),
+            fault: Some(ProbeFault::new(
+                ProbeErrorKind::DecodeFailed,
+                "snmp reply on port 161 could not be decoded",
+            )),
+        };
+        let s = serde_json::to_string(&outcome).expect("serialize");
+        let back: ProbeOutcome = serde_json::from_str(&s).expect("deserialize");
+        assert!(back.reachable);
+        let fault = back.fault.expect("fault survives the round trip");
+        assert_eq!(fault.kind, ProbeErrorKind::DecodeFailed);
+        assert!(fault.detail.contains("could not be decoded"));
+    }
+
+    #[test]
+    fn probe_outcome_omits_fault_from_wire_when_none() {
+        let outcome = ProbeOutcome {
+            kind: ProbeKind::TcpConnect,
+            target_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            timestamp: SystemTime::UNIX_EPOCH,
+            reachable: false,
+            signals: Vec::new(),
+            fault: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&outcome).expect("serialize");
+        assert!(
+            json.get("fault").is_none(),
+            "fault must be skipped when None: {json}"
+        );
     }
 
     #[test]
@@ -229,6 +299,7 @@ mod tests {
         assert_send_sync::<Signal>();
         assert_send_sync::<ProbeCtx>();
         assert_send_sync::<ProbeOutcome>();
+        assert_send_sync::<ProbeFault>();
     }
 
     #[test]

@@ -141,7 +141,6 @@ The response is `{summary, records}`. `summary` carries the counters and the ela
   "summary": {
     "targets_resolved": 1,
     "probe_attempts": 1,
-    "probe_errors": 0,
     "records_emitted": 1,
     "probes_by_kind": [
       { "kind": "TcpConnect", "attempted": 1, "errored": 0 }
@@ -173,14 +172,44 @@ The summary fields:
 |---|---|
 | `targets_resolved` | Addresses the scan probed after CIDR, range, and DNS expansion. |
 | `probe_attempts` | Probes started: `targets_resolved` × number of probers. |
-| `probe_errors` | Probes that hit a fault and produced no result. A target that does not answer is a normal result, not a fault. A scan of a mostly empty range therefore reports `0` here. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). |
+| `error_counts` | Faulted probes tallied by fault kind, as a JSON object — for example `{"decode_failed": 1}`. A kind appears only when it happened at least once, so a scan with no faults omits the field. A target that stays silent is a normal result, not a fault. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). |
 | `records_emitted` | `DeviceRecord` events produced. By default only targets that at least one prober reached produce a record. |
 | `probes_by_kind` | Per-prober `attempted` / `errored` breakdown. Omitted when no probes ran. |
-| `first_probe_error` | Sample message from the first probe fault. Omitted when `probe_errors` is `0`. |
+| `first_probe_error` | The first probe fault, as a two-element `[kind, detail]` array: the fault kind, then a sample detail string. Omitted when no probe faulted. |
 | `dlq_records` | Records the sink diverted to a dead-letter destination. |
 | `sink_type` | Sink the scan wrote to. Always `tee` on `POST /scans`: the server writes every record to the in-memory buffer it returns in the response, and to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `cancelled` | `true` when the scan stopped early; the counters then reflect partial progress. |
 | `elapsed_ms` | Wall-clock duration of the scan. |
+
+When a probe faults, `error_counts` tallies it by kind and `first_probe_error` names the first one. The fault kinds you will see are `decode_failed`, `permission_denied`, `dns_failed`, and `other`; the [reachability reference](../probe/index.md#reachable-unreachable-and-probe-faults) explains each. A probe faults only when the probe itself broke — a silent target is not a fault. One case keeps the device anyway: a target that answers with a reply rastreo cannot decode. The classic case is an SNMP agent speaking a dialect rastreo does not parse. The device answered, so it is reachable. It still produces a record with no signals, and the fault is counted as `decode_failed`:
+
+```json
+{
+  "summary": {
+    "targets_resolved": 1,
+    "probe_attempts": 1,
+    "records_emitted": 1,
+    "error_counts": { "decode_failed": 1 },
+    "probes_by_kind": [
+      { "kind": "Snmp", "attempted": 1, "errored": 1 }
+    ],
+    "dlq_records": 0,
+    "sink_type": "tee",
+    "cancelled": false,
+    "first_probe_error": ["decode_failed", "snmp reply could not be decoded"],
+    "elapsed_ms": 0
+  },
+  "records": [
+    {
+      "identity_key": "ip:10.50.0.10",
+      "mgmt_ip": "10.50.0.10",
+      "confidence": 0.1,
+      "signals": [],
+      "probe_kinds": ["Snmp"]
+    }
+  ]
+}
+```
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).
 

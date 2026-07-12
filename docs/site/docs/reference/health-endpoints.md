@@ -43,7 +43,7 @@ livenessProbe:
 If any gate has fired, the response is `503 SERVICE_UNAVAILABLE`. Otherwise it is `200 OK`.
 
 !!! info "Probe results never gate readiness"
-    A scan that reaches no device still succeeds — the server returns `200 OK` with an empty `records` list, and readiness is unaffected. A probe fault does not fail the scan either: the pipeline counts it in the summary (`probe_errors`) and moves on. Watch `rastreo_server_probes_total{outcome="error"}` for probe faults, not `/readyz`. See [Observability · what `outcome` means](observability.md#what-outcome-means).
+    A scan that reaches no device still succeeds — the server returns `200 OK` with an empty `records` list, and readiness is unaffected. A probe fault does not fail the scan either: the pipeline counts it in the summary (`error_counts`) and moves on. Watch `rastreo_server_probes_total{outcome="error"}` for probe faults, not `/readyz`. See [Observability · what `outcome` means](observability.md#what-outcome-means).
 
 ### Ready response
 
