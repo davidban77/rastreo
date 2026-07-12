@@ -108,7 +108,7 @@ Metrics exposed:
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. |
-| `rastreo_server_probes_total` | counter | `outcome="success"\|"error"` | Probes executed across all scans. `success` is computed as `attempted - errored`. |
+| `rastreo_server_probes_total` | counter | `outcome="success"\|"error"` | Probes executed across all scans. `success` is computed as `attempted - errored` and covers every probe that ran, including probes whose target stayed silent. `error` counts probe faults only. See [Observability · what `outcome` means](../reference/observability.md#what-outcome-means). |
 | `rastreo_server_records_emitted_total` | counter | — | `DeviceRecord` events emitted across all scans. |
 | `rastreo_server_sink_errors_total` | counter | — | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant). |
 | `rastreo_server_scan_duration_seconds` | histogram | — | `POST /scans` request handling duration. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. |
@@ -134,7 +134,7 @@ curl -sS -X POST http://localhost:8080/scans \
   }'
 ```
 
-The response is `{summary, records}`. `summary` is a `DiscoverySummary` with counters and elapsed time; `records` is the list of `DeviceRecord` events produced by the scan. When at least one probe errored during the scan, the summary carries `first_probe_error` — a sample error message from the first failing probe. The field is omitted from the response when no probe errored.
+The response is `{summary, records}`. `summary` carries the counters and the elapsed time; `records` is the list of `DeviceRecord` events the scan produced.
 
 ```json
 {
@@ -143,6 +143,12 @@ The response is `{summary, records}`. `summary` is a `DiscoverySummary` with cou
     "probe_attempts": 1,
     "probe_errors": 0,
     "records_emitted": 1,
+    "probes_by_kind": [
+      { "kind": "TcpConnect", "attempted": 1, "errored": 0 }
+    ],
+    "dlq_records": 0,
+    "sink_type": "tee",
+    "cancelled": false,
     "elapsed_ms": 0
   },
   "records": [
@@ -160,6 +166,21 @@ The response is `{summary, records}`. `summary` is a `DiscoverySummary` with cou
   ]
 }
 ```
+
+The summary fields:
+
+| Field | Meaning |
+|---|---|
+| `targets_resolved` | Addresses the scan probed after CIDR, range, and DNS expansion. |
+| `probe_attempts` | Probes started: `targets_resolved` × number of probers. |
+| `probe_errors` | Probes that hit a fault and produced no result. A target that does not answer is a normal result, not a fault. A scan of a mostly empty range therefore reports `0` here. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). |
+| `records_emitted` | `DeviceRecord` events produced. By default only targets that at least one prober reached produce a record. |
+| `probes_by_kind` | Per-prober `attempted` / `errored` breakdown. Omitted when no probes ran. |
+| `first_probe_error` | Sample message from the first probe fault. Omitted when `probe_errors` is `0`. |
+| `dlq_records` | Records the sink diverted to a dead-letter destination. |
+| `sink_type` | Sink the scan wrote to. Always `tee` on `POST /scans`: the server writes every record to the in-memory buffer it returns in the response, and to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set. |
+| `cancelled` | `true` when the scan stopped early; the counters then reflect partial progress. |
+| `elapsed_ms` | Wall-clock duration of the scan. |
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).
 

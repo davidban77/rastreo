@@ -35,7 +35,9 @@ An example host key: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbi
 
 When the [rules classifier](../discover/classification.md) is enabled, an `SshBanner` matching a baked-in rule (Ubuntu, Debian, FreeBSD) populates `DeviceRecord.platform` (OS — `linux` or `freebsd`), `DeviceRecord.os_version` (distro token — `Ubuntu`, `Debian`, or `FreeBSD`), and `DeviceRecord.ssh_version` (SSH software identifier — for example `OpenSSH_9.3p1`) as three separate fields on the record.
 
-The banner and host-key steps are independent. A target that answers only one of them is still marked reachable, and only the step that succeeded contributes a signal. A target that refuses the TCP connection, or that times out on both steps, is marked unreachable.
+The banner and host-key steps are independent. A target that answers only one of them is still marked reachable, and only the step that succeeded contributes a signal. A target that refuses the TCP connection, or that times out on both steps, is marked unreachable and contributes no signals. That is a normal discovery result, not an error.
+
+A socket failure on the scan host itself — file-descriptor exhaustion, for example — is a probe fault and surfaces as an error. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 
@@ -82,6 +84,7 @@ A record produced against a stock OpenSSH server contains the banner and the hos
 
 ## See also
 
+- [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [Identity fuser](../discover/identity.md#signals-used-for-identity-fusion) — how `SshHostKey` participates as a high-weight correlation signal (0.8, enough to auto-merge alone).
 - [Scenario schema](../reference/scenario.md#ssh) — the full `ProberConfig::Ssh` field table.
 - [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the SSH prober from the CLI via `--file`.

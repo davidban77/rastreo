@@ -18,13 +18,18 @@ The CLI prints the `Display` message to stderr and exits with code `1`. The HTTP
 
 ## Probe errors
 
-`RastreoError::Probe(ProbeError)` covers per-probe failures. The Display prefix on the outer variant is `probe error:`.
+`RastreoError::Probe(ProbeError)` covers probe faults — cases where the probe itself could not run. The Display prefix on the outer variant is `probe error:`.
+
+!!! warning "A probe errors only when it learned nothing"
+    A timeout, a refused connection, an unreachable network, or a port that is not speaking the protocol you probed — each is a normal negative discovery result, and `probe_errors` stays at zero. A probe that learned something partial keeps it: a device that answers TCP but refuses the TLS handshake produces a record carrying the open port, not an error. Only the faults below count as errors. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults).
 
 | Variant | Display message | Common cause | Likely fix |
 |---|---|---|---|
-| `ProbeError::Unreachable { target }` | `probe target unreachable: <target>` | The TCP connect failed without timing out — typically a `connection refused` or `host unreachable` reply. | Verify the host is up and the port is open from the host running the scan (`nc -vz <ip> <port>`). |
-| `ProbeError::Timeout { timeout_ms }` | `probe timed out after <N>ms` | The probe did not receive a response within `--timeout-ms`. | Increase `--timeout-ms`, or check that the target is reachable from the scan host. |
-| `ProbeError::Other(msg)` | The `msg` is rendered as-is. | Catch-all for prober-specific failures not covered by the variants above. | Read the message; it names the probe-side detail. |
+| `ProbeError::Other(msg)` | The `msg` is rendered as-is. | The probe learned nothing at all: a raw socket refused for lack of `CAP_NET_RAW`, an ARP probe aimed at an IPv6 target (or NDP at IPv4), a local socket failure such as descriptor exhaustion, or an SNMP agent whose only reply cannot be decoded. | Read the message; it names the prober and the fault. For `CAP_NET_RAW`, see [ARP · Runtime privilege](../probe/arp.md#runtime-privilege). |
+| `ProbeError::Timeout { timeout_ms }` | `probe timed out after <N>ms` | Retained on the type for custom `Prober` implementations. No prober shipped with rastreo returns it. | — |
+| `ProbeError::Unreachable { target }` | `probe target unreachable: <target>` | Retained on the type for custom `Prober` implementations. No prober shipped with rastreo returns it. | — |
+
+Probe faults do not abort the scan. The pipeline counts them in the scan summary and moves on to the next target. The summary reports `probe_errors`, a sample message in `first_probe_error`, and a per-prober breakdown in `probes_by_kind`. A scan fails only when target resolution, encoding, or the sink fails.
 
 ## Resolver errors
 

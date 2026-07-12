@@ -13,7 +13,7 @@ Every metric uses the `rastreo_server_` prefix. All counters are monotonic acros
 | Metric | Type | Labels | Unit | Meaning |
 |---|---|---|---|---|
 | `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | requests | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. |
-| `rastreo_server_probes_total` | counter | `outcome="success"\|"error"`, `probe_kind` | probes | Probes executed across all scans, partitioned by outcome and probe kind. See the [probe_kind taxonomy](#probe_kind-taxonomy) below. `success` is a monotonic per-scan counter incremented by `probe_attempts - probe_errors` so both `/metrics` and the OTLP observable counter remain non-decreasing per attribute-set. |
+| `rastreo_server_probes_total` | counter | `outcome="success"\|"error"`, `probe_kind` | probes | Probes executed across all scans, partitioned by outcome and probe kind. See the [probe_kind taxonomy](#probe_kind-taxonomy) and [what `outcome` means](#what-outcome-means) below. `success` is a monotonic per-scan counter incremented by `probe_attempts - probe_errors` so both `/metrics` and the OTLP observable counter remain non-decreasing per attribute-set. |
 | `rastreo_server_records_emitted_total` | counter | — | records | `DeviceRecord` events emitted across all scans. |
 | `rastreo_server_sink_errors_total` | counter | `error_class` | errors | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant), partitioned by error class. See the [error_class taxonomy](#error_class-taxonomy) below. |
 | `rastreo_server_dlq_records_total` | counter | `sink_type`, `error_class` | records | Records delivered to a dead-letter destination during scan handling, partitioned by sink type and error class. See [DLQ classification (v1)](#dlq-classification-v1) below. |
@@ -22,6 +22,18 @@ Every metric uses the `rastreo_server_` prefix. All counters are monotonic acros
 | `rastreo_server_sink_reachable` | gauge | `sink_type` | — | `1` when the last sink probe succeeded, `0` otherwise. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `rastreo_server_uptime_seconds` | gauge | — | seconds | Seconds since the server process started. |
 | `rastreo_server_build_info` | gauge | `version` | — | Static `1`; the `version` label carries the binary's `CARGO_PKG_VERSION`. |
+
+### What `outcome` means
+
+On `rastreo_server_probes_total`, `outcome` reports whether the probe **ran**, not whether the target **answered**.
+
+- `outcome="success"` — the probe ran and returned a result. The target may have answered (`reachable: true`) or stayed silent (`reachable: false`). Both count here.
+- `outcome="error"` — the probe hit a fault and produced no result. Examples: a raw socket refused for lack of `CAP_NET_RAW`, an ARP probe aimed at an IPv6 target, a socket that fails to open, or an SNMP reply that cannot be decoded.
+
+A target that does not answer is a normal discovery result, so it never raises the error counter. Sweep a `/24` where twelve addresses are live: the 242 silent addresses count as `success`, and the error counter stays flat. A rising error counter therefore points at the rastreo deployment itself — capabilities, sockets, scenario configuration. It never points at silent targets. The same rule governs `probe_errors` in the scan summary. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults) for the per-prober detail.
+
+!!! tip "Records emitted is your discovery-rate signal"
+    Because silent targets count as `success`, this metric cannot tell you how many devices you found. Use `rastreo_server_records_emitted_total` for that.
 
 ### probe_kind taxonomy
 
@@ -78,8 +90,8 @@ The dashboard declares a `datasource` templating variable of type `datasource` w
 
 Panels shipped:
 
-- **Traffic** — Scans per second by outcome (stacked), records emitted per second, probes per second by outcome (stacked), per-prober success rate (line per `probe_kind`).
-- **Errors** — Sink errors per second (aggregate), scan error ratio (percent), probe error ratio (percent), sink errors by error class (stacked per `error_class`), DLQ records per second (stacked per `sink_type` × `error_class`).
+- **Traffic** — Scans per second by outcome (stacked), records emitted per second, probes per second by outcome (stacked), per-prober success rate (line per `probe_kind`). "Success" here means the probe ran without a fault; it does not mean the target answered. See [what `outcome` means](#what-outcome-means).
+- **Errors** — Sink errors per second (aggregate), scan error ratio (percent), probe error ratio (percent), sink errors by error class (stacked per `error_class`), DLQ records per second (stacked per `sink_type` × `error_class`). The probe error ratio tracks probe faults only, so it sits at 0% on a healthy scan even when most addresses in the range are unused.
 - **Latency** — Scan duration percentiles (p50 / p95 / p99 from `histogram_quantile` on `scenario="_all"`), scan duration heatmap, scan duration p95 per scenario (line per `scenario`, populated only for allow-listed names).
 - **Health** — Uptime (stat panel, seconds formatted as d/h/m/s), build version (stat panel, taken from the `version` label via a `labels to fields` transform), sink reachability (stat panel showing `rastreo_server_sink_reachable` — green at 1, red at 0; blank when no sink is configured).
 
@@ -110,11 +122,11 @@ The packaged alerts:
 
 | Alert | Expression | `for` | Severity | Interpretation |
 |---|---|---|---|---|
-| `RastreoScanFailureRate` | `sum(rate(rastreo_server_probes_total{outcome="error"}[10m])) / clamp_min(sum(rate(rastreo_server_probes_total[10m])), 1) > 0.5` | 10m | warning | Aggregate probe error ratio has stayed above 50% for the last 10 minutes. Investigate target reachability or scenario configuration — the scan is running but almost nothing is succeeding. |
-| `RastreoProbeErrorRatioPerKind` | `sum by (probe_kind) (rate(rastreo_server_probes_total{outcome="error"}[10m])) / clamp_min(sum by (probe_kind) (rate(rastreo_server_probes_total[10m])), 1) > 0.5` | 10m | warning | Per-`probe_kind` breakdown of the same signal. Pages when a single prober breaks — a targeted signal an aggregate ratio can hide when other probers are healthy. |
+| `RastreoScanFailureRate` | `sum(rate(rastreo_server_probes_total{outcome="error"}[10m])) / clamp_min(sum(rate(rastreo_server_probes_total[10m])), 1) > 0.5` | 10m | warning | More than half of all probes hit a fault over the last 10 minutes. Probes are not running correctly. Check the pod's capabilities (`CAP_NET_RAW`), the scenario configuration, and the logs for the fault message. Silent targets do not raise this ratio, so a firing alert always points at rastreo's own environment. |
+| `RastreoProbeErrorRatioPerKind` | `sum by (probe_kind) (rate(rastreo_server_probes_total{outcome="error"}[10m])) / clamp_min(sum by (probe_kind) (rate(rastreo_server_probes_total[10m])), 1) > 0.5` | 10m | warning | Same signal, split per prober. Fires when one prober is faulting while the others are healthy — for example ARP without `CAP_NET_RAW` in a scenario that also runs TCP-connect. The `probe_kind` label names the prober to fix. |
 | `RastreoSinkErrorSpikePerClass` | `sum by (error_class) (rate(rastreo_server_sink_errors_total[5m])) > (1 / 60)` | 5m | warning | Sink error rate for a single `error_class` exceeds 1 per minute for 5+ consecutive minutes. `publish_failure` typically means the broker is unreachable; `ack_rejection` typically means a stream binding or quota is wrong. Split triage by class before opening the sink config. |
 | `RastreoDlqTrafficSurge` | `sum(rate(rastreo_server_dlq_records_total[5m])) > 0.1` | 5m | warning | Records are being quarantined at more than 0.1/sec. The primary destination is refusing at least some payloads; the DLQ is absorbing them. Inspect the DLQ topic / stream, verify the primary destination is healthy, drain the quarantine once the underlying issue is fixed. |
-| `RastreoNoRecordsEmitted10min` | `increase(rastreo_server_records_emitted_total[10m]) == 0 and sum without (outcome) (rate(rastreo_server_scans_total[10m])) > 0` | 10m | warning | No records have been emitted in the last 10 minutes despite active scans. Either every prober is failing to observe live devices, or the sink is silently swallowing records. |
+| `RastreoNoRecordsEmitted10min` | `increase(rastreo_server_records_emitted_total[10m]) == 0 and sum without (outcome) (rate(rastreo_server_scans_total[10m])) > 0` | 10m | warning | Scans are running but no records have been emitted for 10 minutes. Every probed target stayed silent, or the sink is dropping records. This is the alert that catches a scan finding nothing — the probe-error ratios stay flat in that case, because silent targets are not errors. Check the target list, the port list, and the sink. |
 | `RastreoSinkUnreachable` | `max_over_time(rastreo_server_sink_reachable[2m]) == 0` | 2m | warning | The server-side sink reachability probe has reported unreachable for at least 2 minutes for the sink type on the alert label. Only fires when `RASTREO_SINK_CONFIG_PATH` is set — operators without a server-configured sink never see this alert. Records still flow via `POST /scans` response bodies; the downstream broker is offline. |
 | `RastreoBuildOld` | `rastreo_server_uptime_seconds > <threshold>` | 1h | info | The pod has been running the same build longer than `alerts.buildAgeThresholdSeconds`. This is a proxy for "old build" — it does not check the actual release age, only the pod uptime. Bumping the image tag (or any rolling restart) resets it. |
 

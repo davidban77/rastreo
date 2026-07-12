@@ -132,7 +132,7 @@ Each entry in `alt_ips` is an [`AltIp`](../reference/schema/device-record.md#alt
 |---|---|---|
 | `address` | string (IP) | The alternate IP that merged into the primary `mgmt_ip`. Always present. |
 | `role` | [`AltIpRole`](../reference/schema/device-record.md#altiprole) \| null | Role hint mapped 1:1 to NetBox / Nautobot / Infrahub IP-address role models. Omitted from the wire form when null. |
-| `responded_via` | array<`ProbeKind`> | Deduplicated list of probe kinds that produced signals for this IP before the merge (for example `Arp`, `Snmp`, `TcpConnect`). Omitted from the wire form when empty. |
+| `responded_via` | array<`ProbeKind`> | Deduplicated list of probe kinds this IP answered before the merge (for example `Arp`, `Snmp`, `TcpConnect`). A prober that ran against the IP but got no answer is not listed. Omitted from the wire form when empty. |
 
 ### `AltIpRole` values
 

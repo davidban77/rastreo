@@ -1,3 +1,4 @@
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -6,13 +7,15 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use tokio::net::TcpStream;
+use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use x509_parser::extensions::{GeneralName, ParsedExtension};
 use x509_parser::parse_x509_certificate;
 
-use crate::error::{ConfigError, RastreoError};
+use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 pub struct TlsProber {
@@ -162,22 +165,20 @@ fn ip_from_bytes(bytes: &[u8]) -> Option<IpAddr> {
     }
 }
 
+/// The certificate signals a peer yielded, empty when it would not negotiate with us.
 async fn handshake_and_extract(
     connector: &TlsConnector,
     stream: TcpStream,
     addr: SocketAddr,
 ) -> Vec<Signal> {
     let server_name = ServerName::IpAddress(addr.ip().into());
+    // Plaintext, a fatal alert, no cipher suite in common: a device found and not fingerprinted.
     let tls_stream = match connector.connect(server_name, stream).await {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     let (_, connection) = tls_stream.get_ref();
-    let peer_certs = match connection.peer_certificates() {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-    let leaf = match peer_certs.first() {
+    let leaf = match connection.peer_certificates().and_then(<[_]>::first) {
         Some(l) => l,
         None => return Vec::new(),
     };
@@ -193,6 +194,55 @@ async fn handshake_and_extract(
     signals
 }
 
+// A refused / unreachable port is a discovery result; a local socket failure (descriptor
+// exhaustion, denied capability) is a broken probe.
+fn connect_fault(port: u16, err: &io::Error) -> Option<String> {
+    match classify::io_error(err) {
+        Disposition::Fault => Some(format!("tls connect failed on port {port}: {err}")),
+        Disposition::Absence => None,
+    }
+}
+
+fn fold_connect(
+    port: u16,
+    outcome: Result<io::Result<TcpStream>, Elapsed>,
+    signals: &mut Vec<Signal>,
+    last_fault: &mut Option<String>,
+) -> Option<TcpStream> {
+    match outcome {
+        Ok(Ok(stream)) => {
+            signals.push(Signal::OpenPort(port));
+            Some(stream)
+        }
+        Ok(Err(err)) => {
+            if let Some(msg) = connect_fault(port, &err) {
+                *last_fault = Some(msg);
+            }
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+fn outcome_or_fault(
+    target_ip: IpAddr,
+    signals: Vec<Signal>,
+    last_fault: Option<String>,
+) -> Result<ProbeOutcome, RastreoError> {
+    // A successful connect emits `OpenPort`, so no signals means no port answered — the only state
+    // in which a connect fault is all this probe has to report.
+    match last_fault {
+        Some(msg) if signals.is_empty() => Err(ProbeError::Other(msg).into()),
+        _ => Ok(ProbeOutcome {
+            kind: ProbeKind::Tls,
+            target_ip,
+            timestamp: SystemTime::now(),
+            reachable: !signals.is_empty(),
+            signals,
+        }),
+    }
+}
+
 #[async_trait::async_trait]
 impl Prober for TlsProber {
     fn kind(&self) -> ProbeKind {
@@ -205,32 +255,24 @@ impl Prober for TlsProber {
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
         let mut signals = Vec::new();
-        let mut any_reachable = false;
+        let mut last_fault: Option<String> = None;
         let connector = TlsConnector::from(Arc::clone(&self.tls_config));
 
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
-            let stream = match timeout(ctx.timeout, TcpStream::connect(addr)).await {
-                Ok(Ok(s)) => s,
-                _ => continue,
+            let outcome = timeout(ctx.timeout, TcpStream::connect(addr)).await;
+            let Some(stream) = fold_connect(port, outcome, &mut signals, &mut last_fault) else {
+                continue;
             };
-            any_reachable = true;
-            signals.push(Signal::OpenPort(port));
 
-            if let Ok(port_signals) =
+            if let Ok(mut port_signals) =
                 timeout(ctx.timeout, handshake_and_extract(&connector, stream, addr)).await
             {
-                signals.extend(port_signals);
+                signals.append(&mut port_signals);
             }
         }
 
-        Ok(ProbeOutcome {
-            kind: ProbeKind::Tls,
-            target_ip: target.ip,
-            timestamp: SystemTime::now(),
-            reachable: any_reachable,
-            signals,
-        })
+        outcome_or_fault(target.ip, signals, last_fault)
     }
 }
 
@@ -466,6 +508,21 @@ mod tests {
 
     #[tokio::test]
     async fn probe_emits_open_port_but_no_tls_signals_on_non_tls_port() {
+        let port = spawn_plaintext_stub_server().await;
+        let prober = TlsProber::new(vec![port]).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(500),
+            )
+            .await
+            .expect("a plaintext peer is an outcome, not an error");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 1);
+        assert!(matches!(&outcome.signals[0], Signal::OpenPort(p) if *p == port));
+    }
+
+    async fn spawn_plaintext_stub_server() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         tokio::spawn(async move {
@@ -474,17 +531,90 @@ mod tests {
                 let _ = stream.shutdown().await;
             }
         });
+        port
+    }
+
+    /// Answers a `ClientHello` with a fatal `handshake_failure` alert: a peer that speaks TLS
+    /// but will not negotiate with us, as legacy gear with no cipher suite in common does.
+    async fn spawn_alerting_tls_stub_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    const FATAL_HANDSHAKE_FAILURE: [u8; 7] =
+                        [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28];
+                    let _ = stream.write_all(&FATAL_HANDSHAKE_FAILURE).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn probe_emits_open_port_with_no_tls_signals_for_a_peer_that_refuses_to_negotiate() {
+        let port = spawn_alerting_tls_stub_server().await;
         let prober = TlsProber::new(vec![port]).expect("valid");
         let outcome = prober
             .probe(
                 &loopback_target(Ipv4Addr::LOCALHOST),
-                &ctx_with_timeout(500),
+                &ctx_with_timeout(2_000),
             )
             .await
-            .expect("probe ok");
+            .expect("a device we cannot fingerprint is still a device we found");
         assert!(outcome.reachable);
         assert_eq!(outcome.signals.len(), 1);
         assert!(matches!(&outcome.signals[0], Signal::OpenPort(p) if *p == port));
+    }
+
+    #[tokio::test]
+    async fn a_fingerprinted_port_and_an_alerting_port_both_report_open() {
+        let sans = vec![SanType::DnsName("alt.example.com".try_into().expect("dns"))];
+        let good_port = spawn_tls_stub_server("router.example.com", sans).await;
+        let alerting_port = spawn_alerting_tls_stub_server().await;
+        let prober = TlsProber::new(vec![good_port, alerting_port]).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(5_000),
+            )
+            .await
+            .expect("a peer that refuses to negotiate is not an error");
+        assert!(outcome.reachable);
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::TlsSubject(v) if v == "router.example.com")));
+        let open_ports: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(open_ports.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_plaintext_peer_and_an_alerting_peer_are_open_ports_without_tls_signals() {
+        let plaintext_port = spawn_plaintext_stub_server().await;
+        let alerting_port = spawn_alerting_tls_stub_server().await;
+        let prober = TlsProber::new(vec![plaintext_port, alerting_port]).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(2_000),
+            )
+            .await
+            .expect("legacy gear that will not negotiate still produces a record");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 2);
+        assert!(outcome
+            .signals
+            .iter()
+            .all(|s| matches!(s, Signal::OpenPort(_))));
     }
 
     #[tokio::test]
@@ -556,6 +686,139 @@ mod tests {
             .signals
             .iter()
             .any(|s| matches!(s, Signal::OpenPort(_))));
+    }
+
+    const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 13));
+
+    #[test]
+    fn a_local_socket_failure_on_connect_latches_a_fault() {
+        let msg = connect_fault(443, &io::Error::from(io::ErrorKind::PermissionDenied))
+            .expect("a denied local socket is a broken probe");
+        assert!(msg.contains("tls connect failed on port 443"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_refused_connect_latches_no_fault() {
+        assert!(connect_fault(443, &io::Error::from(io::ErrorKind::ConnectionRefused)).is_none());
+    }
+
+    async fn elapsed() -> Elapsed {
+        timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .expect_err("a zero deadline on a pending future always elapses")
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_succeeds_emits_an_open_port_and_yields_the_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let stream = TcpStream::connect(("127.0.0.1", port)).await;
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        let held = fold_connect(port, Ok(stream), &mut signals, &mut last_fault);
+
+        assert!(held.is_some(), "the handshake needs the connected stream");
+        assert!(matches!(signals.as_slice(), [Signal::OpenPort(p)] if *p == port));
+        assert!(last_fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_is_refused_emits_nothing() {
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        let held = fold_connect(
+            443,
+            Ok(Err(io::Error::from(io::ErrorKind::ConnectionRefused))),
+            &mut signals,
+            &mut last_fault,
+        );
+
+        assert!(held.is_none());
+        assert!(signals.is_empty());
+        assert!(last_fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_fails_on_a_local_socket_latches_a_fault() {
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        let held = fold_connect(
+            443,
+            Ok(Err(io::Error::from(io::ErrorKind::PermissionDenied))),
+            &mut signals,
+            &mut last_fault,
+        );
+
+        assert!(held.is_none());
+        assert!(signals.is_empty());
+        let msg = last_fault.expect("a denied local socket is a broken probe");
+        assert!(msg.contains("tls connect failed on port 443"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_times_out_emits_nothing() {
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        let held = fold_connect(443, Err(elapsed().await), &mut signals, &mut last_fault);
+
+        assert!(held.is_none());
+        assert!(signals.is_empty());
+        assert!(last_fault.is_none());
+    }
+
+    #[test]
+    fn an_open_port_is_a_reachable_outcome() {
+        let outcome = outcome_or_fault(
+            TARGET,
+            vec![
+                Signal::OpenPort(443),
+                Signal::TlsSubject("router.example.com".to_string()),
+            ],
+            None,
+        )
+        .expect("an open port is an outcome");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.kind, ProbeKind::Tls);
+        assert_eq!(outcome.signals.len(), 2);
+    }
+
+    #[test]
+    fn an_open_port_outranks_a_connect_fault_on_another_port() {
+        let outcome = outcome_or_fault(
+            TARGET,
+            vec![Signal::OpenPort(443)],
+            Some("tls connect failed on port 8443: too many open files".to_string()),
+        )
+        .expect("a port that answered makes the record truthful");
+        assert!(outcome.reachable);
+    }
+
+    #[test]
+    fn no_signals_and_no_fault_is_an_absent_target() {
+        let outcome =
+            outcome_or_fault(TARGET, Vec::new(), None).expect("a silent target is an outcome");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[test]
+    fn no_open_port_and_a_connect_fault_is_a_probe_error() {
+        let err = outcome_or_fault(
+            TARGET,
+            Vec::new(),
+            Some("tls connect failed on port 443: too many open files".to_string()),
+        )
+        .expect_err("a broken probe is not a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("tls connect failed on port 443"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
     }
 
     #[test]

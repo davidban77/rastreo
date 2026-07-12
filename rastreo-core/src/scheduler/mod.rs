@@ -211,9 +211,12 @@ mod tests {
                 IpAddr::V6(_) => 0,
             };
             if last_octet == self.fail_octet {
-                return Err(RastreoError::Probe(crate::error::ProbeError::Unreachable {
-                    target: target.ip.to_string(),
-                }));
+                return Err(RastreoError::Probe(crate::error::ProbeError::Other(
+                    format!(
+                        "tcp connect failed on port 22: too many open files ({})",
+                        target.ip
+                    ),
+                )));
             }
             Ok(ProbeOutcome {
                 kind: ProbeKind::TcpConnect,
@@ -378,9 +381,7 @@ mod tests {
         assert!(out[1].is_ok());
         assert!(matches!(
             out[2],
-            Err(RastreoError::Probe(
-                crate::error::ProbeError::Unreachable { .. }
-            ))
+            Err(RastreoError::Probe(crate::error::ProbeError::Other(_)))
         ));
         assert!(out[3].is_ok());
     }

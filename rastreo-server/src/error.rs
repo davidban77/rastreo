@@ -128,7 +128,8 @@ mod tests {
 
     #[test]
     fn probe_error_maps_to_500() {
-        let err: AppError = RastreoError::Probe(ProbeError::Timeout { timeout_ms: 500 }).into();
+        let err: AppError =
+            RastreoError::Probe(ProbeError::Other("snmp probe failed on port 161".into())).into();
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 

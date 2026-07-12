@@ -120,8 +120,10 @@ pub(super) async fn probe_port(
                 }
                 _ => return PortOutcome::Reached(Vec::new()),
             },
-            AuthenticatedOutcome::Timeout => return PortOutcome::Timeout,
-            AuthenticatedOutcome::Unreachable => return PortOutcome::Unreachable,
+            // The engine answered discovery: silence now costs the fingerprint, not the device.
+            AuthenticatedOutcome::Timeout | AuthenticatedOutcome::Unreachable => {
+                return PortOutcome::Reached(Vec::new())
+            }
             AuthenticatedOutcome::DecodeFailed => return PortOutcome::DecodeFailed,
             AuthenticatedOutcome::Other(msg) => return PortOutcome::Other(msg),
         }
@@ -710,6 +712,7 @@ mod tests {
         NotInTimeWindowThenNormal { correct_time: u32 },
         WrongDigestReport,
         CorruptResponseHmac,
+        SilentAfterDiscovery,
     }
 
     #[derive(Default)]
@@ -808,6 +811,7 @@ mod tests {
                     }
                     Some(resp)
                 }
+                MockBehavior::SilentAfterDiscovery => None,
                 _ => self.build_signal_response(&msg, &params),
             }
         }
@@ -1301,6 +1305,28 @@ mod tests {
             .await
             .expect("probe ok");
         assert!(outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn snmpv3_agent_that_answers_discovery_then_goes_silent_is_reachable_without_signals() {
+        let agent = MockV3Agent::new("probe").with_behavior(MockBehavior::SilentAfterDiscovery);
+        let port = spawn_mock_v3(agent).await.expect("bind");
+        let creds = UsmCredentials {
+            username: "probe".into(),
+            auth: UsmAuth::None,
+            privacy: UsmPrivacy::None,
+        };
+        let prober =
+            SnmpProber::new(vec![port], SnmpVersion::V3, String::new(), creds).expect("valid v3");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(300))
+            .await
+            .expect("an engine that answered discovery is a device we found");
+        assert!(
+            outcome.reachable,
+            "a v3 engine that completed discovery has provably answered"
+        );
         assert!(outcome.signals.is_empty());
     }
 

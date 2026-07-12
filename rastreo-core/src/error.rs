@@ -40,8 +40,14 @@ impl ConfigError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProbeError {
+    #[deprecated(
+        note = "a target that does not answer is Ok(ProbeOutcome { reachable: false }) — see the reachability contract"
+    )]
     #[error("probe target unreachable: {target}")]
     Unreachable { target: String },
+    #[deprecated(
+        note = "a target that does not answer is Ok(ProbeOutcome { reachable: false }) — see the reachability contract"
+    )]
     #[error("probe timed out after {timeout_ms}ms")]
     Timeout { timeout_ms: u64 },
     #[error("{0}")]
@@ -134,7 +140,7 @@ mod tests {
 
     #[test]
     fn probe_error_converts_via_from() {
-        let p = ProbeError::Timeout { timeout_ms: 1500 };
+        let p = ProbeError::Other("icmp: recv failed".into());
         let err: RastreoError = p.into();
         assert!(matches!(err, RastreoError::Probe(_)));
     }
@@ -184,6 +190,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn probe_unreachable_display_includes_target() {
         let err = RastreoError::Probe(ProbeError::Unreachable {
             target: "10.0.0.1".into(),
@@ -194,6 +201,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn probe_timeout_display_includes_duration() {
         let err = RastreoError::Probe(ProbeError::Timeout { timeout_ms: 750 });
         let msg = format!("{err}");

@@ -33,7 +33,9 @@ Unlike the DNS prober, `reverse_dns` does not accept a `ports` field — resolve
 |---|---|
 | `ReverseDnsName(<hostname>)` | The resolver returned at least one PTR record for the target IP. One signal is emitted per PTR record. The trailing `.` on the returned name is stripped, so `router.example.com.` becomes `router.example.com`. |
 
-Reachability tracks whether the resolver itself responded, not whether it knew the target. When the resolver returns `NXDOMAIN`, `REFUSED`, `SERVFAIL`, or an empty answer section, the prober records `reachable = true` with zero signals — the resolver is up, it just had no name to hand back. When the resolver never replies (outer timeout, network unreachable, UDP port closed), the prober records `reachable = false` with zero signals. Resolver failures never surface as an error; the outcome always returns `Ok`. This matches the classification the [DNS prober](dns.md) uses when treating a target as a DNS server.
+Reachability tracks whether the resolver itself responded, not whether it knew the target. When the resolver returns `NXDOMAIN`, `REFUSED`, `SERVFAIL`, or an empty answer section, the prober records `reachable = true` with zero signals — the resolver is up, it just had no name to hand back. When the resolver never replies (outer timeout, network unreachable, UDP port closed), the prober records `reachable = false` with zero signals. Neither case is an error. This matches the classification the [DNS prober](dns.md) uses when treating a target as a DNS server.
+
+A resolver that answers with something the prober cannot read, and a socket or permission failure on the scan host, are probe faults and surface as errors. Those are cases where the lookup broke, so "this IP has no PTR record" would be the wrong conclusion to draw. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 When more than one resolver is configured, the prober queries them in the listed order and stops at the first successful response. When a single response contains more than one PTR record — common when a load-balanced service publishes several friendly names — every returned name produces its own `ReverseDnsName` signal.
 
@@ -96,6 +98,7 @@ This is the typical shape inside a lab container that already has cluster DNS po
 
 ## See also
 
+- [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [DNS prober](dns.md) — treats the target as a DNS server and issues forward queries against it. Opposite direction from this prober.
 - [Identity fuser](../discover/identity.md) — reverse-DNS hostnames are a candidate correlation signal for future identity fusion; today the fuser correlates on MAC, `SnmpSysName`, and SSH host key.
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.

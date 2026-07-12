@@ -12,6 +12,7 @@ use hickory_resolver::TokioResolver;
 
 use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 const MAX_LABEL_BYTES: usize = 63;
@@ -226,32 +227,6 @@ fn format_signal(query_name: &str, rdata: &RData) -> Option<String> {
     }
 }
 
-enum QueryFailure {
-    Timeout,
-    Unreachable,
-    Other(String),
-}
-
-fn classify_net_error(err: &NetError) -> QueryFailure {
-    if err.is_no_records_found() {
-        // Server responded — should not surface here (handled at call site).
-        return QueryFailure::Other(err.to_string());
-    }
-    match err {
-        NetError::Timeout => QueryFailure::Timeout,
-        NetError::Io(io) => match io.kind() {
-            std::io::ErrorKind::TimedOut => QueryFailure::Timeout,
-            std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::HostUnreachable
-            | std::io::ErrorKind::NetworkUnreachable
-            | std::io::ErrorKind::ConnectionAborted => QueryFailure::Unreachable,
-            _ => QueryFailure::Other(io.to_string()),
-        },
-        _ => QueryFailure::Other(err.to_string()),
-    }
-}
-
 #[async_trait::async_trait]
 impl Prober for DnsProber {
     fn kind(&self) -> ProbeKind {
@@ -266,22 +241,17 @@ impl Prober for DnsProber {
         let record_type = self.query_type.to_record_type();
         let mut signals = Vec::new();
         let mut any_reachable = false;
-        let mut timeouts = 0usize;
-        let mut unreachables = 0usize;
-        let mut last_other: Option<String> = None;
-        let mut attempted = 0usize;
+        let mut last_fault: Option<String> = None;
 
         for &port in &self.ports {
             let resolver = match self.build_resolver(target.ip, port) {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(
-                        ConfigError::invalid(format!("failed to build dns resolver: {e}")).into(),
-                    );
+                    last_fault = Some(format!("failed to build dns resolver on port {port}: {e}"));
+                    continue;
                 }
             };
             for name in self.query_names.iter() {
-                attempted += 1;
                 let lookup = resolver.lookup(name.as_str(), record_type);
                 match tokio::time::timeout(ctx.timeout, lookup).await {
                     Ok(Ok(response)) => {
@@ -306,40 +276,28 @@ impl Prober for DnsProber {
                             any_reachable = true;
                             continue;
                         }
-                        match classify_net_error(&err) {
-                            QueryFailure::Timeout => timeouts += 1,
-                            QueryFailure::Unreachable => unreachables += 1,
-                            QueryFailure::Other(msg) => {
-                                last_other = Some(format!(
-                                    "dns probe failed on port {port} for {name}: {msg}"
-                                ));
-                            }
+                        if classify::net_error(&err) == Disposition::Fault {
+                            last_fault =
+                                Some(format!("dns probe failed on port {port} for {name}: {err}"));
                         }
                     }
-                    Err(_) => {
-                        timeouts += 1;
-                    }
+                    Err(_) => {}
                 }
             }
         }
 
-        if !any_reachable && attempted > 0 {
-            let err = if unreachables > timeouts && unreachables >= last_other.iter().count() {
-                ProbeError::Unreachable {
-                    target: target.ip.to_string(),
-                }
-            } else if timeouts >= unreachables && last_other.is_none() {
-                ProbeError::Timeout {
-                    timeout_ms: ctx.timeout.as_millis() as u64,
-                }
-            } else if let Some(msg) = last_other {
-                ProbeError::Other(msg)
-            } else {
-                ProbeError::Timeout {
-                    timeout_ms: ctx.timeout.as_millis() as u64,
-                }
-            };
-            return Err(err.into());
+        if !any_reachable {
+            // Silence on one port is not evidence against a fault on another, but an answer is.
+            if let Some(msg) = last_fault {
+                return Err(ProbeError::Other(msg).into());
+            }
+            return Ok(ProbeOutcome {
+                kind: ProbeKind::Dns,
+                target_ip: target.ip,
+                timestamp: SystemTime::now(),
+                reachable: false,
+                signals: Vec::new(),
+            });
         }
 
         Ok(ProbeOutcome {
@@ -749,7 +707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dns_prober_maps_timeout_to_timeout_error() {
+    async fn dns_prober_maps_timeout_to_unreachable_outcome() {
         // Bind a UDP socket that never responds. The hickory resolver will retry
         // until the outer tokio::time::timeout fires.
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
@@ -762,42 +720,28 @@ mod tests {
             }
         });
         let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(200))
             .await
-            .expect_err("must error");
-        match err {
-            RastreoError::Probe(ProbeError::Timeout { timeout_ms }) => {
-                assert_eq!(timeout_ms, 200);
-            }
-            other => panic!("expected Timeout, got {other:?}"),
-        }
+            .expect("a silent server is an outcome, not an error");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
     }
 
     #[tokio::test]
-    async fn dns_prober_maps_closed_udp_port_to_error() {
-        // Bind and drop a UDP port. Semantics: on macOS/Linux, sending to a
-        // closed UDP port yields ECONNREFUSED via ICMP port unreachable —
-        // observable in a subsequent recv on a connected socket. hickory may
-        // surface this as an Io error (Unreachable) or as an outer timeout
-        // depending on platform behavior. Either satisfies "not reachable".
+    async fn dns_prober_maps_closed_udp_port_to_unreachable_outcome() {
+        // Bind and drop a UDP port: sending to it yields ECONNREFUSED via ICMP
+        // port unreachable, observable on the connected socket.
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let port = socket.local_addr().expect("addr").port();
         drop(socket);
         let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(500))
             .await
-            .expect_err("must error");
-        assert!(
-            matches!(
-                err,
-                RastreoError::Probe(ProbeError::Unreachable { .. })
-                    | RastreoError::Probe(ProbeError::Timeout { .. })
-                    | RastreoError::Probe(ProbeError::Other(_))
-            ),
-            "expected Unreachable, Timeout, or Other; got {err:?}"
-        );
+            .expect("a closed port is an outcome, not an error");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
     }
 
     #[tokio::test]
@@ -918,6 +862,38 @@ mod tests {
             .expect("probe ok");
         assert_eq!(outcome.signals.len(), 3);
         assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn dns_prober_maps_undecodable_reply_to_a_probe_fault() {
+        let port = spawn_garbage_udp_server().await;
+        let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
+        let err = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect_err("a reply we cannot decode is a fault, not an absent host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("dns probe failed"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+    }
+
+    async fn spawn_garbage_udp_server() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let (_, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let _ = socket.send_to(b"not a dns message", peer).await;
+            }
+        });
+        port
     }
 
     #[test]

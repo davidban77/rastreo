@@ -1,7 +1,9 @@
+use std::net::IpAddr;
 use std::time::SystemTime;
 
 use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 const BANNER_MAX_BYTES: usize = 256;
@@ -107,24 +109,26 @@ fn scheme_for_port(port: u16, scheme: HttpScheme) -> &'static str {
     }
 }
 
-fn is_tls_error(err: &reqwest::Error) -> bool {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(current) = source {
-        let msg = current.to_string().to_ascii_lowercase();
-        if msg.contains("tls")
-            || msg.contains("handshake")
-            || msg.contains("certificate")
-            || msg.contains("rustls")
-            || msg.contains("corrupt message")
-            || msg.contains("invalidcontenttype")
-            || msg.contains("peer sent")
-            || msg.contains("alert")
-        {
-            return true;
-        }
-        source = current.source();
+fn classify_request_error(err: &reqwest::Error) -> Disposition {
+    classify_error_chain(err, err.is_timeout(), err.is_connect())
+}
+
+fn classify_error_chain(
+    err: &(dyn std::error::Error + 'static),
+    is_timeout: bool,
+    is_connect: bool,
+) -> Disposition {
+    if is_timeout {
+        return Disposition::Absence;
     }
-    false
+    // Only the connector's errno separates a refused peer from a denied or exhausted local socket.
+    if let Some(io_err) = classify::io_error_in_chain(err) {
+        return classify::io_error(io_err);
+    }
+    if is_connect {
+        return Disposition::Absence;
+    }
+    Disposition::Fault
 }
 
 fn truncate_banner(raw: &str) -> String {
@@ -139,6 +143,25 @@ fn truncate_banner(raw: &str) -> String {
     trimmed[..end].to_string()
 }
 
+fn outcome_or_fault(
+    target_ip: IpAddr,
+    signals: Vec<Signal>,
+    last_fault: Option<String>,
+) -> Result<ProbeOutcome, RastreoError> {
+    // A port that answered emits `OpenPort`, so no signals means nothing answered — the only state
+    // in which a connect fault is all this probe has to report.
+    match last_fault {
+        Some(msg) if signals.is_empty() => Err(ProbeError::Other(msg).into()),
+        _ => Ok(ProbeOutcome {
+            kind: ProbeKind::Http,
+            target_ip,
+            timestamp: SystemTime::now(),
+            reachable: !signals.is_empty(),
+            signals,
+        }),
+    }
+}
+
 #[async_trait::async_trait]
 impl Prober for HttpProber {
     fn kind(&self) -> ProbeKind {
@@ -151,8 +174,7 @@ impl Prober for HttpProber {
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
         let mut signals = Vec::new();
-        let mut any_reachable = false;
-        let mut last_error: Option<ProbeError> = None;
+        let mut last_fault: Option<String> = None;
 
         for &port in &self.ports {
             let scheme = scheme_for_port(port, self.scheme);
@@ -170,7 +192,6 @@ impl Prober for HttpProber {
 
             match tokio::time::timeout(ctx.timeout, request).await {
                 Ok(Ok(response)) => {
-                    any_reachable = true;
                     signals.push(Signal::OpenPort(port));
                     if let Some(server) = response
                         .headers()
@@ -184,41 +205,19 @@ impl Prober for HttpProber {
                     }
                 }
                 Ok(Err(reqwest_err)) => {
-                    last_error = Some(if reqwest_err.is_timeout() {
-                        ProbeError::Timeout {
-                            timeout_ms: ctx.timeout.as_millis() as u64,
-                        }
-                    } else if reqwest_err.is_connect() && !is_tls_error(&reqwest_err) {
-                        ProbeError::Unreachable {
-                            target: target.ip.to_string(),
-                        }
-                    } else {
-                        ProbeError::Other(format!(
-                            "http probe failed on port {port}: {reqwest_err}"
-                        ))
-                    });
+                    // A rustls error is only reachable once the connect completed: the port is open.
+                    if classify::rustls_error_in_chain(&reqwest_err).is_some() {
+                        signals.push(Signal::OpenPort(port));
+                    } else if classify_request_error(&reqwest_err) == Disposition::Fault {
+                        last_fault =
+                            Some(format!("http probe failed on port {port}: {reqwest_err}"));
+                    }
                 }
-                Err(_) => {
-                    last_error = Some(ProbeError::Timeout {
-                        timeout_ms: ctx.timeout.as_millis() as u64,
-                    });
-                }
+                Err(_) => {}
             }
         }
 
-        if !any_reachable {
-            if let Some(err) = last_error {
-                return Err(err.into());
-            }
-        }
-
-        Ok(ProbeOutcome {
-            kind: ProbeKind::Http,
-            target_ip: target.ip,
-            timestamp: SystemTime::now(),
-            reachable: any_reachable,
-            signals,
-        })
+        outcome_or_fault(target.ip, signals, last_fault)
     }
 }
 
@@ -408,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_prober_maps_connection_refused_to_unreachable_error() {
+    async fn http_prober_maps_connection_refused_to_unreachable_outcome() {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("bind");
@@ -422,26 +421,17 @@ mod tests {
             default_user_agent(),
         )
         .expect("valid");
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(500))
             .await
-            .expect_err("must error");
-        match err {
-            RastreoError::Probe(ProbeError::Unreachable { target }) => {
-                assert_eq!(target, "127.0.0.1");
-            }
-            RastreoError::Probe(ProbeError::Timeout { timeout_ms }) => {
-                assert_eq!(
-                    timeout_ms, 500,
-                    "if timeout fires, it must be the configured 500ms"
-                );
-            }
-            other => panic!("expected Unreachable or Timeout, got {other:?}"),
-        }
+            .expect("a refused port is an outcome, not an error");
+        assert_eq!(outcome.kind, ProbeKind::Http);
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
     }
 
     #[tokio::test]
-    async fn http_prober_maps_timeout_to_timeout_error() {
+    async fn http_prober_maps_timeout_to_unreachable_outcome() {
         let port = spawn_hanging_server().await;
         let prober = HttpProber::new(
             vec![port],
@@ -451,16 +441,12 @@ mod tests {
             default_user_agent(),
         )
         .expect("valid");
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(100))
             .await
-            .expect_err("must time out");
-        match err {
-            RastreoError::Probe(ProbeError::Timeout { timeout_ms }) => {
-                assert_eq!(timeout_ms, 100);
-            }
-            other => panic!("expected Timeout, got {other:?}"),
-        }
+            .expect("a hanging server is an outcome, not an error");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
     }
 
     #[tokio::test]
@@ -613,14 +599,15 @@ mod tests {
             default_user_agent(),
         )
         .expect("valid");
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(500))
             .await
-            .expect_err("closed port must error");
-        assert!(matches!(
-            err,
-            RastreoError::Probe(ProbeError::Unreachable { .. } | ProbeError::Timeout { .. })
-        ));
+            .expect("a closed port is an outcome, not an error");
+        assert!(!outcome.reachable);
+        assert!(outcome
+            .signals
+            .iter()
+            .all(|s| !matches!(s, Signal::OpenPort(_))));
     }
 
     #[tokio::test]
@@ -661,11 +648,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_prober_maps_tls_mismatch_to_other_error() {
-        // Speak plain HTTP on the server; probe as HTTPS. The client attempts
-        // a TLS handshake against a plaintext socket, which fails inside
-        // rustls after the TCP connect succeeded. That's distinct from a
-        // genuinely closed port.
+    async fn http_prober_emits_open_port_for_a_plaintext_peer_probed_as_https() {
+        // Plain HTTP served, probed as HTTPS: rustls rejects the bytes, but the connect completed.
         let port = spawn_server(Arc::new(|_req| {
             Response::builder()
                 .status(200)
@@ -681,18 +665,287 @@ mod tests {
             default_user_agent(),
         )
         .expect("valid");
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
-            .expect_err("TLS handshake against plain HTTP must fail");
+            .expect("a peer that does not speak TLS is a device we found, not a broken probe");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 1);
+        assert!(matches!(&outcome.signals[0], Signal::OpenPort(p) if *p == port));
+    }
+
+    async fn spawn_alerting_tls_server() -> u16 {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    const FATAL_HANDSHAKE_FAILURE: [u8; 7] =
+                        [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28];
+                    let _ = stream.write_all(&FATAL_HANDSHAKE_FAILURE).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn http_prober_emits_open_port_for_a_tls_peer_that_refuses_to_negotiate() {
+        let port = spawn_alerting_tls_server().await;
+        let prober = HttpProber::new(
+            vec![port],
+            HttpScheme::Https,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect("a device we cannot fingerprint is still a device we found");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 1);
+        assert!(matches!(&outcome.signals[0], Signal::OpenPort(p) if *p == port));
+    }
+
+    #[tokio::test]
+    async fn http_prober_keeps_the_open_port_of_a_tls_peer_alongside_a_plaintext_one() {
+        let alerting_port = spawn_alerting_tls_server().await;
+        let plaintext_port = spawn_server(Arc::new(|_req| {
+            Response::builder()
+                .status(200)
+                .body(Full::new(Bytes::from("ok")))
+                .expect("response")
+        }))
+        .await;
+        let prober = HttpProber::new(
+            vec![alerting_port, plaintext_port],
+            HttpScheme::Https,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect("legacy gear that will not negotiate still produces a record");
+        assert!(outcome.reachable);
+        let mut open_ports: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        open_ports.sort_unstable();
+        let mut expected = vec![alerting_port, plaintext_port];
+        expected.sort_unstable();
+        assert_eq!(open_ports, expected);
+    }
+
+    #[tokio::test]
+    async fn reqwest_surfaces_the_rustls_error_for_a_plaintext_peer() {
+        // The open port above holds only while the rustls error stays reachable through reqwest.
+        let port = spawn_server(Arc::new(|_req| {
+            Response::builder()
+                .status(200)
+                .body(Full::new(Bytes::from("ok")))
+                .expect("response")
+        }))
+        .await;
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("client");
+        let err = client
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect_err("TLS handshake against a plaintext port fails");
+        let tls_err = classify::rustls_error_in_chain(&err)
+            .expect("reqwest must expose the rustls error in its source chain");
+        assert!(
+            matches!(tls_err, rustls::Error::InvalidMessage(_)),
+            "got: {tls_err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_surfaces_the_rustls_error_for_a_peer_that_refuses_to_negotiate() {
+        let port = spawn_alerting_tls_server().await;
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("client");
+        let err = client
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect_err("a fatal alert fails the handshake");
+        let tls_err = classify::rustls_error_in_chain(&err)
+            .expect("reqwest must expose the rustls error in its source chain");
+        assert!(
+            matches!(tls_err, rustls::Error::AlertReceived(_)),
+            "got: {tls_err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_surfaces_the_io_error_for_a_refused_port() {
+        // The absence/fault split is only truthful while the connector's errno is reachable
+        // through reqwest's source chain.
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let client = reqwest::Client::builder().build().expect("client");
+        let err = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .expect_err("a connect to a closed port fails");
+        let io_err = classify::io_error_in_chain(&err)
+            .expect("reqwest must expose the connector io error in its source chain");
+        assert_eq!(io_err.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(classify_request_error(&err), Disposition::Absence);
+    }
+
+    #[derive(Debug)]
+    struct Layer(Box<dyn std::error::Error + Send + Sync + 'static>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "layer: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self.0.as_ref())
+        }
+    }
+
+    #[derive(Debug)]
+    struct Opaque;
+
+    impl std::fmt::Display for Opaque {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "opaque")
+        }
+    }
+
+    impl std::error::Error for Opaque {}
+
+    fn connector_error(kind: std::io::ErrorKind) -> Layer {
+        Layer(Box::new(Layer(Box::new(std::io::Error::from(kind)))))
+    }
+
+    #[test]
+    fn a_refused_connect_is_absence() {
+        let err = connector_error(std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(
+            classify_error_chain(&err, false, true),
+            Disposition::Absence
+        );
+    }
+
+    #[test]
+    fn a_denied_connect_is_a_fault() {
+        let err = connector_error(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(classify_error_chain(&err, false, true), Disposition::Fault);
+    }
+
+    #[test]
+    fn a_connect_that_exhausted_local_descriptors_is_a_fault() {
+        let emfile = Layer(Box::new(std::io::Error::from_raw_os_error(24)));
+        assert_eq!(
+            classify_error_chain(&emfile, false, true),
+            Disposition::Fault
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_absence_even_when_it_carries_an_io_error() {
+        let err = connector_error(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            classify_error_chain(&err, true, false),
+            Disposition::Absence
+        );
+    }
+
+    #[test]
+    fn a_connect_failure_with_no_io_evidence_is_absence() {
+        let err = Layer(Box::new(Opaque));
+        assert_eq!(
+            classify_error_chain(&err, false, true),
+            Disposition::Absence
+        );
+    }
+
+    #[test]
+    fn a_request_failure_that_is_neither_connect_nor_timeout_nor_io_is_a_fault() {
+        let err = Layer(Box::new(Opaque));
+        assert_eq!(classify_error_chain(&err, false, false), Disposition::Fault);
+    }
+
+    const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 13));
+
+    #[test]
+    fn an_open_port_is_a_reachable_outcome() {
+        let outcome = outcome_or_fault(
+            TARGET,
+            vec![
+                Signal::OpenPort(443),
+                Signal::HttpBanner("nginx".to_string()),
+            ],
+            None,
+        )
+        .expect("an open port is an outcome");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.kind, ProbeKind::Http);
+        assert_eq!(outcome.signals.len(), 2);
+    }
+
+    #[test]
+    fn an_open_port_outranks_a_connect_fault_on_another_port() {
+        let outcome = outcome_or_fault(
+            TARGET,
+            vec![Signal::OpenPort(443)],
+            Some("http probe failed on port 8443: too many open files".to_string()),
+        )
+        .expect("a port that answered makes the record truthful");
+        assert!(outcome.reachable);
+    }
+
+    #[test]
+    fn no_signals_and_no_fault_is_an_absent_target() {
+        let outcome =
+            outcome_or_fault(TARGET, Vec::new(), None).expect("a silent target is an outcome");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[test]
+    fn no_open_port_and_a_connect_fault_is_a_probe_error() {
+        let err = outcome_or_fault(
+            TARGET,
+            Vec::new(),
+            Some("http probe failed on port 443: too many open files".to_string()),
+        )
+        .expect_err("a broken probe is not a dark host");
         match err {
             RastreoError::Probe(ProbeError::Other(msg)) => {
-                assert!(
-                    msg.contains("http probe failed"),
-                    "message should carry the probe context, got: {msg}"
-                );
+                assert!(msg.contains("http probe failed on port 443"), "got: {msg}");
             }
-            other => panic!("expected ProbeError::Other for TLS/protocol mismatch, got {other:?}"),
+            other => panic!("expected ProbeError::Other, got {other:?}"),
         }
     }
 

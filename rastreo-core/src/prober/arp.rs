@@ -188,6 +188,30 @@ fn run_probe_blocking(
     ProbeResolution::Timeout
 }
 
+fn resolution_to_outcome(
+    resolution: ProbeResolution,
+    target_ip: IpAddr,
+) -> Result<ProbeOutcome, RastreoError> {
+    match resolution {
+        ProbeResolution::Reached(signal) => Ok(ProbeOutcome {
+            kind: ProbeKind::Arp,
+            target_ip,
+            timestamp: SystemTime::now(),
+            reachable: true,
+            signals: vec![signal],
+        }),
+        // A silent host is a negative discovery result, not a probe fault.
+        ProbeResolution::Timeout => Ok(ProbeOutcome {
+            kind: ProbeKind::Arp,
+            target_ip,
+            timestamp: SystemTime::now(),
+            reachable: false,
+            signals: Vec::new(),
+        }),
+        ProbeResolution::Failed(msg) => Err(ProbeError::Other(msg).into()),
+    }
+}
+
 #[async_trait::async_trait]
 impl Prober for ArpProber {
     fn kind(&self) -> ProbeKind {
@@ -243,20 +267,7 @@ impl Prober for ArpProber {
             RastreoError::Runtime(crate::error::RuntimeError::TaskPanicked(err.to_string()))
         })?;
 
-        match result {
-            ProbeResolution::Reached(signal) => Ok(ProbeOutcome {
-                kind: ProbeKind::Arp,
-                target_ip: target.ip,
-                timestamp: SystemTime::now(),
-                reachable: true,
-                signals: vec![signal],
-            }),
-            ProbeResolution::Timeout => Err(ProbeError::Timeout {
-                timeout_ms: ctx.timeout.as_millis() as u64,
-            }
-            .into()),
-            ProbeResolution::Failed(msg) => Err(ProbeError::Other(msg).into()),
-        }
+        resolution_to_outcome(result, target.ip)
     }
 }
 
@@ -471,6 +482,42 @@ mod tests {
             "ARP prober must not put the interface in promiscuous mode"
         );
         assert_eq!(config.read_timeout, Some(RECV_POLL_INTERVAL));
+    }
+
+    #[test]
+    fn timeout_resolution_is_an_unreachable_outcome_not_an_error() {
+        let target_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
+        let outcome = resolution_to_outcome(ProbeResolution::Timeout, target_ip)
+            .expect("silent host must not be a probe error");
+        assert_eq!(outcome.kind, ProbeKind::Arp);
+        assert_eq!(outcome.target_ip, target_ip);
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[test]
+    fn reached_resolution_is_a_reachable_outcome_with_the_mac_signal() {
+        let target_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
+        let signal = Signal::Mac("aa:bb:cc:dd:ee:ff".to_string());
+        let outcome = resolution_to_outcome(ProbeResolution::Reached(signal), target_ip)
+            .expect("reached host is an outcome");
+        assert!(outcome.reachable);
+        assert!(matches!(&outcome.signals[0], Signal::Mac(m) if m == "aa:bb:cc:dd:ee:ff"));
+    }
+
+    #[test]
+    fn failed_resolution_stays_a_probe_error() {
+        let err = resolution_to_outcome(
+            ProbeResolution::Failed("raw socket permission denied".to_string()),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)),
+        )
+        .expect_err("a probe fault must error");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("permission denied"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
     }
 
     #[test]

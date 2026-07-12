@@ -1645,6 +1645,46 @@ mod tests {
     }
 
     #[test]
+    fn altip_responded_via_excludes_silent_probers() {
+        let mac = "aa:bb:cc:11:22:33";
+        let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+        let outcome =
+            |octet: u8, kind: ProbeKind, reachable: bool, signals: Vec<Signal>| ProbeOutcome {
+                kind,
+                target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable,
+                signals,
+            };
+        let f = make_fuser(IdentityHints::default());
+        let outcomes = vec![
+            outcome(1, ProbeKind::Arp, true, vec![Signal::Mac(mac.into())]),
+            outcome(
+                1,
+                ProbeKind::Ssh,
+                true,
+                vec![Signal::SshHostKey(host_key.into())],
+            ),
+            outcome(2, ProbeKind::Arp, true, vec![Signal::Mac(mac.into())]),
+            outcome(
+                2,
+                ProbeKind::Ssh,
+                true,
+                vec![Signal::SshHostKey(host_key.into())],
+            ),
+            outcome(2, ProbeKind::Snmp, false, vec![]),
+        ];
+        let records = f.fuse_many(outcomes).expect("fuse_many");
+        assert_eq!(records.len(), 1, "shared MAC + host key merges both IPs");
+        assert_eq!(records[0].alt_ips.len(), 1);
+        assert_eq!(
+            records[0].alt_ips[0].responded_via,
+            vec![ProbeKind::Arp, ProbeKind::Ssh],
+            "a silent snmp probe must not claim the device responded via snmp",
+        );
+    }
+
+    #[test]
     fn identity_fuser_merges_probe_kinds_across_constituent_records() {
         let mac = "aa:bb:cc:11:22:33";
         let a = base_record_with_kinds(

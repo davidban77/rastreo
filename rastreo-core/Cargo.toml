@@ -14,7 +14,7 @@ readme = "../README.md"
 [features]
 default = ["config"]
 config = ["dep:serde_yaml_ng"]
-http = ["dep:reqwest"]
+http = ["dep:reqwest", "dep:rustls"]
 kafka = ["dep:rskafka", "chrono/clock", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
 snmp = [
     "dep:rasn",

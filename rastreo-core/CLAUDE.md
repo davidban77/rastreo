@@ -17,6 +17,7 @@ src/
 ├── resolver/mod.rs  ← Resolver trait + HickoryResolver default impl
 ├── prober/
 │   ├── mod.rs           ← Prober trait + ProberConfig + create_prober factory
+│   ├── classify.rs      ← shared absence-vs-fault classifier (io / hickory errors) + chain walkers
 │   ├── tcp_connect.rs   ← TcpConnectProber
 │   ├── http.rs          ← HttpProber (feature: http)
 │   ├── dns.rs           ← DnsProber
@@ -60,7 +61,7 @@ src/
 | Feature  | Default | Description |
 |----------|---------|-------------|
 | `config` | yes     | Pulls in `serde_yaml_ng` for YAML scenario-file parsing. Disable for library consumers who construct configs in code and do not need YAML deserialization. |
-| `http`   | no      | Enables the HTTP prober (`reqwest` + rustls-webpki-roots). |
+| `http`   | no      | Enables the HTTP prober (`reqwest` + rustls-webpki-roots). Also pulls `rustls` directly, so a `rustls::Error` in reqwest's source chain can be recognized as proof the TCP connect completed — the port is open even when the TLS handshake fails. |
 | `kafka`  | no      | Enables `KafkaSink` (rskafka producer with rustls TLS support and embedded webpki-roots). |
 | `snmp`   | no      | Enables the SNMP prober for vendor / interface fingerprinting. |
 | `arp`    | no      | Enables the ARP prober for IPv4 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
@@ -117,6 +118,13 @@ Http {
 - Define errors using `thiserror`. Every public function returns `Result<T, RastreoError>`.
 - Never `unwrap()` in this crate. Use `?` propagation or explicit error mapping.
 - The structured error hierarchy uses sub-enums per failure domain (`ConfigError`, `ProbeError`, `ResolverError`, `EncoderError`, `RuntimeError`) accessed via the umbrella `RastreoError`. No blanket `From<std::io::Error>` — sink call sites map I/O failures to `RastreoError::Sink` explicitly.
+
+**The reachability contract.** A prober's `Err` means the probe itself broke — never that the target was quiet. A target that does not answer is `Ok(ProbeOutcome { reachable: false, signals: [] })`. Both halves matter: a fault booked as absence hides a broken probe behind a host that looks dark, and absence booked as a fault floods a scan with errors for every closed port.
+
+- Decide by *reason*, not by counting. `prober::classify` is the single seam: `io_error` and `net_error` (hickory) each return `Absence` or `Fault`. `rustls_error_in_chain` is a chain *walker*, not a classifier — a rustls error proves the TCP connect completed, so HTTP credits the port as open. Probers keep their own outcome enum and delegate the decision to it.
+- An unclassified failure is a **fault**, never absence. A visible fault is recoverable; a fault hidden as a dark host is not.
+- Multi-port probers latch the fault and surface it only when nothing answered: silence on one port is not evidence against a fault on another, but an answer is.
+- Every `ProbeKind` must be able to report both. `tests/reachability_contract.rs` walks `ProbeKind::all()` and fails until a new kind declares both halves — as a live probe case, or as the named unit-test seam covering it.
 
 ## Performance Guidelines
 

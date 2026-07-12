@@ -42,7 +42,17 @@ TlsSanName("edge-fw-1")
 TlsSanName("ip:10.50.0.5")
 ```
 
-A target that refuses the TCP connection, that closes the TCP connection without sending a `ServerHello`, or that times out during the handshake is marked unreachable and contributes no signals. A target that completes the handshake but presents a certificate with neither a CN nor a SAN extension is marked reachable with an empty signal list.
+A target that refuses the TCP connection on every port, or that times out on every port, is marked unreachable and contributes no signals. A target that completes the handshake but presents a certificate with neither a CN nor a SAN extension is marked reachable with an `OpenPort` signal only.
+
+### When the handshake fails
+
+A handshake that fails is never an error. Whatever the reason — the port speaks plain text, the peer sends a fatal alert, the protocol versions do not overlap, no cipher suite is shared — the prober keeps the `OpenPort` signal it already earned, adds no certificate signals, and emits a normal record.
+
+That record is the diagnostic. An open port sitting next to absent certificate signals reads as: something is listening here, and rastreo could not fingerprint it. Legacy gear pinned to an old TLS version shows up exactly this way, and it stays in your inventory instead of being dropped.
+
+Scan `[80, 443]` on an ordinary web server and you get zero probe errors: port 80 does not speak TLS, port 443 hands you the certificate.
+
+The prober's only fault is a socket failure on the scan host itself, such as descriptor exhaustion at connect time. That is the one case where it learns nothing at all. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Certificate handling
 
@@ -117,6 +127,7 @@ probers:
 
 ## See also
 
+- [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [HTTP prober](http.md) — also runs over TLS on ports 443 and 8443. Emits the `Server:` header rather than the certificate identity, so the two are complementary — `http` says what software answers, `tls` says what name the certificate carries.
 - [SSH prober](ssh.md) — the same "identity fingerprint over an unauthenticated transport" philosophy applied to SSH. `TlsSubject` plays a role analogous to `SshHostKey` in tying together IPs that answer with the same claimed identity.
 - [Scenario schema](../reference/scenario.md#tls) — the `tls` prober's field table in the scenario reference.

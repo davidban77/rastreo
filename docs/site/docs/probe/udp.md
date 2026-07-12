@@ -47,7 +47,7 @@ Only one protocol runs per prober entry. Add a second `udp` entry to a scenario 
 
 A response the parser doesn't recognise (garbage bytes, wrong magic cookie, missing header) still marks the target as reachable — a datagram came back — but produces no signal for that port. Distinguishing "server responded but we couldn't parse it" from "nothing came back" is what makes the UDP prober usable for discovery even when the responding service is a slightly nonstandard implementation.
 
-If every configured port fails to respond, the probe returns an error. UDP `recv_from` errors that surface as `ConnectionRefused`, `ConnectionReset`, or `HostUnreachable` map to `Unreachable`; timeouts map to `Timeout`; other I/O errors surface as `Other` with the underlying cause.
+A target that answers on no configured port — every port times out, is refused, or reports the host as unreachable — is marked unreachable and contributes no signals. That is a normal discovery result, not an error. An I/O failure that is neither a timeout nor a refusal (a socket that cannot be opened, for example) is a probe fault and does surface as an error, with the underlying cause in the message. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 
