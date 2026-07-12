@@ -51,6 +51,27 @@ fn should_flush_after_append(buffer_len: usize, threshold: usize) -> bool {
     buffer_len >= threshold
 }
 
+fn buffer_record(buffer: &mut Vec<Vec<u8>>, buffered_bytes: &mut usize, data: &[u8]) {
+    buffer.push(data.to_vec());
+    *buffered_bytes += data.len();
+}
+
+fn build_records(
+    entries: &[Vec<u8>],
+    headers: &BTreeMap<String, Vec<u8>>,
+    timestamp: chrono::DateTime<Utc>,
+) -> Vec<Record> {
+    entries
+        .iter()
+        .map(|value| Record {
+            key: None,
+            value: Some(value.clone()),
+            headers: headers.clone(),
+            timestamp,
+        })
+        .collect()
+}
+
 fn default_batch_threshold() -> usize {
     KafkaSink::DEFAULT_BUFFER_THRESHOLD
 }
@@ -87,7 +108,8 @@ pub struct KafkaSink {
     topic: String,
     brokers: Vec<String>,
     client: PartitionClient,
-    buffer: Vec<u8>,
+    buffer: Vec<Vec<u8>>,
+    buffered_bytes: usize,
     buffer_threshold: usize,
     last_write_delivered: bool,
     dlq_client: Option<PartitionClient>,
@@ -101,7 +123,8 @@ impl std::fmt::Debug for KafkaSink {
         f.debug_struct("KafkaSink")
             .field("topic", &self.topic)
             .field("brokers", &self.brokers)
-            .field("buffer_len", &self.buffer.len())
+            .field("buffered_records", &self.buffer.len())
+            .field("buffered_bytes", &self.buffered_bytes)
             .field("buffer_threshold", &self.buffer_threshold)
             .field("last_write_delivered", &self.last_write_delivered)
             .field("dlq_topic", &self.dlq_topic)
@@ -183,7 +206,8 @@ impl KafkaSink {
             topic,
             brokers,
             client,
-            buffer: Vec::with_capacity(Self::DEFAULT_BUFFER_THRESHOLD),
+            buffer: Vec::new(),
+            buffered_bytes: 0,
             buffer_threshold: Self::DEFAULT_BUFFER_THRESHOLD,
             last_write_delivered: false,
             dlq_client: None,
@@ -233,27 +257,26 @@ impl KafkaSink {
         Ok(self)
     }
 
+    fn clear_buffer(&mut self) {
+        self.buffer.clear();
+        self.buffered_bytes = 0;
+    }
+
     async fn publish_buffer(&mut self) -> Result<(), RastreoError> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        // Buffer retained on produce failure so a caller can retry via flush().
-        // Single-clone on the success/no-DLQ path; the DLQ fallback re-clones from
-        // self.buffer (still intact) only when we actually reach it.
-        let primary_record = Record {
-            key: None,
-            value: Some(self.buffer.clone()),
-            headers: BTreeMap::new(),
-            timestamp: Utc::now(),
-        };
+        let record_count = self.buffer.len() as u64;
+        // One Record per entry: N entries produce N individually-consumable messages in one round-trip.
+        let primary_records = build_records(&self.buffer, &BTreeMap::new(), Utc::now());
 
         let primary_err = match self
             .client
-            .produce(vec![primary_record], Compression::NoCompression)
+            .produce(primary_records, Compression::NoCompression)
             .await
         {
             Ok(_) => {
-                self.buffer.clear();
+                self.clear_buffer();
                 return Ok(());
             }
             Err(e) => e,
@@ -269,7 +292,8 @@ impl KafkaSink {
             topic = self.topic.as_str(),
             dlq_topic = dlq_topic.as_str(),
             error = %primary_err,
-            "kafka sink: primary produce failed; shipping payload to DLQ",
+            records = record_count,
+            "kafka sink: primary produce failed; shipping records to DLQ",
         );
 
         let dlq_headers = if self.include_error_metadata {
@@ -277,21 +301,17 @@ impl KafkaSink {
         } else {
             BTreeMap::new()
         };
-        let dlq_record = Record {
-            key: None,
-            value: Some(self.buffer.clone()),
-            headers: dlq_headers,
-            timestamp: Utc::now(),
-        };
+        let dlq_records = build_records(&self.buffer, &dlq_headers, Utc::now());
 
         match dlq_client
-            .produce(vec![dlq_record], Compression::NoCompression)
+            .produce(dlq_records, Compression::NoCompression)
             .await
         {
             Ok(_) => {
-                // DLQ absorbed the payload; primary failure is quarantined, not propagated.
-                self.buffer.clear();
-                self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
+                // DLQ absorbed every buffered record; primary failure is quarantined, not propagated.
+                self.clear_buffer();
+                self.dlq_delivered
+                    .fetch_add(record_count, Ordering::Relaxed);
                 Ok(())
             }
             Err(dlq_err) => {
@@ -311,8 +331,8 @@ impl KafkaSink {
 impl Sink for KafkaSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        self.buffer.extend_from_slice(data);
-        if should_flush_after_append(self.buffer.len(), self.buffer_threshold) {
+        buffer_record(&mut self.buffer, &mut self.buffered_bytes, data);
+        if should_flush_after_append(self.buffered_bytes, self.buffer_threshold) {
             self.publish_buffer().await?;
             self.last_write_delivered = true;
         }
@@ -467,6 +487,52 @@ mod tests {
     fn should_flush_after_append_is_true_at_or_above_threshold() {
         assert!(should_flush_after_append(1024, 1024));
         assert!(should_flush_after_append(2048, 1024));
+    }
+
+    #[test]
+    fn buffer_record_appends_one_entry_per_call_and_sums_bytes() {
+        let mut buffer: Vec<Vec<u8>> = Vec::new();
+        let mut bytes = 0usize;
+        buffer_record(&mut buffer, &mut bytes, b"one\n");
+        buffer_record(&mut buffer, &mut bytes, b"two\n");
+        buffer_record(&mut buffer, &mut bytes, b"three\n");
+        assert_eq!(buffer.len(), 3, "each write must stay a distinct entry");
+        assert_eq!(buffer[0], b"one\n");
+        assert_eq!(buffer[1], b"two\n");
+        assert_eq!(buffer[2], b"three\n");
+        assert_eq!(bytes, 4 + 4 + 6);
+    }
+
+    #[test]
+    fn build_records_produces_one_record_per_entry() {
+        let entries = vec![b"a\n".to_vec(), b"b\n".to_vec(), b"c\n".to_vec()];
+        let records = build_records(&entries, &BTreeMap::new(), Utc::now());
+        assert_eq!(
+            records.len(),
+            3,
+            "a batched flush of 3 records must produce 3 messages, not one concatenated value"
+        );
+        assert_eq!(records[0].value.as_deref(), Some(b"a\n".as_ref()));
+        assert_eq!(records[1].value.as_deref(), Some(b"b\n".as_ref()));
+        assert_eq!(records[2].value.as_deref(), Some(b"c\n".as_ref()));
+    }
+
+    #[test]
+    fn build_records_attaches_dlq_headers_to_every_record() {
+        let entries = vec![b"a\n".to_vec(), b"b\n".to_vec()];
+        let headers = build_dlq_headers("rastreo.devices");
+        let records = build_records(&entries, &headers, Utc::now());
+        assert_eq!(records.len(), 2, "all buffered records ship to the DLQ");
+        for record in &records {
+            assert!(record.headers.contains_key(HEADER_SOURCE_TOPIC));
+            assert!(record.headers.contains_key(HEADER_ERROR_CLASS));
+        }
+    }
+
+    #[test]
+    fn build_records_on_empty_buffer_produces_no_records() {
+        let records = build_records(&[], &BTreeMap::new(), Utc::now());
+        assert!(records.is_empty());
     }
 
     #[test]

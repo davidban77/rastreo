@@ -291,7 +291,7 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 }
 ```
 
-The `flush_mode` field is itself an internally-tagged object with two variants. `per_record` produces one Kafka message per `DeviceRecord` and prioritises freshness over throughput. `batched` accumulates NDJSON bytes in an internal buffer and produces a single Kafka message when the buffer reaches `threshold_bytes` (default 65536). Inside `batched`, `threshold_bytes` is optional and defaults to 64 KiB.
+The `flush_mode` field is itself an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each Kafka message. `per_record` sends each record immediately and prioritises freshness over throughput. `batched` buffers records and sends them in one produce request when the buffer reaches `threshold_bytes` (default 65536); each record is still its own message, so batching raises throughput without changing the wire framing. Inside `batched`, `threshold_bytes` is optional and defaults to 64 KiB.
 
 The `dead_letter` field carries two properties: `topic` (required, the DLQ Kafka topic name) and `include_error_metadata` (optional, default `true`). When enabled, DLQ messages carry three headers: `x-rastreo-source-topic`, `x-rastreo-error-class` (currently always `produce_failure`), and `x-rastreo-dlq-timestamp` (RFC 3339 UTC). See [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue) for the failure model and consumer guidance.
 
@@ -343,7 +343,7 @@ The `credentials` field is an internally-tagged object with four variants distin
 {"auth_type": "creds", "creds_file": "/etc/rastreo/nats.creds"}
 ```
 
-The `delivery` field is an internally-tagged object with two variants. `per_record` publishes each record and waits for the JetStream ack — the simplest at-least-once model. `batched` accumulates NDJSON bytes until the buffer reaches `threshold_bytes` (default 65536) before publishing one JetStream message; pending acks are drained on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch.
+The `delivery` field is an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each NATS message. `per_record` publishes each record and waits for its JetStream ack — the simplest at-least-once model. `batched` publishes each record as its own message too, but pipelines the acks: it buffers until `threshold_bytes` (default 65536), fires the publishes, and drains the pending acks on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch.
 
 ```json
 {"mode": "per_record"}

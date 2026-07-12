@@ -341,6 +341,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_scan_drains_batched_server_sink_at_completion() {
+        use crate::state::{SharedSink, SinkReachability};
+        use rastreo_core::{RastreoError, Sink, SinkType};
+        use std::sync::Mutex as StdMutex;
+        use tokio::sync::Mutex;
+
+        #[derive(Default)]
+        struct BufferingInner {
+            committed: StdMutex<Vec<Vec<u8>>>,
+        }
+
+        struct BufferingSink {
+            inner: Arc<BufferingInner>,
+            buffer: Vec<Vec<u8>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for BufferingSink {
+            async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+                self.buffer.push(data.to_vec());
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                let mut committed = self
+                    .inner
+                    .committed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                committed.extend(self.buffer.drain(..));
+                Ok(())
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Kafka
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let base = state_with_system_resolver();
+        let inner = Arc::new(BufferingInner::default());
+        let sink = BufferingSink {
+            inner: Arc::clone(&inner),
+            buffer: Vec::new(),
+        };
+        let shared: SharedSink = Arc::new(Mutex::new(Box::new(sink) as Box<dyn Sink>));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        reach.record_success();
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = create_scan(State(state), Json(s))
+            .await
+            .expect("create_scan");
+        assert_eq!(response.summary.records_emitted, 1);
+        let committed = inner.committed.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            committed.len(),
+            1,
+            "the server's batched sink must be drained before the response returns"
+        );
+    }
+
+    #[tokio::test]
     async fn create_scan_without_server_sink_still_returns_records_in_response_body() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

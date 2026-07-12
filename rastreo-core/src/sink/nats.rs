@@ -27,6 +27,11 @@ fn should_flush_after_append(buffer_len: usize, threshold: usize) -> bool {
     buffer_len >= threshold
 }
 
+fn buffer_record(buffer: &mut Vec<Vec<u8>>, buffered_bytes: &mut usize, data: &[u8]) {
+    buffer.push(data.to_vec());
+    *buffered_bytes += data.len();
+}
+
 pub fn default_batch_threshold() -> usize {
     NatsSink::DEFAULT_BUFFER_THRESHOLD
 }
@@ -107,7 +112,8 @@ pub struct NatsSink {
     stream: String,
     servers: Vec<String>,
     ctx: Context,
-    buffer: Vec<u8>,
+    buffer: Vec<Vec<u8>>,
+    buffered_bytes: usize,
     buffer_threshold: usize,
     pending_acks: Vec<PendingPublish>,
     last_write_delivered: bool,
@@ -123,7 +129,8 @@ impl std::fmt::Debug for NatsSink {
             .field("subject", &self.subject)
             .field("stream", &self.stream)
             .field("servers", &self.servers)
-            .field("buffer_len", &self.buffer.len())
+            .field("buffered_records", &self.buffer.len())
+            .field("buffered_bytes", &self.buffered_bytes)
             .field("buffer_threshold", &self.buffer_threshold)
             .field("pending_acks", &self.pending_acks.len())
             .field("last_write_delivered", &self.last_write_delivered)
@@ -207,7 +214,8 @@ impl NatsSink {
             stream,
             servers,
             ctx,
-            buffer: Vec::with_capacity(Self::DEFAULT_BUFFER_THRESHOLD),
+            buffer: Vec::new(),
+            buffered_bytes: 0,
             buffer_threshold: 1,
             pending_acks: Vec::new(),
             last_write_delivered: false,
@@ -266,68 +274,75 @@ impl NatsSink {
         }
     }
 
+    fn requeue(&mut self, failed: Bytes, rest: std::vec::IntoIter<Vec<u8>>) {
+        let mut buffer = Vec::with_capacity(rest.len() + 1);
+        buffer.push(failed.to_vec());
+        buffer.extend(rest);
+        self.buffered_bytes = buffer.iter().map(|entry| entry.len()).sum();
+        self.buffer = buffer;
+    }
+
     async fn publish_buffer(&mut self) -> Result<(), RastreoError> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        let payload = Bytes::from(self.buffer.clone());
         let subject = self.subject.clone();
+        // One publish per entry, pipelined; a non-recoverable failure retains the tail for retry.
+        let mut remaining = std::mem::take(&mut self.buffer).into_iter();
+        self.buffered_bytes = 0;
 
-        let primary_err = match self.ctx.publish(subject.clone(), payload.clone()).await {
-            Ok(ack_future) => {
-                self.buffer.clear();
-                self.pending_acks.push(PendingPublish {
-                    payload,
-                    ack: ack_future,
-                });
-                return Ok(());
-            }
-            Err(e) => e,
-        };
+        while let Some(entry) = remaining.next() {
+            let payload = Bytes::from(entry);
+            let primary_err = match self.ctx.publish(subject.clone(), payload.clone()).await {
+                Ok(ack) => {
+                    self.pending_acks.push(PendingPublish { payload, ack });
+                    continue;
+                }
+                Err(e) => e,
+            };
 
-        let (Some(_), Some(dlq_subject)) = (self.dlq_stream.as_ref(), self.dlq_subject.as_ref())
-        else {
-            return Err(build_publish_error(&subject, &self.servers, primary_err));
-        };
-
-        tracing::warn!(
-            subject = subject.as_str(),
-            dlq_subject = dlq_subject.as_str(),
-            error = %primary_err,
-            "nats sink: primary publish failed; shipping payload to DLQ",
-        );
-
-        let dlq_ack_fut = match self
-            .publish_to_dlq(payload, ERROR_CLASS_PUBLISH_FAILURE)
-            .await
-        {
-            Ok(fut) => fut,
-            Err(dlq_err) => {
-                tracing::error!(
-                    subject = subject.as_str(),
-                    dlq_subject = dlq_subject.as_str(),
-                    dlq_error = %dlq_err,
-                    "nats sink: DLQ publish also failed; retaining buffer",
-                );
+            if self.dlq_stream.is_none() || self.dlq_subject.is_none() {
+                self.requeue(payload, remaining);
                 return Err(build_publish_error(&subject, &self.servers, primary_err));
             }
-        };
 
-        // DLQ replay is awaited synchronously: quarantined records can't be batched with
-        // primary-path acks, and reporting DLQ failure post-hoc via drain_pending_acks
-        // would lose the causal link to the primary failure.
-        if let Err(dlq_ack_err) = dlq_ack_fut.await {
-            tracing::error!(
+            tracing::warn!(
                 subject = subject.as_str(),
-                dlq_subject = dlq_subject.as_str(),
-                dlq_error = %dlq_ack_err,
-                "nats sink: DLQ publish accepted but ack rejected; retaining buffer",
+                error = %primary_err,
+                "nats sink: primary publish failed; shipping record to DLQ",
             );
-            return Err(build_ack_error(&subject, &self.servers, dlq_ack_err));
-        }
 
-        self.buffer.clear();
-        self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
+            // DLQ replay is awaited synchronously: quarantined records can't be batched with
+            // primary-path acks, and reporting DLQ failure post-hoc via drain_pending_acks
+            // would lose the causal link to the primary failure.
+            let dlq_ack_fut = match self
+                .publish_to_dlq(payload.clone(), ERROR_CLASS_PUBLISH_FAILURE)
+                .await
+            {
+                Ok(fut) => fut,
+                Err(dlq_err) => {
+                    tracing::error!(
+                        subject = subject.as_str(),
+                        dlq_error = %dlq_err,
+                        "nats sink: DLQ publish also failed; retaining buffer",
+                    );
+                    self.requeue(payload, remaining);
+                    return Err(build_publish_error(&subject, &self.servers, primary_err));
+                }
+            };
+
+            if let Err(dlq_ack_err) = dlq_ack_fut.await {
+                tracing::error!(
+                    subject = subject.as_str(),
+                    dlq_error = %dlq_ack_err,
+                    "nats sink: DLQ publish accepted but ack rejected; retaining buffer",
+                );
+                self.requeue(payload, remaining);
+                return Err(build_ack_error(&subject, &self.servers, dlq_ack_err));
+            }
+
+            self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -436,8 +451,8 @@ async fn connect_with_credentials(
 impl Sink for NatsSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        self.buffer.extend_from_slice(data);
-        if should_flush_after_append(self.buffer.len(), self.buffer_threshold) {
+        buffer_record(&mut self.buffer, &mut self.buffered_bytes, data);
+        if should_flush_after_append(self.buffered_bytes, self.buffer_threshold) {
             self.publish_buffer().await?;
             if self.buffer_threshold == 1 {
                 self.drain_pending_acks().await?;
@@ -513,6 +528,24 @@ mod tests {
     fn should_flush_after_append_is_true_at_or_above_threshold() {
         assert!(should_flush_after_append(1024, 1024));
         assert!(should_flush_after_append(2048, 1024));
+    }
+
+    #[test]
+    fn buffer_record_keeps_each_record_a_distinct_entry() {
+        let mut buffer: Vec<Vec<u8>> = Vec::new();
+        let mut bytes = 0usize;
+        buffer_record(&mut buffer, &mut bytes, b"one\n");
+        buffer_record(&mut buffer, &mut bytes, b"two\n");
+        buffer_record(&mut buffer, &mut bytes, b"three\n");
+        assert_eq!(
+            buffer.len(),
+            3,
+            "a batched flush of 3 records must issue 3 publishes, not one concatenated payload"
+        );
+        assert_eq!(buffer[0], b"one\n");
+        assert_eq!(buffer[1], b"two\n");
+        assert_eq!(buffer[2], b"three\n");
+        assert_eq!(bytes, 4 + 4 + 6);
     }
 
     #[test]

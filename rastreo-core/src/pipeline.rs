@@ -116,7 +116,7 @@ pub async fn run_discovery_with_components(
     run_discovery_with_components_cancellable(scenario, resolver, sink, rx).await
 }
 
-/// Same as [`run_discovery`], but aborts between probers and between record emissions when `cancel` flips to true. The sink is flushed on every exit path.
+/// Same as [`run_discovery`], but aborts between probers and between record emissions when `cancel` flips to true. The sink is closed on every exit path.
 pub async fn run_discovery_cancellable(
     scenario: &DiscoverScenarioConfig,
     cancel: watch::Receiver<bool>,
@@ -127,7 +127,7 @@ pub async fn run_discovery_cancellable(
     run_discovery_with_components_cancellable(scenario, resolver, sink, cancel).await
 }
 
-/// Same as [`run_discovery_with_components`], but aborts between probers and between record emissions when `cancel` flips to true. The sink is flushed on every exit path.
+/// Same as [`run_discovery_with_components`], but aborts between probers and between record emissions when `cancel` flips to true. The sink is closed on every exit path.
 pub async fn run_discovery_with_components_cancellable(
     scenario: &DiscoverScenarioConfig,
     resolver: Arc<dyn Resolver>,
@@ -254,10 +254,10 @@ pub async fn run_discovery_with_components_cancellable(
         records_emitted += 1;
     }
 
-    let flush_err = sink.flush().await.err();
+    let close_err = sink.close().await.err();
 
     if cancelled {
-        tracing::info!(records_emitted, "discovery cancelled; sink flushed");
+        tracing::info!(records_emitted, "discovery cancelled; sink closed");
     }
 
     let dlq_records_by_type = sink.dlq_records_by_type();
@@ -269,7 +269,7 @@ pub async fn run_discovery_with_components_cancellable(
     if let Some(e) = emit_err {
         return Err(e);
     }
-    if let Some(e) = flush_err {
+    if let Some(e) = close_err {
         return Err(e);
     }
 
@@ -1272,6 +1272,100 @@ mod tests {
             .expect("run_discovery_with_components");
         assert!(!summary.cancelled);
         assert_eq!(summary.records_emitted, 1);
+    }
+
+    #[derive(Default)]
+    struct BatchingSinkInner {
+        committed: std::sync::Mutex<Vec<Vec<u8>>>,
+        closes: AtomicUsize,
+        flushes: AtomicUsize,
+    }
+
+    struct BatchingSink {
+        inner: Arc<BatchingSinkInner>,
+        buffer: Vec<Vec<u8>>,
+    }
+
+    impl BatchingSink {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(BatchingSinkInner::default()),
+                buffer: Vec::new(),
+            }
+        }
+        fn handle(&self) -> Arc<BatchingSinkInner> {
+            Arc::clone(&self.inner)
+        }
+        fn commit(&mut self) {
+            let mut committed = self
+                .inner
+                .committed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            committed.extend(self.buffer.drain(..));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sink::Sink for BatchingSink {
+        async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+            self.buffer.push(data.to_vec());
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            self.inner.flushes.fetch_add(1, Ordering::SeqCst);
+            self.commit();
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<(), RastreoError> {
+            self.inner.closes.fetch_add(1, Ordering::SeqCst);
+            self.commit();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_discovery_closes_the_sink_once_at_end_of_stream() {
+        let port = open_loopback_port().await;
+        let scenario = scenario_for_port(port);
+
+        let sink = Box::new(BatchingSink::new());
+        let handle = sink.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, sink)
+            .await
+            .expect("run_discovery_with_components");
+        assert_eq!(summary.records_emitted, 1);
+        assert_eq!(
+            handle.closes.load(Ordering::SeqCst),
+            1,
+            "the pipeline must close the sink exactly once at end-of-stream"
+        );
+        assert_eq!(
+            handle.flushes.load(Ordering::SeqCst),
+            0,
+            "the terminal drain is close(), not flush()"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_discovery_close_drains_a_batched_sink() {
+        let port = open_loopback_port().await;
+        let scenario = scenario_for_port(port);
+
+        let sink = Box::new(BatchingSink::new());
+        let handle = sink.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, sink)
+            .await
+            .expect("run_discovery_with_components");
+        assert_eq!(summary.records_emitted, 1);
+        let committed = handle.committed.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            committed.len(),
+            1,
+            "a record buffered during write must be delivered by close(), not lost"
+        );
     }
 
     #[tokio::test]

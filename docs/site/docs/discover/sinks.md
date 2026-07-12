@@ -32,7 +32,7 @@ rastreo discover \
 
 ## Kafka
 
-The Kafka sink publishes `DeviceRecord` events to a Kafka topic, encoded as NDJSON. Brokers are comma-separated; the topic is a single name. Two flush modes are available: batched (the default, accumulates records into one Kafka message at a configurable byte threshold) and per-record (one Kafka message per `DeviceRecord`). Use `--kafka-flush-per-record` or `--kafka-batch-threshold <BYTES>` on the CLI; see [Integrate](../integrate/index.md) for the full wire contract.
+The Kafka sink publishes `DeviceRecord` events to a Kafka topic. Each Kafka message carries exactly one `DeviceRecord`. Brokers are comma-separated; the topic is a single name. Two flush modes are available: batched (the default — buffers records and sends them in one produce request at a configurable byte threshold) and per-record (sends each record immediately). Both put one record in each message; the mode changes throughput, not the wire framing. Use `--kafka-flush-per-record` or `--kafka-batch-threshold <BYTES>` on the CLI; see [Integrate](../integrate/index.md) for the full wire contract.
 
 !!! warning "Requires the `kafka` build feature"
     The `kafka` value for `--sink` only exists when the binary is built with the `kafka` Cargo feature. The default build does not include it. To build with Kafka support:
@@ -89,7 +89,7 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 
 ## NATS
 
-The NATS sink publishes `DeviceRecord` events to a NATS JetStream subject, encoded as NDJSON. Because the wire options are richer than Kafka (four auth methods, two delivery modes, a stream binding), the NATS sink is configured through YAML scenarios loaded with `--file` or through the `POST /scans` request body — there are no dedicated CLI flags. Two delivery modes are available: per-record (the default, publishes each record and waits for the JetStream ack) and batched (accumulates NDJSON bytes into one publish at a configurable byte threshold). See [Integrate · NATS](../integrate/nats.md) for the full wire contract, auth details, and stream setup.
+The NATS sink publishes `DeviceRecord` events to a NATS JetStream subject. Each NATS message carries exactly one `DeviceRecord`. Because the wire options are richer than Kafka (four auth methods, two delivery modes, a stream binding), the NATS sink is configured through YAML scenarios loaded with `--file` or through the `POST /scans` request body — there are no dedicated CLI flags. Two delivery modes are available: per-record (the default — publishes each record and waits for its JetStream ack) and batched (pipelines the acks of many per-record publishes at a configurable byte threshold). Both put one record in each message. See [Integrate · NATS](../integrate/nats.md) for the full wire contract, auth details, and stream setup.
 
 !!! warning "Requires the `nats` build feature"
     The `type: nats` value only exists when the binary is built with the `nats` Cargo feature. The default build does not include it. To build with NATS support:
@@ -162,7 +162,7 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 
 ## NDJSON contract
 
-The stdout and file sinks emit one `DeviceRecord` per NDJSON line. Each line is a complete JSON object — no surrounding array, no trailing comma. The Kafka and NATS sinks use the same NDJSON encoding for their payload bytes; see the [Integrate](../integrate/index.md) section for how those bytes map to Kafka records or NATS JetStream messages.
+The stdout and file sinks emit one `DeviceRecord` per NDJSON line. Each line is a complete JSON object — no surrounding array, no trailing comma. The Kafka and NATS sinks use the same JSON encoding, and each message they publish carries exactly one `DeviceRecord`. See the [Integrate](../integrate/index.md) section for the full transport contract.
 
 ```json
 {"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T11:22:51.423959000Z","signals":[{"OpenPort":443}]}

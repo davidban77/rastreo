@@ -135,6 +135,12 @@ pub trait Sink: Send + Sync {
 
     async fn flush(&mut self) -> Result<(), RastreoError>;
 
+    /// Terminal drain at end-of-stream; default delegates to `flush`. Batching sinks
+    /// override only when they need connection-drain beyond a buffer flush.
+    async fn close(&mut self) -> Result<(), RastreoError> {
+        self.flush().await
+    }
+
     // Default: every write is delivered. Batching sinks override to reflect buffered state.
     fn last_write_delivered(&self) -> bool {
         true
@@ -262,6 +268,16 @@ mod tests {
 
     struct MockSink {
         buffer: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl MockSink {
+        fn new() -> Self {
+            Self {
+                buffer: Vec::new(),
+                flushes: 0,
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -272,25 +288,33 @@ mod tests {
         }
 
         async fn flush(&mut self) -> Result<(), RastreoError> {
+            self.flushes += 1;
             Ok(())
         }
     }
 
     #[test]
     fn default_last_write_delivered_is_true() {
-        let s: Box<dyn Sink> = Box::new(MockSink { buffer: Vec::new() });
+        let s: Box<dyn Sink> = Box::new(MockSink::new());
         assert!(s.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn default_close_delegates_to_flush() {
+        let mut s = MockSink::new();
+        s.close().await.expect("close");
+        assert_eq!(s.flushes, 1, "default close must call flush exactly once");
     }
 
     #[test]
     fn default_dlq_records_delivered_is_zero() {
-        let s: Box<dyn Sink> = Box::new(MockSink { buffer: Vec::new() });
+        let s: Box<dyn Sink> = Box::new(MockSink::new());
         assert_eq!(s.dlq_records_delivered(), 0);
     }
 
     #[tokio::test]
     async fn default_probe_reports_reachable() {
-        let s: Box<dyn Sink> = Box::new(MockSink { buffer: Vec::new() });
+        let s: Box<dyn Sink> = Box::new(MockSink::new());
         s.probe().await.expect("default probe must succeed");
     }
 
