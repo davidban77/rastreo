@@ -8,7 +8,7 @@ The page below covers the failures that come up most often when records do not l
 
 ## Zero records emitted
 
-The end-of-run summary on stderr reads `records_emitted=0`, even though `probe_attempts` is non-zero. The CLI also prints a hint that no probe reached an open port.
+The end-of-run summary on stderr reads `records_emitted=0`, even though `probe_attempts` is non-zero. The CLI also prints a hint that no probe reached an open port. `probe_errors` reads `0` — nothing went wrong, nothing answered. A target that does not answer is a normal negative result, not an error.
 
 Common causes:
 
@@ -17,6 +17,23 @@ Common causes:
 - A `--target` CIDR or range expanded to addresses that are not used in the segment. Most of a `/24` is normally unused.
 
 Verify the target answers TCP from the host running the scan: `nc -vz <ip> <port>` or `curl -v telnet://<ip>:<port>`. If `nc` succeeds and rastreo still emits zero records, increase verbosity with `-v` or `-vv` to see per-probe outcomes.
+
+To emit a record for every probed address, silent ones included, set `include_unreachable: true` on the `direct` fuser — see [Recording addresses that did not answer](../reference/scenario.md#recording-addresses-that-did-not-answer).
+
+## Probe errors on every probe
+
+The summary reads `probe_errors` equal to `probe_attempts`. Every probe hit a fault, which means no probe could run. Offline targets never cause this.
+
+Read the fault message the CLI prints next to the summary, then check the usual causes:
+
+- The ARP, NDP, or ICMP prober is running without `CAP_NET_RAW`. See [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
+- The ARP prober is aimed at IPv6 targets, or the NDP prober at IPv4 targets. Each is bound to one address family.
+- The selected interface has no address in the target's family, or no interface reaches the target subnet at all.
+- The scan host has run out of file descriptors or is denied a socket. A local socket failure is the one fault the connection-based probers report.
+
+A TLS handshake failure is not in this list. An `https` probe against a device that will not negotiate still records the open port and raises no error. See [HTTP · Signals emitted](../probe/http.md#signals-emitted).
+
+The same rule applies to `rastreo-server`: `rastreo_server_probes_total{outcome="error"}` counts probe faults only. See [Observability · what `outcome` means](../reference/observability.md#what-outcome-means).
 
 ## DNS resolution failures
 

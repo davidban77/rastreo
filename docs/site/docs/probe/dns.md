@@ -63,7 +63,7 @@ Both transports honour the scenario-level `timeout_ms`. The prober owns the dead
 
 A response with zero matching answers (`NOERROR` with an empty answer section), an `NXDOMAIN` response, or a `REFUSED` response all mark the target as reachable but produce no signals for that `(port, query_name)` combination. The distinction between "server responded, no data" and "server unreachable" is what makes the DNS prober useful for discovery: reachability alone tells you the target speaks DNS.
 
-If every `(port, query_name)` combination fails to reach the server, the probe returns an error. Timeouts map to `Timeout`; connection-refused or unreachable-host errors map to `Unreachable`; other transport errors surface as `Other` with the underlying cause.
+A target that answers none of the `(port, query_name)` combinations — every query times out, is refused, or hits an unreachable network — is marked unreachable and contributes no signals. That is a normal discovery result, not an error. A transport failure that is neither a timeout nor a refusal (for example a resolver that cannot be built for the target) is a probe fault and does surface as an error. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 

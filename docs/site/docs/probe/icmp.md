@@ -37,7 +37,7 @@ The prober does not take a `ports` field. ICMP has no port concept — the packe
 
 The `<value>` is always microseconds. A same-host loopback probe typically returns tens to low hundreds of µs. A LAN probe typically returns hundreds of µs to a few ms (i.e. a few thousand µs). A wide-area probe typically returns tens of ms (tens of thousands of µs). Example: `IcmpEchoRttMicros(4237)` means the fastest round-trip was 4.237 ms.
 
-A target that returns no reply within the scenario-level `timeout_ms` budget is marked unreachable and contributes no signal. Partial success — for example two of three requests answered — still marks the target reachable and reports the minimum of the observed RTTs.
+A target that returns no reply within the scenario-level `timeout_ms` budget is marked unreachable and contributes no signal. The same applies when the network reports the host or the network as unreachable: that is absence, not a probe error. Partial success — for example two of three requests answered — still marks the target reachable and reports the minimum of the observed RTTs.
 
 ## Address families
 
@@ -113,6 +113,7 @@ probers:
 
 ## See also
 
+- [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [ARP prober](arp.md) — IPv4 link-layer discovery. Also uses `CAP_NET_RAW`, but without an unprivileged fallback.
 - [NDP prober](ndp.md) — IPv6 link-layer discovery.
 - [Scenario schema](../reference/scenario.md#icmp) — the full `icmp` field table.

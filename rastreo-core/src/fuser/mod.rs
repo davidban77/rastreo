@@ -126,8 +126,12 @@ impl Fuser for DirectFuser {
             }
         }
 
+        // Provenance, not coverage: a prober that got no answer contributed nothing.
         let mut probe_kinds: Vec<ProbeKind> = Vec::new();
         for outcome in outcomes {
+            if !outcome.reachable {
+                continue;
+            }
             if !probe_kinds.contains(&outcome.kind) {
                 probe_kinds.push(outcome.kind);
             }
@@ -464,6 +468,36 @@ mod tests {
         ];
         let record = f.fuse(&outcomes).expect("ok").expect("some");
         assert_eq!(record.probe_kinds, vec![ProbeKind::Http, ProbeKind::Snmp]);
+    }
+
+    #[test]
+    fn direct_fuser_probe_kinds_exclude_silent_probers() {
+        let f = DirectFuser::new();
+        let outcomes = vec![
+            outcome_with_kind(1, ProbeKind::TcpConnect, true, vec![Signal::OpenPort(22)]),
+            outcome_with_kind(1, ProbeKind::Snmp, false, vec![]),
+        ];
+        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        assert_eq!(
+            record.probe_kinds,
+            vec![ProbeKind::TcpConnect],
+            "a prober that got no answer contributed no provenance"
+        );
+    }
+
+    #[test]
+    fn direct_fuser_include_unreachable_record_has_empty_probe_kinds() {
+        let f = DirectFuser::new().with_include_unreachable(true);
+        let outcomes = vec![
+            outcome_with_kind(1, ProbeKind::TcpConnect, false, vec![]),
+            outcome_with_kind(1, ProbeKind::Snmp, false, vec![]),
+        ];
+        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        assert!(
+            record.probe_kinds.is_empty(),
+            "nothing responded, so nothing is provenance: {:?}",
+            record.probe_kinds
+        );
     }
 
     #[test]

@@ -163,7 +163,7 @@ async fn discover_emits_zero_records_hint_when_no_records() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
-async fn discover_prints_runtime_hint_on_dns_probe_error_against_refused_port() {
+async fn discover_reports_no_probe_error_for_dns_target_on_refused_port() {
     let dir = tempfile::tempdir().expect("tempdir");
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: dns\n        ports: [1]\n        query_names: [\"example.com\"]\n";
     let path = write_yaml(&dir, "dns-refused.yml", yaml);
@@ -188,16 +188,16 @@ async fn discover_prints_runtime_hint_on_dns_probe_error_against_refused_port() 
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
+        stderr.contains("probe_errors=0"),
+        "a server that does not answer must not count as a probe error: {stderr}"
+    );
+    assert!(
         stderr.contains("records_emitted=0"),
         "stderr missing zero-records summary: {stderr}"
     );
     assert!(
-        stderr.contains("hint:"),
-        "stderr missing runtime hint line: {stderr}"
-    );
-    assert!(
-        !stderr.contains("hint: 0 records emitted"),
-        "runtime hint should take precedence over the 0-records fallback: {stderr}"
+        stderr.contains("hint: 0 records emitted"),
+        "stderr missing the zero-records hint: {stderr}"
     );
 }
 

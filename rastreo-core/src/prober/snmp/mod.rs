@@ -17,6 +17,7 @@ use tokio::net::UdpSocket;
 
 use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 const RECV_BUF_LEN: usize = 8192;
@@ -176,14 +177,10 @@ pub(super) async fn bind_socket(target_addr: SocketAddr) -> Result<UdpSocket, Po
 }
 
 pub(super) fn classify_io_error(err: &std::io::Error) -> PortOutcome {
-    match err.kind() {
-        std::io::ErrorKind::TimedOut => PortOutcome::Timeout,
-        std::io::ErrorKind::ConnectionRefused
-        | std::io::ErrorKind::ConnectionReset
-        | std::io::ErrorKind::HostUnreachable
-        | std::io::ErrorKind::NetworkUnreachable
-        | std::io::ErrorKind::ConnectionAborted => PortOutcome::Unreachable,
-        _ => PortOutcome::Other(err.to_string()),
+    match classify::io_error(err) {
+        Disposition::Absence if err.kind() == std::io::ErrorKind::TimedOut => PortOutcome::Timeout,
+        Disposition::Absence => PortOutcome::Unreachable,
+        Disposition::Fault => PortOutcome::Other(err.to_string()),
     }
 }
 
@@ -207,10 +204,8 @@ impl Prober for SnmpProber {
     ) -> Result<ProbeOutcome, RastreoError> {
         let mut signals = Vec::new();
         let mut any_reachable = false;
-        let mut timeouts = 0usize;
-        let mut unreachables = 0usize;
-        let mut decode_failures = 0usize;
-        let mut last_other: Option<String> = None;
+        let mut decode_failed_port: Option<u16> = None;
+        let mut last_fault: Option<String> = None;
 
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
@@ -219,37 +214,35 @@ impl Prober for SnmpProber {
                     any_reachable = true;
                     signals.append(&mut new_signals);
                 }
-                PortOutcome::Timeout => timeouts += 1,
-                PortOutcome::Unreachable => unreachables += 1,
-                PortOutcome::DecodeFailed => decode_failures += 1,
+                PortOutcome::Timeout | PortOutcome::Unreachable => {}
+                PortOutcome::DecodeFailed => {
+                    decode_failed_port.get_or_insert(port);
+                }
                 PortOutcome::Other(msg) => {
-                    last_other = Some(format!("snmp probe failed on port {port}: {msg}"));
+                    last_fault = Some(format!("snmp probe failed on port {port}: {msg}"));
                 }
             }
         }
 
         if !any_reachable {
-            let err = if decode_failures > 0
-                && decode_failures >= timeouts
-                && decode_failures >= unreachables
-            {
-                ProbeError::Other("snmp decode failed on all ports".to_string())
-            } else if unreachables > 0 && unreachables >= timeouts {
-                ProbeError::Unreachable {
-                    target: target.ip.to_string(),
-                }
-            } else if timeouts > 0 {
-                ProbeError::Timeout {
-                    timeout_ms: ctx.timeout.as_millis() as u64,
-                }
-            } else if let Some(msg) = last_other {
-                ProbeError::Other(msg)
-            } else {
-                ProbeError::Timeout {
-                    timeout_ms: ctx.timeout.as_millis() as u64,
-                }
-            };
-            return Err(err.into());
+            // Silence on one port is not evidence against a fault on another, but an answer is:
+            // an agent that answered with something we cannot parse is a fault, never absence.
+            if let Some(port) = decode_failed_port {
+                return Err(ProbeError::Other(format!(
+                    "snmp reply on port {port} could not be decoded"
+                ))
+                .into());
+            }
+            if let Some(msg) = last_fault {
+                return Err(ProbeError::Other(msg).into());
+            }
+            return Ok(ProbeOutcome {
+                kind: ProbeKind::Snmp,
+                target_ip: target.ip,
+                timestamp: SystemTime::now(),
+                reachable: false,
+                signals: Vec::new(),
+            });
         }
 
         Ok(ProbeOutcome {
@@ -529,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snmp_prober_returns_timeout_when_no_agent_bound() {
+    async fn snmp_prober_returns_unreachable_outcome_when_no_agent_bound() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let port = socket.local_addr().expect("addr").port();
         let _hold = tokio::spawn(async move {
@@ -545,15 +538,86 @@ mod tests {
             UsmCredentials::default(),
         )
         .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(200))
+            .await
+            .expect("a silent agent is an outcome, not an error");
+        assert_eq!(outcome.kind, ProbeKind::Snmp);
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    async fn spawn_undecodable_agent() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                if let Ok((_, peer)) = socket.recv_from(&mut buf).await {
+                    let _ = socket.send_to(&[0xff, 0xfe, 0xfd, 0xfc], peer).await;
+                }
+            }
+        });
+        port
+    }
+
+    async fn dark_port() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let _ = socket.recv_from(&mut buf).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn snmp_prober_errors_when_agent_reply_cannot_be_decoded() {
+        let port = spawn_undecodable_agent().await;
+        let prober = SnmpProber::new(
+            vec![port],
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
+        let err = prober
+            .probe(&loopback_target(), &ctx_with_timeout(500))
+            .await
+            .expect_err("an undecodable reply is a probe fault");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("decode"), "got: {msg}");
+                assert!(msg.contains(&port.to_string()), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn snmp_decode_failure_is_a_fault_even_when_other_ports_are_dark() {
+        let undecodable = spawn_undecodable_agent().await;
+        let silent_a = dark_port().await;
+        let silent_b = dark_port().await;
+
+        let prober = SnmpProber::new(
+            vec![undecodable, silent_a, silent_b],
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
         let err = prober
             .probe(&loopback_target(), &ctx_with_timeout(200))
             .await
-            .expect_err("must error");
+            .expect_err("two dark ports must not mask an undecodable agent on a third");
         match err {
-            RastreoError::Probe(ProbeError::Timeout { timeout_ms }) => {
-                assert_eq!(timeout_ms, 200);
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("decode"), "got: {msg}");
             }
-            other => panic!("expected Timeout, got {other:?}"),
+            other => panic!("expected ProbeError::Other, got {other:?}"),
         }
     }
 }

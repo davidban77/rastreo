@@ -72,6 +72,8 @@ Establishes a TCP connection to each listed port on each resolved target IP; an 
 {"type": "tcp_connect", "ports": [22, 80, 443]}
 ```
 
+A port that is closed, refused, or silent is a normal negative result, not an error. A socket failure on the scan host itself — file-descriptor exhaustion, for example — is a probe fault and surfaces as an error. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults).
+
 ### `http`
 
 Issues a `GET` request against each configured port and emits the response `Server:` header as an `HttpBanner(<value>)` signal. See the [HTTP prober page](../probe/http.md) for TLS behaviour and scheme resolution rules.
@@ -368,7 +370,7 @@ The `fuser` field is an internally-tagged object. Three fusers are available: `d
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"direct"`. |
-| `include_unreachable` | bool | no | `false` | When `true`, emit a record for targets that produced no reachable probe outcomes. |
+| `include_unreachable` | bool | no | `false` | Emit a record for every probed address, including addresses that no prober reached. See [Recording addresses that did not answer](#recording-addresses-that-did-not-answer). |
 | `confidence_baseline` | float | no | `0.1` | Starting confidence before any signals are counted. Must be finite and in `[0.0, 1.0]`. |
 | `confidence_per_signal` | float | no | `0.1` | Confidence added per observed signal. Must be finite and non-negative. |
 
@@ -378,6 +380,27 @@ The `fuser` field is an internally-tagged object. Three fusers are available: `d
   "include_unreachable": false,
   "confidence_baseline": 0.3,
   "confidence_per_signal": 0.2
+}
+```
+
+#### Recording addresses that did not answer
+
+By default (`include_unreachable: false`) an address that no prober reached produces no record. A scan of `10.0.0.0/24` with twelve live hosts emits twelve records, not 254. This is what you want when the records feed a source of truth: only real devices are written.
+
+Set `include_unreachable: true` when you want one record per probed address, silent ones included. A silent address gets a record with an empty `signals` list and no `probe_kinds` field at all: no prober observed the device, so there is no provenance to report. Its confidence equals `confidence_baseline` (`0.1` by default). Two cases where you want this:
+
+- **Address-space audits** — you need to know which addresses in a range are in use and which are free, so the free ones must appear too.
+- **Change detection** — a consumer compares consecutive scans. It needs to see an address turn silent, rather than watch it vanish from the stream.
+
+`oui_enrichment` and `identity` wrap an inner fuser. Set the flag on the `direct` fuser at the bottom of the chain.
+
+```json
+{
+  "type": "identity",
+  "inner": {
+    "type": "direct",
+    "include_unreachable": true
+  }
 }
 ```
 

@@ -26,9 +26,12 @@ spec:
           annotations:
             summary: "rastreo-server probe error rate exceeds 50% over 10 minutes"
             description: |
-              Probe error ratio has stayed above 50% for the last 10 minutes on
-              {{ `{{ $labels.instance }}` }}. Investigate target reachability or
-              scenario configuration before continuing.
+              More than half of all probes hit a fault over the last 10 minutes on
+              {{ `{{ $labels.instance }}` }}. A probe fault means the probe could not
+              run — a missing CAP_NET_RAW capability, a socket that fails to open, an
+              address-family mismatch, or an undecodable reply. Targets that simply do
+              not answer are not errors and do not raise this ratio, so this alert
+              points at the rastreo deployment or the scenario, not at dark hosts.
 
         - alert: RastreoProbeErrorRatioPerKind
           expr: |
@@ -43,11 +46,11 @@ spec:
           annotations:
             summary: "rastreo-server probe error rate exceeds 50% for a single probe kind"
             description: |
-              Probe error ratio for {{ `{{ $labels.probe_kind }}` }} has stayed
-              above 50% for the last 10 minutes on {{ `{{ $labels.instance }}` }}.
-              A single failing probe kind narrows the investigation to a specific
-              protocol or target subset — check the prober configuration and the
-              targets it runs against.
+              More than half of the {{ `{{ $labels.probe_kind }}` }} probes hit a fault
+              over the last 10 minutes on {{ `{{ $labels.instance }}` }}. One prober is
+              faulting while the others are healthy — for example arp or ndp without
+              CAP_NET_RAW. Check that prober's configuration and the capabilities the
+              pod was granted.
 
         - alert: RastreoSinkErrorSpikePerClass
           expr: sum by (error_class) (rate(rastreo_server_sink_errors_total[5m])) > (1 / 60)
@@ -88,9 +91,10 @@ spec:
             summary: "rastreo-server has not emitted records for 10 minutes despite active scans"
             description: |
               No records have been emitted in the last 10 minutes on
-              {{ `{{ $labels.instance }}` }}, yet scans are still running.
-              This suggests probes are failing to observe live devices or the
-              sink is silently swallowing records.
+              {{ `{{ $labels.instance }}` }}, yet scans are still running. Every probed
+              target stayed silent, or the sink is dropping records. Check the target
+              list, the port list, and the sink. The probe error ratios stay flat in
+              this case, because a target that does not answer is not an error.
 
         - alert: RastreoSinkUnreachable
           expr: |

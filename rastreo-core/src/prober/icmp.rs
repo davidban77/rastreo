@@ -1,6 +1,8 @@
 use std::io::ErrorKind;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pnet_packet::icmp::echo_reply::EchoReplyPacket;
@@ -15,6 +17,7 @@ use tokio::time::timeout;
 
 use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 const PAYLOAD_NONCE_LEN: usize = 8;
@@ -62,7 +65,7 @@ pub fn default_interval_ms() -> u64 {
     200
 }
 
-fn generate_nonce() -> [u8; PAYLOAD_NONCE_LEN] {
+static NONCE_SEED: LazyLock<u64> = LazyLock::new(|| {
     let now_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -74,7 +77,18 @@ fn generate_nonce() -> [u8; PAYLOAD_NONCE_LEN] {
         tid_hash ^= *b as u64;
         tid_hash = tid_hash.wrapping_mul(0x100000001b3);
     }
-    let mut state = now_nanos ^ elapsed_nanos.rotate_left(17) ^ tid_hash.rotate_left(31);
+    // Concurrent processes share the kernel echo-id space, so keep their nonce streams disjoint
+    // structurally rather than by clock luck.
+    let pid_hash = (std::process::id() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    now_nanos ^ elapsed_nanos.rotate_left(17) ^ tid_hash.rotate_left(31) ^ pid_hash
+});
+
+static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// Bijective in `ticket`, so two in-flight probes can never share a nonce and cross-demux replies.
+fn generate_nonce() -> [u8; PAYLOAD_NONCE_LEN] {
+    let ticket = NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut state = NONCE_SEED.wrapping_add(ticket.wrapping_mul(0x9e37_79b9_7f4a_7c15));
     state ^= state << 13;
     state ^= state >> 7;
     state ^= state << 17;
@@ -145,7 +159,7 @@ pub(crate) fn build_icmpv6_echo_request(
     buf
 }
 
-fn open_socket(target: IpAddr) -> Result<Socket, RastreoError> {
+fn open_socket(target: IpAddr) -> Result<Socket, ProbeError> {
     let (domain, protocol) = match target {
         IpAddr::V4(_) => (Domain::IPV4, Protocol::ICMPV4),
         IpAddr::V6(_) => (Domain::IPV6, Protocol::ICMPV6),
@@ -158,7 +172,9 @@ fn open_socket(target: IpAddr) -> Result<Socket, RastreoError> {
                 .map_err(|e| ProbeError::Other(format!("icmp: raw socket unavailable: {e}")))?
         }
         Err(err) => {
-            return Err(ProbeError::Other(format!("icmp: dgram socket open failed: {err}")).into())
+            return Err(ProbeError::Other(format!(
+                "icmp: dgram socket open failed: {err}"
+            )))
         }
     };
 
@@ -269,17 +285,109 @@ fn payload_rtt(payload: &[u8], nonce: &[u8; PAYLOAD_NONCE_LEN]) -> Option<Durati
     Some(Duration::from_micros(sent_micros))
 }
 
+/// What the ping loop has learned so far, readable while the loop is still running.
+#[derive(Debug, Clone, Default)]
+struct Evidence {
+    started: bool,
+    rtts: Vec<Duration>,
+    fault: Option<String>,
+}
+
+/// Readable by the async caller after it abandons the blocking ping thread at its own deadline.
+type EvidenceSlot = Arc<Mutex<Evidence>>;
+
+fn mark_started(slot: &EvidenceSlot) {
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.started = true;
+}
+
+fn push_rtt(slot: &EvidenceSlot, rtt: Duration) {
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.rtts.push(rtt);
+}
+
+fn latch_fault(slot: &EvidenceSlot, message: String) {
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.fault = Some(message);
+}
+
+fn collected(slot: &EvidenceSlot) -> Evidence {
+    slot.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn rtts_or_fault(evidence: Evidence) -> Result<Vec<Duration>, RastreoError> {
+    // An echo reply already in hand outranks a fault on a later packet: the host answered.
+    match evidence.fault {
+        Some(msg) if evidence.rtts.is_empty() => Err(ProbeError::Other(msg).into()),
+        _ => Ok(evidence.rtts),
+    }
+}
+
+type BlockingOutcome = Result<
+    Result<Result<Vec<Duration>, RastreoError>, tokio::task::JoinError>,
+    tokio::time::error::Elapsed,
+>;
+
+fn fold_probe_outcome(
+    outcome: BlockingOutcome,
+    slot: &EvidenceSlot,
+) -> Result<Vec<Duration>, RastreoError> {
+    match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => Err(RastreoError::Runtime(
+            crate::error::RuntimeError::TaskPanicked(join_err.to_string()),
+        )),
+        // The ping loop outlived our deadline: keep what it had already learned.
+        Err(_) => {
+            let evidence = collected(slot);
+            if !evidence.started {
+                // The pool never ran the closure: nothing was learned, so a dark host would be a lie.
+                return Err(ProbeError::Other(
+                    "icmp: probe did not start before the deadline".to_string(),
+                )
+                .into());
+            }
+            rtts_or_fault(evidence)
+        }
+    }
+}
+
+fn latched(slot: &EvidenceSlot, err: ProbeError) -> RastreoError {
+    latch_fault(slot, err.to_string());
+    err.into()
+}
+
 fn run_probe_blocking(
     target: IpAddr,
     count: u32,
     interval: Duration,
-    total_timeout: Duration,
+    deadline: Instant,
+    slot: &EvidenceSlot,
 ) -> Result<Vec<Duration>, RastreoError> {
-    let socket = open_socket(target)?;
-    socket
-        .set_nonblocking(false)
-        .map_err(|e| ProbeError::Other(format!("icmp: set_nonblocking failed: {e}")))?;
+    mark_started(slot);
+    let socket = match open_socket(target) {
+        Ok(s) => s,
+        Err(err) => return Err(latched(slot, err)),
+    };
+    if let Err(err) = socket.set_nonblocking(false) {
+        return Err(latched(
+            slot,
+            ProbeError::Other(format!("icmp: set_nonblocking failed: {err}")),
+        ));
+    }
+    ping_loop(&socket, target, count, interval, deadline, slot)
+}
 
+fn ping_loop(
+    socket: &Socket,
+    target: IpAddr,
+    count: u32,
+    interval: Duration,
+    deadline: Instant,
+    slot: &EvidenceSlot,
+) -> Result<Vec<Duration>, RastreoError> {
     let dest: SocketAddr = match target {
         IpAddr::V4(v4) => SocketAddr::from((v4, 0)),
         IpAddr::V6(v6) => SocketAddr::from((v6, 0)),
@@ -289,10 +397,8 @@ fn run_probe_blocking(
     let identifier: u16 = 0;
     let nonce = generate_nonce();
     let reference = Instant::now();
-    let deadline = reference + total_timeout;
-    let per_packet_budget = total_timeout / count.max(1);
+    let per_packet_budget = deadline.saturating_duration_since(reference) / count.max(1);
 
-    let mut rtts: Vec<Duration> = Vec::with_capacity(count as usize);
     let max_seq = count.saturating_sub(1).min(u16::MAX as u32) as u16;
 
     for seq in 0..count {
@@ -307,19 +413,27 @@ fn run_probe_blocking(
         };
 
         if let Err(err) = socket.send_to(&packet, &dest_sock) {
-            return Err(ProbeError::Other(format!("icmp: send failed: {err}")).into());
+            // A dark host latches EHOSTUNREACH / ENETUNREACH on the socket: no reply, not a fault.
+            if classify::io_error(&err) == Disposition::Fault {
+                latch_fault(slot, format!("icmp: send failed: {err}"));
+            }
+            break;
         }
 
         let per_pkt_deadline = (send_at + per_packet_budget).min(deadline);
-        match recv_matching_reply(&socket, target, &nonce, max_seq, per_pkt_deadline) {
+        match recv_matching_reply(socket, target, &nonce, max_seq, per_pkt_deadline) {
             Ok(Some(sent_offset)) => {
                 let now = Instant::now();
                 let elapsed = now.saturating_duration_since(reference);
-                let rtt = elapsed.saturating_sub(sent_offset);
-                rtts.push(rtt);
+                push_rtt(slot, elapsed.saturating_sub(sent_offset));
             }
             Ok(None) => {}
-            Err(err) => return Err(ProbeError::Other(format!("icmp: recv failed: {err}")).into()),
+            Err(err) => {
+                if classify::io_error(&err) == Disposition::Fault {
+                    latch_fault(slot, format!("icmp: recv failed: {err}"));
+                }
+                break;
+            }
         }
 
         if seq + 1 < count && !interval.is_zero() {
@@ -332,7 +446,7 @@ fn run_probe_blocking(
         }
     }
 
-    Ok(rtts)
+    rtts_or_fault(collected(slot))
 }
 
 #[async_trait::async_trait]
@@ -349,26 +463,21 @@ impl Prober for IcmpProber {
         let target_ip = target.ip;
         let count = self.count;
         let interval = self.interval;
-        let total_timeout = ctx.timeout;
+        // Set before the spawn so a queued closure cannot outlive the timer below.
+        let deadline = Instant::now() + ctx.timeout;
+
+        let evidence: EvidenceSlot = Arc::default();
+        let sink = Arc::clone(&evidence);
 
         let outcome = timeout(
             ctx.timeout,
             tokio::task::spawn_blocking(move || {
-                run_probe_blocking(target_ip, count, interval, total_timeout)
+                run_probe_blocking(target_ip, count, interval, deadline, &sink)
             }),
         )
         .await;
 
-        let rtts = match outcome {
-            Ok(Ok(Ok(rtts))) => rtts,
-            Ok(Ok(Err(err))) => return Err(err),
-            Ok(Err(join_err)) => {
-                return Err(RastreoError::Runtime(
-                    crate::error::RuntimeError::TaskPanicked(join_err.to_string()),
-                ))
-            }
-            Err(_) => Vec::new(),
-        };
+        let rtts = fold_probe_outcome(outcome, &evidence)?;
 
         let (reachable, signals) = if rtts.is_empty() {
             (false, Vec::new())
@@ -396,6 +505,8 @@ impl Prober for IcmpProber {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -512,9 +623,41 @@ mod tests {
 
     #[test]
     fn generate_nonce_produces_distinct_values() {
-        let a = generate_nonce();
-        let b = generate_nonce();
-        assert_ne!(a, b, "two consecutive nonces should differ");
+        let mut seen = HashSet::new();
+        for _ in 0..100_000 {
+            let nonce = generate_nonce();
+            assert!(
+                seen.insert(nonce),
+                "nonce repeated within one thread: {nonce:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_nonce_produces_distinct_values_across_threads() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 10_000;
+
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..PER_THREAD)
+                        .map(|_| generate_nonce())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let mut seen = HashSet::new();
+        for worker in workers {
+            for nonce in worker.join().expect("worker thread panicked") {
+                assert!(
+                    seen.insert(nonce),
+                    "nonce repeated across threads: {nonce:?}"
+                );
+            }
+        }
+        assert_eq!(seen.len(), THREADS * PER_THREAD);
     }
 
     #[test]
@@ -570,6 +713,239 @@ mod tests {
     }
 
     #[test]
+    fn a_send_that_fails_locally_is_a_probe_error_not_a_silent_host() {
+        // An AF_INET socket cannot send to an IPv6 destination, so the send fails in the kernel
+        // before a packet leaves the host — the same shape as an ICMP send denied locally, and
+        // reachable without CAP_NET_RAW.
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("socket");
+        socket.set_nonblocking(false).expect("blocking socket");
+        let target: IpAddr = "2001:db8::1".parse().expect("valid ipv6");
+        let slot: EvidenceSlot = Arc::default();
+
+        let err = ping_loop(
+            &socket,
+            target,
+            1,
+            Duration::ZERO,
+            Instant::now() + Duration::from_millis(200),
+            &slot,
+        )
+        .expect_err("a send the classifier calls a fault must not be booked as a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("icmp: send failed"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_ping_loop_publishes_its_fault_before_it_returns() {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("socket");
+        socket.set_nonblocking(false).expect("blocking socket");
+        let target: IpAddr = "2001:db8::1".parse().expect("valid ipv6");
+        let slot: EvidenceSlot = Arc::default();
+
+        let _ = ping_loop(
+            &socket,
+            target,
+            1,
+            Duration::ZERO,
+            Instant::now() + Duration::from_millis(200),
+            &slot,
+        );
+
+        let fault = collected(&slot)
+            .fault
+            .expect("a caller that abandons the loop must still see the fault it hit");
+        assert!(fault.contains("icmp: send failed"), "got: {fault}");
+    }
+
+    #[test]
+    fn run_probe_blocking_marks_the_slot_started_before_it_touches_a_socket() {
+        let slot: EvidenceSlot = Arc::default();
+
+        let _ = run_probe_blocking(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            1,
+            Duration::ZERO,
+            Instant::now(),
+            &slot,
+        );
+
+        assert!(
+            collected(&slot).started,
+            "the caller cannot tell a probe that never ran from a host that never answered \
+             unless the closure publishes that it ran"
+        );
+    }
+
+    #[test]
+    fn a_socket_fault_is_latched_before_it_leaves_the_blocking_thread() {
+        let slot: EvidenceSlot = Arc::default();
+
+        let err = latched(
+            &slot,
+            ProbeError::Other("icmp: dgram socket open failed: too many open files".to_string()),
+        );
+
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("icmp: dgram socket open failed"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+        let fault = collected(&slot)
+            .fault
+            .expect("a caller that abandons the thread must still see the fault it hit");
+        assert!(
+            fault.contains("icmp: dgram socket open failed"),
+            "got: {fault}"
+        );
+    }
+
+    fn evidence(rtts: Vec<Duration>, fault: Option<&str>) -> Evidence {
+        Evidence {
+            started: true,
+            rtts,
+            fault: fault.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_echo_reply_outranks_a_later_send_fault() {
+        let rtts = rtts_or_fault(evidence(
+            vec![Duration::from_micros(1_200)],
+            Some("icmp: send failed: no buffer space available"),
+        ))
+        .expect("a host that answered a ping is not a broken probe");
+        assert_eq!(rtts, vec![Duration::from_micros(1_200)]);
+    }
+
+    #[test]
+    fn no_reply_and_a_fault_is_a_probe_error() {
+        let err = rtts_or_fault(evidence(Vec::new(), Some("icmp: recv failed: interrupted")))
+            .expect_err("a broken probe is not a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("icmp: recv failed"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_reply_and_no_fault_is_an_absent_target() {
+        let rtts = rtts_or_fault(evidence(Vec::new(), None)).expect("a silent host is an outcome");
+        assert!(rtts.is_empty());
+    }
+
+    async fn elapsed() -> tokio::time::error::Elapsed {
+        timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .expect_err("a zero deadline on a pending future always elapses")
+    }
+
+    #[test]
+    fn a_probe_that_finishes_inside_the_deadline_returns_its_rtts() {
+        let slot: EvidenceSlot = Arc::default();
+        let rtts = fold_probe_outcome(Ok(Ok(Ok(vec![Duration::from_micros(900)]))), &slot)
+            .expect("a completed probe is an outcome");
+        assert_eq!(rtts, vec![Duration::from_micros(900)]);
+    }
+
+    #[test]
+    fn a_probe_that_broke_inside_the_deadline_surfaces_its_error() {
+        let slot: EvidenceSlot = Arc::default();
+        let err = fold_probe_outcome(
+            Ok(Ok(Err(ProbeError::Other(
+                "icmp: dgram socket open failed".to_string(),
+            )
+            .into()))),
+            &slot,
+        )
+        .expect_err("a broken probe is not a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("icmp: dgram socket open failed"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deadline_that_fires_after_a_reply_keeps_the_rtt() {
+        // A host behind an ICMP policer answers the first echo, drops the rest, and runs the loop
+        // past the caller's deadline.
+        let slot: EvidenceSlot = Arc::default();
+        mark_started(&slot);
+        push_rtt(&slot, Duration::from_micros(1_500));
+
+        let rtts = fold_probe_outcome(Err(elapsed().await), &slot)
+            .expect("a host that answered before the deadline is not a dark host");
+        assert_eq!(rtts, vec![Duration::from_micros(1_500)]);
+    }
+
+    #[tokio::test]
+    async fn a_deadline_that_fires_with_nothing_learned_is_an_absent_target() {
+        let slot: EvidenceSlot = Arc::default();
+        mark_started(&slot);
+
+        let rtts = fold_probe_outcome(Err(elapsed().await), &slot)
+            .expect("a silent host is an outcome, not an error");
+        assert!(rtts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_deadline_that_fires_before_the_probe_starts_is_a_probe_error() {
+        // A backed-up blocking pool never runs the closure: the target was never asked anything.
+        let slot: EvidenceSlot = Arc::default();
+
+        let err = fold_probe_outcome(Err(elapsed().await), &slot)
+            .expect_err("a probe that never ran is not a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("did not start"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deadline_that_fires_after_a_latched_fault_is_a_probe_error() {
+        let slot: EvidenceSlot = Arc::default();
+        mark_started(&slot);
+        latch_fault(&slot, "icmp: recv failed: interrupted".to_string());
+
+        let err = fold_probe_outcome(Err(elapsed().await), &slot)
+            .expect_err("a broken probe is not a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("icmp: recv failed"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicked_ping_thread_is_a_runtime_error() {
+        let join_err = tokio::task::spawn_blocking(|| panic!("ping thread died"))
+            .await
+            .expect_err("the task panicked");
+        let slot: EvidenceSlot = Arc::default();
+
+        let err = fold_probe_outcome(Ok(Err(join_err)), &slot)
+            .expect_err("a dead probe thread is not a dark host");
+        assert!(
+            matches!(
+                err,
+                RastreoError::Runtime(crate::error::RuntimeError::TaskPanicked(_))
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
     fn icmp_prober_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<IcmpProber>();
@@ -603,6 +979,41 @@ mod tests {
             matches!(outcome.signals.first(), Some(Signal::IcmpEchoRttMicros(_))),
             "expected IcmpEchoRttMicros signal, got {:?}",
             outcome.signals
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "requires Linux ping_group_range sysctl or CAP_NET_RAW"
+    )]
+    fn a_live_ping_loop_publishes_each_rtt_before_it_returns() {
+        // The caller reads this slot after abandoning the loop at its own deadline, so a reply is
+        // only safe once it is in there — not when the loop finally returns it.
+        use std::net::Ipv4Addr;
+
+        let socket = open_socket(IpAddr::V4(Ipv4Addr::LOCALHOST)).expect("icmp socket");
+        socket.set_nonblocking(false).expect("blocking socket");
+        let slot: EvidenceSlot = Arc::default();
+
+        let returned = ping_loop(
+            &socket,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            2,
+            Duration::ZERO,
+            Instant::now() + Duration::from_secs(2),
+            &slot,
+        )
+        .expect("loopback answers echo requests");
+
+        let published = collected(&slot).rtts;
+        assert!(
+            !published.is_empty(),
+            "loopback answered, so the slot must hold its rtt"
+        );
+        assert_eq!(
+            published, returned,
+            "what the loop publishes and what it returns must not diverge"
         );
     }
 }

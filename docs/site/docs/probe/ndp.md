@@ -60,7 +60,7 @@ Probing an IPv6 address that is assigned to one of your interfaces returns `Prob
 
 Advertisements that lack the Target Link-Layer Address option are silently skipped — RFC 4861 §4.4 allows the option to be omitted when the sender's link-layer address is already known to the receiver, but a probing sender by definition does not know it yet, so an option-less advertisement produces no signal. Frames that are not ICMPv6 Neighbor Advertisements, or whose target address does not match the probe, are discarded and the receive loop continues.
 
-Timeouts map to `ProbeError::Timeout`. There is no `Unreachable` outcome for NDP — the kernel does not surface ICMP unreachable for L2 solicitations, so silent timeout is the normal failure signature.
+A target that sends no Neighbor Advertisement before the timeout is marked unreachable and contributes no signal. That is a normal discovery result, not an error: the kernel does not surface ICMP unreachable for L2 solicitations, so a silent timeout is the only shape absence can take. Probe faults still surface as errors: no local interface reaches the target, the selected interface has no IPv6 address, the target is one of your own interface addresses, the target is an IPv4 address, or the process lacks `CAP_NET_RAW`. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 

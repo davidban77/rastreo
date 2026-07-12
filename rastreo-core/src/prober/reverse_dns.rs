@@ -7,8 +7,9 @@ use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::rr::{Name, RData};
 use hickory_resolver::TokioResolver;
 
-use crate::error::{ConfigError, RastreoError};
+use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 pub struct ReverseDnsProber {
@@ -96,6 +97,7 @@ impl Prober for ReverseDnsProber {
         let query_name: Name = target.ip.into();
         let mut signals = Vec::new();
         let mut reachable = false;
+        let mut fault: Option<String> = None;
 
         match tokio::time::timeout(ctx.timeout, self.resolver.reverse_lookup(query_name)).await {
             Ok(Ok(lookup)) => {
@@ -113,11 +115,18 @@ impl Prober for ReverseDnsProber {
                 } else if let NetError::Dns(DnsError::ResponseCode(_)) = &err {
                     // REFUSED / SERVFAIL / etc. — server responded.
                     reachable = true;
+                } else if classify::net_error(&err) == Disposition::Fault {
+                    fault = Some(format!("reverse dns probe failed for {}: {err}", target.ip));
                 }
-                // Else: network-layer error — reachable stays false, no signals.
             }
             Err(_) => {
                 // Outer tokio timeout fired — reachable stays false.
+            }
+        }
+
+        if !reachable {
+            if let Some(msg) = fault {
+                return Err(ProbeError::Other(msg).into());
             }
         }
 
@@ -328,6 +337,60 @@ mod tests {
             "NXDOMAIN response must mark outcome reachable"
         );
         assert!(outcome.signals.is_empty());
+    }
+
+    /// Pins a resolver to a loopback stub. `ProberConfig::ReverseDns` only carries resolver IPs
+    /// (port 53 implied), so the fault seam is only reachable by building the prober directly.
+    fn prober_pinned_to(port: u16) -> ReverseDnsProber {
+        use hickory_resolver::config::{ConnectionConfig, ProtocolConfig};
+
+        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut connection = ConnectionConfig::new(ProtocolConfig::Udp);
+        connection.port = port;
+        let name_server = NameServerConfig::new(loopback, true, vec![connection]);
+        let config = ResolverConfig::from_parts(None, Vec::new(), vec![name_server]);
+        let mut builder =
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+        apply_resolver_opts(&mut builder);
+        ReverseDnsProber {
+            resolvers: vec![loopback],
+            resolver: builder.build().expect("build resolver"),
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_maps_an_undecodable_reply_to_a_probe_fault() {
+        use tokio::net::UdpSocket;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let (_, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let _ = socket.send_to(b"not a dns message", peer).await;
+            }
+        });
+
+        let target_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
+        let target = ResolvedTarget {
+            ip: target_ip,
+            original: Target::Ip(target_ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let err = prober_pinned_to(port)
+            .probe(&target, &ctx_with_timeout(2_000))
+            .await
+            .expect_err("a reply we cannot decode is a fault, not a host without a PTR record");
+        match err {
+            RastreoError::Probe(crate::error::ProbeError::Other(msg)) => {
+                assert!(msg.contains("reverse dns probe failed"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
     }
 
     #[test]

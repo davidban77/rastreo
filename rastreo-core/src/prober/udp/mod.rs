@@ -6,13 +6,14 @@ pub mod sip;
 pub mod stun;
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::net::UdpSocket;
 
 use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 const RECV_BUF_LEN: usize = 4096;
@@ -109,14 +110,10 @@ async fn probe_port(target_addr: SocketAddr, protocol: UdpProtocol, ctx: &ProbeC
 }
 
 fn classify_io_error(err: &io::Error) -> PortOutcome {
-    match err.kind() {
-        io::ErrorKind::TimedOut => PortOutcome::Timeout,
-        io::ErrorKind::ConnectionRefused
-        | io::ErrorKind::ConnectionReset
-        | io::ErrorKind::HostUnreachable
-        | io::ErrorKind::NetworkUnreachable
-        | io::ErrorKind::ConnectionAborted => PortOutcome::Unreachable,
-        _ => PortOutcome::Other(err.to_string()),
+    match classify::io_error(err) {
+        Disposition::Absence if err.kind() == io::ErrorKind::TimedOut => PortOutcome::Timeout,
+        Disposition::Absence => PortOutcome::Unreachable,
+        Disposition::Fault => PortOutcome::Other(err.to_string()),
     }
 }
 
@@ -148,6 +145,34 @@ fn new_memcached_request_id(port: u16) -> u16 {
     (nanos as u16) ^ port
 }
 
+// A port that timed out or answered ICMP-unreachable is a discovery result; a local socket
+// failure is a broken probe.
+fn port_fault(port: u16, outcome: &PortOutcome) -> Option<String> {
+    match outcome {
+        PortOutcome::Other(msg) => Some(format!("udp probe failed on port {port}: {msg}")),
+        PortOutcome::Reached(_) | PortOutcome::Timeout | PortOutcome::Unreachable => None,
+    }
+}
+
+fn outcome_or_fault(
+    target_ip: IpAddr,
+    any_reachable: bool,
+    signals: Vec<Signal>,
+    last_fault: Option<String>,
+) -> Result<ProbeOutcome, RastreoError> {
+    // Silence on one port is not evidence against a fault on another, but a port that answered is.
+    match last_fault {
+        Some(msg) if !any_reachable => Err(ProbeError::Other(msg).into()),
+        _ => Ok(ProbeOutcome {
+            kind: ProbeKind::Udp,
+            target_ip,
+            timestamp: SystemTime::now(),
+            reachable: any_reachable,
+            signals,
+        }),
+    }
+}
+
 #[async_trait::async_trait]
 impl Prober for UdpProber {
     fn kind(&self) -> ProbeKind {
@@ -161,53 +186,23 @@ impl Prober for UdpProber {
     ) -> Result<ProbeOutcome, RastreoError> {
         let mut signals = Vec::new();
         let mut any_reachable = false;
-        let mut timeouts = 0usize;
-        let mut unreachables = 0usize;
-        let mut last_other: Option<String> = None;
+        let mut last_fault: Option<String> = None;
 
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
-            match probe_port(addr, self.protocol, ctx).await {
-                PortOutcome::Reached(signal) => {
-                    any_reachable = true;
-                    if let Some(s) = signal {
-                        signals.push(s);
-                    }
-                }
-                PortOutcome::Timeout => timeouts += 1,
-                PortOutcome::Unreachable => unreachables += 1,
-                PortOutcome::Other(msg) => {
-                    last_other = Some(format!("udp probe failed on port {port}: {msg}"));
+            let outcome = probe_port(addr, self.protocol, ctx).await;
+            if let Some(msg) = port_fault(port, &outcome) {
+                last_fault = Some(msg);
+            }
+            if let PortOutcome::Reached(signal) = outcome {
+                any_reachable = true;
+                if let Some(s) = signal {
+                    signals.push(s);
                 }
             }
         }
 
-        if !any_reachable {
-            let err = if unreachables > 0 && unreachables >= timeouts {
-                ProbeError::Unreachable {
-                    target: target.ip.to_string(),
-                }
-            } else if timeouts > 0 {
-                ProbeError::Timeout {
-                    timeout_ms: ctx.timeout.as_millis() as u64,
-                }
-            } else if let Some(msg) = last_other {
-                ProbeError::Other(msg)
-            } else {
-                ProbeError::Timeout {
-                    timeout_ms: ctx.timeout.as_millis() as u64,
-                }
-            };
-            return Err(err.into());
-        }
-
-        Ok(ProbeOutcome {
-            kind: ProbeKind::Udp,
-            target_ip: target.ip,
-            timestamp: SystemTime::now(),
-            reachable: any_reachable,
-            signals,
-        })
+        outcome_or_fault(target.ip, any_reachable, signals, last_fault)
     }
 }
 
@@ -393,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_prober_maps_all_timeouts_to_timeout_error() {
+    async fn udp_prober_maps_all_timeouts_to_unreachable_outcome() {
         // Bind a socket that swallows requests and never replies.
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let port = socket.local_addr().expect("addr").port();
@@ -404,16 +399,27 @@ mod tests {
             }
         });
         let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(200))
             .await
-            .expect_err("must error");
-        match err {
-            RastreoError::Probe(ProbeError::Timeout { timeout_ms }) => {
-                assert_eq!(timeout_ms, 200);
-            }
-            other => panic!("expected Timeout, got {other:?}"),
-        }
+            .expect("a silent host is an outcome, not an error");
+        assert_eq!(outcome.kind, ProbeKind::Udp);
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn udp_prober_maps_closed_port_to_unreachable_outcome() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        drop(socket);
+        let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(500))
+            .await
+            .expect("a closed port is an outcome, not an error");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
     }
 
     #[tokio::test]
@@ -488,6 +494,30 @@ mod tests {
     }
 
     #[test]
+    fn classify_io_error_maps_absence_kinds_to_absence_outcomes() {
+        for kind in [
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::HostUnreachable,
+            io::ErrorKind::NetworkUnreachable,
+        ] {
+            let outcome = classify_io_error(&io::Error::from(kind));
+            assert!(
+                matches!(outcome, PortOutcome::Timeout | PortOutcome::Unreachable),
+                "{kind:?} must be absence, not a fault"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_io_error_maps_unclassified_kinds_to_fault() {
+        let outcome = classify_io_error(&io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(matches!(outcome, PortOutcome::Other(_)));
+    }
+
+    #[test]
     fn new_rejects_empty_ports() {
         match UdpProber::new(Vec::new(), UdpProtocol::Ntp) {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
@@ -502,6 +532,80 @@ mod tests {
     fn new_sorts_and_dedups_ports() {
         let prober = UdpProber::new(vec![5060, 123, 5060, 3478], UdpProtocol::Ntp).expect("valid");
         assert_eq!(prober.ports(), &[123, 3478, 5060]);
+    }
+
+    const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
+
+    #[test]
+    fn a_local_socket_failure_latches_a_fault() {
+        let outcome = classify_io_error(&io::Error::from(io::ErrorKind::PermissionDenied));
+        let msg = port_fault(123, &outcome).expect("a denied local socket is a broken probe");
+        assert!(msg.contains("udp probe failed on port 123"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_silent_or_unreachable_port_latches_no_fault() {
+        for kind in [
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::HostUnreachable,
+        ] {
+            let outcome = classify_io_error(&io::Error::from(kind));
+            assert!(port_fault(123, &outcome).is_none(), "{kind:?}");
+        }
+        assert!(port_fault(123, &PortOutcome::Reached(None)).is_none());
+    }
+
+    #[test]
+    fn a_port_that_answered_is_a_reachable_outcome() {
+        let outcome = outcome_or_fault(
+            TARGET,
+            true,
+            vec![Signal::NtpBanner("stratum=2 ref=10.0.0.1".to_string())],
+            None,
+        )
+        .expect("a port that answered is an outcome");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.kind, ProbeKind::Udp);
+        assert_eq!(outcome.signals.len(), 1);
+    }
+
+    #[test]
+    fn a_port_that_answered_outranks_a_socket_fault_on_another_port() {
+        let outcome = outcome_or_fault(
+            TARGET,
+            true,
+            Vec::new(),
+            Some("udp probe failed on port 5060: permission denied".to_string()),
+        )
+        .expect("a port that answered makes the record truthful");
+        assert!(outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[test]
+    fn no_answer_and_no_fault_is_an_absent_target() {
+        let outcome = outcome_or_fault(TARGET, false, Vec::new(), None)
+            .expect("a silent target is an outcome");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[test]
+    fn no_answer_and_a_socket_fault_is_a_probe_error() {
+        let err = outcome_or_fault(
+            TARGET,
+            false,
+            Vec::new(),
+            Some("udp probe failed on port 123: permission denied".to_string()),
+        )
+        .expect_err("a broken probe is not a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("udp probe failed on port 123"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
+        }
     }
 
     #[test]

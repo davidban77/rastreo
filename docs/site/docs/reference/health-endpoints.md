@@ -38,9 +38,12 @@ livenessProbe:
 - **Inflight scan limit** — the number of in-flight `POST /scans` requests has reached `RASTREO_MAX_INFLIGHT_SCANS`. New scans would compete with running ones for CPU, sockets, and memory. Kubernetes removes the pod from Service endpoints until this drops.
 - **Sink unreachable** — the server-side reachability probe reported the sink as unreachable on its last tick. Proactive gate: fires before the sink-error quarantine, because a probe failure indicates downstream ingest is offline right now. Only active when `RASTREO_SINK_CONFIG_PATH` is set.
 - **Recent sink error** — a scan failed in the last `RASTREO_SINK_ERROR_QUARANTINE_SECS` because the downstream sink (Kafka, file, HTTP) errored. Reactive gate: catches transient errors between probe ticks; assumes the sink is still misbehaving until the window elapses.
-- **Recent scan error** — a scan failed in the last `RASTREO_SCAN_ERROR_QUARANTINE_SECS` for any reason (not necessarily a sink failure). Coarser check that catches persistent probe / runtime issues.
+- **Recent scan error** — a `POST /scans` request failed in the last `RASTREO_SCAN_ERROR_QUARANTINE_SECS` for any reason (not necessarily a sink failure). Coarser check that catches an invalid scenario body, a resolver failure, or a runtime failure.
 
 If any gate has fired, the response is `503 SERVICE_UNAVAILABLE`. Otherwise it is `200 OK`.
+
+!!! info "Probe results never gate readiness"
+    A scan that reaches no device still succeeds — the server returns `200 OK` with an empty `records` list, and readiness is unaffected. A probe fault does not fail the scan either: the pipeline counts it in the summary (`probe_errors`) and moves on. Watch `rastreo_server_probes_total{outcome="error"}` for probe faults, not `/readyz`. See [Observability · what `outcome` means](observability.md#what-outcome-means).
 
 ### Ready response
 

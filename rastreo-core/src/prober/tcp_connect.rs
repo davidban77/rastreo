@@ -1,8 +1,13 @@
-use std::net::SocketAddr;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::time::SystemTime;
 
-use crate::error::{ConfigError, RastreoError};
+use tokio::net::TcpStream;
+use tokio::time::error::Elapsed;
+
+use crate::error::{ConfigError, ProbeError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
 pub struct TcpConnectProber {
@@ -26,6 +31,50 @@ impl TcpConnectProber {
     }
 }
 
+// A refused / unreachable port is a discovery result; a local socket failure (descriptor
+// exhaustion, denied capability) is a broken probe.
+fn connect_fault(port: u16, err: &io::Error) -> Option<String> {
+    match classify::io_error(err) {
+        Disposition::Fault => Some(format!("tcp connect failed on port {port}: {err}")),
+        Disposition::Absence => None,
+    }
+}
+
+fn fold_connect(
+    port: u16,
+    outcome: Result<io::Result<TcpStream>, Elapsed>,
+    signals: &mut Vec<Signal>,
+    last_fault: &mut Option<String>,
+) {
+    match outcome {
+        Ok(Ok(_stream)) => signals.push(Signal::OpenPort(port)),
+        Ok(Err(err)) => {
+            if let Some(msg) = connect_fault(port, &err) {
+                *last_fault = Some(msg);
+            }
+        }
+        Err(_) => {}
+    }
+}
+
+fn outcome_or_fault(
+    target_ip: IpAddr,
+    signals: Vec<Signal>,
+    last_fault: Option<String>,
+) -> Result<ProbeOutcome, RastreoError> {
+    // Silence on one port is not evidence against a fault on another, but an open port is.
+    match last_fault {
+        Some(msg) if signals.is_empty() => Err(ProbeError::Other(msg).into()),
+        _ => Ok(ProbeOutcome {
+            kind: ProbeKind::TcpConnect,
+            target_ip,
+            timestamp: SystemTime::now(),
+            reachable: !signals.is_empty(),
+            signals,
+        }),
+    }
+}
+
 #[async_trait::async_trait]
 impl Prober for TcpConnectProber {
     fn kind(&self) -> ProbeKind {
@@ -38,22 +87,16 @@ impl Prober for TcpConnectProber {
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
         let mut signals = Vec::new();
+        let mut last_fault: Option<String> = None;
+
         for &port in &self.ports {
             let addr = SocketAddr::new(target.ip, port);
-            let connect = tokio::net::TcpStream::connect(addr);
-            // A refused/unreachable/timed-out port is a discovery result, not an error.
-            if let Ok(Ok(_stream)) = tokio::time::timeout(ctx.timeout, connect).await {
-                signals.push(Signal::OpenPort(port));
-            }
+            let connect = TcpStream::connect(addr);
+            let outcome = tokio::time::timeout(ctx.timeout, connect).await;
+            fold_connect(port, outcome, &mut signals, &mut last_fault);
         }
-        let reachable = !signals.is_empty();
-        Ok(ProbeOutcome {
-            kind: ProbeKind::TcpConnect,
-            target_ip: target.ip,
-            timestamp: SystemTime::now(),
-            reachable,
-            signals,
-        })
+
+        outcome_or_fault(target.ip, signals, last_fault)
     }
 }
 
@@ -226,6 +269,135 @@ mod tests {
             }
             #[allow(unreachable_patterns)]
             _ => panic!("expected TcpConnect variant"),
+        }
+    }
+
+    const TARGET: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+
+    #[test]
+    fn a_local_socket_failure_on_connect_latches_a_fault() {
+        let msg = connect_fault(22, &io::Error::from(io::ErrorKind::PermissionDenied))
+            .expect("a denied local socket is a broken probe");
+        assert!(msg.contains("tcp connect failed on port 22"), "got: {msg}");
+    }
+
+    #[test]
+    fn a_refused_connect_latches_no_fault() {
+        assert!(connect_fault(22, &io::Error::from(io::ErrorKind::ConnectionRefused)).is_none());
+    }
+
+    async fn connected_stream() -> (u16, io::Result<TcpStream>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+        let stream = TcpStream::connect(("127.0.0.1", port)).await;
+        (port, stream)
+    }
+
+    async fn elapsed() -> Elapsed {
+        tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .expect_err("a zero deadline on a pending future always elapses")
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_succeeds_emits_an_open_port() {
+        let (port, stream) = connected_stream().await;
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        fold_connect(port, Ok(stream), &mut signals, &mut last_fault);
+
+        assert!(matches!(signals.as_slice(), [Signal::OpenPort(p)] if *p == port));
+        assert!(last_fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_is_refused_emits_nothing() {
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        fold_connect(
+            22,
+            Ok(Err(io::Error::from(io::ErrorKind::ConnectionRefused))),
+            &mut signals,
+            &mut last_fault,
+        );
+
+        assert!(signals.is_empty());
+        assert!(last_fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_fails_on_a_local_socket_latches_a_fault() {
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        fold_connect(
+            22,
+            Ok(Err(io::Error::from(io::ErrorKind::PermissionDenied))),
+            &mut signals,
+            &mut last_fault,
+        );
+
+        assert!(signals.is_empty());
+        let msg = last_fault.expect("a denied local socket is a broken probe");
+        assert!(msg.contains("tcp connect failed on port 22"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_times_out_emits_nothing() {
+        let mut signals = Vec::new();
+        let mut last_fault = None;
+
+        fold_connect(22, Err(elapsed().await), &mut signals, &mut last_fault);
+
+        assert!(signals.is_empty());
+        assert!(last_fault.is_none());
+    }
+
+    #[test]
+    fn an_open_port_is_a_reachable_outcome() {
+        let outcome = outcome_or_fault(TARGET, vec![Signal::OpenPort(22)], None)
+            .expect("an open port is an outcome");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.target_ip, TARGET);
+        assert!(matches!(outcome.signals[0], Signal::OpenPort(22)));
+    }
+
+    #[test]
+    fn an_open_port_outranks_a_connect_fault_on_another_port() {
+        let outcome = outcome_or_fault(
+            TARGET,
+            vec![Signal::OpenPort(22)],
+            Some("tcp connect failed on port 80: too many open files".to_string()),
+        )
+        .expect("a port that answered makes the record truthful");
+        assert!(outcome.reachable);
+    }
+
+    #[test]
+    fn no_signals_and_no_fault_is_an_absent_target() {
+        let outcome =
+            outcome_or_fault(TARGET, Vec::new(), None).expect("a silent target is an outcome");
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+    }
+
+    #[test]
+    fn no_signals_and_a_connect_fault_is_a_probe_error() {
+        let err = outcome_or_fault(
+            TARGET,
+            Vec::new(),
+            Some("tcp connect failed on port 22: too many open files".to_string()),
+        )
+        .expect_err("a broken probe is not a dark host");
+        match err {
+            RastreoError::Probe(ProbeError::Other(msg)) => {
+                assert!(msg.contains("tcp connect failed on port 22"), "got: {msg}");
+            }
+            other => panic!("expected ProbeError::Other, got {other:?}"),
         }
     }
 

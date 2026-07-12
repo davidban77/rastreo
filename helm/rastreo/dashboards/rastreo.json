@@ -228,7 +228,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Probes executed per second across all scans, partitioned by outcome.",
+      "description": "Probes executed per second across all scans, partitioned by outcome. success = the probe ran without a fault (the target may or may not have answered); error = the probe itself could not run.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -533,7 +533,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Ratio of probes with outcome=error over all probes, expressed as a percent.",
+      "description": "Ratio of probes with outcome=error over all probes, expressed as a percent. Counts probe faults only (missing CAP_NET_RAW, socket failure, undecodable reply). Targets that do not answer are not errors, so this stays at 0% on a healthy sweep of a mostly empty subnet.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1092,7 +1092,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Per-prober success rate (success/total) computed from rastreo_server_probes_total.",
+      "description": "Per-prober fault-free rate (success/total) computed from rastreo_server_probes_total. success means the probe ran, not that the target answered. Use 'Records emitted per second' to see how many devices were actually discovered.",
       "fieldConfig": {
         "defaults": {
           "color": {

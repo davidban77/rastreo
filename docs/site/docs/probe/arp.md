@@ -46,7 +46,9 @@ Probing the IP of one of your own interfaces returns `ProbeError::Other("arp tar
 |---|---|
 | `Mac(<address>)` | The target answered with an ARP Reply whose `sender protocol address` matches the target IP. The `sender hardware address` is formatted as a lower-case colon-separated hex string (e.g. `00:11:22:aa:bb:cc`). |
 
-Frames on the wire that are not ARP, or that are ARP Requests, or that carry an ARP Reply for a different sender IP, are silently discarded — the receive loop keeps waiting until the target answers or the scenario-level `timeout_ms` fires. On timeout, the probe returns `ProbeError::Timeout`. There is no `Unreachable` outcome for ARP: the kernel does not surface ICMP unreachable for L2 lookups, so silent timeout is the normal failure signature — the target either does not exist on the segment or has an ARP-blocking firewall between the prober's NIC and the target.
+Frames on the wire that are not ARP, or that are ARP Requests, or that carry an ARP Reply for a different sender IP, are silently discarded — the receive loop keeps waiting until the target answers or the scenario-level `timeout_ms` fires.
+
+A target that sends no ARP Reply before the timeout is marked unreachable and contributes no signal. That is a normal discovery result, not an error: the kernel does not surface ICMP unreachable for L2 lookups, so a silent timeout is the only shape absence can take. The address either is not in use on the segment, or an ARP-blocking firewall sits between the prober's interface and the target. Probe faults still surface as errors: no local interface reaches the target, the selected interface has no IPv4 address, the target is one of your own interface addresses, the target is an IPv6 address, or the process lacks `CAP_NET_RAW`. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 

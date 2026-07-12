@@ -115,7 +115,7 @@ Report PDUs with `msgFlags.authFlag == 0` (unauthenticated Reports) are accepted
 
 A response with a nonzero `error-status` (for example `authorizationError` when the community is wrong on v2c, or `noSuchName` when v1 doesn't recognise the OID) marks the target as reachable but emits no signals. A reachable-but-refusing agent is still a signal in itself for discovery — you know a device is there and running SNMP, even if the community is not what was configured. A varbind whose value is not the ASN.1 type expected for that OID (for example `sysDescr` returned as an `INTEGER`) is silently skipped; the remaining varbinds are still processed.
 
-If every port fails to reach the agent, the probe returns an error. Timeouts map to `Timeout`; connection-refused or unreachable-host errors map to `Unreachable`; BER decode failures on every port map to `Other("snmp decode failed on all ports")`.
+A target whose agent answers on no configured port — every port times out, is refused, or reports the host as unreachable — is marked unreachable and contributes no signals. That is a normal discovery result, not an error. A BER decode failure on every port is different: the agent did answer, but the reply could not be parsed. That is a probe fault, and it surfaces as an error naming the decode failure. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 

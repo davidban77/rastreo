@@ -59,7 +59,7 @@ Every metric enumerated on the [Observability page](observability.md#metrics) is
 | OpenTelemetry name | Instrument | Attributes |
 |---|---|---|
 | `rastreo_server_scans_total` | observable counter (u64) | `outcome=success\|error\|cancelled` |
-| `rastreo_server_probes_total` | observable counter (u64) | `outcome=success\|error`, `probe_kind` (bounded set — see [probe_kind taxonomy](observability.md#probe_kind-taxonomy)) |
+| `rastreo_server_probes_total` | observable counter (u64) | `outcome=success\|error` (see [what `outcome` means](observability.md#what-outcome-means)), `probe_kind` (bounded set — see [probe_kind taxonomy](observability.md#probe_kind-taxonomy)) |
 | `rastreo_server_records_emitted_total` | observable counter (u64) | — |
 | `rastreo_server_sink_errors_total` | observable counter (u64) | `error_class` (bounded set — see [error_class taxonomy](observability.md#error_class-taxonomy)) |
 | `rastreo_server_dlq_records_total` | observable counter (u64) | `sink_type` (`kafka\|nats`), `error_class` |

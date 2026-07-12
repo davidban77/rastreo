@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_discovery_captures_first_probe_error_and_ignores_subsequent() {
+    async fn run_discovery_reports_no_probe_errors_for_dark_targets() {
         use crate::prober::UdpProtocol;
 
         let scenario = DiscoverScenarioConfig {
@@ -601,10 +601,71 @@ mod tests {
             .await
             .expect("returns summary");
 
-        assert!(
-            summary.probe_errors >= 2,
-            "both targets should error against port 1, got {}",
-            summary.probe_errors
+        assert_eq!(summary.probe_attempts, 2);
+        assert_eq!(
+            summary.probe_errors, 0,
+            "a target that does not answer is a discovery result, not a probe error"
+        );
+        assert!(summary.first_probe_error.is_none());
+        assert_eq!(summary.records_emitted, 0);
+        let udp = summary
+            .probes_by_kind
+            .iter()
+            .find(|k| k.kind == ProbeKind::Udp)
+            .expect("udp kind summary");
+        assert_eq!(udp.attempted, 2);
+        assert_eq!(udp.errored, 0);
+    }
+
+    #[cfg(feature = "snmp")]
+    async fn spawn_undecodable_snmp_agent() -> u16 {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind agent");
+        let port = socket.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                if let Ok((_, peer)) = socket.recv_from(&mut buf).await {
+                    let _ = socket.send_to(&[0xff, 0xfe, 0xfd, 0xfc], peer).await;
+                }
+            }
+        });
+        port
+    }
+
+    #[cfg(feature = "snmp")]
+    #[tokio::test]
+    async fn run_discovery_captures_first_probe_error_and_ignores_subsequent() {
+        use crate::prober::snmp::{SnmpVersion, UsmCredentials};
+
+        let snmp_prober_on = |port: u16| ProberConfig::Snmp {
+            ports: vec![port],
+            version: SnmpVersion::V2c,
+            community: crate::prober::Community("public".into()),
+            credentials: UsmCredentials::default(),
+        };
+        let first_port = spawn_undecodable_snmp_agent().await;
+        let second_port = spawn_undecodable_snmp_agent().await;
+
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![snmp_prober_on(first_port), snmp_prober_on(second_port)],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("returns summary");
+
+        assert_eq!(
+            summary.probe_errors, 2,
+            "an undecodable agent reply is a probe fault, not an absent host"
         );
         assert_eq!(summary.records_emitted, 0);
         let first = summary
@@ -612,8 +673,107 @@ mod tests {
             .as_deref()
             .expect("first probe error must be captured");
         assert!(
-            !first.is_empty(),
-            "first_probe_error must be non-empty when a probe errors"
+            first.contains("decode"),
+            "first_probe_error must carry the fault, got: {first}"
+        );
+        assert!(
+            first.contains(&first_port.to_string()),
+            "the first fault must win the latch, got: {first}"
+        );
+        assert!(
+            !first.contains(&second_port.to_string()),
+            "a later fault must not overwrite the latched first one, got: {first}"
+        );
+    }
+
+    #[tokio::test]
+    async fn include_unreachable_emits_a_record_per_dark_target() {
+        use crate::prober::UdpProtocol;
+
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(100),
+                fuser: Some(FuserConfig::Direct {
+                    include_unreachable: Some(true),
+                    confidence_baseline: None,
+                    confidence_per_signal: None,
+                }),
+                ..Default::default()
+            },
+            targets: vec![
+                Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                Target::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+            ],
+            probers: vec![ProberConfig::Udp {
+                ports: vec![1],
+                protocol: UdpProtocol::Ntp,
+            }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("returns summary");
+
+        assert_eq!(summary.probe_errors, 0);
+        assert_eq!(
+            summary.records_emitted, 2,
+            "a dark host is an outcome, so include_unreachable emits one record per dark IP"
+        );
+        let records: Vec<crate::model::DeviceRecord> = handle
+            .ndjson_lines()
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("parse record"))
+            .collect();
+        for record in &records {
+            assert!(
+                record.probe_kinds.is_empty(),
+                "nothing responded, so nothing is provenance: {:?}",
+                record.probe_kinds
+            );
+            assert!(record.signals.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_kinds_on_a_reachable_record_exclude_silent_probers() {
+        use crate::prober::UdpProtocol;
+
+        let open_port = open_loopback_port().await;
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(100),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![
+                ProberConfig::TcpConnect {
+                    ports: vec![open_port],
+                },
+                ProberConfig::Udp {
+                    ports: vec![1],
+                    protocol: UdpProtocol::Ntp,
+                },
+            ],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("returns summary");
+
+        assert_eq!(summary.records_emitted, 1);
+        let lines = handle.ndjson_lines();
+        let record: crate::model::DeviceRecord =
+            serde_json::from_str(&lines[0]).expect("parse record");
+        assert_eq!(
+            record.probe_kinds,
+            vec![ProbeKind::TcpConnect],
+            "the silent udp prober answered nothing and must not claim provenance"
         );
     }
 
