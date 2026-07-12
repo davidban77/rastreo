@@ -18,18 +18,18 @@ The CLI prints the `Display` message to stderr and exits with code `1`. The HTTP
 
 ## Probe errors
 
-`RastreoError::Probe(ProbeError)` covers probe faults — cases where the probe itself could not run. The Display prefix on the outer variant is `probe error:`.
+Probe faults are typed data, not returned errors. When a probe faults, it records the reason as a named kind on the outcome and the scan keeps running. The named kinds you will see are `decode_failed`, `permission_denied`, `dns_failed`, and `other` — each explained in [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). A `permission_denied` fault from a missing `CAP_NET_RAW` is covered in [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
 
-!!! warning "A probe errors only when it learned nothing"
-    A timeout, a refused connection, an unreachable network, or a port that is not speaking the protocol you probed — each is a normal negative discovery result, and `probe_errors` stays at zero. A probe that learned something partial keeps it: a device that answers TCP but refuses the TLS handshake produces a record carrying the open port, not an error. Only the faults below count as errors. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults).
+!!! warning "A fault is the probe breaking, not a silent target"
+    A timeout, a refused connection, an unreachable network, or a port that is not speaking the protocol you probed — each is a normal negative discovery result, and `error_counts` stays empty. A probe that learned something partial keeps it: a device that answers TCP but refuses the TLS handshake produces a record carrying the open port, no fault. One fault keeps the device even so — a reply rastreo cannot decode marks the target reachable, emits a record with no signals, and counts the fault as `decode_failed`.
+
+The scan summary reports faults in three fields. `error_counts` tallies them by kind. `first_probe_error` holds the first fault as a two-element `[kind, detail]` array. `probes_by_kind` gives a per-prober `attempted` / `errored` breakdown. A scan fails only when target resolution, encoding, or the sink fails.
+
+`RastreoError::Probe(ProbeError)` is separate and rare. It is returned only when a probe could not attempt a target at all, and the pipeline then counts that case under the `other` fault kind. The Display prefix on the outer variant is `probe error:`, and the HTTP server maps it to `500`.
 
 | Variant | Display message | Common cause | Likely fix |
 |---|---|---|---|
-| `ProbeError::Other(msg)` | The `msg` is rendered as-is. | The probe learned nothing at all: a raw socket refused for lack of `CAP_NET_RAW`, an ARP probe aimed at an IPv6 target (or NDP at IPv4), a local socket failure such as descriptor exhaustion, or an SNMP agent whose only reply cannot be decoded. | Read the message; it names the prober and the fault. For `CAP_NET_RAW`, see [ARP · Runtime privilege](../probe/arp.md#runtime-privilege). |
-| `ProbeError::Timeout { timeout_ms }` | `probe timed out after <N>ms` | Retained on the type for custom `Prober` implementations. No prober shipped with rastreo returns it. | — |
-| `ProbeError::Unreachable { target }` | `probe target unreachable: <target>` | Retained on the type for custom `Prober` implementations. No prober shipped with rastreo returns it. | — |
-
-Probe faults do not abort the scan. The pipeline counts them in the scan summary and moves on to the next target. The summary reports `probe_errors`, a sample message in `first_probe_error`, and a per-prober breakdown in `probes_by_kind`. A scan fails only when target resolution, encoding, or the sink fails.
+| `ProbeError::Other(msg)` | The `msg` is rendered as-is. | A probe could not attempt the target at all. | Read the message; it names the prober and the failure. |
 
 ## Resolver errors
 

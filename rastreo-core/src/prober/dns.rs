@@ -10,8 +10,8 @@ use hickory_resolver::net::NetError;
 use hickory_resolver::proto::rr::{RData, RecordType};
 use hickory_resolver::TokioResolver;
 
-use crate::error::{ConfigError, ProbeError, RastreoError};
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
+use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
@@ -241,13 +241,16 @@ impl Prober for DnsProber {
         let record_type = self.query_type.to_record_type();
         let mut signals = Vec::new();
         let mut any_reachable = false;
-        let mut last_fault: Option<String> = None;
+        let mut last_fault: Option<ProbeFault> = None;
 
         for &port in &self.ports {
             let resolver = match self.build_resolver(target.ip, port) {
                 Ok(r) => r,
                 Err(e) => {
-                    last_fault = Some(format!("failed to build dns resolver on port {port}: {e}"));
+                    last_fault = Some(ProbeFault::new(
+                        ProbeErrorKind::DnsFailed,
+                        format!("failed to build dns resolver on port {port}: {e}"),
+                    ));
                     continue;
                 }
             };
@@ -276,9 +279,11 @@ impl Prober for DnsProber {
                             any_reachable = true;
                             continue;
                         }
-                        if classify::net_error(&err) == Disposition::Fault {
-                            last_fault =
-                                Some(format!("dns probe failed on port {port} for {name}: {err}"));
+                        if let Disposition::Fault(kind) = classify::net_error(&err) {
+                            last_fault = Some(ProbeFault::new(
+                                kind,
+                                format!("dns probe failed on port {port} for {name}: {err}"),
+                            ));
                         }
                     }
                     Err(_) => {}
@@ -288,15 +293,13 @@ impl Prober for DnsProber {
 
         if !any_reachable {
             // Silence on one port is not evidence against a fault on another, but an answer is.
-            if let Some(msg) = last_fault {
-                return Err(ProbeError::Other(msg).into());
-            }
             return Ok(ProbeOutcome {
                 kind: ProbeKind::Dns,
                 target_ip: target.ip,
                 timestamp: SystemTime::now(),
                 reachable: false,
                 signals: Vec::new(),
+                fault: last_fault,
             });
         }
 
@@ -306,6 +309,7 @@ impl Prober for DnsProber {
             timestamp: SystemTime::now(),
             reachable: any_reachable,
             signals,
+            fault: None,
         })
     }
 }
@@ -868,16 +872,24 @@ mod tests {
     async fn dns_prober_maps_undecodable_reply_to_a_probe_fault() {
         let port = spawn_garbage_udp_server().await;
         let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
-        let err = prober
+        let outcome = prober
             .probe(&loopback_target(), &ctx_with_timeout(2_000))
             .await
-            .expect_err("a reply we cannot decode is a fault, not an absent host");
-        match err {
-            RastreoError::Probe(ProbeError::Other(msg)) => {
-                assert!(msg.contains("dns probe failed"), "got: {msg}");
-            }
-            other => panic!("expected ProbeError::Other, got {other:?}"),
-        }
+            .expect("a reply we cannot decode is a fault on the outcome, not an Err");
+        assert!(
+            !outcome.reachable,
+            "a reply we cannot decode is not reachability"
+        );
+        assert!(outcome.signals.is_empty());
+        let fault = outcome
+            .fault
+            .expect("an undecodable reply is a fault, not an absent host");
+        assert_eq!(fault.kind, ProbeErrorKind::DnsFailed);
+        assert!(
+            fault.detail.contains("dns probe failed"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     async fn spawn_garbage_udp_server() -> u16 {

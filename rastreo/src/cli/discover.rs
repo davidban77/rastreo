@@ -634,7 +634,7 @@ fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary) {
     if summary.records_emitted > 0 {
         return;
     }
-    if let Some(msg) = summary.first_probe_error.as_deref() {
+    if let Some((_, msg)) = summary.first_probe_error.as_ref() {
         if let Some(hint) = enrich_probe_error_hint(msg) {
             eprintln!("{hint}");
             return;
@@ -730,12 +730,13 @@ fn print_summary(label: &str, summary: &rastreo_core::DiscoverySummary) {
     } else {
         "complete"
     };
+    let probe_errors: usize = summary.error_counts.values().sum();
     eprintln!(
         "{label} {}: targets_resolved={} probe_attempts={} probe_errors={} records_emitted={} elapsed_ms={}",
         status,
         summary.targets_resolved,
         summary.probe_attempts,
-        summary.probe_errors,
+        probe_errors,
         summary.records_emitted,
         summary.elapsed.as_millis(),
     );
@@ -1841,9 +1842,14 @@ mod tests {
         let mut summary = rastreo_core::DiscoverySummary::default();
         summary.targets_resolved = 1;
         summary.probe_attempts = 1;
-        summary.probe_errors = 1;
+        summary
+            .error_counts
+            .insert(rastreo_core::ProbeErrorKind::PermissionDenied, 1);
         summary.cancelled = true;
-        summary.first_probe_error = Some("connection refused".into());
+        summary.first_probe_error = Some((
+            rastreo_core::ProbeErrorKind::PermissionDenied,
+            "permission denied".into(),
+        ));
         print_runtime_hints(&summary);
     }
 }

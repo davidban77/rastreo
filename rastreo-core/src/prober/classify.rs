@@ -2,11 +2,14 @@ use std::io::ErrorKind;
 
 use hickory_resolver::net::NetError;
 
-/// Whether a failed probe attempt is evidence of an absent target or of a broken probe.
+use crate::error::ProbeErrorKind;
+
+/// Whether a failed probe attempt is evidence of an absent target or of a broken probe; a fault
+/// carries the [`ProbeErrorKind`] naming what broke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Disposition {
     Absence,
-    Fault,
+    Fault(ProbeErrorKind),
 }
 
 pub(crate) fn io_error(err: &std::io::Error) -> Disposition {
@@ -19,7 +22,8 @@ pub(crate) fn io_error(err: &std::io::Error) -> Disposition {
         | ErrorKind::NetworkUnreachable => Disposition::Absence,
         // A remote admin-prohibited answer arrives as `HostUnreachable`, so `PermissionDenied`
         // here is always local egress policy (netfilter REJECT in OUTPUT, SELinux, a NetworkPolicy).
-        _ => Disposition::Fault,
+        ErrorKind::PermissionDenied => Disposition::Fault(ProbeErrorKind::PermissionDenied),
+        _ => Disposition::Fault(ProbeErrorKind::Other),
     }
 }
 
@@ -28,8 +32,10 @@ pub(crate) fn net_error(err: &NetError) -> Disposition {
         NetError::Timeout => Disposition::Absence,
         NetError::Io(io) => io_error(io),
         // `NetError` is #[non_exhaustive]: classify an unknown variant by the io error in its
-        // source chain; a resolver-layer failure with no io evidence is a fault.
-        other => io_source(other).map(io_error).unwrap_or(Disposition::Fault),
+        // source chain; a resolver-layer failure with no io evidence is a DNS-layer fault.
+        other => io_source(other)
+            .map(io_error)
+            .unwrap_or(Disposition::Fault(ProbeErrorKind::DnsFailed)),
     }
 }
 
@@ -111,17 +117,23 @@ mod tests {
     #[test]
     fn local_resource_io_kinds_are_faults() {
         for kind in [
-            ErrorKind::PermissionDenied,
             ErrorKind::AddrNotAvailable,
             ErrorKind::InvalidInput,
             ErrorKind::OutOfMemory,
         ] {
-            assert_eq!(
-                io_error(&std::io::Error::from(kind)),
-                Disposition::Fault,
+            assert!(
+                matches!(io_error(&std::io::Error::from(kind)), Disposition::Fault(_)),
                 "{kind:?} must be a fault, not absence"
             );
         }
+    }
+
+    #[test]
+    fn a_denied_local_socket_is_a_permission_denied_fault() {
+        assert_eq!(
+            io_error(&std::io::Error::from(ErrorKind::PermissionDenied)),
+            Disposition::Fault(ProbeErrorKind::PermissionDenied)
+        );
     }
 
     #[test]
@@ -138,27 +150,34 @@ mod tests {
     }
 
     #[test]
-    fn dns_io_fault_kinds_are_faults() {
+    fn dns_io_fault_kinds_carry_the_io_kind() {
         let err = NetError::Io(Arc::new(std::io::Error::from(ErrorKind::PermissionDenied)));
-        assert_eq!(net_error(&err), Disposition::Fault);
+        assert_eq!(
+            net_error(&err),
+            Disposition::Fault(ProbeErrorKind::PermissionDenied)
+        );
     }
 
     #[test]
-    fn dns_no_connections_is_a_fault() {
+    fn dns_no_connections_is_a_dns_fault() {
         // hickory raises `NoConnections` when the connection policy selects no usable connection
         // config, or when no configured server survives the pool's filter — never when a server
         // was asked and stayed silent (that is `Timeout`).
-        assert_eq!(net_error(&NetError::NoConnections), Disposition::Fault);
+        assert_eq!(
+            net_error(&NetError::NoConnections),
+            Disposition::Fault(ProbeErrorKind::DnsFailed)
+        );
     }
 
     #[test]
-    fn dns_resolver_layer_failure_without_io_evidence_is_a_fault() {
-        assert_eq!(net_error(&NetError::Busy), Disposition::Fault);
+    fn dns_resolver_layer_failure_without_io_evidence_is_a_dns_fault() {
+        let dns_fault = Disposition::Fault(ProbeErrorKind::DnsFailed);
+        assert_eq!(net_error(&NetError::Busy), dns_fault);
         assert_eq!(
             net_error(&NetError::Msg("bad resolver state".into())),
-            Disposition::Fault
+            dns_fault
         );
-        assert_eq!(net_error(&NetError::QueryCaseMismatch), Disposition::Fault);
+        assert_eq!(net_error(&NetError::QueryCaseMismatch), dns_fault);
     }
 
     #[cfg(feature = "http")]
@@ -235,7 +254,10 @@ mod tests {
     fn a_denied_local_socket_wrapped_by_a_client_stack_is_a_fault() {
         let wrapped = wrap(std::io::Error::from(ErrorKind::PermissionDenied));
         let io = io_error_in_chain(&wrapped).expect("io error recovered through the source chain");
-        assert_eq!(io_error(io), Disposition::Fault);
+        assert_eq!(
+            io_error(io),
+            Disposition::Fault(ProbeErrorKind::PermissionDenied)
+        );
     }
 
     #[cfg(feature = "http")]
@@ -245,7 +267,7 @@ mod tests {
         let emfile = std::io::Error::from_raw_os_error(24);
         let wrapped = wrap(emfile);
         let io = io_error_in_chain(&wrapped).expect("io error recovered through the source chain");
-        assert_eq!(io_error(io), Disposition::Fault);
+        assert_eq!(io_error(io), Disposition::Fault(ProbeErrorKind::Other));
     }
 
     #[cfg(feature = "http")]

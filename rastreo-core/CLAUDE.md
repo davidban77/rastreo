@@ -7,10 +7,10 @@ This is the library crate. It owns **all** domain logic. If it probes a network,
 ```
 src/
 ├── lib.rs           ← crate-root re-exports + version()
-├── error.rs         ← RastreoError umbrella + sub-enums
+├── error.rs         ← RastreoError umbrella + sub-enums + ProbeErrorKind taxonomy
 ├── model/
 │   ├── target.rs        ← Target, ResolvedTarget
-│   ├── outcome.rs       ← ProbeKind, ProbeOutcome, Signal, ProbeCtx
+│   ├── outcome.rs       ← ProbeKind, ProbeOutcome, ProbeFault, Signal, ProbeCtx
 │   ├── device.rs        ← DeviceRecord, IdentityKey, AltIp, AltIpRole
 │   ├── scan.rs          ← ScanMetadata, source_config_hash
 │   └── serde_iso8601.rs ← RFC 3339 serde helpers for SystemTime
@@ -119,12 +119,14 @@ Http {
 - Never `unwrap()` in this crate. Use `?` propagation or explicit error mapping.
 - The structured error hierarchy uses sub-enums per failure domain (`ConfigError`, `ProbeError`, `ResolverError`, `EncoderError`, `RuntimeError`) accessed via the umbrella `RastreoError`. No blanket `From<std::io::Error>` — sink call sites map I/O failures to `RastreoError::Sink` explicitly.
 
-**The reachability contract.** A prober's `Err` means the probe itself broke — never that the target was quiet. A target that does not answer is `Ok(ProbeOutcome { reachable: false, signals: [] })`. Both halves matter: a fault booked as absence hides a broken probe behind a host that looks dark, and absence booked as a fault floods a scan with errors for every closed port.
+**The reachability contract.** A probe result is a complete, typed record of what the probe learned. `probe()` returns `Ok(ProbeOutcome)` whenever it attempted a target; the outcome carries `reachable`, `signals`, and a typed `fault: Option<ProbeFault>`. A target that does not answer is `Ok(ProbeOutcome { reachable: false, signals: [], fault: None })`. A probe that broke is `Ok(ProbeOutcome { fault: Some(ProbeFault { kind, detail }) })` — the fault is data, never discarded. `Err` from `probe()` is vestigial: reserved for "could not attempt at all" (e.g. a panicked blocking thread → `RuntimeError`); the pipeline still handles a stray `Err` by counting it as `ProbeErrorKind::Other`.
 
-- Decide by *reason*, not by counting. `prober::classify` is the single seam: `io_error` and `net_error` (hickory) each return `Absence` or `Fault`. `rustls_error_in_chain` is a chain *walker*, not a classifier — a rustls error proves the TCP connect completed, so HTTP credits the port as open. Probers keep their own outcome enum and delegate the decision to it.
+- Faults are named by `ProbeErrorKind`, never by string-matching. `ProbeFault { kind, detail }` carries the kind plus a sample detail string for the summary.
+- Decide by *reason*, not by counting. `prober::classify` is the single seam: `io_error` and `net_error` (hickory) each return `Absence` or `Fault(ProbeErrorKind)`. `rustls_error_in_chain` is a chain *walker*, not a classifier — a rustls error proves the TCP connect completed, so HTTP credits the port as open. Probers build a `ProbeFault` from the classifier's kind.
 - An unclassified failure is a **fault**, never absence. A visible fault is recoverable; a fault hidden as a dark host is not.
-- Multi-port probers latch the fault and surface it only when nothing answered: silence on one port is not evidence against a fault on another, but an answer is.
-- Every `ProbeKind` must be able to report both. `tests/reachability_contract.rs` walks `ProbeKind::all()` and fails until a new kind declares both halves — as a live probe case, or as the named unit-test seam covering it.
+- Multi-port probers latch the fault and surface it on the outcome only when nothing answered: silence on one port is not evidence against a fault on another, but an answer is. The exception is a reply the probe cannot decode (SNMP): the agent answered, so the device is kept (`reachable: true`) with the `DecodeFailed` fault recorded and no signals.
+- The pipeline derives `DiscoverySummary.error_counts` (by `ProbeErrorKind`) and `first_probe_error` from `outcome.fault`, not from `Err`. A faulted-but-reachable outcome still fuses into a record.
+- Every `ProbeKind` must be able to report both. `tests/reachability_contract.rs` walks `ProbeKind::all()` and fails until a new kind declares both halves — an absent target as `Ok`-without-fault, a broken probe as `Ok`-with-`fault` — as a live probe case, or as the named unit-test seam covering it.
 
 ## Performance Guidelines
 

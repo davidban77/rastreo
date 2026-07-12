@@ -774,7 +774,7 @@ mod tests {
         assert!((snap.sum - 0.5).abs() < 1e-9);
     }
 
-    use rastreo_core::{ProbeKind, ProbeKindSummary, SinkType};
+    use rastreo_core::{ProbeErrorKind, ProbeKind, ProbeKindSummary, SinkType};
 
     fn kind_summary(kind: ProbeKind, attempted: usize, errored: usize) -> ProbeKindSummary {
         let mut s = ProbeKindSummary::default();
@@ -794,7 +794,9 @@ mod tests {
         let mut s = DiscoverySummary::default();
         s.targets_resolved = 1;
         s.probe_attempts = probe_attempts;
-        s.probe_errors = probe_errors;
+        if probe_errors > 0 {
+            s.error_counts.insert(ProbeErrorKind::Other, probe_errors);
+        }
         s.records_emitted = records_emitted;
         s.probes_by_kind = by_kind;
         s.elapsed = Duration::from_millis(elapsed_ms);

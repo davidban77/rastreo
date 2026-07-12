@@ -295,6 +295,7 @@ mod tests {
             timestamp: SystemTime::UNIX_EPOCH,
             reachable,
             signals,
+            fault: None,
         }
     }
 
@@ -310,6 +311,7 @@ mod tests {
             timestamp: ts,
             reachable,
             signals,
+            fault: None,
         }
     }
 

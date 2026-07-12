@@ -369,7 +369,6 @@ mod tests {
         let mut summary = DiscoverySummary::default();
         summary.targets_resolved = 1;
         summary.probe_attempts = 10;
-        summary.probe_errors = 2;
         summary.records_emitted = 5;
         summary.probes_by_kind = vec![build_kind_summary(ProbeKind::TcpConnect, 10, 2)];
         summary.sink_type = Some(SinkType::Memory);

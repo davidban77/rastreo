@@ -7,8 +7,8 @@ use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::rr::{Name, RData};
 use hickory_resolver::TokioResolver;
 
-use crate::error::{ConfigError, ProbeError, RastreoError};
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, RastreoError};
+use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
 use crate::prober::Prober;
 
@@ -97,7 +97,7 @@ impl Prober for ReverseDnsProber {
         let query_name: Name = target.ip.into();
         let mut signals = Vec::new();
         let mut reachable = false;
-        let mut fault: Option<String> = None;
+        let mut fault: Option<ProbeFault> = None;
 
         match tokio::time::timeout(ctx.timeout, self.resolver.reverse_lookup(query_name)).await {
             Ok(Ok(lookup)) => {
@@ -115,18 +115,15 @@ impl Prober for ReverseDnsProber {
                 } else if let NetError::Dns(DnsError::ResponseCode(_)) = &err {
                     // REFUSED / SERVFAIL / etc. — server responded.
                     reachable = true;
-                } else if classify::net_error(&err) == Disposition::Fault {
-                    fault = Some(format!("reverse dns probe failed for {}: {err}", target.ip));
+                } else if let Disposition::Fault(kind) = classify::net_error(&err) {
+                    fault = Some(ProbeFault::new(
+                        kind,
+                        format!("reverse dns probe failed for {}: {err}", target.ip),
+                    ));
                 }
             }
             Err(_) => {
                 // Outer tokio timeout fired — reachable stays false.
-            }
-        }
-
-        if !reachable {
-            if let Some(msg) = fault {
-                return Err(ProbeError::Other(msg).into());
             }
         }
 
@@ -136,6 +133,7 @@ impl Prober for ReverseDnsProber {
             timestamp: SystemTime::now(),
             reachable,
             signals,
+            fault: if reachable { None } else { fault },
         })
     }
 }
@@ -381,16 +379,20 @@ mod tests {
             original: Target::Ip(target_ip),
             resolved_at: SystemTime::UNIX_EPOCH,
         };
-        let err = prober_pinned_to(port)
+        let outcome = prober_pinned_to(port)
             .probe(&target, &ctx_with_timeout(2_000))
             .await
-            .expect_err("a reply we cannot decode is a fault, not a host without a PTR record");
-        match err {
-            RastreoError::Probe(crate::error::ProbeError::Other(msg)) => {
-                assert!(msg.contains("reverse dns probe failed"), "got: {msg}");
-            }
-            other => panic!("expected ProbeError::Other, got {other:?}"),
-        }
+            .expect("a reply we cannot decode is a fault on the outcome, not an Err");
+        assert!(!outcome.reachable);
+        let fault = outcome
+            .fault
+            .expect("a reply we cannot decode is a fault, not a host without a PTR record");
+        assert_eq!(fault.kind, crate::error::ProbeErrorKind::DnsFailed);
+        assert!(
+            fault.detail.contains("reverse dns probe failed"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     #[test]
