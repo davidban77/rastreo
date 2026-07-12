@@ -24,9 +24,10 @@ use crate::error::RastreoError;
 
 /// Bounded taxonomy of sink failure classes surfaced on `sink_errors_total` and `dlq_records_total`.
 ///
-/// The classifier maps `io::Error` messages produced by concrete sinks to one of these
-/// variants. Variants are `#[non_exhaustive]` so future sinks can add classes without
-/// breaking downstream exhaustive matching.
+/// Each concrete sink tags its failures with one of these variants at the failure site;
+/// the class is carried on [`SinkError`], never re-derived from the message. Variants are
+/// `#[non_exhaustive]` so future sinks can add classes without breaking downstream exhaustive
+/// matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, JsonSchema)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
@@ -107,25 +108,25 @@ impl SinkType {
     }
 }
 
-/// Map a sink-produced `io::Error` to a bounded `SinkErrorClass` for metric labelling.
+/// A sink I/O failure tagged with its [`SinkErrorClass`], constructed at the failure site.
 ///
-/// The mapping keys off message prefixes that concrete sinks emit — the classifier is
-/// intentionally structural (string-based) because the underlying error types differ
-/// across sinks and stringifying is already the shared surface via `io::Error`.
-pub fn classify_sink_error(err: &std::io::Error) -> SinkErrorClass {
-    let msg = err.to_string();
-    if msg.contains("was not acked") {
-        SinkErrorClass::AckRejection
-    } else if msg.contains("failed to publish") {
-        SinkErrorClass::PublishFailure
-    } else if msg.contains("failed to produce") {
-        SinkErrorClass::ProduceFailure
-    } else if msg.contains("failed to flush") {
-        SinkErrorClass::FlushFailure
-    } else if msg.contains("failed to write") {
-        SinkErrorClass::WriteFailure
-    } else {
-        SinkErrorClass::Other
+/// The class travels as data on the error, so DLQ headers and metric attribution read it
+/// directly instead of re-deriving it from the message.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct SinkError {
+    pub class: SinkErrorClass,
+    pub source: std::io::Error,
+}
+
+impl SinkError {
+    pub fn new(class: SinkErrorClass, source: std::io::Error) -> Self {
+        Self { class, source }
+    }
+
+    /// Tag an unclassified I/O failure (connect, partition-client, stream-lookup) as [`SinkErrorClass::Other`].
+    pub fn other(source: std::io::Error) -> Self {
+        Self::new(SinkErrorClass::Other, source)
     }
 }
 
@@ -160,19 +161,29 @@ pub trait Sink: Send + Sync {
         0
     }
 
-    /// DLQ deliveries attributed to the underlying destination sink type.
+    /// Cumulative DLQ deliveries per [`SinkErrorClass`], indexed by `SinkErrorClass::index()`.
     ///
-    /// Default derives from `kind()` and `dlq_records_delivered()` — a single-protocol
-    /// sink returns one entry (or empty when its count is zero). Fan-out sinks that
-    /// deliver to children of different protocols override this to preserve per-type
+    /// Default is all-zero — a sink without a DLQ never quarantines a record. Sinks with a
+    /// DLQ override to report each delivery under the class of the failure that triggered it.
+    fn dlq_records_by_class(&self) -> [u64; SINK_ERROR_CLASS_COUNT] {
+        [0; SINK_ERROR_CLASS_COUNT]
+    }
+
+    /// DLQ deliveries attributed to `(destination sink type, failure class)`.
+    ///
+    /// Default derives from `kind()` and `dlq_records_by_class()`. Fan-out sinks that
+    /// deliver to children of different protocols override this to preserve per-child
     /// attribution for the DLQ metric.
-    fn dlq_records_by_type(&self) -> Vec<(SinkType, u64)> {
-        let count = self.dlq_records_delivered();
-        if count == 0 {
-            Vec::new()
-        } else {
-            vec![(self.kind(), count)]
-        }
+    fn dlq_records_by_type_and_class(&self) -> Vec<(SinkType, SinkErrorClass, u64)> {
+        let kind = self.kind();
+        let by_class = self.dlq_records_by_class();
+        SinkErrorClass::all()
+            .iter()
+            .filter_map(|class| {
+                let count = by_class[class.index()];
+                (count > 0).then_some((kind, *class, count))
+            })
+            .collect()
     }
 
     /// Lightweight liveness check the server-side reachability probe consumes.
@@ -372,33 +383,121 @@ mod tests {
     }
 
     #[test]
-    fn classify_produce_failure_matches_kafka_produce_message() {
-        let io_err = std::io::Error::other(
-            "kafka sink: failed to produce record to topic 't' at broker(s) 'b:9092': boom",
+    fn sink_error_carries_the_class_it_was_constructed_with() {
+        let err = SinkError::new(
+            SinkErrorClass::AckRejection,
+            std::io::Error::other("rejected"),
         );
-        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::ProduceFailure);
+        assert_eq!(err.class, SinkErrorClass::AckRejection);
     }
 
     #[test]
-    fn classify_publish_failure_matches_nats_publish_message() {
-        let io_err = std::io::Error::other(
-            "nats sink: failed to publish to subject 'x' at server(s) 'n:4222': boom",
-        );
-        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::PublishFailure);
+    fn sink_error_other_tags_unclassified_io_as_other() {
+        let err = SinkError::other(std::io::Error::other("connect refused"));
+        assert_eq!(err.class, SinkErrorClass::Other);
     }
 
     #[test]
-    fn classify_ack_rejection_matches_nats_ack_message() {
-        let io_err = std::io::Error::other(
-            "nats sink: publish to subject 'x' at server(s) 'n:4222' was not acked: rejected",
+    fn sink_error_display_forwards_the_io_message() {
+        let err = SinkError::new(
+            SinkErrorClass::WriteFailure,
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke"),
         );
-        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::AckRejection);
+        assert_eq!(err.to_string(), "pipe broke");
     }
 
     #[test]
-    fn classify_other_falls_through_for_unknown_message() {
-        let io_err = std::io::Error::other("some unrelated io failure");
-        assert_eq!(classify_sink_error(&io_err), SinkErrorClass::Other);
+    fn dlq_records_by_type_and_class_default_derives_from_kind_and_class_counts() {
+        struct KafkaLike(u64);
+        #[async_trait::async_trait]
+        impl Sink for KafkaLike {
+            async fn write(&mut self, _: &[u8]) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Kafka
+            }
+            fn dlq_records_by_class(&self) -> [u64; SINK_ERROR_CLASS_COUNT] {
+                let mut out = [0; SINK_ERROR_CLASS_COUNT];
+                out[SinkErrorClass::ProduceFailure.index()] = self.0;
+                out
+            }
+        }
+        let sink = KafkaLike(4);
+        assert_eq!(
+            sink.dlq_records_by_type_and_class(),
+            vec![(SinkType::Kafka, SinkErrorClass::ProduceFailure, 4)]
+        );
+    }
+
+    #[test]
+    fn dlq_records_by_type_and_class_default_is_empty_without_dlq() {
+        struct Plain;
+        #[async_trait::async_trait]
+        impl Sink for Plain {
+            async fn write(&mut self, _: &[u8]) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+        }
+        assert!(Plain.dlq_records_by_type_and_class().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dlq_by_class_totals_sum_to_the_scalar_delivered_count() {
+        struct DlqCountingSink {
+            class: SinkErrorClass,
+            delivered: u64,
+            by_class: [u64; SINK_ERROR_CLASS_COUNT],
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for DlqCountingSink {
+            async fn write(&mut self, _: &[u8]) -> Result<(), RastreoError> {
+                self.delivered += 1;
+                self.by_class[self.class.index()] += 1;
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            fn dlq_records_delivered(&self) -> u64 {
+                self.delivered
+            }
+            fn dlq_records_by_class(&self) -> [u64; SINK_ERROR_CLASS_COUNT] {
+                self.by_class
+            }
+        }
+
+        let mut family: Vec<Box<dyn Sink>> = vec![Box::new(MockSink::new())];
+        for class in [
+            SinkErrorClass::ProduceFailure,
+            SinkErrorClass::AckRejection,
+            SinkErrorClass::WriteFailure,
+        ] {
+            let mut sink = DlqCountingSink {
+                class,
+                delivered: 0,
+                by_class: [0; SINK_ERROR_CLASS_COUNT],
+            };
+            for _ in 0..3 {
+                sink.write(b"quarantined").await.expect("write");
+            }
+            family.push(Box::new(sink));
+        }
+
+        for (i, sink) in family.iter().enumerate() {
+            assert_eq!(
+                sink.dlq_records_by_class().iter().sum::<u64>(),
+                sink.dlq_records_delivered(),
+                "sink {i}: by_class sum must equal the scalar delivered total"
+            );
+        }
     }
 
     #[tokio::test]

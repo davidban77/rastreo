@@ -72,7 +72,7 @@ DLQ messages default to carrying a small header envelope so downstream consumers
 | Header | Value | Encoding |
 |---|---|---|
 | `x-rastreo-source-topic` | Primary topic name (e.g. `rastreo.discovery.records`) | UTF-8 bytes |
-| `x-rastreo-error-class` | `produce_failure` (the only class today) | UTF-8 bytes |
+| `x-rastreo-error-class` | `produce_failure` — the class of a failed Kafka produce | UTF-8 bytes |
 | `x-rastreo-dlq-timestamp` | RFC 3339 UTC timestamp of the DLQ publish | UTF-8 bytes |
 
 Set `include_error_metadata: false` to ship the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary topic.
@@ -81,7 +81,7 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 
 **Consumer guidance.** A DLQ consumer typically re-publishes the payload to the primary topic once the underlying issue (broker outage, topic ACL, partition offline) is resolved. Filter on `x-rastreo-source-topic` when the same DLQ is shared across multiple discovery pipelines; use `x-rastreo-dlq-timestamp` to skip records older than a retention window.
 
-**Metric.** Each successful Kafka DLQ delivery increments `rastreo_server_dlq_records_total{sink_type="kafka",error_class="produce_failure"}`, surfaced on `/metrics` and via OTLP. The v1 classifier uses a sink-type-hint mapping — Kafka DLQ traffic always credits `produce_failure` regardless of the specific error that triggered the fallback. See [Observability · DLQ classification](../reference/observability.md#dlq-classification-v1) for the taxonomy and roadmap.
+**Metric.** Each successful Kafka DLQ delivery increments `rastreo_server_dlq_records_total{sink_type="kafka",error_class="produce_failure"}`, surfaced on `/metrics` and via OTLP. The `error_class` is the actual class of the failure that quarantined the record. A Kafka produce is the only path that sends a record to the Kafka DLQ, so Kafka DLQ traffic always carries `produce_failure`. See [Observability · DLQ error-class attribution](../reference/observability.md#dlq-error-class-attribution) for the full class list and the [DlqEnvelope schema](../reference/schema/dlq-envelope.md) for the header contract.
 
 **Reachability probe.** When a DLQ is configured, the server-side sink reachability probe covers both partitions: it issues a `ListOffsets` against the primary partition **and** a `ListOffsets` against the DLQ partition on every tick, regardless of whether the primary succeeded. Either side returning an error flips `sink_reachable` to `false` on `/readyz`. `last_probe_error` names the failed side (`primary partition unreachable ...` or `dead-letter partition unreachable ...`); when both sides fail, both segments are included, joined by `; `. Operators get advance warning that DLQ fallback would fail — including the case where the primary is already down and the DLQ is the only remaining safety net.
 
@@ -156,7 +156,7 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 
 **Consumer guidance.** A DLQ consumer typically re-publishes the payload to the primary subject once the underlying issue (broker outage, stream misconfiguration, quota) is resolved. Filter on `x-rastreo-source-subject` when the same DLQ is shared across multiple discovery pipelines; filter on `x-rastreo-error-class` to split triage between broker-connectivity issues (`publish_failure`) and stream-durability issues (`ack_rejection`); use `x-rastreo-dlq-timestamp` to skip records older than a retention window.
 
-**Metric.** Each successful NATS DLQ delivery increments `rastreo_server_dlq_records_total{sink_type="nats",error_class="publish_failure"}`, surfaced on `/metrics` and via OTLP. The v1 classifier uses a sink-type-hint mapping — NATS DLQ traffic credits `publish_failure` regardless of whether the underlying trigger was a primary-publish failure or a primary-ack rejection. See [Observability · DLQ classification](../reference/observability.md#dlq-classification-v1) for the taxonomy and roadmap.
+**Metric.** Each successful NATS DLQ delivery increments `rastreo_server_dlq_records_total{sink_type="nats",error_class="..."}`, surfaced on `/metrics` and via OTLP. The `error_class` is the actual class of the failure that quarantined the record: `publish_failure` when the synchronous publish failed, `ack_rejection` when JetStream refused durable storage after accepting the publish. The two classes let you split triage without opening logs. See [Observability · DLQ error-class attribution](../reference/observability.md#dlq-error-class-attribution) for the full class list and the [DlqEnvelope schema](../reference/schema/dlq-envelope.md) for the header contract.
 
 **See also.** Sink failures surface operationally through the [`/readyz` readiness gate](../reference/health-endpoints.md#readyz-readiness) on `rastreo-server`: a sink error observed within `RASTREO_SINK_ERROR_QUARANTINE_SECS` flips the pod to `503 not_ready`. Caveat: the current server-side gate only trips when a scan attempts a write and fails; it does not detect pre-request unreachability against a broker that is already down. True broker-reachability probing is tracked as a Phase 3 close-out follow-up.
 
@@ -182,3 +182,4 @@ The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get
 - [CLI](cli.md) — every flag `rastreo discover` accepts.
 - [Integrate · Kafka](../integrate/kafka.md) — Kafka wire contract.
 - [Integrate · NATS](../integrate/nats.md) — NATS JetStream wire contract.
+- [DlqEnvelope schema](../reference/schema/dlq-envelope.md) — the header and payload contract on every dead-letter message.

@@ -4,7 +4,7 @@ description: rastreo describes its streaming surface with an AsyncAPI 3.0 docume
 
 # Streaming API
 
-rastreo ships a transport-neutral description of its streaming surface as an AsyncAPI 3.0 document at `schemas/asyncapi.yaml`. The spec describes one channel — `rastreo.discovery.records.v1` — carrying `DeviceRecord` messages, attached to two servers (Kafka and NATS). Both transports carry the same JSON payload; the only difference is that Kafka calls the channel a "topic" and NATS calls it a "subject".
+rastreo ships a transport-neutral description of its streaming surface as an AsyncAPI 3.0 document at `schemas/asyncapi.yaml`. The spec describes two channels — a primary channel `rastreo.discovery.records.v1` carrying `DeviceRecord` messages, and a dead-letter channel for records that failed primary delivery — each attached to two servers (Kafka and NATS). Both transports carry the same JSON payload; the only difference is that Kafka calls a channel a "topic" and NATS calls it a "subject".
 
 ## What is AsyncAPI
 
@@ -25,6 +25,12 @@ The channel address is `rastreo.discovery.records.v1`. That string is used verba
 - `v1` — the wire schema version.
 
 A breaking change to the `DeviceRecord` shape ships a new channel at `rastreo.discovery.records.v2`. Both channels run in parallel for one release cycle so consumers can migrate on their own schedule. Additive changes stay on `v1`.
+
+## Dead-letter channel
+
+The spec declares a second channel, `deadLetterRecords`, for records that failed primary delivery. Its address in the spec (`rastreo.discovery.dlq.v1`) is illustrative — the real topic (Kafka) or subject (NATS) is whatever the sink's `dead_letter` config names. Each dead-letter message carries one unmodified `DeviceRecord` payload plus a set of `x-rastreo-*` headers. The `x-rastreo-error-class` header names the failure class so a consumer triages without parsing the payload. A consumer typically re-publishes the payload to the primary channel once the underlying issue is resolved.
+
+The full header and payload contract is on the [DlqEnvelope schema page](dlq-envelope.md).
 
 ## Correlation ID
 

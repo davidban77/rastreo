@@ -147,6 +147,7 @@ nav:
           - ScanMetadata: reference/schema/scan-metadata.md
           - ScenarioFile: reference/schema/scenario-config.md
           - Streaming API: reference/schema/streaming-api.md
+          - DlqEnvelope: reference/schema/dlq-envelope.md
       - Errors: reference/errors.md
       - Health endpoints: reference/health-endpoints.md
       - Observability: reference/observability.md

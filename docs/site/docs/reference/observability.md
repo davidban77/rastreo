@@ -16,7 +16,7 @@ Every metric uses the `rastreo_server_` prefix. All counters are monotonic acros
 | `rastreo_server_probes_total` | counter | `outcome="success"\|"error"`, `probe_kind` | probes | Probes executed across all scans, partitioned by outcome and probe kind. See the [probe_kind taxonomy](#probe_kind-taxonomy) and [what `outcome` means](#what-outcome-means) below. `success` is a monotonic per-scan counter incremented by `probe_attempts` minus the faulted probes so both `/metrics` and the OTLP observable counter remain non-decreasing per attribute-set. |
 | `rastreo_server_records_emitted_total` | counter | — | records | `DeviceRecord` events emitted across all scans. |
 | `rastreo_server_sink_errors_total` | counter | `error_class` | errors | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant), partitioned by error class. See the [error_class taxonomy](#error_class-taxonomy) below. |
-| `rastreo_server_dlq_records_total` | counter | `sink_type`, `error_class` | records | Records delivered to a dead-letter destination during scan handling, partitioned by sink type and error class. See [DLQ classification (v1)](#dlq-classification-v1) below. |
+| `rastreo_server_dlq_records_total` | counter | `sink_type`, `error_class` | records | Records delivered to a dead-letter destination during scan handling, partitioned by sink type and error class. See [DLQ error-class attribution](#dlq-error-class-attribution) below. |
 | `rastreo_server_scan_duration_seconds` | histogram | `scenario` | seconds | `POST /scans` request handling duration, partitioned by scenario name. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. See the [scenario label](#scenario-label) below. |
 | `rastreo_server_sink_reachability_probe_total` | counter | `outcome="success"\|"failure"`, `sink_type` | probes | Server-side sink reachability probes. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. See [Sink reachability probe](#sink-reachability-probe) below. |
 | `rastreo_server_sink_reachable` | gauge | `sink_type` | — | `1` when the last sink probe succeeded, `0` otherwise. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
@@ -43,9 +43,9 @@ The `probe_kind` label carries the snake_case name of the probe that produced th
 
 The `error_class` label groups sink failures by their observable shape so ops teams can triage without opening logs. Bounded (6): `publish_failure` (broker unreachable or subject invalid), `ack_rejection` (broker accepted but refused durable storage — stream quota, retention hit), `produce_failure` (Kafka primary produce failure), `write_failure` (file / stdout write failed), `flush_failure` (buffer drain on flush failed), `other` (anything unclassified).
 
-### DLQ classification (v1)
+### DLQ error-class attribution
 
-`rastreo_server_dlq_records_total` credits Kafka DLQ deliveries to `error_class="produce_failure"` and NATS DLQ deliveries to `error_class="publish_failure"`. This is a sink-type-hint mapping — it reflects the class the DLQ absorbs for that sink today, not per-record classification. A future revision will attach the specific class that triggered each individual DLQ delivery. The imprecision does not affect alerting on aggregate DLQ traffic (see `RastreoDlqTrafficSurge`).
+`rastreo_server_dlq_records_total` credits each quarantined record under the actual class of the failure that triggered the dead-letter delivery, set at the point of failure. A Kafka DLQ record carries `error_class="produce_failure"` — a failed Kafka produce is the only path that quarantines a Kafka record. A NATS DLQ record carries `error_class="publish_failure"` when the synchronous publish failed, or `error_class="ack_rejection"` when JetStream refused durable storage after accepting the publish. The two NATS classes let you split triage between broker-connectivity problems and stream-durability problems. Aggregate DLQ alerting (see `RastreoDlqTrafficSurge`) sums across classes and is unaffected by the split. The full envelope contract — headers and payload — is described on the [DlqEnvelope schema page](schema/dlq-envelope.md).
 
 ### scenario label
 

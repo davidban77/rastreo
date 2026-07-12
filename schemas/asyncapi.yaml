@@ -51,6 +51,26 @@ channels:
       deviceRecord:
         $ref: '#/components/messages/deviceRecord'
 
+  deadLetterRecords:
+    address: rastreo.discovery.dlq.v1
+    title: Dead-letter DeviceRecord stream
+    description: |
+      Records rastreo could not deliver to the primary channel and
+      quarantined to the operator-configured dead-letter destination.
+      The address here is illustrative — the real topic (Kafka) or
+      subject (NATS) is whatever the sink's `dead_letter` config names.
+      Each message payload is one unmodified `DeviceRecord`; the failure
+      reason travels in the `x-rastreo-error-class` header so consumers
+      can triage without parsing the payload. A consumer typically
+      re-publishes the payload to the primary channel once the underlying
+      issue is resolved.
+    servers:
+      - $ref: '#/servers/kafka'
+      - $ref: '#/servers/nats'
+    messages:
+      deadLetterRecord:
+        $ref: '#/components/messages/deadLetterRecord'
+
 operations:
   emitDiscoveryRecord:
     action: send
@@ -63,6 +83,18 @@ operations:
       ULID) to reconstruct per-scan batches.
     messages:
       - $ref: '#/channels/discoveryRecords/messages/deviceRecord'
+
+  quarantineDiscoveryRecord:
+    action: send
+    channel:
+      $ref: '#/channels/deadLetterRecords'
+    summary: Quarantine a DeviceRecord that failed primary delivery.
+    description: |
+      When primary delivery fails and a dead-letter destination is
+      configured, rastreo ships the record there and reports success.
+      The `x-rastreo-error-class` header names the failure class.
+    messages:
+      - $ref: '#/channels/deadLetterRecords/messages/deadLetterRecord'
 
 components:
   messages:
@@ -78,3 +110,19 @@ components:
         description: |
           ULID stamped per scan. Consumers use it to group messages
           belonging to the same scan into a single batch.
+
+    deadLetterRecord:
+      name: DeadLetterRecord
+      title: DeadLetterRecord
+      summary: A DeviceRecord quarantined after primary delivery failed.
+      contentType: application/json
+      payload:
+        $ref: './device-record-v1.json'
+      headers:
+        $ref: './dlq-envelope-v1.json#/properties/headers'
+      correlationId:
+        location: $message.payload#/scan_metadata/scan_id
+        description: |
+          ULID stamped per scan, identical to the primary-channel
+          message. Consumers use it to correlate a quarantined record
+          back to its originating scan.

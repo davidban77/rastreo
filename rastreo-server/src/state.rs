@@ -110,8 +110,8 @@ impl ProbeKindCounters {
     }
 }
 
-/// Per-`SinkType` × per-`SinkErrorClass` DLQ delivery counters — v1 uses a sink-type-hint
-/// mapping: Kafka DLQ deliveries record under `produce_failure`, NATS under `publish_failure`.
+/// Per-`SinkType` × per-`SinkErrorClass` DLQ delivery counters, credited from the carried
+/// class of each quarantined record.
 pub(crate) struct DlqRecordsCounter {
     pub kafka: [AtomicU64; SINK_ERROR_CLASS_COUNT],
     pub nats: [AtomicU64; SINK_ERROR_CLASS_COUNT],
@@ -310,12 +310,8 @@ impl Metrics {
             self.probes.succeeded[idx].fetch_add(succeeded, Ordering::Relaxed);
             self.probes.errored[idx].fetch_add(pk.errored as u64, Ordering::Relaxed);
         }
-        if !summary.dlq_records_by_type.is_empty() {
-            for (sink_type, count) in &summary.dlq_records_by_type {
-                self.record_dlq(Some(*sink_type), *count);
-            }
-        } else if summary.dlq_records > 0 {
-            self.record_dlq(summary.sink_type, summary.dlq_records as u64);
+        for (sink_type, class, count) in &summary.dlq_records_by_type_and_class {
+            self.record_dlq(*sink_type, *class, *count);
         }
         let seconds = summary.elapsed.as_secs_f64();
         self.scan_duration.observe(seconds, scenario);
@@ -337,10 +333,10 @@ impl Metrics {
         self.record_otlp_scan_duration(seconds, scenario);
     }
 
-    fn record_dlq(&self, sink_type: Option<SinkType>, count: u64) {
-        let (bucket, class) = match sink_type {
-            Some(SinkType::Kafka) => (&self.dlq.kafka, SinkErrorClass::ProduceFailure),
-            Some(SinkType::Nats) => (&self.dlq.nats, SinkErrorClass::PublishFailure),
+    fn record_dlq(&self, sink_type: SinkType, class: SinkErrorClass, count: u64) {
+        let bucket = match sink_type {
+            SinkType::Kafka => &self.dlq.kafka,
+            SinkType::Nats => &self.dlq.nats,
             _ => return,
         };
         bucket[class.index()].fetch_add(count, Ordering::Relaxed);
@@ -903,6 +899,8 @@ mod tests {
         let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
         summary.dlq_records = 3;
         summary.sink_type = Some(SinkType::Kafka);
+        summary.dlq_records_by_type_and_class =
+            vec![(SinkType::Kafka, SinkErrorClass::ProduceFailure, 3)];
         metrics.record_scan_completion(&summary, "unnamed");
         assert_eq!(
             metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
@@ -920,6 +918,8 @@ mod tests {
         let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
         summary.dlq_records = 5;
         summary.sink_type = Some(SinkType::Nats);
+        summary.dlq_records_by_type_and_class =
+            vec![(SinkType::Nats, SinkErrorClass::PublishFailure, 5)];
         metrics.record_scan_completion(&summary, "unnamed");
         assert_eq!(
             metrics.dlq.nats[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
@@ -928,12 +928,33 @@ mod tests {
     }
 
     #[test]
-    fn metrics_record_dlq_credits_kafka_when_sink_type_is_tee_but_by_type_has_kafka() {
+    fn metrics_record_dlq_credits_nats_ack_rejection_distinctly_from_publish_failure() {
+        let metrics = Metrics::new();
+        let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
+        summary.sink_type = Some(SinkType::Nats);
+        summary.dlq_records = 2;
+        summary.dlq_records_by_type_and_class =
+            vec![(SinkType::Nats, SinkErrorClass::AckRejection, 2)];
+        metrics.record_scan_completion(&summary, "unnamed");
+        assert_eq!(
+            metrics.dlq.nats[SinkErrorClass::AckRejection.index()].load(Ordering::Relaxed),
+            2,
+            "an ack rejection credits the ack_rejection class, not publish_failure"
+        );
+        assert_eq!(
+            metrics.dlq.nats[SinkErrorClass::PublishFailure.index()].load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn metrics_record_dlq_credits_kafka_when_sink_type_is_tee_but_by_class_has_kafka() {
         let metrics = Metrics::new();
         let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
         summary.sink_type = Some(SinkType::Tee);
         summary.dlq_records = 3;
-        summary.dlq_records_by_type = vec![(SinkType::Kafka, 3)];
+        summary.dlq_records_by_type_and_class =
+            vec![(SinkType::Kafka, SinkErrorClass::ProduceFailure, 3)];
         metrics.record_scan_completion(&summary, "unnamed");
         assert_eq!(
             metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
@@ -946,12 +967,15 @@ mod tests {
     }
 
     #[test]
-    fn metrics_record_dlq_credits_kafka_and_nats_when_by_type_has_both() {
+    fn metrics_record_dlq_credits_kafka_and_nats_when_by_class_has_both() {
         let metrics = Metrics::new();
         let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
         summary.sink_type = Some(SinkType::Tee);
         summary.dlq_records = 7;
-        summary.dlq_records_by_type = vec![(SinkType::Kafka, 4), (SinkType::Nats, 3)];
+        summary.dlq_records_by_type_and_class = vec![
+            (SinkType::Kafka, SinkErrorClass::ProduceFailure, 4),
+            (SinkType::Nats, SinkErrorClass::PublishFailure, 3),
+        ];
         metrics.record_scan_completion(&summary, "unnamed");
         assert_eq!(
             metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
@@ -964,16 +988,17 @@ mod tests {
     }
 
     #[test]
-    fn metrics_record_dlq_falls_back_to_summary_sink_type_when_by_type_empty() {
+    fn metrics_record_dlq_credits_nothing_when_by_type_and_class_empty() {
         let metrics = Metrics::new();
         let mut summary = summary_completed(1, 0, 1, Vec::new(), 10);
         summary.sink_type = Some(SinkType::Kafka);
         summary.dlq_records = 2;
-        assert!(summary.dlq_records_by_type.is_empty());
+        assert!(summary.dlq_records_by_type_and_class.is_empty());
         metrics.record_scan_completion(&summary, "unnamed");
         assert_eq!(
             metrics.dlq.kafka[SinkErrorClass::ProduceFailure.index()].load(Ordering::Relaxed),
-            2
+            0,
+            "the DLQ metric credits from per-class attribution, not the scalar total"
         );
     }
 

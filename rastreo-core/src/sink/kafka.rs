@@ -13,7 +13,7 @@ use rskafka::{
 };
 
 use crate::error::{ConfigError, RastreoError};
-use crate::sink::{Sink, SinkType};
+use crate::sink::{Sink, SinkError, SinkErrorClass, SinkType, SINK_ERROR_CLASS_COUNT};
 
 /// Quarantine topic configuration for records the primary Kafka produce refused.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -41,7 +41,6 @@ fn default_include_error_metadata() -> bool {
 const HEADER_SOURCE_TOPIC: &str = "x-rastreo-source-topic";
 const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
 const HEADER_DLQ_TIMESTAMP: &str = "x-rastreo-dlq-timestamp";
-const ERROR_CLASS_PRODUCE_FAILURE: &str = "produce_failure";
 
 fn clamp_threshold(bytes: usize) -> usize {
     bytes.max(1)
@@ -139,14 +138,18 @@ fn build_produce_error(
     err: rskafka::client::error::Error,
 ) -> RastreoError {
     let brokers_for_err = brokers.join(",");
-    RastreoError::Sink(io::Error::other(format!(
-        "kafka sink: failed to produce record to topic '{topic}' at broker(s) '{brokers_for_err}': {err}"
-    )))
+    RastreoError::Sink(SinkError::new(
+        SinkErrorClass::ProduceFailure,
+        io::Error::other(format!(
+            "kafka sink: failed to produce record to topic '{topic}' at broker(s) '{brokers_for_err}': {err}"
+        )),
+    ))
 }
 
 /// Envelope headers follow the `x-<vendor>-<name>` convention so downstream
-/// consumers can filter DLQ records without inspecting the payload.
-fn build_dlq_headers(source_topic: &str) -> BTreeMap<String, Vec<u8>> {
+/// consumers can filter DLQ records without inspecting the payload. `error_class`
+/// is the class of the failure that quarantined the record.
+fn build_dlq_headers(source_topic: &str, error_class: SinkErrorClass) -> BTreeMap<String, Vec<u8>> {
     let mut headers = BTreeMap::new();
     headers.insert(
         HEADER_SOURCE_TOPIC.to_string(),
@@ -154,7 +157,7 @@ fn build_dlq_headers(source_topic: &str) -> BTreeMap<String, Vec<u8>> {
     );
     headers.insert(
         HEADER_ERROR_CLASS.to_string(),
-        ERROR_CLASS_PRODUCE_FAILURE.as_bytes().to_vec(),
+        error_class.as_label().as_bytes().to_vec(),
     );
     headers.insert(
         HEADER_DLQ_TIMESTAMP.to_string(),
@@ -189,7 +192,7 @@ impl KafkaSink {
                     format!("kafka sink: failed to connect to broker(s) '{brokers_for_err}': {e}"),
                 )
             })
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
 
         // Single-partition: always produces to partition 0.
         let client = kafka_client
@@ -200,7 +203,7 @@ impl KafkaSink {
                     "kafka sink: failed to get partition client for topic '{topic}' at broker(s) '{brokers_for_err}': {e}"
                 ))
             })
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
 
         Ok(Self {
             topic,
@@ -239,7 +242,7 @@ impl KafkaSink {
                     format!("kafka sink: failed to connect to broker(s) '{brokers_for_err}' for dead-letter topic '{dlq_topic}': {e}"),
                 )
             })
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
 
         let dlq_client = kafka_client
             .partition_client(dlq_topic.clone(), 0, UnknownTopicHandling::Retry)
@@ -249,7 +252,7 @@ impl KafkaSink {
                     "kafka sink: failed to get partition client for dead-letter topic '{dlq_topic}' at broker(s) '{brokers_for_err}': {e}"
                 ))
             })
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
 
         self.dlq_client = Some(dlq_client);
         self.dlq_topic = Some(dlq_topic);
@@ -297,7 +300,7 @@ impl KafkaSink {
         );
 
         let dlq_headers = if self.include_error_metadata {
-            build_dlq_headers(&self.topic)
+            build_dlq_headers(&self.topic, SinkErrorClass::ProduceFailure)
         } else {
             BTreeMap::new()
         };
@@ -357,6 +360,13 @@ impl Sink for KafkaSink {
 
     fn dlq_records_delivered(&self) -> u64 {
         self.dlq_delivered.load(Ordering::Relaxed)
+    }
+
+    fn dlq_records_by_class(&self) -> [u64; SINK_ERROR_CLASS_COUNT] {
+        // Kafka only quarantines on a primary produce failure.
+        let mut out = [0u64; SINK_ERROR_CLASS_COUNT];
+        out[SinkErrorClass::ProduceFailure.index()] = self.dlq_delivered.load(Ordering::Relaxed);
+        out
     }
 
     async fn probe(&self) -> Result<(), io::Error> {
@@ -520,7 +530,7 @@ mod tests {
     #[test]
     fn build_records_attaches_dlq_headers_to_every_record() {
         let entries = vec![b"a\n".to_vec(), b"b\n".to_vec()];
-        let headers = build_dlq_headers("rastreo.devices");
+        let headers = build_dlq_headers("rastreo.devices", SinkErrorClass::ProduceFailure);
         let records = build_records(&entries, &headers, Utc::now());
         assert_eq!(records.len(), 2, "all buffered records ship to the DLQ");
         for record in &records {
@@ -693,7 +703,7 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_contains_source_topic_and_error_class_and_timestamp() {
-        let headers = build_dlq_headers("rastreo.devices");
+        let headers = build_dlq_headers("rastreo.devices", SinkErrorClass::ProduceFailure);
         assert!(headers.contains_key(HEADER_SOURCE_TOPIC));
         assert!(headers.contains_key(HEADER_ERROR_CLASS));
         assert!(headers.contains_key(HEADER_DLQ_TIMESTAMP));
@@ -704,7 +714,7 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_source_topic_matches_input() {
-        let headers = build_dlq_headers("rastreo.devices");
+        let headers = build_dlq_headers("rastreo.devices", SinkErrorClass::ProduceFailure);
         let value = headers
             .get(HEADER_SOURCE_TOPIC)
             .expect("source-topic header present");
@@ -715,14 +725,14 @@ mod tests {
     }
 
     #[test]
-    fn build_dlq_headers_error_class_is_produce_failure() {
-        let headers = build_dlq_headers("rastreo.devices");
+    fn build_dlq_headers_error_class_renders_carried_class_label() {
+        let headers = build_dlq_headers("rastreo.devices", SinkErrorClass::ProduceFailure);
         let value = headers
             .get(HEADER_ERROR_CLASS)
             .expect("error-class header present");
         assert_eq!(
             std::str::from_utf8(value).expect("utf-8"),
-            ERROR_CLASS_PRODUCE_FAILURE
+            "produce_failure"
         );
     }
 
@@ -832,11 +842,22 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_timestamp_parses_as_rfc3339() {
-        let headers = build_dlq_headers("rastreo.devices");
+        let headers = build_dlq_headers("rastreo.devices", SinkErrorClass::ProduceFailure);
         let value = headers
             .get(HEADER_DLQ_TIMESTAMP)
             .expect("timestamp header present");
         let ts = std::str::from_utf8(value).expect("utf-8");
         chrono::DateTime::parse_from_rfc3339(ts).expect("valid rfc3339 timestamp");
+    }
+
+    #[test]
+    fn produce_error_carries_produce_failure_class() {
+        let err = build_produce_error(
+            "rastreo.devices",
+            &["b:9092".to_string()],
+            rskafka::client::error::Error::InvalidResponse("boom".to_string()),
+        );
+        assert_eq!(err.sink_error_class(), Some(SinkErrorClass::ProduceFailure));
+        assert!(err.to_string().contains("failed to produce"));
     }
 }

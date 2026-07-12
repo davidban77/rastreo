@@ -85,6 +85,20 @@ fn committed_schemas_match_derives() {
 }
 
 #[test]
+fn dlq_envelope_schema_copies_are_byte_identical() {
+    let root = workspace_root();
+    let source = fs::read(root.join("schemas/dlq-envelope-v1.json"))
+        .expect("read schemas/dlq-envelope-v1.json");
+    let served = fs::read(root.join("docs/site/docs/schemas/dlq-envelope-v1.json"))
+        .expect("read docs/site/docs/schemas/dlq-envelope-v1.json");
+    assert_eq!(
+        source, served,
+        "docs/site/docs/schemas/dlq-envelope-v1.json is out of sync with schemas/dlq-envelope-v1.json. \
+         Copy the hand-authored source into the served dir so its $id URL resolves."
+    );
+}
+
+#[test]
 fn scenario_schema_defaults_are_version_stable() {
     let root = workspace_root();
     let raw =

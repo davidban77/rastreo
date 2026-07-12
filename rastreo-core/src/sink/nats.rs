@@ -10,14 +10,11 @@ use chrono::Utc;
 
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
-use crate::sink::{Sink, SinkType};
+use crate::sink::{Sink, SinkError, SinkErrorClass, SinkType, SINK_ERROR_CLASS_COUNT};
 
 const HEADER_SOURCE_SUBJECT: &str = "x-rastreo-source-subject";
 const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
 const HEADER_DLQ_TIMESTAMP: &str = "x-rastreo-dlq-timestamp";
-
-const ERROR_CLASS_PUBLISH_FAILURE: &str = "publish_failure";
-const ERROR_CLASS_ACK_REJECTION: &str = "ack_rejection";
 
 fn clamp_threshold(bytes: usize) -> usize {
     bytes.max(1)
@@ -120,7 +117,7 @@ pub struct NatsSink {
     dlq_stream: Option<String>,
     dlq_subject: Option<String>,
     include_error_metadata: bool,
-    dlq_delivered: AtomicU64,
+    dlq_delivered: [AtomicU64; SINK_ERROR_CLASS_COUNT],
 }
 
 impl std::fmt::Debug for NatsSink {
@@ -142,24 +139,31 @@ impl std::fmt::Debug for NatsSink {
 
 fn build_publish_error(subject: &str, servers: &[String], err: PublishError) -> RastreoError {
     let servers_for_err = servers.join(",");
-    RastreoError::Sink(io::Error::other(format!(
-        "nats sink: failed to publish to subject '{subject}' at server(s) '{servers_for_err}': {err}"
-    )))
+    RastreoError::Sink(SinkError::new(
+        SinkErrorClass::PublishFailure,
+        io::Error::other(format!(
+            "nats sink: failed to publish to subject '{subject}' at server(s) '{servers_for_err}': {err}"
+        )),
+    ))
 }
 
 fn build_ack_error(subject: &str, servers: &[String], err: PublishError) -> RastreoError {
     let servers_for_err = servers.join(",");
-    RastreoError::Sink(io::Error::other(format!(
-        "nats sink: publish to subject '{subject}' at server(s) '{servers_for_err}' was not acked: {err}"
-    )))
+    RastreoError::Sink(SinkError::new(
+        SinkErrorClass::AckRejection,
+        io::Error::other(format!(
+            "nats sink: publish to subject '{subject}' at server(s) '{servers_for_err}' was not acked: {err}"
+        )),
+    ))
 }
 
 /// Envelope headers follow the `x-<vendor>-<name>` convention so downstream
-/// consumers can filter DLQ records without inspecting the payload.
-fn build_dlq_headers(source_subject: &str, error_class: &str) -> HeaderMap {
+/// consumers can filter DLQ records without inspecting the payload. `error_class`
+/// is the class of the failure that quarantined the record.
+fn build_dlq_headers(source_subject: &str, error_class: SinkErrorClass) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(HEADER_SOURCE_SUBJECT, source_subject);
-    headers.insert(HEADER_ERROR_CLASS, error_class);
+    headers.insert(HEADER_ERROR_CLASS, error_class.as_label());
     headers.insert(HEADER_DLQ_TIMESTAMP, Utc::now().to_rfc3339().as_str());
     headers
 }
@@ -196,7 +200,7 @@ impl NatsSink {
                     "nats sink: failed to connect to server(s) '{servers_for_err}': {e}"
                 ))
             })
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
 
         let ctx = jetstream::new(client);
 
@@ -207,7 +211,7 @@ impl NatsSink {
                     "nats sink: JetStream stream '{stream}' not found or unreachable at server(s) '{servers_for_err}': {e}"
                 ))
             })
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
 
         Ok(Self {
             subject,
@@ -222,7 +226,7 @@ impl NatsSink {
             dlq_stream: None,
             dlq_subject: None,
             include_error_metadata: false,
-            dlq_delivered: AtomicU64::new(0),
+            dlq_delivered: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
 
@@ -247,7 +251,7 @@ impl NatsSink {
                     "nats sink: JetStream dead-letter stream '{dlq_stream}' not found or unreachable at server(s) '{servers_for_err}': {e}"
                 ))
             })
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
 
         self.dlq_stream = Some(dlq_stream);
         self.dlq_subject = Some(config.subject);
@@ -258,7 +262,7 @@ impl NatsSink {
     async fn publish_to_dlq(
         &self,
         payload: Bytes,
-        error_class: &str,
+        error_class: SinkErrorClass,
     ) -> Result<PublishAckFuture, PublishError> {
         let dlq_subject = self
             .dlq_subject
@@ -272,6 +276,10 @@ impl NatsSink {
         } else {
             self.ctx.publish(dlq_subject.clone(), payload).await
         }
+    }
+
+    fn credit_dlq(&self, class: SinkErrorClass) {
+        self.dlq_delivered[class.index()].fetch_add(1, Ordering::Relaxed);
     }
 
     fn requeue(&mut self, failed: Bytes, rest: std::vec::IntoIter<Vec<u8>>) {
@@ -316,7 +324,7 @@ impl NatsSink {
             // primary-path acks, and reporting DLQ failure post-hoc via drain_pending_acks
             // would lose the causal link to the primary failure.
             let dlq_ack_fut = match self
-                .publish_to_dlq(payload.clone(), ERROR_CLASS_PUBLISH_FAILURE)
+                .publish_to_dlq(payload.clone(), SinkErrorClass::PublishFailure)
                 .await
             {
                 Ok(fut) => fut,
@@ -341,7 +349,7 @@ impl NatsSink {
                 return Err(build_ack_error(&subject, &self.servers, dlq_ack_err));
             }
 
-            self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
+            self.credit_dlq(SinkErrorClass::PublishFailure);
         }
         Ok(())
     }
@@ -377,12 +385,12 @@ impl NatsSink {
             );
 
             match self
-                .publish_to_dlq(payload, ERROR_CLASS_ACK_REJECTION)
+                .publish_to_dlq(payload, SinkErrorClass::AckRejection)
                 .await
             {
                 Ok(dlq_ack_fut) => match dlq_ack_fut.await {
                     Ok(_) => {
-                        self.dlq_delivered.fetch_add(1, Ordering::Relaxed);
+                        self.credit_dlq(SinkErrorClass::AckRejection);
                         continue;
                     }
                     Err(dlq_ack_err) => {
@@ -480,7 +488,13 @@ impl Sink for NatsSink {
     }
 
     fn dlq_records_delivered(&self) -> u64 {
-        self.dlq_delivered.load(Ordering::Relaxed)
+        self.dlq_delivered
+            .iter()
+            .fold(0u64, |acc, c| acc.saturating_add(c.load(Ordering::Relaxed)))
+    }
+
+    fn dlq_records_by_class(&self) -> [u64; SINK_ERROR_CLASS_COUNT] {
+        std::array::from_fn(|i| self.dlq_delivered[i].load(Ordering::Relaxed))
     }
 
     async fn probe(&self) -> Result<(), io::Error> {
@@ -878,8 +892,10 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_contains_source_subject_and_error_class_and_timestamp() {
-        let headers =
-            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        let headers = build_dlq_headers(
+            "rastreo.discovery.records.v1",
+            SinkErrorClass::PublishFailure,
+        );
         assert!(headers.get(HEADER_SOURCE_SUBJECT).is_some());
         assert!(headers.get(HEADER_ERROR_CLASS).is_some());
         assert!(headers.get(HEADER_DLQ_TIMESTAMP).is_some());
@@ -887,8 +903,10 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_source_subject_matches_input() {
-        let headers =
-            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        let headers = build_dlq_headers(
+            "rastreo.discovery.records.v1",
+            SinkErrorClass::PublishFailure,
+        );
         let value = headers
             .get(HEADER_SOURCE_SUBJECT)
             .expect("source-subject header present");
@@ -897,8 +915,10 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_error_class_is_publish_failure_when_publish_class_supplied() {
-        let headers =
-            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        let headers = build_dlq_headers(
+            "rastreo.discovery.records.v1",
+            SinkErrorClass::PublishFailure,
+        );
         let value = headers
             .get(HEADER_ERROR_CLASS)
             .expect("error-class header present");
@@ -907,7 +927,8 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_error_class_is_ack_rejection_when_ack_class_supplied() {
-        let headers = build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_ACK_REJECTION);
+        let headers =
+            build_dlq_headers("rastreo.discovery.records.v1", SinkErrorClass::AckRejection);
         let value = headers
             .get(HEADER_ERROR_CLASS)
             .expect("error-class header present");
@@ -916,8 +937,10 @@ mod tests {
 
     #[test]
     fn build_dlq_headers_timestamp_parses_as_rfc3339() {
-        let headers =
-            build_dlq_headers("rastreo.discovery.records.v1", ERROR_CLASS_PUBLISH_FAILURE);
+        let headers = build_dlq_headers(
+            "rastreo.discovery.records.v1",
+            SinkErrorClass::PublishFailure,
+        );
         let value = headers
             .get(HEADER_DLQ_TIMESTAMP)
             .expect("timestamp header present");
@@ -939,8 +962,27 @@ mod tests {
     }
 
     #[test]
-    fn error_class_constants_are_stable_wire_values() {
-        assert_eq!(ERROR_CLASS_PUBLISH_FAILURE, "publish_failure");
-        assert_eq!(ERROR_CLASS_ACK_REJECTION, "ack_rejection");
+    fn publish_and_ack_errors_carry_their_distinct_classes() {
+        let servers = vec!["nats://n:4222".to_string()];
+        let publish = build_publish_error("s", &servers, publish_error());
+        let ack = build_ack_error("s", &servers, publish_error());
+        assert_eq!(
+            publish.sink_error_class(),
+            Some(SinkErrorClass::PublishFailure)
+        );
+        assert_eq!(ack.sink_error_class(), Some(SinkErrorClass::AckRejection));
+        assert!(publish.to_string().contains("failed to publish"));
+        assert!(ack.to_string().contains("was not acked"));
+    }
+
+    #[test]
+    fn dlq_wire_labels_stay_byte_identical() {
+        assert_eq!(SinkErrorClass::PublishFailure.as_label(), "publish_failure");
+        assert_eq!(SinkErrorClass::AckRejection.as_label(), "ack_rejection");
+    }
+
+    fn publish_error() -> PublishError {
+        use async_nats::jetstream::context::PublishErrorKind;
+        PublishError::new(PublishErrorKind::StreamNotFound)
     }
 }
