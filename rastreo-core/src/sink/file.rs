@@ -5,7 +5,21 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::error::RastreoError;
 
-use super::{Sink, SinkType};
+use super::{Sink, SinkError, SinkErrorClass, SinkType};
+
+fn write_error(e: std::io::Error) -> RastreoError {
+    RastreoError::Sink(SinkError::new(
+        SinkErrorClass::WriteFailure,
+        std::io::Error::new(e.kind(), format!("failed to write to file sink: {e}")),
+    ))
+}
+
+fn flush_error(e: std::io::Error) -> RastreoError {
+    RastreoError::Sink(SinkError::new(
+        SinkErrorClass::FlushFailure,
+        std::io::Error::new(e.kind(), format!("failed to flush file sink: {e}")),
+    ))
+}
 
 pub struct FileSink {
     writer: BufWriter<File>,
@@ -19,7 +33,7 @@ impl FileSink {
             .append(true)
             .open(path.as_ref())
             .await
-            .map_err(RastreoError::Sink)?;
+            .map_err(SinkError::other)?;
         Ok(Self {
             writer: BufWriter::new(file),
         })
@@ -29,22 +43,12 @@ impl FileSink {
 #[async_trait::async_trait]
 impl Sink for FileSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
-        self.writer.write_all(data).await.map_err(|e| {
-            RastreoError::Sink(std::io::Error::new(
-                e.kind(),
-                format!("failed to write to file sink: {e}"),
-            ))
-        })?;
+        self.writer.write_all(data).await.map_err(write_error)?;
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
-        self.writer.flush().await.map_err(|e| {
-            RastreoError::Sink(std::io::Error::new(
-                e.kind(),
-                format!("failed to flush file sink: {e}"),
-            ))
-        })?;
+        self.writer.flush().await.map_err(flush_error)?;
         Ok(())
     }
 
@@ -168,10 +172,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_errors_on_unopenable_path() {
+    async fn new_errors_on_unopenable_path_with_other_class() {
         let bad = Path::new("/this/path/should/not/exist/anywhere/foo.ndjson");
         match FileSink::new(bad).await {
-            Err(RastreoError::Sink(_)) => {}
+            Err(RastreoError::Sink(e)) => assert_eq!(e.class, SinkErrorClass::Other),
             Err(other) => panic!("expected RastreoError::Sink, got {other:?}"),
             Ok(_) => panic!("bad path must error"),
         }
@@ -201,9 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_failure_on_readonly_fd_classifies_as_flush_failure() {
-        use crate::sink::{classify_sink_error, SinkErrorClass};
-
+    async fn flush_failure_on_readonly_fd_carries_flush_failure_class() {
         let dir = tempfile::tempdir().expect("tempdir");
         let seed = dir.path().join("flush-seed.ndjson");
         std::fs::File::create(&seed).expect("create seed");
@@ -218,35 +220,24 @@ mod tests {
         sink.write(b"buffered\n").await.expect("buffer write");
 
         let err = sink.flush().await.expect_err("flush must fail");
-        let RastreoError::Sink(io) = err else {
-            panic!("expected RastreoError::Sink");
-        };
-        assert_eq!(classify_sink_error(&io), SinkErrorClass::FlushFailure);
-        assert!(io.to_string().contains("failed to flush"));
+        assert_eq!(err.sink_error_class(), Some(SinkErrorClass::FlushFailure));
+        assert!(err.to_string().contains("failed to flush"));
     }
 
     #[test]
-    fn file_sink_write_error_prefix_matches_classifier() {
-        use crate::sink::{classify_sink_error, SinkErrorClass};
-        // Contract: the exact prefix `FileSink::write` produces must classify as WriteFailure.
-        let simulated =
-            std::io::Error::other("failed to write to file sink: No space left on device");
-        assert_eq!(
-            classify_sink_error(&simulated),
-            SinkErrorClass::WriteFailure
-        );
+    fn write_error_carries_write_failure_class_and_prefix() {
+        let err = write_error(std::io::Error::other("No space left on device"));
+        assert_eq!(err.sink_error_class(), Some(SinkErrorClass::WriteFailure));
+        assert!(err.to_string().contains("failed to write to file sink"));
     }
 
     #[test]
-    fn file_sink_flush_error_prefix_matches_classifier() {
-        use crate::sink::{classify_sink_error, SinkErrorClass};
-        let simulated = std::io::Error::new(
+    fn flush_error_carries_flush_failure_class_and_prefix() {
+        let err = flush_error(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
-            "failed to flush file sink: Broken pipe",
-        );
-        assert_eq!(
-            classify_sink_error(&simulated),
-            SinkErrorClass::FlushFailure
-        );
+            "Broken pipe",
+        ));
+        assert_eq!(err.sink_error_class(), Some(SinkErrorClass::FlushFailure));
+        assert!(err.to_string().contains("failed to flush file sink"));
     }
 }

@@ -147,8 +147,10 @@ mod tests {
 
     #[test]
     fn sink_error_maps_to_500() {
+        use rastreo_core::{SinkError, SinkErrorClass};
         let io = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe");
-        let err: AppError = RastreoError::Sink(io).into();
+        let err: AppError =
+            RastreoError::Sink(SinkError::new(SinkErrorClass::WriteFailure, io)).into();
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 

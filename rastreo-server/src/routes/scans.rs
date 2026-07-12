@@ -5,8 +5,8 @@ use axum::extract::State;
 use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
 use rastreo_core::{
-    classify_sink_error, hint_for_error_kind, run_discovery_with_components, DeviceRecord,
-    DiscoverySummary, EncoderConfig, MemorySink, Sink, TeeChild, TeeSink,
+    hint_for_error_kind, run_discovery_with_components, DeviceRecord, DiscoverySummary,
+    EncoderConfig, MemorySink, Sink, TeeChild, TeeSink,
 };
 use serde::Serialize;
 
@@ -120,10 +120,7 @@ pub async fn create_scan(
             }))
         }
         Err(err) => {
-            let sink_class = match &err {
-                rastreo_core::RastreoError::Sink(io) => Some(classify_sink_error(io)),
-                _ => None,
-            };
+            let sink_class = err.sink_error_class();
             let is_sink_error = sink_class.is_some();
             state
                 .metrics

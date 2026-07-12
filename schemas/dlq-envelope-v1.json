@@ -1,0 +1,51 @@
+{
+  "$id": "https://davidban77.github.io/rastreo/schemas/dlq-envelope-v1.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DlqEnvelope",
+  "description": "Envelope for a record rastreo quarantined to a dead-letter destination after primary delivery failed. The transport carries a set of `x-rastreo-*` headers (Kafka record headers or NATS message headers) alongside the payload, which is a single unmodified `device-record-v1`. Consumers filter and triage on the headers without parsing the payload.",
+  "type": "object",
+  "properties": {
+    "headers": {
+      "type": "object",
+      "description": "Transport headers attached to every DLQ message. Present only when the sink's dead-letter config has `include_error_metadata: true` (the default).",
+      "properties": {
+        "x-rastreo-source-topic": {
+          "type": "string",
+          "description": "Kafka: the primary topic the record failed to reach. Mutually exclusive with `x-rastreo-source-subject`."
+        },
+        "x-rastreo-source-subject": {
+          "type": "string",
+          "description": "NATS: the primary subject the record failed to reach. Mutually exclusive with `x-rastreo-source-topic`."
+        },
+        "x-rastreo-error-class": {
+          "type": "string",
+          "description": "The class of the failure that quarantined the record, set at the failure site. Kafka DLQ records carry `produce_failure`; NATS DLQ records carry `publish_failure` or `ack_rejection` depending on which stage failed.",
+          "enum": [
+            "publish_failure",
+            "ack_rejection",
+            "produce_failure",
+            "write_failure",
+            "flush_failure",
+            "other"
+          ]
+        },
+        "x-rastreo-dlq-timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 timestamp of when the record was written to the dead-letter destination."
+        }
+      },
+      "required": [
+        "x-rastreo-error-class",
+        "x-rastreo-dlq-timestamp"
+      ]
+    },
+    "payload": {
+      "$ref": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
+      "description": "The unmodified `DeviceRecord` that failed primary delivery."
+    }
+  },
+  "required": [
+    "payload"
+  ]
+}

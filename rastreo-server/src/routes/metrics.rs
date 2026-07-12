@@ -452,12 +452,37 @@ mod tests {
         summary.records_emitted = 1;
         summary.dlq_records = 7;
         summary.sink_type = Some(SinkType::Kafka);
+        summary.dlq_records_by_type_and_class =
+            vec![(SinkType::Kafka, SinkErrorClass::ProduceFailure, 7)];
         summary.elapsed = Duration::from_millis(20);
         state.metrics.record_scan_completion(&summary, "unnamed");
         let resp = get_metrics(State(state)).await.expect("ok");
         let body = body_string(resp).await;
         assert!(body.contains(
             "rastreo_server_dlq_records_total{sink_type=\"kafka\",error_class=\"produce_failure\"} 7"
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_metrics_reflects_dlq_records_for_nats_ack_rejection() {
+        let state = build_state();
+        let mut summary = DiscoverySummary::default();
+        summary.targets_resolved = 1;
+        summary.probe_attempts = 1;
+        summary.records_emitted = 1;
+        summary.dlq_records = 4;
+        summary.sink_type = Some(SinkType::Nats);
+        summary.dlq_records_by_type_and_class =
+            vec![(SinkType::Nats, SinkErrorClass::AckRejection, 4)];
+        summary.elapsed = Duration::from_millis(20);
+        state.metrics.record_scan_completion(&summary, "unnamed");
+        let resp = get_metrics(State(state)).await.expect("ok");
+        let body = body_string(resp).await;
+        assert!(body.contains(
+            "rastreo_server_dlq_records_total{sink_type=\"nats\",error_class=\"ack_rejection\"} 4"
+        ));
+        assert!(body.contains(
+            "rastreo_server_dlq_records_total{sink_type=\"nats\",error_class=\"publish_failure\"} 0"
         ));
     }
 

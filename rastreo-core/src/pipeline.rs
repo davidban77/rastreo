@@ -36,15 +36,12 @@ pub struct DiscoverySummary {
     /// Records delivered to a DLQ destination during this scan.
     #[serde(default)]
     pub dlq_records: usize,
-    /// DLQ deliveries per underlying sink type; populated when the pipeline sink is a fan-out that wraps multiple protocol destinations. Empty for single-protocol sinks.
+    /// DLQ deliveries keyed by `(destination sink type, failure class)`; empty when nothing was quarantined.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dlq_records_by_type: Vec<(SinkType, u64)>,
+    pub dlq_records_by_type_and_class: Vec<(SinkType, SinkErrorClass, u64)>,
     /// Concrete sink kind the scan wrote against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sink_type: Option<SinkType>,
-    /// Sink error class when the scan terminated with a sink error; `None` when the scan completed or errored on a non-sink path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sink_error_class: Option<SinkErrorClass>,
     /// True when the run terminated early via the cancellation token; counters reflect partial progress.
     #[serde(default)]
     pub cancelled: bool,
@@ -260,10 +257,10 @@ pub async fn run_discovery_with_components_cancellable(
         tracing::info!(records_emitted, "discovery cancelled; sink closed");
     }
 
-    let dlq_records_by_type = sink.dlq_records_by_type();
-    let dlq_records = dlq_records_by_type
+    let dlq_records_by_type_and_class = sink.dlq_records_by_type_and_class();
+    let dlq_records = dlq_records_by_type_and_class
         .iter()
-        .fold(0u64, |acc, (_, c)| acc.saturating_add(*c)) as usize;
+        .fold(0u64, |acc, (_, _, c)| acc.saturating_add(*c)) as usize;
     let probes_by_kind = build_probes_by_kind(&attempts_by_kind, &errors_by_kind);
 
     if let Some(e) = emit_err {
@@ -280,9 +277,8 @@ pub async fn run_discovery_with_components_cancellable(
         error_counts,
         probes_by_kind,
         dlq_records,
-        dlq_records_by_type,
+        dlq_records_by_type_and_class,
         sink_type: Some(sink_type),
-        sink_error_class: None,
         cancelled,
         first_probe_error,
         elapsed: start.elapsed(),
@@ -552,7 +548,6 @@ mod tests {
             .expect("run_discovery_with_components");
         assert_eq!(summary.sink_type, Some(crate::sink::SinkType::Memory));
         assert_eq!(summary.dlq_records, 0);
-        assert!(summary.sink_error_class.is_none());
         assert_eq!(summary.probes_by_kind.len(), 1);
         assert_eq!(summary.probes_by_kind[0].kind, ProbeKind::TcpConnect);
         assert_eq!(summary.probes_by_kind[0].attempted, 1);
@@ -564,9 +559,8 @@ mod tests {
         let summary = DiscoverySummary::default();
         assert_eq!(summary.probes_by_kind.len(), 0);
         assert_eq!(summary.dlq_records, 0);
-        assert!(summary.dlq_records_by_type.is_empty());
+        assert!(summary.dlq_records_by_type_and_class.is_empty());
         assert!(summary.sink_type.is_none());
-        assert!(summary.sink_error_class.is_none());
         assert!(summary.first_probe_error.is_none());
         assert!(summary.error_counts.is_empty());
     }
@@ -878,8 +872,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_summary_populates_dlq_records_by_type_on_tee_wrapped_kafka() {
-        use crate::sink::{TeeChild, TeeSink};
+    async fn discovery_summary_populates_dlq_records_by_type_and_class_on_tee_wrapped_kafka() {
+        use crate::sink::{TeeChild, TeeSink, SINK_ERROR_CLASS_COUNT};
 
         struct KafkaLikeSink {
             dlq: u64,
@@ -897,8 +891,10 @@ mod tests {
             fn kind(&self) -> SinkType {
                 SinkType::Kafka
             }
-            fn dlq_records_delivered(&self) -> u64 {
-                self.dlq
+            fn dlq_records_by_class(&self) -> [u64; SINK_ERROR_CLASS_COUNT] {
+                let mut out = [0; SINK_ERROR_CLASS_COUNT];
+                out[SinkErrorClass::ProduceFailure.index()] = self.dlq;
+                out
             }
         }
 
@@ -919,7 +915,10 @@ mod tests {
         assert_eq!(summary.sink_type, Some(SinkType::Tee));
         assert_eq!(summary.records_emitted, 1);
         assert_eq!(summary.dlq_records, 1);
-        assert_eq!(summary.dlq_records_by_type, vec![(SinkType::Kafka, 1)]);
+        assert_eq!(
+            summary.dlq_records_by_type_and_class,
+            vec![(SinkType::Kafka, SinkErrorClass::ProduceFailure, 1)]
+        );
     }
 
     #[tokio::test]
@@ -994,8 +993,9 @@ mod tests {
         async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
             let n = self.inner.writes.fetch_add(1, Ordering::SeqCst) + 1;
             if n > self.fail_after_writes {
-                return Err(RastreoError::Sink(std::io::Error::other(
-                    "simulated write failure",
+                return Err(RastreoError::Sink(crate::sink::SinkError::new(
+                    SinkErrorClass::WriteFailure,
+                    std::io::Error::other("simulated write failure"),
                 )));
             }
             Ok(())
@@ -1039,12 +1039,18 @@ mod tests {
         let err = run_discovery_with_components_cancellable(&scenario, resolver, sink, rx)
             .await
             .expect_err("write must error");
-        match err {
+        match &err {
             RastreoError::Sink(e) => {
                 assert!(format!("{e}").contains("simulated"), "unexpected msg: {e}");
+                assert_eq!(e.class, SinkErrorClass::WriteFailure);
             }
             other => panic!("expected Sink error, got {other:?}"),
         }
+        assert_eq!(
+            err.sink_error_class(),
+            Some(SinkErrorClass::WriteFailure),
+            "the pipeline surfaces the failing sink's carried class"
+        );
         assert!(handle.writes() >= 1, "write must have been attempted");
         assert_eq!(handle.flushes(), 1, "flush must be called after error");
     }

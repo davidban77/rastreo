@@ -43,8 +43,8 @@ pub use prober::{Prober, ProberConfig, ReverseDnsProber, TcpConnectProber};
 pub use resolver::{HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler};
 pub use sink::{
-    classify_sink_error, FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, SinkErrorClass,
-    SinkType, StdoutSink, TeeChild, TeeSink, SINK_ERROR_CLASS_COUNT,
+    FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, SinkError, SinkErrorClass, SinkType,
+    StdoutSink, TeeChild, TeeSink, SINK_ERROR_CLASS_COUNT,
 };
 #[cfg(feature = "kafka")]
 pub use sink::{KafkaFlushMode, KafkaSink};

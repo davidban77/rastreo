@@ -13,15 +13,25 @@ pub enum RastreoError {
     #[error("encoder error: {0}")]
     Encoder(#[from] EncoderError),
 
-    // No blanket `#[from] std::io::Error` — call sites must classify I/O failures explicitly.
+    // No blanket `#[from] std::io::Error` — call sites build the `SinkError` with its class.
     #[error("sink error: {0}")]
-    Sink(std::io::Error),
+    Sink(#[from] crate::sink::SinkError),
 
     #[error("runtime error: {0}")]
     Runtime(#[from] RuntimeError),
 
     #[error("classifier error: {0}")]
     Classifier(#[from] ClassifierError),
+}
+
+impl RastreoError {
+    /// The carried [`crate::sink::SinkErrorClass`] when this is a sink failure; `None` otherwise.
+    pub fn sink_error_class(&self) -> Option<crate::sink::SinkErrorClass> {
+        match self {
+            RastreoError::Sink(e) => Some(e.class),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -138,11 +148,29 @@ pub enum ClassifierError {
 mod tests {
     use super::*;
 
+    use crate::sink::{SinkError, SinkErrorClass};
+
     #[test]
-    fn io_error_does_not_auto_convert_to_rastreo_error() {
+    fn sink_error_carries_the_class_through_the_umbrella() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
-        let err = RastreoError::Sink(io_err);
-        assert!(matches!(err, RastreoError::Sink(_)));
+        let err = RastreoError::Sink(SinkError::new(SinkErrorClass::WriteFailure, io_err));
+        assert_eq!(err.sink_error_class(), Some(SinkErrorClass::WriteFailure));
+    }
+
+    #[test]
+    fn sink_error_converts_via_from() {
+        let sink = SinkError::new(
+            SinkErrorClass::ProduceFailure,
+            std::io::Error::other("boom"),
+        );
+        let err: RastreoError = sink.into();
+        assert_eq!(err.sink_error_class(), Some(SinkErrorClass::ProduceFailure));
+    }
+
+    #[test]
+    fn sink_error_class_is_none_for_non_sink_variants() {
+        let err = RastreoError::Config(ConfigError::invalid("bad"));
+        assert!(err.sink_error_class().is_none());
     }
 
     #[test]
@@ -247,7 +275,7 @@ mod tests {
     #[test]
     fn sink_display_includes_io_message() {
         let io = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
-        let err = RastreoError::Sink(io);
+        let err = RastreoError::Sink(SinkError::new(SinkErrorClass::FlushFailure, io));
         let msg = format!("{err}");
         assert!(msg.contains("sink error"));
         assert!(msg.contains("pipe broke"));
@@ -274,6 +302,7 @@ mod tests {
         assert_send_sync::<EncoderError>();
         assert_send_sync::<RuntimeError>();
         assert_send_sync::<ClassifierError>();
+        assert_send_sync::<SinkError>();
     }
 
     fn bad_regex_error() -> regex::Error {

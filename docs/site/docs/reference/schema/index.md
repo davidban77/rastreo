@@ -17,6 +17,7 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
 - [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo discover --file`. Generated. Point an IDE YAML plugin at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json` for autocomplete and validation; see [Editor setup](#editor-setup) below for the concrete snippets. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
 - [Streaming API](streaming-api.md) — Kafka topic / NATS subject conventions, correlation IDs, the AsyncAPI spec.
+- [DlqEnvelope](dlq-envelope.md) — the `x-rastreo-*` header and payload contract on every dead-letter message.
 
 ## Editor setup
 
