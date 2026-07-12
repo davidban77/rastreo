@@ -37,10 +37,13 @@ channels:
     title: DeviceRecord stream
     description: |
       Discovered device records, one message per fused `DeviceRecord`.
-      The channel address is used verbatim as the Kafka topic name and
-      as the NATS subject. The `v1` suffix pins the wire schema; a
-      breaking change ships a new channel (`rastreo.discovery.records.v2`)
-      and both run in parallel for one release cycle.
+      Batched flush / delivery modes optimise the network round-trip only;
+      they never combine records, so every message carries exactly one
+      `DeviceRecord`. The channel address is used verbatim as the Kafka
+      topic name and as the NATS subject. The `v1` suffix pins the wire
+      schema; a breaking change ships a new channel
+      (`rastreo.discovery.records.v2`) and both run in parallel for one
+      release cycle.
     servers:
       - $ref: '#/servers/kafka'
       - $ref: '#/servers/nats'

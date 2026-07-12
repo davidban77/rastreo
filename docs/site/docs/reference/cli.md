@@ -33,7 +33,7 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` a
 | `--brokers <BROKERS>` | string list | — | Comma-separated Kafka brokers for `--sink kafka`. Requires the `kafka` build feature. |
 | `--topic <TOPIC>` | string | — | Kafka topic for `--sink kafka`. Requires the `kafka` build feature. |
 | `--kafka-flush-per-record` | flag | — | Flush every `DeviceRecord` as a separate Kafka message. Mutually exclusive with `--kafka-batch-threshold`. Requires the `kafka` build feature. |
-| `--kafka-batch-threshold <BYTES>` | usize | `65536` | Bytes accumulated in the sink buffer before a single Kafka message is produced. Minimum 1. Requires the `kafka` build feature. |
+| `--kafka-batch-threshold <BYTES>` | usize | `65536` | Bytes accumulated in the sink buffer before one produce request goes out, carrying one message per record. Minimum 1. Requires the `kafka` build feature. |
 | `--concurrency <N>` | u32 | `64` | Maximum number of in-flight probes. Minimum 1. |
 | `--timeout-ms <MS>` | u64 | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum 1. |
 | `-v`, `--verbose` | counter | — | See top-level flags above. |

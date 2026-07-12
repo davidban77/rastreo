@@ -1,82 +1,81 @@
 ---
-description: The Kafka wire contract — batched vs per-record flush modes, NDJSON payload shape, consumer parsing strategy, and idempotency model.
+description: The Kafka wire contract — one message per DeviceRecord, batched vs per-record flush modes, consumer parsing, and idempotency.
 ---
 
 # Kafka
 
-The Kafka sink publishes `DeviceRecord` events to a topic on a single partition, encoded as NDJSON. The sink supports two flush modes: `Batched` (the default — accumulates records into one Kafka message at a configurable byte threshold) and `PerRecord` (one Kafka message per record). The wire format is the same in both modes; the difference is how many `DeviceRecord` lines end up inside each Kafka message value.
+The Kafka sink publishes `DeviceRecord` events to a topic on a single partition. Each Kafka message carries exactly one `DeviceRecord`, encoded as JSON. Two flush modes control how the sink groups the network round-trips: `batched` (the default) and `per_record`. Both put one record in each message — the mode changes throughput, not the wire framing.
 
 ## Wire contract
 
-A Kafka message value is a sequence of NDJSON-encoded `DeviceRecord` objects, each terminated by a single `\n` byte. The message has no key, no headers, and is produced with `NoCompression`. The topic is single-partition (partition `0`). The producer timestamp is wall-clock time at produce time.
+A Kafka message value is one JSON-encoded `DeviceRecord` followed by a single `\n` byte. The message has no key, no headers, and is produced without compression. The topic is single-partition (partition `0`). The producer timestamp is wall-clock time at produce time.
 
-In `Batched` mode (default), records accumulate in an in-memory buffer until the buffer length reaches `threshold_bytes` (default 65536, override with `--kafka-batch-threshold <BYTES>`). When the threshold is reached, the buffer is produced as one Kafka message. When the discovery scan ends, any remaining buffered records are produced as one final message on `flush()`. A typical `Batched`-mode Kafka message value with three records looks like:
+A single Kafka message value looks like this:
 
-```text
-{"identity_key":"ip:10.50.0.10","mgmt_ip":"10.50.0.10","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T13:47:22.678133082Z","signals":[{"OpenPort":80}]}
-{"identity_key":"ip:10.50.0.11","mgmt_ip":"10.50.0.11","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T13:47:22.681947013Z","signals":[{"OpenPort":80}]}
-{"identity_key":"ip:10.50.0.12","mgmt_ip":"10.50.0.12","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T13:47:22.684201874Z","signals":[{"OpenPort":80}]}
+```json
+{"identity_key":"ip:10.50.0.10","mgmt_ip":"10.50.0.10","mac":null,"manufacturer":null,"platform":null,"os_version":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T13:47:22.678133Z","signals":[{"OpenPort":80}],"probe_kinds":["TcpConnect"],"schema_version":"v1","schema_id":"https://davidban77.github.io/rastreo/schemas/device-record-v1.json","possible_alias_of":null,"scan_metadata":{"scan_id":"01KXC3Z94835AJY8WWSYQ81Y1P","scenario_name":null,"initiated_at":"2026-07-05T13:47:22.676000Z","source_config_hash":"sha256:63b96614fd6aa54b03a6f04d56b311d00c795f32881a27d0d4168411ec6a2f30"}}
 ```
 
-In `PerRecord` mode (opt in via `--kafka-flush-per-record`), the sink calls `produce()` after every record, so every Kafka message value contains exactly one NDJSON-encoded `DeviceRecord` followed by a single `\n` byte.
+The trailing `\n` is a single byte at the end of the value. A JSON parser ignores trailing whitespace, so a consumer passes the whole value straight to `json.loads`.
 
 ## Choosing a mode
 
-`Batched` is the default and the right choice when the consumer can split NDJSON on `\n`. Fewer Kafka messages mean lower broker overhead and higher throughput for large scans.
+Both modes put one `DeviceRecord` in each Kafka message. They differ only in how the sink groups the network round-trips.
 
-`PerRecord` is the right choice when the consumer can not split NDJSON itself, when records must be available to downstream systems as soon as they are discovered (low-latency reconciliation), or when downstream tools key off Kafka offsets one-to-one with records.
+`batched` (the default) buffers records in memory until the buffered bytes reach `threshold_bytes` (default 65536, override with `--kafka-batch-threshold <BYTES>`). At the threshold, the sink sends the buffered records in one produce request. That request still carries N separate messages — one per record. When the scan ends, the sink sends any remaining buffered records in one final produce request. Choose it for large scans: fewer produce requests lower broker overhead and raise throughput.
+
+`per_record` (opt in with `--kafka-flush-per-record`) sends one produce request per record, with no buffering. Choose it when records must reach downstream systems as soon as they are discovered, for example low-latency reconciliation, or when a tool keys off Kafka offsets one-to-one with records.
+
+!!! info
+    Batching changes throughput, not the wire framing. In both modes a consumer reads one message and gets one `DeviceRecord`.
 
 ## Consumer parsing
 
-A consumer reads each Kafka message value, splits the bytes on `\n`, drops the empty trailing entry, and deserializes each remaining line as JSON. The same code handles both flush modes — `PerRecord` simply yields one record per message instead of many.
+A consumer reads each Kafka message and runs one `json.loads` on the message value. One message is one record — there is nothing to split.
 
 ```python
-# Python kafka-python consumer sketch
 from json import loads
-from kafka import KafkaConsumer
 
-consumer = KafkaConsumer(
-    "rastreo.devices",
-    bootstrap_servers=["localhost:9092"],
-    auto_offset_reset="earliest",
-)
+from confluent_kafka import Consumer
 
-for msg in consumer:
-    for line in msg.value.split(b"\n"):
-        if not line:
-            continue
-        record = loads(line)
-        upsert_record(record)
+consumer = Consumer({
+    "bootstrap.servers": "localhost:9092",
+    "group.id": "rastreo-reconciler",
+    "auto.offset.reset": "earliest",
+})
+consumer.subscribe(["rastreo.devices"])
+
+while True:
+    msg = consumer.poll(1.0)
+    if msg is None or msg.error():
+        continue
+    record = loads(msg.value())     # one DeviceRecord per message
+    upsert_record(record)
 ```
 
 ```go
-// Go franz-go consumer sketch
+// franz-go consumer sketch
 for _, rec := range fetches.Records() {
-    for _, line := range bytes.Split(rec.Value, []byte("\n")) {
-        if len(line) == 0 {
-            continue
-        }
-        var record DeviceRecord
-        if err := json.Unmarshal(line, &record); err != nil {
-            log.Printf("skip malformed line: %v", err)
-            continue
-        }
-        upsertRecord(record)
+    var record DeviceRecord
+    if err := json.Unmarshal(rec.Value, &record); err != nil {
+        log.Printf("skip malformed message: %v", err)
+        continue
     }
+    upsertRecord(record)
 }
 ```
 
 ## Idempotency
 
-`identity_key` is the stable dedup key. For IP targets, it is `ip:<address>`. The same target probed twice produces two `DeviceRecord` events with the same `identity_key` but different `last_seen` timestamps. Consumers must upsert by `identity_key` — replace fields the new record carries, bump `last_seen`, and tolerate seeing the same key arrive any number of times.
+`identity_key` is the stable dedup key. For IP targets, it is `ip:<address>`. The same target probed twice produces two `DeviceRecord` events with the same `identity_key` but different `last_seen` timestamps. Consumers must upsert by `identity_key` — replace the fields the new record carries, update `last_seen`, and tolerate seeing the same key arrive any number of times.
 
 The Kafka sink does not deduplicate. Records are emitted as the discovery pipeline observes them; deduplication is a consumer responsibility.
 
 ## Tuning the threshold
 
-`--kafka-batch-threshold <BYTES>` sets the byte-count trigger for `Batched` mode. The default is 65536 (64 KiB), the minimum is 1. A value too low produces many small Kafka messages and wastes broker overhead. A value too high keeps records in memory longer and delays delivery — records sit in the buffer until either the threshold is reached or the scan ends.
+`--kafka-batch-threshold <BYTES>` sets the buffered-byte count that triggers a produce request in `batched` mode. The default is 65536 (64 KiB); the minimum is 1. A low value sends more frequent, smaller produce requests. A high value keeps records in memory longer — records wait in the buffer until the threshold is reached or the scan ends. The message count on the topic is the same either way; only the number of produce requests changes.
 
-For interactive scans where you want to see records on the topic as the scan runs, prefer `--kafka-flush-per-record` over lowering the batch threshold to 1. The flag is the readable way to say "flush after every record".
+For interactive scans where you want records on the topic as the scan runs, prefer `--kafka-flush-per-record` over lowering the batch threshold to 1. The flag is the clear way to say "send after every record".
 
 ## See also
 

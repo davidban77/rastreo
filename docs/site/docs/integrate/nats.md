@@ -4,15 +4,15 @@ description: The NATS JetStream wire contract — auth methods, per-record vs ba
 
 # NATS
 
-The NATS sink publishes `DeviceRecord` events to a JetStream subject encoded as NDJSON. Pick NATS when you want a lightweight persistent transport with at-least-once delivery, lower operational surface than Kafka, or when your downstream reconcilers already speak NATS. The wire payload is exactly the same NDJSON `DeviceRecord` shape as the Kafka sink; only the transport differs.
+The NATS sink publishes `DeviceRecord` events to a JetStream subject. Each NATS message carries exactly one `DeviceRecord`, encoded as JSON. Choose NATS when you want a lightweight persistent transport with at-least-once delivery, a smaller operational surface than Kafka, or when your downstream reconcilers already speak NATS. The message payload is the same JSON `DeviceRecord` as the Kafka sink; only the transport differs.
 
 ## Wire contract
 
-A JetStream message payload is a sequence of NDJSON-encoded `DeviceRecord` objects, each terminated by a single `\n` byte. The message has no headers. The subject is a single subject (not a wildcard); the sink publishes exclusively to it. Every publish is confirmed by a JetStream `PublishAck` before the sink reports the write delivered.
+A JetStream message payload is one JSON-encoded `DeviceRecord` followed by a single `\n` byte. The message has no headers. The subject is a single subject (not a wildcard); the sink publishes only to it. Every publish is confirmed by a JetStream `PublishAck` before the sink reports the write delivered.
 
-In `per_record` mode (the default), the sink publishes one JetStream message per `DeviceRecord` and waits for the ack before returning from `write`. This is the simplest correctness model — every record is durable on the stream by the time the sink signals success.
+In `per_record` mode (the default), the sink publishes one message per `DeviceRecord` and waits for its ack before returning from the write. This is the simplest correctness model — every record is durable on the stream by the time the sink signals success.
 
-In `batched` mode, records accumulate in an in-memory buffer until the buffer length reaches `threshold_bytes` (default 65536). When the threshold is reached the buffer is published as one JetStream message and the publish ack is held pending. `flush()` drains all pending acks and returns an error if any publish was not acknowledged. Batched mode is higher throughput but widens the failure window if the process is killed mid-batch.
+In `batched` mode, the sink still publishes one message per record, but it does not wait for each ack inline. It buffers records until the buffered bytes reach `threshold_bytes` (default 65536), fires the publishes back to back, and holds the acks pending. `flush()` drains all pending acks and returns an error if any publish was not acknowledged. Batched mode raises throughput by overlapping the ack round-trips, at the cost of a wider failure window if the process is killed before `flush()`.
 
 ## Basic scenario
 
@@ -101,7 +101,9 @@ Password and token values are redacted in Debug output and in `source_config_has
 
 `per_record` is the default and the right choice for most workloads. Every record is confirmed on the stream before the sink acknowledges the write, so a graceful shutdown never loses a record.
 
-`batched` is the right choice for very high record rates where the extra ack round-trips dominate. `flush()` drains the outstanding acks and surfaces any errors; the pipeline calls it during graceful shutdown.
+`batched` is the right choice for very high record rates where the extra ack round-trips dominate. It publishes each record as its own message and pipelines the acks, draining them at `flush()`. The pipeline calls `flush()` during graceful shutdown, which surfaces any ack error.
+
+Set `delivery.mode` to `batched`. The optional `threshold_bytes` field is the buffered-byte count that triggers the pipelined publishes (default 65536):
 
 ```yaml
 sink:
@@ -111,6 +113,9 @@ sink:
     mode: batched
     threshold_bytes: 65536
 ```
+
+!!! info
+    Batched delivery pipelines the acks; it does not combine records. In both modes a consumer reads one message and gets one `DeviceRecord`.
 
 ## Stream setup
 
@@ -135,7 +140,7 @@ Adjust `--replicas`, `--storage`, and retention limits to match the cluster and 
 
 ## Consumer parsing
 
-A JetStream consumer receives each message value, splits the bytes on `\n`, drops the empty trailing entry, and deserializes each remaining line as JSON. The same code handles both delivery modes — `per_record` yields one record per message, `batched` yields many.
+A JetStream consumer receives each message and runs one `json.loads` on the payload. One message is one record — there is nothing to split. The same code handles both delivery modes.
 
 ```python
 # Python async NATS consumer sketch
@@ -151,11 +156,8 @@ async def main():
     while True:
         msgs = await sub.fetch(batch=32, timeout=5)
         for msg in msgs:
-            for line in msg.data.split(b"\n"):
-                if not line:
-                    continue
-                record = loads(line)
-                upsert_record(record)
+            record = loads(msg.data)     # one DeviceRecord per message
+            upsert_record(record)
             await msg.ack()
 
 asyncio.run(main())

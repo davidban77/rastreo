@@ -74,9 +74,9 @@ To tune the curve, set `fuser.confidence_baseline` and `fuser.confidence_per_sig
 
 ## Records do not appear on the Kafka topic
 
-You expect records on the topic during a scan, but the topic shows none until the scan ends. This is the default behaviour of `Batched` mode: the sink buffers NDJSON bytes until the threshold (default 64 KiB) is reached, then produces one Kafka message. For short scans where the buffer never fills, every record lands in the single final message produced at `flush()` when the scan ends.
+You expect records on the topic during a scan, but the topic shows none until the scan ends. This is the default behaviour of `batched` mode: the sink buffers records until the buffered bytes reach the threshold (default 64 KiB), then sends them in one produce request. Each record is still its own message — batching only defers when the produce request goes out. For short scans where the buffer never fills, every record is sent in the final produce request at `flush()` when the scan ends.
 
-The fix is `--kafka-flush-per-record`, which produces one Kafka message per record. Records appear on the topic in real time, at the cost of higher per-record broker overhead. See [Kafka](kafka.md#choosing-a-mode) for the trade-off.
+The fix is `--kafka-flush-per-record`, which sends one produce request per record with no buffering. Records appear on the topic in real time, at the cost of higher per-record broker overhead. See [Kafka](kafka.md#choosing-a-mode) for the trade-off.
 
 ## See also
 

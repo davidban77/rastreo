@@ -77,10 +77,39 @@ async fn write_child(child: &mut TeeChild, data: &[u8]) -> Result<WriteAttributi
     }
 }
 
-async fn flush_child(child: &mut TeeChild) -> Result<(), RastreoError> {
+async fn flush_child(child: &mut TeeChild) -> Result<(SinkType, u64), RastreoError> {
     match child {
-        TeeChild::Owned(sink) => sink.flush().await,
-        TeeChild::Shared(sink) => sink.lock().await.flush().await,
+        TeeChild::Owned(sink) => {
+            let before = sink.dlq_records_delivered();
+            sink.flush().await?;
+            let after = sink.dlq_records_delivered();
+            Ok((sink.kind(), after.saturating_sub(before)))
+        }
+        TeeChild::Shared(sink) => {
+            let mut guard = sink.lock().await;
+            let before = guard.dlq_records_delivered();
+            guard.flush().await?;
+            let after = guard.dlq_records_delivered();
+            Ok((guard.kind(), after.saturating_sub(before)))
+        }
+    }
+}
+
+async fn close_child(child: &mut TeeChild) -> Result<(SinkType, u64), RastreoError> {
+    match child {
+        TeeChild::Owned(sink) => {
+            let before = sink.dlq_records_delivered();
+            sink.close().await?;
+            let after = sink.dlq_records_delivered();
+            Ok((sink.kind(), after.saturating_sub(before)))
+        }
+        TeeChild::Shared(sink) => {
+            let mut guard = sink.lock().await;
+            let before = guard.dlq_records_delivered();
+            guard.close().await?;
+            let after = guard.dlq_records_delivered();
+            Ok((guard.kind(), after.saturating_sub(before)))
+        }
     }
 }
 
@@ -112,7 +141,20 @@ impl Sink for TeeSink {
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
         for child in &mut self.children {
-            flush_child(child).await?;
+            let (kind, delta) = flush_child(child).await?;
+            if delta > 0 {
+                credit_attribution(&self.attribution, kind, delta);
+            }
+        }
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), RastreoError> {
+        for child in &mut self.children {
+            let (kind, delta) = close_child(child).await?;
+            if delta > 0 {
+                credit_attribution(&self.attribution, kind, delta);
+            }
         }
         Ok(())
     }
@@ -155,10 +197,13 @@ mod tests {
     struct RecordingSink {
         writes: Arc<AtomicUsize>,
         flushes: Arc<AtomicUsize>,
+        closes: Arc<AtomicUsize>,
         probes: Arc<AtomicUsize>,
         delivered: bool,
         dlq: u64,
         dlq_per_write: u64,
+        dlq_on_flush: u64,
+        dlq_on_close: u64,
         kind: SinkType,
     }
 
@@ -167,10 +212,13 @@ mod tests {
             Self {
                 writes: Arc::new(AtomicUsize::new(0)),
                 flushes: Arc::new(AtomicUsize::new(0)),
+                closes: Arc::new(AtomicUsize::new(0)),
                 probes: Arc::new(AtomicUsize::new(0)),
                 delivered: true,
                 dlq: 0,
                 dlq_per_write: 0,
+                dlq_on_flush: 0,
+                dlq_on_close: 0,
                 kind: SinkType::Memory,
             }
         }
@@ -185,6 +233,12 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
+            self.dlq = self.dlq.saturating_add(self.dlq_on_flush);
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<(), RastreoError> {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            self.dlq = self.dlq.saturating_add(self.dlq_on_close);
             Ok(())
         }
         fn last_write_delivered(&self) -> bool {
@@ -223,6 +277,21 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Err(RastreoError::Sink(io::Error::other("flush failed")))
+        }
+    }
+
+    struct FailingClose;
+
+    #[async_trait]
+    impl Sink for FailingClose {
+        async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<(), RastreoError> {
+            Err(RastreoError::Sink(io::Error::other("close failed")))
         }
     }
 
@@ -316,6 +385,50 @@ mod tests {
         let err = tee.flush().await.expect_err("must error");
         assert!(matches!(err, RastreoError::Sink(_)));
         assert_eq!(after_flushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_close_fans_out_close_to_every_child() {
+        let a = RecordingSink::new();
+        let b = RecordingSink::new();
+        let a_closes = Arc::clone(&a.closes);
+        let a_flushes = Arc::clone(&a.flushes);
+        let b_closes = Arc::clone(&b.closes);
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(a)),
+            TeeChild::Owned(Box::new(b)),
+        ]);
+        tee.close().await.expect("close");
+        assert_eq!(a_closes.load(Ordering::SeqCst), 1);
+        assert_eq!(b_closes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            a_flushes.load(Ordering::SeqCst),
+            0,
+            "close must call the child's close(), not flush()"
+        );
+    }
+
+    #[tokio::test]
+    async fn tee_sink_close_fans_out_to_shared_children() {
+        let shared_inner = RecordingSink::new();
+        let shared_closes = Arc::clone(&shared_inner.closes);
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(shared_inner)));
+        let mut tee = TeeSink::new(vec![TeeChild::Shared(shared)]);
+        tee.close().await.expect("close");
+        assert_eq!(shared_closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_close_returns_first_error_and_stops() {
+        let after = RecordingSink::new();
+        let after_closes = Arc::clone(&after.closes);
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingClose)),
+            TeeChild::Owned(Box::new(after)),
+        ]);
+        let err = tee.close().await.expect_err("must error");
+        assert!(matches!(err, RastreoError::Sink(_)));
+        assert_eq!(after_closes.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -489,6 +602,49 @@ mod tests {
         );
         let guard = shared.lock().await;
         assert_eq!(guard.dlq_records_delivered(), 1);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_credits_child_dlq_landing_during_close() {
+        let mut batched = RecordingSink::new();
+        batched.dlq_on_close = 4;
+        batched.kind = SinkType::Kafka;
+        let mut tee = TeeSink::new(vec![TeeChild::Owned(Box::new(batched))]);
+
+        tee.write(b"buffered\n").await.expect("write");
+        assert_eq!(tee.dlq_records_delivered(), 0, "batch not yet published");
+
+        tee.close().await.expect("close");
+        assert_eq!(tee.dlq_records_delivered(), 4);
+        assert_eq!(tee.dlq_records_by_type(), vec![(SinkType::Kafka, 4)]);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_credits_child_dlq_landing_during_flush() {
+        let mut batched = RecordingSink::new();
+        batched.dlq_on_flush = 3;
+        batched.kind = SinkType::Kafka;
+        let mut tee = TeeSink::new(vec![TeeChild::Owned(Box::new(batched))]);
+
+        tee.write(b"buffered\n").await.expect("write");
+        assert_eq!(tee.dlq_records_delivered(), 0, "batch not yet published");
+
+        tee.flush().await.expect("flush");
+        assert_eq!(tee.dlq_records_delivered(), 3);
+        assert_eq!(tee.dlq_records_by_type(), vec![(SinkType::Kafka, 3)]);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_credits_shared_child_dlq_landing_during_close() {
+        let mut batched = RecordingSink::new();
+        batched.dlq_on_close = 2;
+        batched.kind = SinkType::Nats;
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(batched)));
+        let mut tee = TeeSink::new(vec![TeeChild::Shared(shared)]);
+
+        tee.close().await.expect("close");
+        assert_eq!(tee.dlq_records_delivered(), 2);
+        assert_eq!(tee.dlq_records_by_type(), vec![(SinkType::Nats, 2)]);
     }
 
     #[tokio::test]
