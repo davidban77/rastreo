@@ -169,11 +169,11 @@ mod tests {
     #[test]
     fn app_error_for_4xx_preserves_message_detail() {
         let err: AppError = RastreoError::Config(ConfigError::InvalidValue(
-            "rate_limit must be positive".into(),
+            "max_concurrent must be positive".into(),
         ))
         .into();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert!(err.message.contains("rate_limit"));
+        assert!(err.message.contains("max_concurrent"));
         assert!(err.message.contains("must be positive"));
     }
 

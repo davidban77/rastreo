@@ -580,7 +580,7 @@ def build_server_scan_payload(
         "targets": [{"Ip": ip} for ip in target_ips],
         "probers": [{"type": "tcp_connect", "ports": [port]}],
         "timeout_ms": 2000,
-        "rate_limit": 16,
+        "max_concurrent": 16,
     }
 
 
@@ -809,7 +809,7 @@ def build_cli_nats_scenario_yaml(
         "  - signal_type: discover\n"
         "    name: uat-nats\n"
         "    timeout_ms: 2000\n"
-        "    rate_limit: 16\n"
+        "    max_concurrent: 16\n"
         "    sink:\n"
         "      type: nats\n"
         f"      servers: [\"{server_url}\"]\n"
@@ -1949,7 +1949,7 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("type: tcp_connect", yaml_text)
         self.assertIn("ports: [80]", yaml_text)
         self.assertIn("timeout_ms: 2000", yaml_text)
-        self.assertIn("rate_limit: 16", yaml_text)
+        self.assertIn("max_concurrent: 16", yaml_text)
         # Sink block uses the exact field names that SinkConfig::Nats expects.
         self.assertIn("sink:", yaml_text)
         self.assertIn("type: nats", yaml_text)

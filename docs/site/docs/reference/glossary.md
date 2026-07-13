@@ -30,7 +30,7 @@ This glossary defines the domain terms used across rastreo's documentation and s
 
 **Prober** — A component that performs probes of a specific protocol. Today only `tcp_connect` is available. Probers are pluggable trait objects in `rastreo-core`; new probers slot in without changes to the dispatcher.
 
-**Scheduler** — The runtime that dispatches probes to probers under a concurrency cap. The default `BoundedScheduler` enforces `rate_limit` (the `--concurrency` flag on the CLI) as the maximum number of in-flight probes.
+**Scheduler** — The runtime that dispatches probes to probers under two limits. The default `BoundedScheduler` enforces `max_concurrent` (the `--concurrency` flag on the CLI) as the maximum number of probes in flight at once, and `probe_rate` (the `--rate` flag) as the maximum number of probes started per second. When `probe_rate` is unset, probes start as fast as the concurrency cap allows.
 
 **Fuser** — The component that aggregates per-target signals into a `DeviceRecord` and assigns a confidence. Today only `DirectFuser` is available. The fuser groups outcomes by target IP, dedups signals, and emits one record per group.
 

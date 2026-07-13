@@ -63,6 +63,8 @@ rastreo discover --file /etc/rastreo/scan.yml
 
 A multi-scenario file that runs two independent probes sequentially. The `defaults:` block applies to every scenario unless the scenario re-declares the field.
 
+Two scheduler knobs pace a scan. `max_concurrent` caps how many probes run at the same time. `probe_rate` caps how many probes start each second. The `web-tier` scenario below sets both: up to 64 probes in flight, and no more than 50 new probes started per second.
+
 ```yaml
 # yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
 version: 1
@@ -84,7 +86,8 @@ scenarios:
         community: public
   - signal_type: discover
     name: web-tier
-    rate_limit: 32
+    max_concurrent: 64
+    probe_rate: 50
     targets:
       - Cidr: "10.1.0.0/28"
     probers:
@@ -104,11 +107,15 @@ Each scenario prints its own status line to stderr. If ANY single scenario fails
 | `--topic <TOPIC>` | — | Kafka topic for `--sink kafka`. Requires the `kafka` build feature. |
 | `--kafka-flush-per-record` | — | Flush every `DeviceRecord` to Kafka as a separate message. Mutually exclusive with `--kafka-batch-threshold`. Only meaningful with `--sink kafka`. |
 | `--kafka-batch-threshold <BYTES>` | `65536` (64 KiB) | Batch threshold in bytes. Records accumulate until the buffer reaches this size, then flush in one produce request that carries one message per record. Minimum 1. Only meaningful with `--sink kafka`. |
-| `--concurrency <N>` | `64` (flag-driven) / YAML `rate_limit` (YAML-driven) | Maximum number of in-flight probes. Minimum value is 1. In YAML-driven mode, setting `--concurrency` overrides the scenario's `rate_limit`. |
+| `--concurrency <N>` | `64` (flag-driven) / YAML `max_concurrent` (YAML-driven) | Maximum number of probes in flight at once. Minimum value is 1. In YAML-driven mode, setting `--concurrency` overrides the scenario's `max_concurrent`. |
+| `--rate <N>` | unset — no pacing (flag-driven) / YAML `probe_rate` (YAML-driven) | Maximum number of probes started per second. Minimum value is 1. When unset, probes start as fast as concurrency allows. In YAML-driven mode, setting `--rate` overrides the scenario's `probe_rate`. |
 | `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
 | `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
 | `-q`, `--quiet` | — | Drop the log level to `error`. Mutually exclusive in spirit with `-v`. |
+
+!!! info "Concurrency vs rate"
+    These are two different limits. `--concurrency` (YAML `max_concurrent`) sets how many probes run at the same time. `--rate` (YAML `probe_rate`) sets how many probes start each second. They compose: with `--concurrency 64 --rate 50`, up to 64 probes run at once, but no more than 50 start per second. The rate bounds the scan whenever it is the tighter limit. Leave `--rate` unset to let probes start as fast as concurrency allows — useful to be gentle on a fragile network.
 
 ## Examples
 
@@ -155,7 +162,7 @@ rastreo discover \
 
 `--dry-run` validates the scenario, resolves targets (DNS lookups run for real), prints the expanded plan to stdout, and exits without probing anything or opening a sink. It works in both flag-driven mode (`--target` + `--port`) and YAML-driven mode (`--file`). CLI overrides (`--sink`, `--concurrency`, `--timeout-ms`) are applied to the plan — what you see is what would run.
 
-The output shows one block per scenario listing each target's DNS / CIDR / range expansion, the configured probers with their parameters, the sink kind and destination, and the effective concurrency and per-probe timeout. A bottom line reports the total probe count (unique IPs × configured probers, deduplicated across overlapping targets), matching the count the real pipeline would dispatch.
+The output shows one block per scenario listing each target's DNS / CIDR / range expansion, the configured probers with their parameters, the sink kind and destination, and the effective concurrency, probe rate, and per-probe timeout. The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count (unique IPs × configured probers, deduplicated across overlapping targets), matching the count the real pipeline would dispatch.
 
 CIDRs and ranges that expand to more than six addresses are truncated with an ellipsis and a count. DNS resolution failures are printed inline (`example.com → <error: DNS lookup failed: ...>`) and the run continues with the remaining targets. The exit code is `0` when at least one target resolves and `1` only when every target fails to resolve — in that case there is nothing left to probe.
 
@@ -173,6 +180,7 @@ rastreo discover --target 10.0.0.0/24 --port 22,80 --dry-run
     probers: tcp_connect (ports 22, 80)
     sink: stdout
     concurrency: 64
+    rate: unlimited
     timeout_ms: 1000
 total probes: 254
 ```
@@ -182,10 +190,10 @@ total probes: 254
 CLI flags override YAML values. Merge order per scenario, lowest to highest:
 
 1. `defaults:` block in the scenario file.
-2. Per-scenario fields (`rate_limit`, `timeout_ms`, `sink`, `encoder`, `fuser`, `name`).
-3. CLI flags (`--concurrency`, `--timeout-ms`, `--sink` + `--output` / Kafka flags).
+2. Per-scenario fields (`max_concurrent`, `probe_rate`, `timeout_ms`, `sink`, `encoder`, `fuser`, `name`).
+3. CLI flags (`--concurrency`, `--rate`, `--timeout-ms`, `--sink` + `--output` / Kafka flags).
 
-Only fields the CLI flag was explicitly set for are overridden. `rastreo discover --file scan.yml --concurrency 32` overrides the YAML `rate_limit`, but leaves the sink and timeout untouched. Omitting a flag entirely lets the YAML value win.
+Only fields the CLI flag was explicitly set for are overridden. `rastreo discover --file scan.yml --concurrency 32` overrides the YAML `max_concurrent`, but leaves the rate, sink, and timeout untouched. Omitting a flag entirely lets the YAML value win.
 
 ## Cancellation
 

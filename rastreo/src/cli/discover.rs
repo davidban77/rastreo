@@ -85,9 +85,13 @@ pub struct DiscoverArgs {
     #[arg(long, value_parser = parse_positive_usize)]
     pub kafka_batch_threshold: Option<usize>,
 
-    /// Max concurrent probes. Defaults to 64. With --file, overrides the YAML rate_limit.
+    /// Max probes in flight at once. Defaults to 64. With --file, overrides the YAML max_concurrent.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub concurrency: Option<u32>,
+
+    /// Max probes started per second. Unset means no rate limit. With --file, overrides the YAML probe_rate.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub rate: Option<u32>,
 
     /// Per-probe timeout in milliseconds. Defaults to 1000. With --file, overrides the YAML timeout_ms.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -257,13 +261,17 @@ fn write_scenario_plan(
 
     let concurrency = scenario
         .base
-        .rate_limit
+        .max_concurrent
         .unwrap_or_else(|| args.concurrency.unwrap_or(DEFAULT_CONCURRENCY));
     let timeout_ms = scenario
         .base
         .timeout_ms
         .unwrap_or_else(|| args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
     writeln!(out, "    concurrency: {concurrency}").expect("write to String");
+    match scenario.base.probe_rate.or(args.rate) {
+        Some(r) => writeln!(out, "    rate: {r}/sec").expect("write to String"),
+        None => writeln!(out, "    rate: unlimited").expect("write to String"),
+    }
     writeln!(out, "    timeout_ms: {timeout_ms}").expect("write to String");
 
     unique_ips.len().saturating_mul(scenario.probers.len())
@@ -634,8 +642,11 @@ fn merge_defaults(base: &mut BaseProbeConfig, defaults: &BaseProbeConfig) {
     if base.name.is_none() {
         base.name = defaults.name.clone();
     }
-    if base.rate_limit.is_none() {
-        base.rate_limit = defaults.rate_limit;
+    if base.max_concurrent.is_none() {
+        base.max_concurrent = defaults.max_concurrent;
+    }
+    if base.probe_rate.is_none() {
+        base.probe_rate = defaults.probe_rate;
     }
     if base.timeout_ms.is_none() {
         base.timeout_ms = defaults.timeout_ms;
@@ -661,7 +672,10 @@ fn apply_cli_overrides(
     cli_sink: Option<&SinkConfig>,
 ) {
     if let Some(c) = args.concurrency {
-        base.rate_limit = Some(c);
+        base.max_concurrent = Some(c);
+    }
+    if let Some(r) = args.rate {
+        base.probe_rate = Some(r);
     }
     if let Some(t) = args.timeout_ms {
         base.timeout_ms = Some(t);
@@ -723,7 +737,8 @@ pub(crate) fn build_scenario(args: &DiscoverArgs) -> Result<DiscoverScenarioConf
     }];
 
     let mut base = BaseProbeConfig::new();
-    base.rate_limit = Some(args.concurrency.unwrap_or(DEFAULT_CONCURRENCY));
+    base.max_concurrent = Some(args.concurrency.unwrap_or(DEFAULT_CONCURRENCY));
+    base.probe_rate = args.rate;
     base.timeout_ms = Some(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
     base.sink = Some(sink_config);
 
@@ -816,6 +831,7 @@ mod tests {
             #[cfg(feature = "kafka")]
             kafka_batch_threshold: None,
             concurrency: None,
+            rate: None,
             timeout_ms: None,
             dry_run: false,
         }
@@ -917,7 +933,7 @@ mod tests {
             Some(SinkConfig::Stdout) => {}
             other => panic!("expected Stdout sink, got {other:?}"),
         }
-        assert_eq!(scenario.base.rate_limit, Some(64));
+        assert_eq!(scenario.base.max_concurrent, Some(64));
         assert_eq!(scenario.base.timeout_ms, Some(1000));
     }
 
@@ -959,7 +975,8 @@ mod tests {
     fn build_scenario_uses_defaults_when_flags_unset() {
         let a = args(&["10.0.0.1"], &[80]);
         let scenario = build_scenario(&a).expect("scenario");
-        assert_eq!(scenario.base.rate_limit, Some(DEFAULT_CONCURRENCY));
+        assert_eq!(scenario.base.max_concurrent, Some(DEFAULT_CONCURRENCY));
+        assert_eq!(scenario.base.probe_rate, None);
         assert_eq!(scenario.base.timeout_ms, Some(DEFAULT_TIMEOUT_MS));
     }
 
@@ -967,9 +984,11 @@ mod tests {
     fn build_scenario_uses_flag_values_when_set() {
         let mut a = args(&["10.0.0.1"], &[80]);
         a.concurrency = Some(8);
+        a.rate = Some(20);
         a.timeout_ms = Some(200);
         let scenario = build_scenario(&a).expect("scenario");
-        assert_eq!(scenario.base.rate_limit, Some(8));
+        assert_eq!(scenario.base.max_concurrent, Some(8));
+        assert_eq!(scenario.base.probe_rate, Some(20));
         assert_eq!(scenario.base.timeout_ms, Some(200));
     }
 
@@ -1014,6 +1033,35 @@ mod tests {
         ])
         .expect("--concurrency 1 should parse");
         assert_eq!(parsed.concurrency, Some(1));
+    }
+
+    #[test]
+    fn discover_accepts_rate_flag() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--rate",
+            "50",
+        ])
+        .expect("--rate 50 should parse");
+        assert_eq!(parsed.rate, Some(50));
+    }
+
+    #[test]
+    fn discover_rejects_rate_zero() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--rate",
+            "0",
+        ]);
+        assert!(result.is_err(), "expected --rate 0 to be rejected");
     }
 
     #[test]
@@ -1083,13 +1131,16 @@ mod tests {
     #[test]
     fn merge_defaults_takes_scenario_field_when_present() {
         let mut base = BaseProbeConfig::new();
-        base.rate_limit = Some(10);
+        base.max_concurrent = Some(10);
+        base.probe_rate = Some(30);
         base.timeout_ms = Some(500);
         let mut defaults = BaseProbeConfig::new();
-        defaults.rate_limit = Some(999);
+        defaults.max_concurrent = Some(999);
+        defaults.probe_rate = Some(9);
         defaults.timeout_ms = Some(9999);
         merge_defaults(&mut base, &defaults);
-        assert_eq!(base.rate_limit, Some(10));
+        assert_eq!(base.max_concurrent, Some(10));
+        assert_eq!(base.probe_rate, Some(30));
         assert_eq!(base.timeout_ms, Some(500));
     }
 
@@ -1099,13 +1150,15 @@ mod tests {
         let mut base = BaseProbeConfig::new();
         let mut defaults = BaseProbeConfig::new();
         defaults.name = Some("lab".into());
-        defaults.rate_limit = Some(32);
+        defaults.max_concurrent = Some(32);
+        defaults.probe_rate = Some(100);
         defaults.timeout_ms = Some(750);
         defaults.sink = Some(SinkConfig::Stdout);
         defaults.classifier = Some(rastreo_core::ClassifierConfig::Noop);
         merge_defaults(&mut base, &defaults);
         assert_eq!(base.name.as_deref(), Some("lab"));
-        assert_eq!(base.rate_limit, Some(32));
+        assert_eq!(base.max_concurrent, Some(32));
+        assert_eq!(base.probe_rate, Some(100));
         assert_eq!(base.timeout_ms, Some(750));
         assert!(matches!(base.sink, Some(SinkConfig::Stdout)));
         assert!(matches!(
@@ -1118,15 +1171,27 @@ mod tests {
     #[test]
     fn apply_cli_overrides_sets_only_provided_fields() {
         let mut base = BaseProbeConfig::new();
-        base.rate_limit = Some(1);
+        base.max_concurrent = Some(1);
         base.timeout_ms = Some(2);
         base.sink = Some(SinkConfig::Stdout);
         let mut a = args(&[], &[]);
         a.concurrency = Some(99);
         apply_cli_overrides(&mut base, &a, None);
-        assert_eq!(base.rate_limit, Some(99));
+        assert_eq!(base.max_concurrent, Some(99));
+        assert_eq!(base.probe_rate, None);
         assert_eq!(base.timeout_ms, Some(2));
         assert!(matches!(base.sink, Some(SinkConfig::Stdout)));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_cli_overrides_sets_probe_rate_from_rate_flag() {
+        let mut base = BaseProbeConfig::new();
+        base.probe_rate = Some(5);
+        let mut a = args(&[], &[]);
+        a.rate = Some(200);
+        apply_cli_overrides(&mut base, &a, None);
+        assert_eq!(base.probe_rate, Some(200));
     }
 
     #[cfg(feature = "config")]
@@ -1511,12 +1576,26 @@ mod tests {
         assert!(out.contains("tcp_connect (ports 22, 80)"), "{out}");
         assert!(out.contains("sink: stdout"), "{out}");
         assert!(out.contains("concurrency: 64"), "{out}");
+        assert!(out.contains("rate: unlimited"), "{out}");
         assert!(out.contains("timeout_ms: 1000"), "{out}");
         assert!(
             out.contains("total probes: 1"),
             "single-scenario prints total: {out}"
         );
         dry_run_exit_status(&[resolutions]).expect("exit ok");
+    }
+
+    #[tokio::test]
+    async fn dry_run_shows_rate_per_second_when_rate_flag_set() {
+        let mut a = args(&["127.0.0.1"], &[22]);
+        a.dry_run = true;
+        a.rate = Some(25);
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let mut out = String::new();
+        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        assert!(out.contains("rate: 25/sec"), "{out}");
     }
 
     #[tokio::test]

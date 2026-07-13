@@ -18,13 +18,18 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
     let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
     let expanded = secrets::expand(raw)?;
-    serde_yaml_ng::from_value::<ScenarioFile>(expanded)
-        .map_err(|e| {
-            ConfigError::InvalidValue(format!(
-                "scenario shape validation failed after secret expansion: {e}"
-            ))
-        })
-        .map_err(RastreoError::from)
+    let file: ScenarioFile = serde_yaml_ng::from_value(expanded).map_err(|e| {
+        ConfigError::InvalidValue(format!(
+            "scenario shape validation failed after secret expansion: {e}"
+        ))
+    })?;
+    file.defaults.ensure_no_retired_fields()?;
+    for entry in &file.scenarios {
+        match entry {
+            ScenarioEntry::Discover(cfg) => cfg.base.ensure_no_retired_fields()?,
+        }
+    }
+    Ok(file)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -47,17 +52,33 @@ pub enum ScenarioKind {
 #[non_exhaustive]
 pub struct BaseProbeConfig {
     pub name: Option<String>,
-    pub rate_limit: Option<u32>,
+    /// Maximum probes in flight at once.
+    pub max_concurrent: Option<u32>,
+    /// Maximum probes started per second; unset means no rate limit.
+    pub probe_rate: Option<u32>,
     pub timeout_ms: Option<u64>,
     pub encoder: Option<EncoderConfig>,
     pub fuser: Option<FuserConfig>,
     pub classifier: Option<ClassifierConfig>,
     pub sink: Option<SinkConfig>,
+    // Retired: read old configs so validation can reject them with a migration hint.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub(crate) rate_limit: Option<u32>,
 }
 
 impl BaseProbeConfig {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn ensure_no_retired_fields(&self) -> Result<(), crate::error::ConfigError> {
+        if self.rate_limit.is_some() {
+            return Err(crate::error::ConfigError::invalid(
+                "`rate_limit` was renamed: use `max_concurrent` to keep the previous behavior (in-flight cap), or `probe_rate` for the new probes/sec pacing",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -102,7 +123,8 @@ mod tests {
     fn base_probe_config_default_is_all_none() {
         let cfg = BaseProbeConfig::default();
         assert!(cfg.name.is_none());
-        assert!(cfg.rate_limit.is_none());
+        assert!(cfg.max_concurrent.is_none());
+        assert!(cfg.probe_rate.is_none());
         assert!(cfg.timeout_ms.is_none());
         assert!(cfg.encoder.is_none());
         assert!(cfg.fuser.is_none());
@@ -148,11 +170,46 @@ mod tests {
 
     #[test]
     fn base_probe_config_deserializes_with_fields() {
-        let json = r#"{"name":"lab","rate_limit":50,"timeout_ms":1000}"#;
+        let json = r#"{"name":"lab","max_concurrent":50,"probe_rate":25,"timeout_ms":1000}"#;
         let cfg: BaseProbeConfig = serde_json::from_str(json).expect("with fields");
         assert_eq!(cfg.name.as_deref(), Some("lab"));
-        assert_eq!(cfg.rate_limit, Some(50));
+        assert_eq!(cfg.max_concurrent, Some(50));
+        assert_eq!(cfg.probe_rate, Some(25));
         assert_eq!(cfg.timeout_ms, Some(1000));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_retired_rate_limit_with_migration_hint() {
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    rate_limit: 50\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err = parse_scenario_file(yaml).expect_err("retired rate_limit must error");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        let msg = format!("{err}");
+        assert!(msg.contains("max_concurrent"), "msg: {msg}");
+        assert!(msg.contains("probe_rate"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_retired_rate_limit_in_defaults() {
+        let yaml = "version: 1\nkind: discovery\ndefaults:\n  rate_limit: 8\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err = parse_scenario_file(yaml).expect_err("retired rate_limit in defaults must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("max_concurrent"), "msg: {msg}");
+        assert!(msg.contains("probe_rate"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_accepts_max_concurrent_and_probe_rate() {
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    max_concurrent: 32\n    probe_rate: 100\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let file = parse_scenario_file(yaml).expect("parse");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        assert_eq!(d.base.max_concurrent, Some(32));
+        assert_eq!(d.base.probe_rate, Some(100));
     }
 
     #[test]
