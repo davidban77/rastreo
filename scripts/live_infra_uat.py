@@ -813,7 +813,7 @@ def build_cli_nats_scenario_yaml(
 
     The NATS sink has no CLI flag surface, so the CLI runs against a mounted
     scenario file. Field names match ``SinkConfig::Nats`` (``servers``,
-    ``subject``, ``stream``); ``delivery`` is omitted so the Rust default
+    ``subject``, ``stream``); ``flush_mode`` is omitted so the Rust default
     ``PerRecord`` applies.
     """
     targets_yaml = "\n".join(f"      - Ip: {ip}" for ip in target_ips)
@@ -1971,8 +1971,8 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn('servers: ["nats://nats:4222"]', yaml_text)
         self.assertIn("subject: rastreo.uat.records.abc", yaml_text)
         self.assertIn("stream: rastreo-uat-abc", yaml_text)
-        # Delivery omitted so the Rust default (PerRecord) applies.
-        self.assertNotIn("delivery:", yaml_text)
+        # Flush mode omitted so the Rust default (PerRecord) applies.
+        self.assertNotIn("flush_mode:", yaml_text)
 
     def test_build_cli_ssh_argv_shape(self) -> None:
         argv = build_cli_ssh_argv(

@@ -313,7 +313,7 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
 | `subject` | string | yes | Subject to publish to. |
 | `stream` | string | yes | JetStream stream name bound to the subject. |
 | `credentials` | object | no | Auth details. Defaults to anonymous. See below. |
-| `delivery` | object | no | Delivery / flush mode. Defaults to `per_record`. See below. |
+| `flush_mode` | object | no | Flush mode. Defaults to `per_record`. See below. |
 | `dead_letter` | object | no | Optional quarantine subject for records the primary publish or JetStream ack refused. Omit to preserve the pre-existing "return error, retain buffer/pending" behavior on failure. |
 
 ```json
@@ -322,37 +322,37 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
   "servers": ["nats://nats:4222"],
   "subject": "rastreo.discovery.records.v1",
   "stream": "rastreo",
-  "credentials": {"auth_type": "user_pass", "username": "admin", "password": "sekret"},
-  "delivery": {"mode": "per_record"}
+  "credentials": {"type": "user_pass", "username": "admin", "password": "sekret"},
+  "flush_mode": {"type": "per_record"}
 }
 ```
 
-The `credentials` field is an internally-tagged object with four variants distinguished by `auth_type`. `anonymous` connects with no auth (lab / dev only). `user_pass` sends a username and password. `token` sends a bearer token. `creds` reads a NATS `.creds` file (JWT + nkey seed) from disk. Password and token values are redacted in Debug output and in `source_config_hash` — rotation still changes the hash, plaintext never leaks.
+The `credentials` field is an internally-tagged object with four variants distinguished by `type`. `anonymous` connects with no auth (lab / dev only). `user_pass` sends a username and password. `token` sends a bearer token. `creds` reads a NATS `.creds` file (JWT + nkey seed) from disk. Password and token values are redacted in Debug output and in `source_config_hash` — rotation still changes the hash, plaintext never leaks.
 
 ```json
-{"auth_type": "anonymous"}
+{"type": "anonymous"}
 ```
 
 ```json
-{"auth_type": "user_pass", "username": "admin", "password": "sekret"}
+{"type": "user_pass", "username": "admin", "password": "sekret"}
 ```
 
 ```json
-{"auth_type": "token", "token": "bearer-xyz"}
+{"type": "token", "token": "bearer-xyz"}
 ```
 
 ```json
-{"auth_type": "creds", "creds_file": "/etc/rastreo/nats.creds"}
+{"type": "creds", "creds_file": "/etc/rastreo/nats.creds"}
 ```
 
-The `delivery` field is an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each NATS message. `per_record` publishes each record and waits for its JetStream ack — the simplest at-least-once model. `batched` publishes each record as its own message too, but pipelines the acks: it buffers until `threshold_bytes` (default 65536), fires the publishes, and drains the pending acks on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch.
+The `flush_mode` field is an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each NATS message. `per_record` publishes each record and waits for its JetStream ack — the simplest at-least-once model. `batched` publishes each record as its own message too, but pipelines the acks: it buffers until `threshold_bytes` (default 65536), fires the publishes, and drains the pending acks on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch.
 
 ```json
-{"mode": "per_record"}
+{"type": "per_record"}
 ```
 
 ```json
-{"mode": "batched", "threshold_bytes": 65536}
+{"type": "batched", "threshold_bytes": 65536}
 ```
 
 The `dead_letter` field carries three properties: `stream` (required, the DLQ JetStream stream name), `subject` (required, the DLQ subject), and `include_error_metadata` (optional, default `true`). When enabled, DLQ messages carry three headers: `x-rastreo-source-subject`, `x-rastreo-error-class` (either `publish_failure` for a synchronous `publish()` failure or `ack_rejection` when JetStream refused durable storage), and `x-rastreo-dlq-timestamp` (RFC 3339 UTC). The DLQ stream must exist on the same NATS cluster as the primary stream; construction fails fast if it is missing. See [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue_1) for the failure model, error-class taxonomy, and consumer guidance.

@@ -34,7 +34,7 @@ pub fn default_batch_threshold() -> usize {
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-#[serde(tag = "auth_type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NatsCredentials {
     #[default]
@@ -52,9 +52,9 @@ pub enum NatsCredentials {
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum NatsDelivery {
+pub enum NatsFlushMode {
     #[default]
     PerRecord,
     Batched {
@@ -63,7 +63,7 @@ pub enum NatsDelivery {
     },
 }
 
-impl NatsDelivery {
+impl NatsFlushMode {
     fn to_threshold(&self) -> usize {
         match self {
             Self::PerRecord => 1,
@@ -230,8 +230,8 @@ impl NatsSink {
         })
     }
 
-    pub fn with_delivery(mut self, delivery: NatsDelivery) -> Self {
-        self.buffer_threshold = delivery.to_threshold();
+    pub fn with_flush_mode(mut self, mode: NatsFlushMode) -> Self {
+        self.buffer_threshold = mode.to_threshold();
         self
     }
 
@@ -571,28 +571,28 @@ mod tests {
     }
 
     #[test]
-    fn nats_delivery_default_is_per_record() {
-        assert!(matches!(NatsDelivery::default(), NatsDelivery::PerRecord));
+    fn nats_flush_mode_default_is_per_record() {
+        assert!(matches!(NatsFlushMode::default(), NatsFlushMode::PerRecord));
     }
 
     #[test]
-    fn nats_delivery_batched_default_threshold_is_64k() {
+    fn nats_flush_mode_batched_default_threshold_is_64k() {
         assert_eq!(default_batch_threshold(), 64 * 1024);
     }
 
     #[test]
-    fn nats_delivery_per_record_maps_to_threshold_one() {
-        assert_eq!(NatsDelivery::PerRecord.to_threshold(), 1);
+    fn nats_flush_mode_per_record_maps_to_threshold_one() {
+        assert_eq!(NatsFlushMode::PerRecord.to_threshold(), 1);
     }
 
     #[test]
-    fn nats_delivery_batched_maps_to_clamped_threshold() {
+    fn nats_flush_mode_batched_maps_to_clamped_threshold() {
         assert_eq!(
-            NatsDelivery::Batched { threshold_bytes: 0 }.to_threshold(),
+            NatsFlushMode::Batched { threshold_bytes: 0 }.to_threshold(),
             1
         );
         assert_eq!(
-            NatsDelivery::Batched {
+            NatsFlushMode::Batched {
                 threshold_bytes: 4096
             }
             .to_threshold(),
@@ -654,7 +654,7 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn nats_credentials_anonymous_deserializes_from_yaml() {
-        let yaml = "auth_type: anonymous\n";
+        let yaml = "type: anonymous\n";
         let creds: NatsCredentials = serde_yaml_ng::from_str(yaml).expect("deserialize");
         assert!(matches!(creds, NatsCredentials::Anonymous));
     }
@@ -662,7 +662,7 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn nats_credentials_user_pass_deserializes_from_yaml() {
-        let yaml = "auth_type: user_pass\nusername: admin\npassword: pw\n";
+        let yaml = "type: user_pass\nusername: admin\npassword: pw\n";
         let creds: NatsCredentials = serde_yaml_ng::from_str(yaml).expect("deserialize");
         match creds {
             NatsCredentials::UserPass { username, password } => {
@@ -676,7 +676,7 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn nats_credentials_token_deserializes_from_yaml() {
-        let yaml = "auth_type: token\ntoken: secret-token\n";
+        let yaml = "type: token\ntoken: secret-token\n";
         let creds: NatsCredentials = serde_yaml_ng::from_str(yaml).expect("deserialize");
         match creds {
             NatsCredentials::Token { token } => {
@@ -689,7 +689,7 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn nats_credentials_creds_file_deserializes_from_yaml() {
-        let yaml = "auth_type: creds\ncreds_file: /etc/rastreo/nats.creds\n";
+        let yaml = "type: creds\ncreds_file: /etc/rastreo/nats.creds\n";
         let creds: NatsCredentials = serde_yaml_ng::from_str(yaml).expect("deserialize");
         match creds {
             NatsCredentials::Creds { creds_file } => {
@@ -701,30 +701,30 @@ mod tests {
 
     #[cfg(feature = "config")]
     #[test]
-    fn nats_delivery_per_record_deserializes_from_yaml() {
-        let yaml = "mode: per_record\n";
-        let d: NatsDelivery = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        assert!(matches!(d, NatsDelivery::PerRecord));
+    fn nats_flush_mode_per_record_deserializes_from_yaml() {
+        let yaml = "type: per_record\n";
+        let d: NatsFlushMode = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        assert!(matches!(d, NatsFlushMode::PerRecord));
     }
 
     #[cfg(feature = "config")]
     #[test]
-    fn nats_delivery_batched_with_threshold_deserializes() {
-        let yaml = "mode: batched\nthreshold_bytes: 2048\n";
-        let d: NatsDelivery = serde_yaml_ng::from_str(yaml).expect("deserialize");
+    fn nats_flush_mode_batched_with_threshold_deserializes() {
+        let yaml = "type: batched\nthreshold_bytes: 2048\n";
+        let d: NatsFlushMode = serde_yaml_ng::from_str(yaml).expect("deserialize");
         match d {
-            NatsDelivery::Batched { threshold_bytes } => assert_eq!(threshold_bytes, 2048),
+            NatsFlushMode::Batched { threshold_bytes } => assert_eq!(threshold_bytes, 2048),
             other => panic!("expected Batched, got {other:?}"),
         }
     }
 
     #[cfg(feature = "config")]
     #[test]
-    fn nats_delivery_batched_default_threshold_deserializes() {
-        let yaml = "mode: batched\n";
-        let d: NatsDelivery = serde_yaml_ng::from_str(yaml).expect("deserialize");
+    fn nats_flush_mode_batched_default_threshold_deserializes() {
+        let yaml = "type: batched\n";
+        let d: NatsFlushMode = serde_yaml_ng::from_str(yaml).expect("deserialize");
         match d {
-            NatsDelivery::Batched { threshold_bytes } => {
+            NatsFlushMode::Batched { threshold_bytes } => {
                 assert_eq!(threshold_bytes, 64 * 1024);
             }
             other => panic!("expected Batched, got {other:?}"),

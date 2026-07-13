@@ -49,7 +49,7 @@ pub use sink::{
 #[cfg(feature = "kafka")]
 pub use sink::{KafkaFlushMode, KafkaSink};
 #[cfg(feature = "nats")]
-pub use sink::{NatsCredentials, NatsDelivery, NatsSink};
+pub use sink::{NatsCredentials, NatsFlushMode, NatsSink};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
