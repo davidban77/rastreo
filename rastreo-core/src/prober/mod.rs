@@ -42,8 +42,18 @@ pub use tcp_connect::TcpConnectProber;
 pub use tls::TlsProber;
 pub use udp::{UdpProber, UdpProtocol};
 
+use std::time::Duration;
+
 use crate::error::RastreoError;
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
+
+const MIN_ATTEMPT_SLICE: Duration = Duration::from_millis(1);
+
+/// Splits `timeout` across `retries + 1` attempts; the divisor saturates and the slice floors at
+/// `MIN_ATTEMPT_SLICE` so no `u32` value can divide by zero or busy-spin the retransmit loop.
+pub(crate) fn per_attempt_timeout(timeout: Duration, retries: u32) -> Duration {
+    (timeout / retries.saturating_add(1)).max(MIN_ATTEMPT_SLICE)
+}
 
 #[async_trait::async_trait]
 pub trait Prober: Send + Sync {
@@ -209,6 +219,38 @@ mod tests {
     use std::time::SystemTime;
 
     use crate::model::{Signal, Target};
+
+    #[test]
+    fn per_attempt_timeout_retries_zero_is_full_timeout() {
+        assert_eq!(
+            per_attempt_timeout(Duration::from_secs(1), 0),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn per_attempt_timeout_splits_budget_across_attempts() {
+        assert_eq!(
+            per_attempt_timeout(Duration::from_millis(900), 2),
+            Duration::from_millis(300)
+        );
+    }
+
+    #[test]
+    fn per_attempt_timeout_floors_near_zero_slice() {
+        assert_eq!(
+            per_attempt_timeout(Duration::from_millis(2), 1024),
+            MIN_ATTEMPT_SLICE
+        );
+    }
+
+    #[test]
+    fn per_attempt_timeout_u32_max_neither_panics_nor_zeroes() {
+        assert_eq!(
+            per_attempt_timeout(Duration::from_millis(2), u32::MAX),
+            MIN_ATTEMPT_SLICE
+        );
+    }
 
     struct MockProber;
 

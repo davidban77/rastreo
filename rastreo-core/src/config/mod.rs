@@ -12,6 +12,10 @@ use crate::model::Target;
 use crate::prober::ProberConfig;
 use crate::sink::SinkConfig;
 
+/// Upper bound on `BaseProbeConfig::retries`, mirroring the ICMP prober's `count` cap: past this a
+/// larger value only shrinks each retransmit slice against the floor without extending the reach.
+pub const MAX_RETRIES: u32 = 1024;
+
 /// Parse a YAML scenario file from a UTF-8 string into a `ScenarioFile`. `${VAR}` env-var references and `!file <path>` tags are expanded before deserialization; missing vars or unreadable files fail here rather than surfacing at probe time.
 #[cfg(feature = "config")]
 pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
@@ -24,9 +28,13 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
         ))
     })?;
     file.defaults.ensure_no_retired_fields()?;
+    file.defaults.ensure_retries_within_bound()?;
     for entry in &file.scenarios {
         match entry {
-            ScenarioEntry::Discover(cfg) => cfg.base.ensure_no_retired_fields()?,
+            ScenarioEntry::Discover(cfg) => {
+                cfg.base.ensure_no_retired_fields()?;
+                cfg.base.ensure_retries_within_bound()?;
+            }
         }
     }
     Ok(file)
@@ -56,6 +64,8 @@ pub struct BaseProbeConfig {
     pub max_concurrent: Option<u32>,
     /// Maximum probes started per second; unset means no rate limit.
     pub probe_rate: Option<u32>,
+    /// Retransmit attempts for connectionless probers that lack native retransmission (UDP, SNMP, DNS); 0 (default) issues a single request within the same total timeout.
+    pub retries: Option<u32>,
     pub timeout_ms: Option<u64>,
     pub encoder: Option<EncoderConfig>,
     pub fuser: Option<FuserConfig>,
@@ -77,6 +87,17 @@ impl BaseProbeConfig {
             return Err(crate::error::ConfigError::invalid(
                 "`rate_limit` was renamed: use `max_concurrent` to keep the previous behavior (in-flight cap), or `probe_rate` for the new probes/sec pacing",
             ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_retries_within_bound(&self) -> Result<(), crate::error::ConfigError> {
+        if let Some(retries) = self.retries {
+            if retries > MAX_RETRIES {
+                return Err(crate::error::ConfigError::invalid(format!(
+                    "`retries` must be between 0 and {MAX_RETRIES}, got {retries}"
+                )));
+            }
         }
         Ok(())
     }
@@ -125,6 +146,7 @@ mod tests {
         assert!(cfg.name.is_none());
         assert!(cfg.max_concurrent.is_none());
         assert!(cfg.probe_rate.is_none());
+        assert!(cfg.retries.is_none());
         assert!(cfg.timeout_ms.is_none());
         assert!(cfg.encoder.is_none());
         assert!(cfg.fuser.is_none());
@@ -170,11 +192,13 @@ mod tests {
 
     #[test]
     fn base_probe_config_deserializes_with_fields() {
-        let json = r#"{"name":"lab","max_concurrent":50,"probe_rate":25,"timeout_ms":1000}"#;
+        let json =
+            r#"{"name":"lab","max_concurrent":50,"probe_rate":25,"retries":3,"timeout_ms":1000}"#;
         let cfg: BaseProbeConfig = serde_json::from_str(json).expect("with fields");
         assert_eq!(cfg.name.as_deref(), Some("lab"));
         assert_eq!(cfg.max_concurrent, Some(50));
         assert_eq!(cfg.probe_rate, Some(25));
+        assert_eq!(cfg.retries, Some(3));
         assert_eq!(cfg.timeout_ms, Some(1000));
     }
 
@@ -210,6 +234,48 @@ mod tests {
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         assert_eq!(d.base.max_concurrent, Some(32));
         assert_eq!(d.base.probe_rate, Some(100));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_accepts_retries() {
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    retries: 2\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let file = parse_scenario_file(yaml).expect("parse");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        assert_eq!(d.base.retries, Some(2));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_accepts_retries_at_max() {
+        let yaml = format!("version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    retries: {MAX_RETRIES}\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n");
+        let file = parse_scenario_file(&yaml).expect("retries at the max parses");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        assert_eq!(d.base.retries, Some(MAX_RETRIES));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_retries_over_max() {
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    retries: 99999\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err = parse_scenario_file(yaml).expect_err("retries over the max must error");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        let msg = format!("{err}");
+        assert!(msg.contains("retries"), "msg: {msg}");
+        assert!(msg.contains("1024"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_retries_over_max_in_defaults() {
+        let yaml = "version: 1\nkind: discovery\ndefaults:\n  retries: 5000\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err =
+            parse_scenario_file(yaml).expect_err("retries over the max in defaults must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("retries"), "msg: {msg}");
     }
 
     #[test]

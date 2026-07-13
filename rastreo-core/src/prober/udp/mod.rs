@@ -85,30 +85,39 @@ async fn probe_port(target_addr: SocketAddr, protocol: UdpProtocol, ctx: &ProbeC
         UdpProtocol::MemcachedStats => memcached::build_request(memcached_request_id),
         UdpProtocol::StunBinding => stun::build_request(stun_txid),
     };
-    if let Err(e) = socket.send_to(&payload, target_addr).await {
-        return classify_io_error(&e);
-    }
     let mut buf = vec![0u8; RECV_BUF_LEN];
-    let deadline = tokio::time::Instant::now() + ctx.timeout;
-    loop {
-        match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, peer))) => {
-                if peer.ip() != target_addr.ip() {
-                    continue;
+    // Split the timeout across attempts so retransmits stay inside the same total per-probe deadline.
+    let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
+    let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
+    for _ in 0..=ctx.retries {
+        if let Err(e) = socket.send_to(&payload, target_addr).await {
+            return classify_io_error(&e);
+        }
+        let attempt_deadline = (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
+        loop {
+            match tokio::time::timeout_at(attempt_deadline, socket.recv_from(&mut buf)).await {
+                Ok(Ok((n, peer))) => {
+                    if peer.ip() != target_addr.ip() {
+                        continue;
+                    }
+                    let bytes = &buf[..n];
+                    let signal = match protocol {
+                        UdpProtocol::Ntp => ntp::parse_response(bytes),
+                        UdpProtocol::SipOptions => sip::parse_response(bytes),
+                        UdpProtocol::MemcachedStats => memcached::parse_response(bytes),
+                        UdpProtocol::StunBinding => stun::parse_response(bytes, &stun_txid),
+                    };
+                    return PortOutcome::Reached(signal);
                 }
-                let bytes = &buf[..n];
-                let signal = match protocol {
-                    UdpProtocol::Ntp => ntp::parse_response(bytes),
-                    UdpProtocol::SipOptions => sip::parse_response(bytes),
-                    UdpProtocol::MemcachedStats => memcached::parse_response(bytes),
-                    UdpProtocol::StunBinding => stun::parse_response(bytes, &stun_txid),
-                };
-                return PortOutcome::Reached(signal);
+                Ok(Err(e)) => return classify_io_error(&e),
+                Err(_) => break,
             }
-            Ok(Err(e)) => return classify_io_error(&e),
-            Err(_) => return PortOutcome::Timeout,
+        }
+        if tokio::time::Instant::now() >= overall_deadline {
+            break;
         }
     }
+    PortOutcome::Timeout
 }
 
 fn classify_io_error(err: &io::Error) -> PortOutcome {
@@ -214,6 +223,7 @@ impl Prober for UdpProber {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -660,5 +670,135 @@ mod tests {
         let prober = UdpProber::new(vec![5060], UdpProtocol::SipOptions).expect("valid");
         assert_eq!(prober.ports(), &[5060]);
         assert_eq!(prober.protocol(), UdpProtocol::SipOptions);
+    }
+
+    fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
+        ProbeCtx {
+            timeout: Duration::from_millis(ms),
+            retries,
+        }
+    }
+
+    async fn spawn_ntp_server_dropping(drop_first: usize) -> (u16, Arc<AtomicUsize>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        let received = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&received);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; RECV_BUF_LEN];
+            loop {
+                let (_n, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let count = seen.fetch_add(1, Ordering::SeqCst) + 1;
+                if count <= drop_first {
+                    continue;
+                }
+                let _ = socket
+                    .send_to(&ntp_response(2, [203, 0, 113, 1]), peer)
+                    .await;
+            }
+        });
+        (port, received)
+    }
+
+    #[tokio::test]
+    async fn udp_retries_zero_issues_exactly_one_datagram() {
+        let (port, received) = spawn_ntp_server_dropping(usize::MAX).await;
+        let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(200, 0))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            1,
+            "retries=0 must send a single datagram"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_retransmit_recovers_when_first_packets_are_dropped() {
+        let (port, _received) = spawn_ntp_server_dropping(2).await;
+        let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(900, 2))
+            .await
+            .expect("probe ok");
+        assert!(
+            outcome.reachable,
+            "the third attempt reaches the server after two dropped datagrams"
+        );
+        assert_eq!(outcome.signals.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn udp_without_retries_reports_absent_when_first_packet_dropped() {
+        let (port, _received) = spawn_ntp_server_dropping(1).await;
+        let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 0))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn udp_exhausted_retries_is_absence_not_fault() {
+        let (port, received) = spawn_ntp_server_dropping(usize::MAX).await;
+        let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 2))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            3,
+            "retries=2 sends the first datagram plus two retransmits"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_retries_u32_max_is_bounded_and_does_not_panic() {
+        let (port, received) = spawn_ntp_server_dropping(usize::MAX).await;
+        let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(2, u32::MAX))
+            .await
+            .expect("u32::MAX retries must not panic");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "u32::MAX retries must stay bounded near the timeout: {elapsed:?}"
+        );
+        assert!(
+            received.load(Ordering::SeqCst) < 100,
+            "the per-attempt floor and deadline break bound the send count: {}",
+            received.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_retransmit_stays_within_the_total_timeout() {
+        let (port, _received) = spawn_ntp_server_dropping(usize::MAX).await;
+        let prober = UdpProber::new(vec![port], UdpProtocol::Ntp).expect("valid");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 2))
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "split model keeps the total near timeout, not retries+1 times it: {elapsed:?}"
+        );
     }
 }

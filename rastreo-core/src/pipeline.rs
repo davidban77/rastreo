@@ -132,6 +132,7 @@ pub async fn run_discovery_with_components_cancellable(
     mut cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
     scenario.base.ensure_no_retired_fields()?;
+    scenario.base.ensure_retries_within_bound()?;
     if scenario.probers.is_empty() {
         return Err(ConfigError::invalid("scenario.probers must not be empty").into());
     }
@@ -152,7 +153,7 @@ pub async fn run_discovery_with_components_cancellable(
     let timeout_ms = scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
     let ctx = ProbeCtx {
         timeout: Duration::from_millis(timeout_ms),
-        retries: 0,
+        retries: scenario.base.retries.unwrap_or(0),
     };
 
     let encoder_config = scenario

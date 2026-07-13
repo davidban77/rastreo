@@ -36,6 +36,7 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` a
 | `--kafka-batch-threshold <BYTES>` | usize | `65536` | Bytes accumulated in the sink buffer before one produce request goes out, carrying one message per record. Minimum 1. Requires the `kafka` build feature. |
 | `--concurrency <N>` | u32 | `64` | Maximum number of probes in flight at once. Minimum 1. |
 | `--rate <N>` | u32 | unset | Maximum number of probes started per second. Minimum 1. Unset means probes start as fast as concurrency allows. |
+| `--retries <N>` | u32 | `0` | Retransmit attempts for the connectionless probers — UDP, SNMP, DNS, and reverse DNS. `0` is single-shot (default). Range 0–1024. It divides `--timeout-ms` across attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. With `--file`, it overrides the scenario `retries`. See [Discover · CLI](../discover/cli.md#retries-on-lossy-links). |
 | `--timeout-ms <MS>` | u64 | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum 1. |
 | `-v`, `--verbose` | counter | — | See top-level flags above. |
 | `-q`, `--quiet` | flag | — | See top-level flags above. |

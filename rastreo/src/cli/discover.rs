@@ -10,7 +10,7 @@ use clap::Parser;
 use ipnet::IpNet;
 #[cfg(feature = "config")]
 use rastreo_core::config::{parse_scenario_file, ScenarioEntry, ScenarioFile, ScenarioKind};
-use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
+use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig, MAX_RETRIES};
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
@@ -92,6 +92,10 @@ pub struct DiscoverArgs {
     /// Max probes started per second. Unset means no rate limit. With --file, overrides the YAML probe_rate.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub rate: Option<u32>,
+
+    /// Retransmit attempts for connectionless probers (UDP, SNMP, DNS); 0 = single-shot. With --file, overrides the YAML `retries`.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=MAX_RETRIES as i64))]
+    pub retries: Option<u32>,
 
     /// Per-probe timeout in milliseconds. Defaults to 1000. With --file, overrides the YAML timeout_ms.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -272,6 +276,8 @@ fn write_scenario_plan(
         Some(r) => writeln!(out, "    rate: {r}/sec").expect("write to String"),
         None => writeln!(out, "    rate: unlimited").expect("write to String"),
     }
+    let retries = scenario.base.retries.or(args.retries).unwrap_or(0);
+    writeln!(out, "    retries: {retries}").expect("write to String");
     writeln!(out, "    timeout_ms: {timeout_ms}").expect("write to String");
 
     unique_ips.len().saturating_mul(scenario.probers.len())
@@ -648,6 +654,9 @@ fn merge_defaults(base: &mut BaseProbeConfig, defaults: &BaseProbeConfig) {
     if base.probe_rate.is_none() {
         base.probe_rate = defaults.probe_rate;
     }
+    if base.retries.is_none() {
+        base.retries = defaults.retries;
+    }
     if base.timeout_ms.is_none() {
         base.timeout_ms = defaults.timeout_ms;
     }
@@ -676,6 +685,9 @@ fn apply_cli_overrides(
     }
     if let Some(r) = args.rate {
         base.probe_rate = Some(r);
+    }
+    if let Some(r) = args.retries {
+        base.retries = Some(r);
     }
     if let Some(t) = args.timeout_ms {
         base.timeout_ms = Some(t);
@@ -739,6 +751,7 @@ pub(crate) fn build_scenario(args: &DiscoverArgs) -> Result<DiscoverScenarioConf
     let mut base = BaseProbeConfig::new();
     base.max_concurrent = Some(args.concurrency.unwrap_or(DEFAULT_CONCURRENCY));
     base.probe_rate = args.rate;
+    base.retries = args.retries;
     base.timeout_ms = Some(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
     base.sink = Some(sink_config);
 
@@ -832,6 +845,7 @@ mod tests {
             kafka_batch_threshold: None,
             concurrency: None,
             rate: None,
+            retries: None,
             timeout_ms: None,
             dry_run: false,
         }
@@ -1051,6 +1065,69 @@ mod tests {
     }
 
     #[test]
+    fn discover_accepts_retries_flag() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--retries",
+            "2",
+        ])
+        .expect("--retries 2 should parse");
+        assert_eq!(parsed.retries, Some(2));
+    }
+
+    #[test]
+    fn discover_accepts_retries_at_max() {
+        let max = MAX_RETRIES.to_string();
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--retries",
+            max.as_str(),
+        ])
+        .expect("--retries at the max should parse");
+        assert_eq!(parsed.retries, Some(MAX_RETRIES));
+    }
+
+    #[test]
+    fn discover_rejects_retries_over_max() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--retries",
+            "99999",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected --retries over the max to be rejected"
+        );
+    }
+
+    #[test]
+    fn build_scenario_threads_retries_flag() {
+        let mut a = args(&["10.0.0.1"], &[80]);
+        a.retries = Some(3);
+        let scenario = build_scenario(&a).expect("scenario");
+        assert_eq!(scenario.base.retries, Some(3));
+    }
+
+    #[test]
+    fn build_scenario_leaves_retries_unset_by_default() {
+        let a = args(&["10.0.0.1"], &[80]);
+        let scenario = build_scenario(&a).expect("scenario");
+        assert_eq!(scenario.base.retries, None);
+    }
+
+    #[test]
     fn discover_rejects_rate_zero() {
         let result = DiscoverArgs::try_parse_from([
             "discover",
@@ -1192,6 +1269,27 @@ mod tests {
         a.rate = Some(200);
         apply_cli_overrides(&mut base, &a, None);
         assert_eq!(base.probe_rate, Some(200));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_cli_overrides_sets_retries_from_retries_flag() {
+        let mut base = BaseProbeConfig::new();
+        base.retries = Some(1);
+        let mut a = args(&[], &[]);
+        a.retries = Some(4);
+        apply_cli_overrides(&mut base, &a, None);
+        assert_eq!(base.retries, Some(4));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn merge_defaults_falls_back_to_file_retries_when_scenario_field_missing() {
+        let mut base = BaseProbeConfig::new();
+        let mut defaults = BaseProbeConfig::new();
+        defaults.retries = Some(2);
+        merge_defaults(&mut base, &defaults);
+        assert_eq!(base.retries, Some(2));
     }
 
     #[cfg(feature = "config")]

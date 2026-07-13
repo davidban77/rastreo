@@ -242,6 +242,8 @@ impl Prober for DnsProber {
         let mut signals = Vec::new();
         let mut any_reachable = false;
         let mut last_fault: Option<ProbeFault> = None;
+        // Split the timeout across attempts so a dropped query is retransmitted inside the same total per-probe deadline.
+        let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
 
         for &port in &self.ports {
             let resolver = match self.build_resolver(target.ip, port) {
@@ -255,38 +257,45 @@ impl Prober for DnsProber {
                 }
             };
             for name in self.query_names.iter() {
-                let lookup = resolver.lookup(name.as_str(), record_type);
-                match tokio::time::timeout(ctx.timeout, lookup).await {
-                    Ok(Ok(response)) => {
-                        any_reachable = true;
-                        for record in response.answers() {
-                            if let Some(text) = format_signal(name, &record.data) {
-                                signals.push(Signal::DnsHost(text));
+                let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
+                for _ in 0..=ctx.retries {
+                    let attempt_deadline =
+                        (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
+                    let lookup = resolver.lookup(name.as_str(), record_type);
+                    match tokio::time::timeout_at(attempt_deadline, lookup).await {
+                        Ok(Ok(response)) => {
+                            any_reachable = true;
+                            for record in response.answers() {
+                                if let Some(text) = format_signal(name, &record.data) {
+                                    signals.push(Signal::DnsHost(text));
+                                }
                             }
+                            break;
                         }
+                        Ok(Err(err)) => {
+                            if err.is_no_records_found() {
+                                // NXDOMAIN, NoError-with-empty-answers: server responded.
+                                any_reachable = true;
+                            } else if let hickory_resolver::net::NetError::Dns(
+                                hickory_resolver::net::DnsError::ResponseCode(_),
+                            ) = &err
+                            {
+                                // REFUSED / SERVFAIL / etc. — server responded.
+                                any_reachable = true;
+                            } else if let Disposition::Fault(kind) = classify::net_error(&err) {
+                                last_fault = Some(ProbeFault::new(
+                                    kind,
+                                    format!("dns probe failed on port {port} for {name}: {err}"),
+                                ));
+                            }
+                            break;
+                        }
+                        // No response within the attempt slice: retransmit until the overall deadline.
+                        Err(_) => {}
                     }
-                    Ok(Err(err)) => {
-                        if err.is_no_records_found() {
-                            // NXDOMAIN, NoError-with-empty-answers: server responded.
-                            any_reachable = true;
-                            continue;
-                        }
-                        if let hickory_resolver::net::NetError::Dns(
-                            hickory_resolver::net::DnsError::ResponseCode(_),
-                        ) = &err
-                        {
-                            // REFUSED / SERVFAIL / etc. — server responded.
-                            any_reachable = true;
-                            continue;
-                        }
-                        if let Disposition::Fault(kind) = classify::net_error(&err) {
-                            last_fault = Some(ProbeFault::new(
-                                kind,
-                                format!("dns probe failed on port {port} for {name}: {err}"),
-                            ));
-                        }
+                    if tokio::time::Instant::now() >= overall_deadline {
+                        break;
                     }
-                    Err(_) => {}
                 }
             }
         }
@@ -387,6 +396,47 @@ mod tests {
             }
         });
         Ok(port)
+    }
+
+    async fn spawn_udp_dns_server_dropping(
+        bind: &str,
+        responder: DnsResponder,
+        drop_first: usize,
+    ) -> std::io::Result<(u16, std::sync::Arc<std::sync::atomic::AtomicUsize>)> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let socket = UdpSocket::bind(bind).await?;
+        let port = socket.local_addr()?.port();
+        let received = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&received);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let (n, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                if seen.fetch_add(1, Ordering::SeqCst) < drop_first {
+                    continue;
+                }
+                let request = match Message::from_bytes(&buf[..n]) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let query = match request.queries.first() {
+                    Some(q) => q.clone(),
+                    None => continue,
+                };
+                let (answers, rcode) = (responder.0)(&query);
+                let mut response = build_response(&query, answers, rcode);
+                response.metadata.id = request.metadata.id;
+                let bytes = match response.to_bytes() {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let _ = socket.send_to(&bytes, peer).await;
+            }
+        });
+        Ok((port, received))
     }
 
     async fn spawn_tcp_dns_server(bind: &str, responder: DnsResponder) -> std::io::Result<u16> {
@@ -496,6 +546,101 @@ mod tests {
             true,
         )
         .expect("valid")
+    }
+
+    fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
+        ProbeCtx {
+            timeout: Duration::from_millis(ms),
+            retries,
+        }
+    }
+
+    fn a_record_responder() -> DnsResponder {
+        DnsResponder(Arc::new(|q| {
+            let ans = vec![a_record(
+                &q.name().to_ascii(),
+                Ipv4Addr::new(93, 184, 216, 34),
+            )];
+            (ans, ResponseCode::NoError)
+        }))
+    }
+
+    #[tokio::test]
+    async fn dns_retransmit_recovers_when_first_queries_are_dropped() {
+        let (port, _received) =
+            spawn_udp_dns_server_dropping("127.0.0.1:0", a_record_responder(), 2)
+                .await
+                .expect("bind");
+        let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(900, 2))
+            .await
+            .expect("probe ok");
+        assert!(
+            outcome.reachable,
+            "the third attempt reaches the server after two dropped queries"
+        );
+        assert_eq!(outcome.signals.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dns_without_retries_reports_absent_when_first_query_dropped() {
+        let (port, _received) =
+            spawn_udp_dns_server_dropping("127.0.0.1:0", a_record_responder(), 1)
+                .await
+                .expect("bind");
+        let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 0))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn dns_retries_u32_max_is_bounded_and_does_not_panic() {
+        let (port, received) =
+            spawn_udp_dns_server_dropping("127.0.0.1:0", a_record_responder(), usize::MAX)
+                .await
+                .expect("bind");
+        let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(2, u32::MAX))
+            .await
+            .expect("u32::MAX retries must not panic");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "u32::MAX retries must stay bounded near the timeout: {elapsed:?}"
+        );
+        assert!(
+            received.load(std::sync::atomic::Ordering::SeqCst) < 100,
+            "the per-attempt floor and deadline break bound the query count: {}",
+            received.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_exhausted_retries_is_absence_not_fault() {
+        let (port, received) =
+            spawn_udp_dns_server_dropping("127.0.0.1:0", a_record_responder(), usize::MAX)
+                .await
+                .expect("bind");
+        let prober = make_prober(vec![port], DnsQueryType::A, DnsTransport::Udp);
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 2))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+        assert_eq!(
+            received.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "retries=2 sends the first query plus two retransmits"
+        );
     }
 
     #[tokio::test]

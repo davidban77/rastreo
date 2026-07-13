@@ -71,7 +71,7 @@ pub(super) async fn probe_port(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let deadline = tokio::time::Instant::now() + ctx.timeout;
+    let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
     let credentials = prober.credentials();
     let auth = credentials.auth.resolve();
     let privacy = credentials.privacy.resolve();
@@ -80,7 +80,14 @@ pub(super) async fn probe_port(
         Err(msg) => return PortOutcome::Other(msg.to_string()),
     };
 
-    let engine = match discover_engine(&socket, target_addr, &credentials.username, deadline).await
+    let engine = match discover_engine(
+        &socket,
+        target_addr,
+        &credentials.username,
+        ctx,
+        overall_deadline,
+    )
+    .await
     {
         Ok(e) => e,
         Err(e) => return e,
@@ -106,7 +113,7 @@ pub(super) async fn probe_port(
             &auth_key,
             &privacy,
             &priv_key,
-            deadline,
+            overall_deadline,
         )
         .await;
 
@@ -165,7 +172,8 @@ async fn discover_engine(
     socket: &UdpSocket,
     target_addr: SocketAddr,
     username: &str,
-    deadline: tokio::time::Instant,
+    ctx: &ProbeCtx,
+    overall_deadline: tokio::time::Instant,
 ) -> Result<EngineSnapshot, PortOutcome> {
     let msg_id = next_msg_id();
     let scoped_pdu = v3::ScopedPdu {
@@ -191,44 +199,52 @@ async fn discover_engine(
     let payload = rasn::ber::encode(&msg)
         .map_err(|e| PortOutcome::Other(format!("snmp v3 discovery encode failed: {e}")))?;
 
-    if let Err(e) = socket.send_to(&payload, target_addr).await {
-        return Err(classify_io_error(&e));
-    }
-
     let mut buf = vec![0u8; RECV_BUF_LEN];
-    loop {
-        match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, peer))) => {
-                if peer.ip() != target_addr.ip() {
-                    continue;
-                }
-                let reply: v3::Message = match rasn::ber::decode(&buf[..n]) {
-                    Ok(m) => m,
-                    Err(_) => return Err(PortOutcome::DecodeFailed),
-                };
-                let params: v3::USMSecurityParameters =
-                    match reply.decode_security_parameters(rasn::Codec::Ber) {
-                        Ok(p) => p,
+    // Split the timeout across attempts so a dropped discovery packet is retransmitted inside the same total per-probe deadline.
+    let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
+    for _ in 0..=ctx.retries {
+        if let Err(e) = socket.send_to(&payload, target_addr).await {
+            return Err(classify_io_error(&e));
+        }
+        let attempt_deadline = (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
+        loop {
+            match tokio::time::timeout_at(attempt_deadline, socket.recv_from(&mut buf)).await {
+                Ok(Ok((n, peer))) => {
+                    if peer.ip() != target_addr.ip() {
+                        continue;
+                    }
+                    let reply: v3::Message = match rasn::ber::decode(&buf[..n]) {
+                        Ok(m) => m,
                         Err(_) => return Err(PortOutcome::DecodeFailed),
                     };
-                let engine_id: Vec<u8> = params.authoritative_engine_id.to_vec();
-                if engine_id.is_empty() {
-                    return Err(PortOutcome::Other(
-                        "snmp v3 discovery response missing engine id".to_string(),
-                    ));
+                    let params: v3::USMSecurityParameters =
+                        match reply.decode_security_parameters(rasn::Codec::Ber) {
+                            Ok(p) => p,
+                            Err(_) => return Err(PortOutcome::DecodeFailed),
+                        };
+                    let engine_id: Vec<u8> = params.authoritative_engine_id.to_vec();
+                    if engine_id.is_empty() {
+                        return Err(PortOutcome::Other(
+                            "snmp v3 discovery response missing engine id".to_string(),
+                        ));
+                    }
+                    let boots = integer_to_u32(&params.authoritative_engine_boots);
+                    let time = integer_to_u32(&params.authoritative_engine_time);
+                    return Ok(EngineSnapshot {
+                        engine_id,
+                        engine_boots: boots,
+                        engine_time: time,
+                    });
                 }
-                let boots = integer_to_u32(&params.authoritative_engine_boots);
-                let time = integer_to_u32(&params.authoritative_engine_time);
-                return Ok(EngineSnapshot {
-                    engine_id,
-                    engine_boots: boots,
-                    engine_time: time,
-                });
+                Ok(Err(e)) => return Err(classify_io_error(&e)),
+                Err(_) => break,
             }
-            Ok(Err(e)) => return Err(classify_io_error(&e)),
-            Err(_) => return Err(PortOutcome::Timeout),
+        }
+        if tokio::time::Instant::now() >= overall_deadline {
+            break;
         }
     }
+    Err(PortOutcome::Timeout)
 }
 
 fn integer_to_u32(v: &Integer) -> u32 {
@@ -648,6 +664,7 @@ mod tests {
     use rasn::types::ObjectIdentifier;
     use rasn_smi::v2 as smi_v2;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
@@ -1142,6 +1159,126 @@ mod tests {
             }
         });
         Ok(port)
+    }
+
+    async fn spawn_mock_v3_dropping(
+        agent: MockV3Agent,
+        drop_first: usize,
+    ) -> std::io::Result<(u16, Arc<AtomicUsize>)> {
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let port = socket.local_addr()?.port();
+        let received = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&received);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; RECV_BUF_LEN];
+            loop {
+                let (n, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let count = seen.fetch_add(1, Ordering::SeqCst) + 1;
+                if count <= drop_first {
+                    continue;
+                }
+                if let Some(resp) = agent.respond(&buf[..n]) {
+                    let _ = socket.send_to(&resp, peer).await;
+                }
+            }
+        });
+        Ok((port, received))
+    }
+
+    fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
+        ProbeCtx {
+            timeout: Duration::from_millis(ms),
+            retries,
+        }
+    }
+
+    fn noauth_creds() -> UsmCredentials {
+        UsmCredentials {
+            username: "probe".into(),
+            auth: UsmAuth::None,
+            privacy: UsmPrivacy::None,
+        }
+    }
+
+    #[tokio::test]
+    async fn snmpv3_retransmit_recovers_when_discovery_packets_are_dropped() {
+        let (port, _received) = spawn_mock_v3_dropping(MockV3Agent::new("probe"), 2)
+            .await
+            .expect("bind");
+        let prober = SnmpProber::new(vec![port], SnmpVersion::V3, String::new(), noauth_creds())
+            .expect("valid v3");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(1_500, 2))
+            .await
+            .expect("probe ok");
+        assert!(
+            outcome.reachable,
+            "the third discovery attempt reaches the engine after two dropped datagrams"
+        );
+        assert_eq!(outcome.signals.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn snmpv3_without_retries_reports_absent_when_discovery_dropped() {
+        let (port, _received) = spawn_mock_v3_dropping(MockV3Agent::new("probe"), 1)
+            .await
+            .expect("bind");
+        let prober = SnmpProber::new(vec![port], SnmpVersion::V3, String::new(), noauth_creds())
+            .expect("valid v3");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 0))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn snmpv3_retries_u32_max_is_bounded_and_does_not_panic() {
+        let (port, received) = spawn_mock_v3_dropping(MockV3Agent::new("probe"), usize::MAX)
+            .await
+            .expect("bind");
+        let prober = SnmpProber::new(vec![port], SnmpVersion::V3, String::new(), noauth_creds())
+            .expect("valid v3");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(2, u32::MAX))
+            .await
+            .expect("u32::MAX retries must not panic");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "u32::MAX retries must stay bounded near the timeout: {elapsed:?}"
+        );
+        assert!(
+            received.load(Ordering::SeqCst) < 100,
+            "the per-attempt floor and deadline break bound the send count: {}",
+            received.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn snmpv3_exhausted_retries_is_absence_not_fault() {
+        let (port, received) = spawn_mock_v3_dropping(MockV3Agent::new("probe"), usize::MAX)
+            .await
+            .expect("bind");
+        let prober = SnmpProber::new(vec![port], SnmpVersion::V3, String::new(), noauth_creds())
+            .expect("valid v3");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 2))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            3,
+            "retries=2 sends the first discovery datagram plus two retransmits"
+        );
     }
 
     #[tokio::test]

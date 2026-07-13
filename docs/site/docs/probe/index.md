@@ -34,6 +34,9 @@ Every prober reports one of three results for a target. The rules are the same f
 
 A target that does not answer is a normal discovery result. Most addresses in a healthy subnet are unused, so most probes come back unreachable. Only probe faults appear in the scan summary's `error_counts` and raise `rastreo_server_probes_total{outcome="error"}` on the server. A sweep of a mostly empty `/24` therefore reports zero probe faults.
 
+!!! tip "Lossy links can fake an unreachable result"
+    On a congested or long-distance link, a dropped UDP, SNMP, or DNS packet can make a live host report as unreachable. The scenario-level `retries` knob resends the request to recover from that loss. See [Retries on lossy links](../discover/cli.md#retries-on-lossy-links).
+
 Each fault carries a named kind, and the summary tallies faults by kind in `error_counts`. The kinds you will see are:
 
 - `decode_failed` — the target answered, but the reply could not be parsed.

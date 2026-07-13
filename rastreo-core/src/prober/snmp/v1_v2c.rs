@@ -244,30 +244,39 @@ pub(super) async fn probe_port(
         Ok(p) => p,
         Err(e) => return PortOutcome::Other(format!("snmp encode failed: {e}")),
     };
-    if let Err(e) = socket.send_to(&payload, target_addr).await {
-        return classify_io_error(&e);
-    }
     let mut buf = vec![0u8; RECV_BUF_LEN];
-    let deadline = tokio::time::Instant::now() + ctx.timeout;
-    loop {
-        match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, peer))) => {
-                if peer.ip() != target_addr.ip() {
-                    continue;
-                }
-                let bytes = &buf[..n];
-                match prober.parse_v1_v2c_response(bytes, request_id) {
-                    ResponseVerdict::Ok(signals) => return PortOutcome::Reached(signals),
-                    ResponseVerdict::UnexpectedPdu | ResponseVerdict::MismatchedRequestId => {
+    // Split the timeout across attempts so retransmits stay inside the same total per-probe deadline.
+    let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
+    let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
+    for _ in 0..=ctx.retries {
+        if let Err(e) = socket.send_to(&payload, target_addr).await {
+            return classify_io_error(&e);
+        }
+        let attempt_deadline = (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
+        loop {
+            match tokio::time::timeout_at(attempt_deadline, socket.recv_from(&mut buf)).await {
+                Ok(Ok((n, peer))) => {
+                    if peer.ip() != target_addr.ip() {
                         continue;
                     }
-                    ResponseVerdict::Malformed => return PortOutcome::DecodeFailed,
+                    let bytes = &buf[..n];
+                    match prober.parse_v1_v2c_response(bytes, request_id) {
+                        ResponseVerdict::Ok(signals) => return PortOutcome::Reached(signals),
+                        ResponseVerdict::UnexpectedPdu | ResponseVerdict::MismatchedRequestId => {
+                            continue;
+                        }
+                        ResponseVerdict::Malformed => return PortOutcome::DecodeFailed,
+                    }
                 }
+                Ok(Err(e)) => return classify_io_error(&e),
+                Err(_) => break,
             }
-            Ok(Err(e)) => return classify_io_error(&e),
-            Err(_) => return PortOutcome::Timeout,
+        }
+        if tokio::time::Instant::now() >= overall_deadline {
+            break;
         }
     }
+    PortOutcome::Timeout
 }
 
 #[cfg(test)]
@@ -278,6 +287,7 @@ mod tests {
     use crate::prober::Prober;
     use std::io;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
     use tokio::net::UdpSocket;
@@ -706,5 +716,123 @@ mod tests {
         assert!(outcome.reachable);
         assert_eq!(outcome.signals.len(), 3);
         let _ = ProbeKind::Snmp;
+    }
+
+    fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
+        ProbeCtx {
+            timeout: Duration::from_millis(ms),
+            retries,
+        }
+    }
+
+    async fn spawn_v2c_agent_dropping(drop_first: usize) -> (u16, Arc<AtomicUsize>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        let received = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&received);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; RECV_BUF_LEN];
+            loop {
+                let (n, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let count = seen.fetch_add(1, Ordering::SeqCst) + 1;
+                if count <= drop_first {
+                    continue;
+                }
+                if let Some(resp) = mirror_v2c_response(&buf[..n]) {
+                    let _ = socket.send_to(&resp, peer).await;
+                }
+            }
+        });
+        (port, received)
+    }
+
+    #[tokio::test]
+    async fn snmp_v2c_retransmit_recovers_when_first_packets_are_dropped() {
+        let (port, _received) = spawn_v2c_agent_dropping(2).await;
+        let prober = SnmpProber::new(
+            vec![port],
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(900, 2))
+            .await
+            .expect("probe ok");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn snmp_v2c_without_retries_reports_absent_when_first_packet_dropped() {
+        let (port, _received) = spawn_v2c_agent_dropping(1).await;
+        let prober = SnmpProber::new(
+            vec![port],
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 0))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn snmp_v2c_retries_u32_max_is_bounded_and_does_not_panic() {
+        let (port, received) = spawn_v2c_agent_dropping(usize::MAX).await;
+        let prober = SnmpProber::new(
+            vec![port],
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(2, u32::MAX))
+            .await
+            .expect("u32::MAX retries must not panic");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "u32::MAX retries must stay bounded near the timeout: {elapsed:?}"
+        );
+        assert!(
+            received.load(Ordering::SeqCst) < 100,
+            "the per-attempt floor and deadline break bound the send count: {}",
+            received.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn snmp_v2c_exhausted_retries_is_absence_not_fault() {
+        let (port, received) = spawn_v2c_agent_dropping(usize::MAX).await;
+        let prober = SnmpProber::new(
+            vec![port],
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_retries(300, 2))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            3,
+            "retries=2 sends the first datagram plus two retransmits"
+        );
     }
 }
