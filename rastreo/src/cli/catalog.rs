@@ -10,6 +10,7 @@ const HOME_ENV: &str = "HOME";
 const ETC_CATALOG_DIR: &str = "/etc/rastreo/catalog";
 const MAX_LISTED_NAMES_PER_DIR: usize = 20;
 
+/// Resolve a catalog `@name` to a scenario path: search `RASTREO_CATALOG_DIR` if set, else the user config dir then `/etc/rastreo/catalog`; first directory wins, `.yml` before `.yaml`.
 pub fn resolve_catalog_name(name: &str) -> Result<PathBuf> {
     resolve_catalog_name_with_env(name, &StdEnv)
 }
