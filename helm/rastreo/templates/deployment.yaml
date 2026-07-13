@@ -82,6 +82,17 @@ spec:
           {{- $envs = append $envs (dict "name" "RASTREO_SCENARIO_LABEL_MAX_LENGTH" "value" (printf "%v" .Values.metrics.scenarioMaxLength)) }}
           {{- end }}
           {{- end }}
+          {{- if .Values.targetGuard }}
+          {{- if and .Values.targetGuard.allowlist (gt (len .Values.targetGuard.allowlist) 0) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_TARGET_ALLOWLIST" "value" (join "," .Values.targetGuard.allowlist)) }}
+          {{- end }}
+          {{- if hasKey .Values.targetGuard "maxTotalHosts" }}
+          {{- $envs = append $envs (dict "name" "RASTREO_MAX_TOTAL_HOSTS" "value" (printf "%d" (int64 .Values.targetGuard.maxTotalHosts))) }}
+          {{- end }}
+          {{- if hasKey .Values.targetGuard "maxBodyBytes" }}
+          {{- $envs = append $envs (dict "name" "RASTREO_MAX_BODY_BYTES" "value" (printf "%d" (int64 .Values.targetGuard.maxBodyBytes))) }}
+          {{- end }}
+          {{- end }}
           {{- if and .Values.sink (and .Values.sink.config (gt (len .Values.sink.config) 0)) }}
           {{- $envs = append $envs (dict "name" "RASTREO_SINK_CONFIG_PATH" "value" "/etc/rastreo/sink/sink.yaml") }}
           {{- if hasKey .Values.sink "probeIntervalSeconds" }}

@@ -40,6 +40,9 @@ The most useful `values.yaml` knobs are:
 | `auth.token`                     | `""`                          | Inline bearer token. The chart renders a `Secret` holding it. Prefer `auth.existingSecret` in production. See [Authentication](#authentication). |
 | `auth.existingSecret`            | `""`                          | Name of a pre-existing `Secret` holding the token. Takes precedence over `auth.token`. See [Authentication](#authentication). |
 | `auth.secretKey`                 | `api-token`                   | Key within the `Secret` that holds the token value.       |
+| `targetGuard.allowlist`          | `[]`                          | List of CIDRs (or bare IPs) the server may probe. Empty means allow any target. Renders `RASTREO_TARGET_ALLOWLIST`. See [Restricting scan targets](#restricting-scan-targets). |
+| `targetGuard.maxTotalHosts`      | `262144`                      | Cap on the total resolved hosts across all targets in one request. `0` disables. Renders `RASTREO_MAX_TOTAL_HOSTS`. See [Restricting scan targets](#restricting-scan-targets). |
+| `targetGuard.maxBodyBytes`       | `1048576`                     | `POST /scans` request body size limit in bytes. Renders `RASTREO_MAX_BODY_BYTES`. See [Restricting scan targets](#restricting-scan-targets). |
 | `serviceAccount.create`          | `true`                        | Create a dedicated `ServiceAccount` with token automounting disabled. See [ServiceAccount](#serviceaccount). |
 | `networkPolicy.enabled`          | `false`                       | Create a `NetworkPolicy` restricting which peers reach the pod. See [NetworkPolicy](#networkpolicy). |
 | `service.type`                   | `ClusterIP`                   | `ClusterIP`, `NodePort`, or `LoadBalancer`.               |
@@ -125,6 +128,38 @@ You have three ways to supply the token.
     ```bash
     kubectl get secret rastreo-api-token -o jsonpath='{.data.api-token}' | base64 -d
     ```
+
+## Restricting scan targets
+
+Authentication controls who may call `POST /scans`. The target guard controls which addresses the server is allowed to probe, and how large one request may be. See [rastreo-server · Restricting scan targets](server.md#restricting-scan-targets) for the full behaviour and the 403 / 400 / 413 responses.
+
+The chart exposes three values under `targetGuard`:
+
+- `targetGuard.allowlist` — a list of CIDRs (or bare IPs) the server may probe. Empty (the default) renders no `RASTREO_TARGET_ALLOWLIST`, so every target is allowed.
+- `targetGuard.maxTotalHosts` — the cap on the total resolved hosts across all targets in one request. Default `262144`; `0` disables it.
+- `targetGuard.maxBodyBytes` — the `POST /scans` request body size limit in bytes. Default `1048576` (1 MiB).
+
+Set the allow-list and keep the two always-on caps at their defaults:
+
+```bash
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+  --set auth.existingSecret=rastreo-api-token \
+  --set 'targetGuard.allowlist={10.0.0.0/8,192.168.0.0/16}'
+```
+
+Or set all three in a values file:
+
+```yaml
+targetGuard:
+  allowlist:
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+  maxTotalHosts: 262144
+  maxBodyBytes: 1048576
+```
+
+!!! note "The allow-list is opt-in and rejects the whole request"
+    An empty `targetGuard.allowlist` (the default) allows any target. When you populate it, a scan whose resolved targets include any address outside the listed networks is rejected in full with `403` — nothing is probed.
 
 ## Image source
 

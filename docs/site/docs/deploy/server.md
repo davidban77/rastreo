@@ -34,6 +34,9 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 | —                       | `RASTREO_SINK_CONFIG_PATH`             | unset   | Path to a YAML file with a `SinkConfig`. When set, the server builds the sink at startup and probes it every `RASTREO_SINK_PROBE_INTERVAL_SECS`. Sink construction failure is non-fatal — the pod stays up, `/readyz` reports `sink_unreachable`. |
 | —                       | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`    | Sink reachability probe cadence in seconds. Minimum 1. |
 | —                       | `RASTREO_SINK_PROBE_TIMEOUT_SECS`      | `5`     | Per-probe timeout in seconds. Probes exceeding this count as failures. Minimum 1. |
+| —                       | `RASTREO_TARGET_ALLOWLIST`             | unset   | Comma-separated CIDRs (bare IPs accepted, treated as `/32` or `/128`) the server may probe. Unset or empty allows any target. See [Restricting scan targets](#restricting-scan-targets). |
+| —                       | `RASTREO_MAX_TOTAL_HOSTS`              | `262144` | Aggregate cap on the total resolved hosts across all targets in one request. `0` disables. See [Restricting scan targets](#restricting-scan-targets). |
+| —                       | `RASTREO_MAX_BODY_BYTES`               | `1048576` | `POST /scans` request body size limit in bytes (1 MiB by default). An over-limit body is rejected with `413`. See [Restricting scan targets](#restricting-scan-targets). |
 
 The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
 
@@ -95,6 +98,79 @@ www-authenticate: Bearer
 The response is the same whether the token is missing or wrong. It never reveals which, and it never echoes the token you sent.
 
 On Kubernetes the Helm chart supplies the token from a Secret. See [Authentication on Kubernetes](kubernetes.md#authentication) for the chart values.
+
+Authentication controls who may call `POST /scans`. To also limit which targets a caller may probe, see [Restricting scan targets](#restricting-scan-targets).
+
+## Restricting scan targets
+
+[Authentication](#authentication) controls *who* may trigger a scan. The target guard controls *what* the server is allowed to probe. Use both together. Authentication keeps unknown callers out. The target guard stops an authenticated caller from probing addresses you never meant to expose.
+
+Three server-only controls apply to `POST /scans`:
+
+- `RASTREO_TARGET_ALLOWLIST` — the networks the server may probe. Opt-in.
+- `RASTREO_MAX_TOTAL_HOSTS` — a cap on the total hosts one request may resolve to. Always on.
+- `RASTREO_MAX_BODY_BYTES` — a cap on the request body size. Always on.
+
+!!! note "Server-only — the CLI is not affected"
+    These controls guard the HTTP server only. The `rastreo discover` CLI is operator-run and trusted, so it probes any target regardless of these variables.
+
+### Allow-list
+
+`RASTREO_TARGET_ALLOWLIST` is a comma-separated list of CIDRs the server may probe. A bare IP is accepted and treated as a single-host network (`/32` for IPv4, `/128` for IPv6). Leave it unset or empty to allow any target — the allow-list is opt-in.
+
+```bash
+export RASTREO_TARGET_ALLOWLIST='10.0.0.0/8,192.168.0.0/16'
+```
+
+When the allow-list is set, the server resolves every target in the request, then checks each resolved IP. If any resolved IP falls outside every listed network, the whole request is rejected with `403 Forbidden` and nothing is probed.
+
+!!! note "The whole request is rejected, not part of it"
+    One out-of-range address rejects the entire request. The server never runs a partial scan of the addresses that were in range.
+
+The example below sends a target that is outside the allow-list above:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/scans \
+  -H "Authorization: Bearer $RASTREO_API_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"targets":[{"Ip":"127.0.0.1"}],"probers":[{"type":"tcp_connect","ports":[80]}]}'
+```
+
+`127.0.0.1` is outside every listed network, so the response is `403`:
+
+```text
+HTTP/1.1 403 Forbidden
+content-type: application/json
+
+{"error":"resolver error: target 127.0.0.1 is outside the configured allow-list"}
+```
+
+The error names only the caller's offending IP. It never echoes the allow-list.
+
+!!! warning "A malformed entry stops startup"
+    Each entry must be a valid CIDR or IP address. A bad value fails at startup and names the offending entry, so the server never runs with a half-parsed allow-list:
+
+    ```text
+    invalid entry in RASTREO_TARGET_ALLOWLIST: "not-a-cidr" is not a valid CIDR or IP address
+    ```
+
+### Aggregate host cap
+
+`RASTREO_MAX_TOTAL_HOSTS` caps the total number of hosts one request may resolve to, summed across every target. The default is `262144`. Set it to `0` to disable the cap.
+
+A request that resolves to more hosts than the cap is rejected with `400 Bad Request` before any probe runs:
+
+```text
+{"error":"resolver error: scan resolves to 14 hosts; exceeds the configured aggregate limit of 4"}
+```
+
+This cap is separate from the per-target expansion limit. A single CIDR or range wider than 65536 hosts is rejected on its own with a different error (`CidrTooLarge` or `RangeTooLarge`). The aggregate cap adds a second limit on the sum across all targets. Many small targets then cannot add up to one very large scan.
+
+### Request body size
+
+`RASTREO_MAX_BODY_BYTES` limits the size of a `POST /scans` request body in bytes. The default is `1048576` (1 MiB). A body larger than the limit is rejected with `413 Payload Too Large` before the server parses the JSON or runs any scan.
+
+On Kubernetes, set all three controls through the Helm chart. See [Restricting scan targets on Kubernetes](kubernetes.md#restricting-scan-targets) for the `targetGuard` values.
 
 ## Graceful shutdown
 
@@ -289,7 +365,9 @@ Error surfaces:
 | Status | When                                                                                                         |
 |--------|--------------------------------------------------------------------------------------------------------------|
 | `401`  | Authentication is enabled and the request carried a missing, malformed, or wrong bearer token. Checked before the scan runs. See [Authentication](#authentication). |
-| `400`  | `scenario.targets` empty, `scenario.probers` empty, malformed JSON body, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). |
+| `403`  | The target allow-list is set and a resolved target falls outside every allowed network. The whole request is rejected and nothing is probed. See [Restricting scan targets](#restricting-scan-targets). |
+| `413`  | The request body exceeded `RASTREO_MAX_BODY_BYTES`. Rejected before the JSON body is parsed. See [Restricting scan targets](#restricting-scan-targets). |
+| `400`  | `scenario.targets` empty, `scenario.probers` empty, malformed JSON body, the request exceeded `RASTREO_MAX_TOTAL_HOSTS`, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). |
 | `500`  | Internal probe / encoder / sink / runtime error. The response body carries `{"error":"internal server error"}` — full detail is logged for operators, not returned to the client. |
 | `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`) or the request exceeded `--request-timeout-ms`. |
 

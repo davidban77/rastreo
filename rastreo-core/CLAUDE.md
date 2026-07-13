@@ -14,7 +14,9 @@ src/
 │   ├── device.rs        ← DeviceRecord, IdentityKey, AltIp, AltIpRole
 │   ├── scan.rs          ← ScanMetadata, source_config_hash
 │   └── serde_iso8601.rs ← RFC 3339 serde helpers for SystemTime
-├── resolver/mod.rs  ← Resolver trait + HickoryResolver default impl
+├── resolver/
+│   ├── mod.rs       ← Resolver trait + HickoryResolver default impl
+│   └── guarded.rs   ← GuardedResolver decorator (allow-list + aggregate host cap)
 ├── prober/
 │   ├── mod.rs           ← Prober trait + ProberConfig + create_prober factory
 │   ├── classify.rs      ← shared absence-vs-fault classifier (io / hickory errors) + chain walkers

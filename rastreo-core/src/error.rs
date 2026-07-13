@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RastreoError {
@@ -108,6 +110,10 @@ pub enum ResolverError {
     InvalidRange { start: String, end: String },
     #[error("IP range mixes IPv4 and IPv6: start {start} end {end}")]
     MixedFamilyRange { start: String, end: String },
+    #[error("target {ip} is outside the configured allow-list")]
+    TargetNotAllowed { ip: IpAddr },
+    #[error("scan resolves to {hosts} hosts; exceeds the configured aggregate limit of {limit}")]
+    AggregateHostCapExceeded { hosts: usize, limit: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +227,28 @@ mod tests {
         assert!(msg.contains("10.0.0.0/8"));
         assert!(msg.contains("16777214"));
         assert!(msg.contains("65536"));
+    }
+
+    #[test]
+    fn resolver_target_not_allowed_display_names_the_ip() {
+        use std::net::Ipv4Addr;
+        let err = RastreoError::Resolver(ResolverError::TargetNotAllowed {
+            ip: std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("192.168.1.1"));
+        assert!(msg.contains("allow-list"));
+    }
+
+    #[test]
+    fn resolver_aggregate_host_cap_exceeded_display_includes_counts() {
+        let err = RastreoError::Resolver(ResolverError::AggregateHostCapExceeded {
+            hosts: 300,
+            limit: 100,
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("300"));
+        assert!(msg.contains("100"));
     }
 
     #[test]

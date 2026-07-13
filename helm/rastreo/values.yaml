@@ -111,6 +111,19 @@ metrics:
   scenarioAllowlist: []
   scenarioMaxLength: 64
 
+# SSRF / DoS guards for POST /scans. The allow-list is opt-in: an empty list
+# (default) renders no RASTREO_TARGET_ALLOWLIST, so every resolved target is
+# allowed. Populate it with CIDRs (or bare IPs, which become /32 or /128 host
+# nets) to reject any scan whose resolved targets fall outside the listed ranges
+# — the whole request is refused with 403 and nothing is probed. maxTotalHosts
+# caps the total resolved hosts across all targets in one request (0 disables);
+# a scan over the cap is rejected with 400. maxBodyBytes bounds the request body
+# size; a larger body is rejected with 413 before JSON parsing.
+targetGuard:
+  allowlist: []
+  maxTotalHosts: 262144
+  maxBodyBytes: 1048576
+
 # Log line format on stderr. `text` (default) is human-readable; `json` emits
 # one JSON object per line for Loki / ELK / Splunk ingestion. Leave null to
 # inherit the binary default (text); set to `text` or `json` to render

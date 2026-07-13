@@ -48,6 +48,7 @@ impl From<RastreoError> for AppError {
             RastreoError::Config(_) => StatusCode::BAD_REQUEST,
             RastreoError::Resolver(inner) => match inner {
                 ResolverError::DnsLookupFailed { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                ResolverError::TargetNotAllowed { .. } => StatusCode::FORBIDDEN,
                 _ => StatusCode::BAD_REQUEST,
             },
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -93,6 +94,31 @@ mod tests {
             cidr: "10.0.0.0/8".into(),
             hosts: 16_777_214,
             limit: 65_536,
+        })
+        .into();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn resolver_error_target_not_allowed_maps_to_403() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let err: AppError = RastreoError::Resolver(ResolverError::TargetNotAllowed {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+        })
+        .into();
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert!(
+            err.message.contains("192.168.1.1"),
+            "the 403 body names the offending IP: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn resolver_error_aggregate_host_cap_exceeded_maps_to_400() {
+        let err: AppError = RastreoError::Resolver(ResolverError::AggregateHostCapExceeded {
+            hosts: 300_000,
+            limit: 262_144,
         })
         .into();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);

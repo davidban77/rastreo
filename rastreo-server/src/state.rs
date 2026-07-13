@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ipnet::IpNet;
 use rastreo_core::observability::otlp_config::{parse_env_bool, parse_env_u64};
 use rastreo_core::{
     DiscoverySummary, Resolver, Sink, SinkErrorClass, SinkType, PROBE_KIND_COUNT,
@@ -406,6 +408,75 @@ impl ReadinessConfig {
     }
 }
 
+pub const DEFAULT_MAX_TOTAL_HOSTS: usize = 262_144;
+pub const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
+
+/// SSRF and DoS guards applied to `POST /scans` — an optional target allow-list, an
+/// aggregate host cap across all targets in a request, and a request-body size limit.
+#[derive(Debug, Clone)]
+pub struct TargetGuardConfig {
+    pub allowlist: Option<Vec<IpNet>>,
+    pub max_total_hosts: Option<usize>,
+    pub max_body_bytes: usize,
+}
+
+impl Default for TargetGuardConfig {
+    fn default() -> Self {
+        Self {
+            allowlist: None,
+            max_total_hosts: Some(DEFAULT_MAX_TOTAL_HOSTS),
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+        }
+    }
+}
+
+impl TargetGuardConfig {
+    /// Read `RASTREO_TARGET_ALLOWLIST` (comma-separated CIDRs or bare IPs; unset ⇒ allow all), `RASTREO_MAX_TOTAL_HOSTS` (0 disables), and `RASTREO_MAX_BODY_BYTES`, falling back to defaults.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let allowlist = match std::env::var("RASTREO_TARGET_ALLOWLIST") {
+            Ok(raw) => {
+                let mut nets = Vec::new();
+                for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    // A bare IP parses as a host net (/32 or /128).
+                    let net = entry
+                        .parse::<IpNet>()
+                        .or_else(|_| entry.parse::<IpAddr>().map(IpNet::from))
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "invalid entry in RASTREO_TARGET_ALLOWLIST: {entry:?} is not a \
+                                 valid CIDR or IP address"
+                            )
+                        })?;
+                    nets.push(net);
+                }
+                if nets.is_empty() {
+                    None
+                } else {
+                    Some(nets)
+                }
+            }
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(anyhow::anyhow!(
+                    "invalid value for RASTREO_TARGET_ALLOWLIST: not valid UTF-8"
+                ));
+            }
+        };
+        let max_total_hosts =
+            match parse_env_u64("RASTREO_MAX_TOTAL_HOSTS", DEFAULT_MAX_TOTAL_HOSTS as u64)? {
+                0 => None,
+                n => Some(n as usize),
+            };
+        let max_body_bytes =
+            parse_env_u64("RASTREO_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES as u64)? as usize;
+        Ok(Self {
+            allowlist,
+            max_total_hosts,
+            max_body_bytes,
+        })
+    }
+}
+
 /// OpenTelemetry OTLP exporter configuration read from `RASTREO_OTLP_*` environment variables.
 #[cfg(feature = "otlp")]
 #[derive(Debug, Clone)]
@@ -708,6 +779,7 @@ pub struct AppState {
     pub sink: Option<SharedSink>,
     pub sink_reachability: Arc<SinkReachability>,
     pub auth: AuthConfig,
+    pub max_body_bytes: usize,
 }
 
 impl AppState {
@@ -731,6 +803,7 @@ impl AppState {
             sink: None,
             sink_reachability: Arc::new(SinkReachability::not_configured()),
             auth: AuthConfig::default(),
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
     }
 
@@ -746,6 +819,11 @@ impl AppState {
 
     pub fn with_auth(mut self, auth: AuthConfig) -> Self {
         self.auth = auth;
+        self
+    }
+
+    pub fn with_body_limit(mut self, max_body_bytes: usize) -> Self {
+        self.max_body_bytes = max_body_bytes;
         self
     }
 }
@@ -1259,7 +1337,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    const ENV_KEYS: [&str; 14] = [
+    const ENV_KEYS: [&str; 17] = [
         "RASTREO_MAX_INFLIGHT_SCANS",
         "RASTREO_SINK_ERROR_QUARANTINE_SECS",
         "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
@@ -1274,6 +1352,9 @@ mod tests {
         "RASTREO_SINK_PROBE_TIMEOUT_SECS",
         "RASTREO_API_TOKEN",
         "RASTREO_AUTH_DISABLED",
+        "RASTREO_TARGET_ALLOWLIST",
+        "RASTREO_MAX_TOTAL_HOSTS",
+        "RASTREO_MAX_BODY_BYTES",
     ];
 
     fn clear_env() {
@@ -1687,6 +1768,126 @@ mod tests {
             msg.contains("RASTREO_SINK_PROBE_INTERVAL_SECS"),
             "msg was {msg}"
         );
+    }
+
+    #[test]
+    fn target_guard_config_default_values() {
+        let cfg = TargetGuardConfig::default();
+        assert!(cfg.allowlist.is_none());
+        assert_eq!(cfg.max_total_hosts, Some(DEFAULT_MAX_TOTAL_HOSTS));
+        assert_eq!(cfg.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn target_guard_config_from_env_uses_defaults_when_unset() {
+        let _guard = env_guard();
+        clear_env();
+        let cfg = TargetGuardConfig::from_env().expect("from_env");
+        assert!(cfg.allowlist.is_none());
+        assert_eq!(cfg.max_total_hosts, Some(262_144));
+        assert_eq!(cfg.max_body_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn target_guard_config_from_env_parses_comma_separated_cidrs() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_TARGET_ALLOWLIST", "10.0.0.0/8, 192.168.0.0/16 , ");
+        }
+        let cfg = TargetGuardConfig::from_env().expect("from_env");
+        clear_env();
+        let nets = cfg.allowlist.expect("allowlist present");
+        assert_eq!(
+            nets,
+            vec![
+                "10.0.0.0/8".parse::<IpNet>().unwrap(),
+                "192.168.0.0/16".parse::<IpNet>().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn target_guard_config_from_env_parses_bare_ip_as_host_net() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_TARGET_ALLOWLIST", "10.0.0.5");
+        }
+        let cfg = TargetGuardConfig::from_env().expect("from_env");
+        clear_env();
+        let nets = cfg.allowlist.expect("allowlist present");
+        assert_eq!(nets, vec!["10.0.0.5/32".parse::<IpNet>().unwrap()]);
+    }
+
+    #[test]
+    fn target_guard_config_from_env_rejects_invalid_cidr() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_TARGET_ALLOWLIST", "10.0.0.0/8,not-a-cidr");
+        }
+        let err = TargetGuardConfig::from_env().expect_err("must reject");
+        clear_env();
+        let msg = err.to_string();
+        assert!(msg.contains("RASTREO_TARGET_ALLOWLIST"), "msg was {msg}");
+        assert!(msg.contains("not-a-cidr"), "msg was {msg}");
+    }
+
+    #[test]
+    fn target_guard_config_from_env_zero_max_total_hosts_disables_cap() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_MAX_TOTAL_HOSTS", "0");
+        }
+        let cfg = TargetGuardConfig::from_env().expect("from_env");
+        clear_env();
+        assert!(cfg.max_total_hosts.is_none());
+    }
+
+    #[test]
+    fn target_guard_config_from_env_reads_custom_caps() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_MAX_TOTAL_HOSTS", "500");
+            std::env::set_var("RASTREO_MAX_BODY_BYTES", "4096");
+        }
+        let cfg = TargetGuardConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(cfg.max_total_hosts, Some(500));
+        assert_eq!(cfg.max_body_bytes, 4096);
+    }
+
+    #[test]
+    fn target_guard_config_from_env_rejects_non_numeric_max_total_hosts() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_MAX_TOTAL_HOSTS", "lots");
+        }
+        let err = TargetGuardConfig::from_env().expect_err("must reject");
+        clear_env();
+        assert!(err.to_string().contains("RASTREO_MAX_TOTAL_HOSTS"));
+    }
+
+    #[test]
+    fn app_state_defaults_body_limit_to_one_mib() {
+        let state = build_state();
+        assert_eq!(state.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn app_state_with_body_limit_overrides_default() {
+        let state = build_state().with_body_limit(4096);
+        assert_eq!(state.max_body_bytes, 4096);
     }
 
     #[cfg(feature = "otlp")]
