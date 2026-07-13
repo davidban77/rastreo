@@ -63,13 +63,13 @@ spec:
               protocol: TCP
           {{- $envs := list }}
           {{- if hasKey .Values.readiness "maxInflightScans" }}
-          {{- $envs = append $envs (dict "name" "RASTREO_MAX_INFLIGHT_SCANS" "value" (printf "%v" .Values.readiness.maxInflightScans)) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_MAX_INFLIGHT_SCANS" "value" (printf "%d" (int64 .Values.readiness.maxInflightScans))) }}
           {{- end }}
           {{- if hasKey .Values.readiness "sinkErrorQuarantineSeconds" }}
-          {{- $envs = append $envs (dict "name" "RASTREO_SINK_ERROR_QUARANTINE_SECS" "value" (printf "%v" .Values.readiness.sinkErrorQuarantineSeconds)) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SINK_ERROR_QUARANTINE_SECS" "value" (printf "%d" (int64 .Values.readiness.sinkErrorQuarantineSeconds))) }}
           {{- end }}
           {{- if hasKey .Values.readiness "scanErrorQuarantineSeconds" }}
-          {{- $envs = append $envs (dict "name" "RASTREO_SCAN_ERROR_QUARANTINE_SECS" "value" (printf "%v" .Values.readiness.scanErrorQuarantineSeconds)) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SCAN_ERROR_QUARANTINE_SECS" "value" (printf "%d" (int64 .Values.readiness.scanErrorQuarantineSeconds))) }}
           {{- end }}
           {{- if .Values.logFormat }}
           {{- $envs = append $envs (dict "name" "RASTREO_LOG_FORMAT" "value" (printf "%v" .Values.logFormat)) }}
@@ -79,7 +79,7 @@ spec:
           {{- $envs = append $envs (dict "name" "RASTREO_SCENARIO_LABEL_ALLOWLIST" "value" (join "," .Values.metrics.scenarioAllowlist)) }}
           {{- end }}
           {{- if hasKey .Values.metrics "scenarioMaxLength" }}
-          {{- $envs = append $envs (dict "name" "RASTREO_SCENARIO_LABEL_MAX_LENGTH" "value" (printf "%v" .Values.metrics.scenarioMaxLength)) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SCENARIO_LABEL_MAX_LENGTH" "value" (printf "%d" (int64 .Values.metrics.scenarioMaxLength))) }}
           {{- end }}
           {{- end }}
           {{- if .Values.targetGuard }}
@@ -96,10 +96,10 @@ spec:
           {{- if and .Values.sink (and .Values.sink.config (gt (len .Values.sink.config) 0)) }}
           {{- $envs = append $envs (dict "name" "RASTREO_SINK_CONFIG_PATH" "value" "/etc/rastreo/sink/sink.yaml") }}
           {{- if hasKey .Values.sink "probeIntervalSeconds" }}
-          {{- $envs = append $envs (dict "name" "RASTREO_SINK_PROBE_INTERVAL_SECS" "value" (printf "%v" .Values.sink.probeIntervalSeconds)) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SINK_PROBE_INTERVAL_SECS" "value" (printf "%d" (int64 .Values.sink.probeIntervalSeconds))) }}
           {{- end }}
           {{- if hasKey .Values.sink "probeTimeoutSeconds" }}
-          {{- $envs = append $envs (dict "name" "RASTREO_SINK_PROBE_TIMEOUT_SECS" "value" (printf "%v" .Values.sink.probeTimeoutSeconds)) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_SINK_PROBE_TIMEOUT_SECS" "value" (printf "%d" (int64 .Values.sink.probeTimeoutSeconds))) }}
           {{- end }}
           {{- end }}
           {{- if .Values.otlp }}
@@ -118,7 +118,7 @@ spec:
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_LOGS_ENABLED" "value" "true") }}
           {{- end }}
           {{- if and .Values.otlp.metricsEnabled .Values.otlp.metricsIntervalSeconds }}
-          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_METRICS_INTERVAL_SECS" "value" (printf "%v" .Values.otlp.metricsIntervalSeconds)) }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_METRICS_INTERVAL_SECS" "value" (printf "%d" (int64 .Values.otlp.metricsIntervalSeconds))) }}
           {{- end }}
           {{- if .Values.otlp.serviceName }}
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_SERVICE_NAME" "value" (printf "%v" .Values.otlp.serviceName)) }}
