@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::error::{RastreoError, RuntimeError};
 use crate::model::{ProbeCtx, ProbeOutcome, ResolvedTarget};
@@ -17,8 +19,42 @@ pub trait Scheduler: Send + Sync {
     ) -> Vec<Result<ProbeOutcome, RastreoError>>;
 }
 
+/// Steady min-interval pacer: hands each probe start a monotonically increasing slot spaced `1/rate` apart, so starts never burst.
+struct Pacer {
+    interval: Duration,
+    next_start: Mutex<Option<Instant>>,
+}
+
+impl Pacer {
+    fn from_rate(rate: u32) -> Option<Arc<Self>> {
+        // rate 0 would mean an infinite interval; treat it as "no pacing".
+        if rate == 0 {
+            return None;
+        }
+        Some(Arc::new(Self {
+            interval: Duration::from_secs_f64(1.0 / f64::from(rate)),
+            next_start: Mutex::new(None),
+        }))
+    }
+
+    async fn wait_for_slot(&self) {
+        let scheduled = {
+            let mut next = self.next_start.lock().await;
+            let now = Instant::now();
+            let scheduled = match *next {
+                Some(t) if t > now => t,
+                _ => now,
+            };
+            *next = Some(scheduled + self.interval);
+            scheduled
+        };
+        tokio::time::sleep_until(scheduled).await;
+    }
+}
+
 pub struct BoundedScheduler {
     max_concurrent: usize,
+    pacer: Option<Arc<Pacer>>,
 }
 
 impl BoundedScheduler {
@@ -28,11 +64,18 @@ impl BoundedScheduler {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             max_concurrent: max_concurrent.max(1),
+            pacer: None,
         }
     }
 
     pub fn with_default_concurrency() -> Self {
         Self::new(Self::DEFAULT_MAX_CONCURRENT)
+    }
+
+    /// Cap probe starts at `probe_rate` per second; `None` (or `0`) leaves the scan unpaced.
+    pub fn with_probe_rate(mut self, probe_rate: Option<u32>) -> Self {
+        self.pacer = probe_rate.and_then(Pacer::from_rate);
+        self
     }
 
     pub fn max_concurrent(&self) -> usize {
@@ -63,8 +106,12 @@ impl Scheduler for BoundedScheduler {
             let permit_source = Arc::clone(&semaphore);
             let prober_for_task = Arc::clone(&prober);
             let ctx_for_task = ctx.clone();
+            let pacer_for_task = self.pacer.clone();
 
             let handle = tokio::spawn(async move {
+                if let Some(pacer) = pacer_for_task {
+                    pacer.wait_for_slot().await;
+                }
                 let _permit = permit_source
                     .acquire_owned()
                     .await
@@ -292,6 +339,76 @@ mod tests {
         let s = BoundedScheduler::with_default_concurrency();
         assert_eq!(s.max_concurrent(), BoundedScheduler::DEFAULT_MAX_CONCURRENT);
         assert_eq!(s.max_concurrent(), 64);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_rate_paces_starts_to_min_interval() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let prober: Arc<dyn Prober> = Arc::new(CountingProber {
+            calls: Arc::clone(&calls),
+        });
+        // 10 probes/sec => 100ms between starts. 5 starts land at 0,100,200,300,400ms.
+        let s = BoundedScheduler::new(64).with_probe_rate(Some(10));
+        let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
+        let start = Instant::now();
+        let out = s.run(prober, targets, ctx()).await;
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), 5);
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "5 probes at 10/sec must span >= 400ms, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_rate_none_adds_no_latency() {
+        let prober: Arc<dyn Prober> = Arc::new(CountingProber {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let s = BoundedScheduler::new(64);
+        let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
+        let start = Instant::now();
+        let out = s.run(prober, targets, ctx()).await;
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), 5);
+        assert!(
+            elapsed < Duration::from_millis(1),
+            "unpaced scan must not add latency, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_rate_zero_disables_pacing() {
+        let prober: Arc<dyn Prober> = Arc::new(CountingProber {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let s = BoundedScheduler::new(64).with_probe_rate(Some(0));
+        let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
+        let start = Instant::now();
+        let out = s.run(prober, targets, ctx()).await;
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), 5);
+        assert!(
+            elapsed < Duration::from_millis(1),
+            "probe_rate 0 must disable pacing, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_rate_preserves_input_order() {
+        let prober: Arc<dyn Prober> = Arc::new(CountingProber {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let s = BoundedScheduler::new(64).with_probe_rate(Some(50));
+        let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
+        let out = s.run(prober, targets, ctx()).await;
+        assert_eq!(out.len(), 5);
+        for (i, result) in out.iter().enumerate() {
+            let octet = (i as u8) + 1;
+            let expected = IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet));
+            assert_eq!(result.as_ref().expect("ok").target_ip, expected);
+        }
     }
 
     #[tokio::test]

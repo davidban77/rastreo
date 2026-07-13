@@ -18,7 +18,8 @@ Any string scalar in the scenario may use `${VAR}` to interpolate an environment
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `name` | string \| null | `null` | Optional human-readable label for the scenario. Not interpreted by the runtime. |
-| `rate_limit` | integer \| null | `null` | Maximum number of in-flight probes. Maps to scheduler concurrency at runtime. |
+| `max_concurrent` | integer \| null | `null` | Maximum number of probes in flight at once. Maps to scheduler concurrency at runtime. |
+| `probe_rate` | integer \| null | `null` | Maximum number of probes started per second. When unset, probes start as fast as `max_concurrent` allows. |
 | `timeout_ms` | integer \| null | `null` | Per-probe timeout in milliseconds. |
 | `encoder` | object \| null | `null` (NDJSON) | Output encoding. See [Encoders](#encoders). |
 | `fuser` | object \| null | `null` (Direct, baseline 0.1 / per-signal 0.1) | Signal-fusion strategy. See [Fusers](#fusers). |
@@ -555,12 +556,13 @@ The smallest body that `POST /scans` accepts. Targets a single IP on port 80, us
 }
 ```
 
-A fuller body with explicit fuser knobs and a custom timeout:
+A fuller body with explicit scheduler knobs, fuser knobs, and a custom timeout. `max_concurrent` caps how many probes run at once; `probe_rate` caps how many start per second:
 
 ```json
 {
   "name": "lab scan",
-  "rate_limit": 32,
+  "max_concurrent": 64,
+  "probe_rate": 50,
   "timeout_ms": 500,
   "fuser": {
     "type": "direct",

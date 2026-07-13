@@ -66,7 +66,7 @@ Errors:
 - 500 — probe / encode / sink / runtime errors. A server-configured sink that returns an error mid-scan aborts the pipeline and surfaces as 500; the response body's `records` list is not returned even if the in-memory capture succeeded.
 - 503 — request exceeded the server-side timeout (`--request-timeout-ms`), or the server-side DNS infrastructure failed (`ResolverError::DnsLookupFailed`).
 
-A request holds the HTTP connection open for the duration of the scan. The pipeline's own `BoundedScheduler` enforces per-scan concurrency via the scenario's `rate_limit`.
+A request holds the HTTP connection open for the duration of the scan. The pipeline's own `BoundedScheduler` enforces per-scan concurrency via the scenario's `max_concurrent` and paces probe starts via `probe_rate`.
 
 ## Error Handling
 

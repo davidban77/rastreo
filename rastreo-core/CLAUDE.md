@@ -105,7 +105,7 @@ Http {
 
 **Sub-enums for enumerable choices.** Nested enums like `HttpScheme::{Auto, Http, Https}` derive `Default` with the sensible variant (`Auto` in the HTTP case). `#[serde(rename_all = "snake_case")]` keeps YAML lowercase.
 
-**Where knobs live.** Cross-prober knobs (`rate_limit`, `timeout_ms`, `retries`) stay on `BaseProbeConfig` at the scenario level and propagate to every prober via `ProbeCtx`. Individual probers do NOT re-declare these fields. If a future protocol genuinely needs a per-probe deviation, that's a case for a scoped override field on the specific variant, not a hoist of the shared knobs.
+**Where knobs live.** Scenario-level knobs stay on `BaseProbeConfig`: `timeout_ms` propagates to every prober via `ProbeCtx`, while `max_concurrent` and `probe_rate` configure the `BoundedScheduler` (in-flight cap and probe-start pace). Individual probers do NOT re-declare these fields. If a future protocol genuinely needs a per-probe deviation, that's a case for a scoped override field on the specific variant, not a hoist of the shared knobs.
 
 **Security-toggle default polarity.** Discovery-oriented toggles like `tls_verify` default to the permissive value (`false`), because rastreo is aimed at unknown / lab / internal networks where self-signed and expired certificates are the norm. Users on trusted networks opt into strict mode with an explicit `tls_verify: true`. This is a deliberate departure from the Rust HTTP-client ecosystem's strict-by-default convention; document the default and the rationale on the prober's docs page.
 

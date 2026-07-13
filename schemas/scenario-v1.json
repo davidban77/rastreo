@@ -34,13 +34,23 @@
             }
           ]
         },
+        "max_concurrent": {
+          "description": "Maximum probes in flight at once.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "name": {
           "type": [
             "string",
             "null"
           ]
         },
-        "rate_limit": {
+        "probe_rate": {
+          "description": "Maximum probes started per second; unset means no rate limit.",
           "format": "uint32",
           "minimum": 0.0,
           "type": [
@@ -1006,9 +1016,27 @@
                 }
               ]
             },
+            "max_concurrent": {
+              "description": "Maximum probes in flight at once.",
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "name": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "probe_rate": {
+              "description": "Maximum probes started per second; unset means no rate limit.",
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": [
+                "integer",
                 "null"
               ]
             },
@@ -1018,14 +1046,6 @@
                 "$ref": "#/definitions/ProberConfig"
               },
               "type": "array"
-            },
-            "rate_limit": {
-              "format": "uint32",
-              "minimum": 0.0,
-              "type": [
-                "integer",
-                "null"
-              ]
             },
             "signal_type": {
               "enum": [
@@ -1592,8 +1612,9 @@
         "classifier": null,
         "encoder": null,
         "fuser": null,
+        "max_concurrent": null,
         "name": null,
-        "rate_limit": null,
+        "probe_rate": null,
         "sink": null,
         "timeout_ms": null
       }

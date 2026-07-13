@@ -473,7 +473,7 @@ async fn run_from_file_reports_all_scenarios_in_multi_scenario_file() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
-async fn concurrency_flag_overrides_yaml_rate_limit() {
+async fn concurrency_flag_overrides_yaml_max_concurrent() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -481,7 +481,7 @@ async fn concurrency_flag_overrides_yaml_rate_limit() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let yaml = format!(
-        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    rate_limit: 2\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n"
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    max_concurrent: 2\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n"
     );
     let path = write_yaml(&dir, "rate.yml", &yaml);
 
@@ -514,6 +514,33 @@ async fn concurrency_flag_overrides_yaml_rate_limit() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
+async fn retired_rate_limit_scenario_fails_with_migration_hint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    rate_limit: 50\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+    let path = write_yaml(&dir, "retired.yml", yaml);
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        !output.status.success(),
+        "an old rate_limit scenario must not run silently"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("max_concurrent"), "stderr: {stderr}");
+    assert!(stderr.contains("probe_rate"), "stderr: {stderr}");
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
 async fn timeout_ms_flag_overrides_yaml_timeout_ms() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -522,7 +549,7 @@ async fn timeout_ms_flag_overrides_yaml_timeout_ms() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let yaml = format!(
-        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    rate_limit: 8\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n"
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    max_concurrent: 8\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n"
     );
     let path = write_yaml(&dir, "timeout.yml", &yaml);
 

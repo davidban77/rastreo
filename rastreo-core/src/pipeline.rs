@@ -131,6 +131,7 @@ pub async fn run_discovery_with_components_cancellable(
     mut sink: Box<dyn Sink>,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
+    scenario.base.ensure_no_retired_fields()?;
     if scenario.probers.is_empty() {
         return Err(ConfigError::invalid("scenario.probers must not be empty").into());
     }
@@ -141,12 +142,12 @@ pub async fn run_discovery_with_components_cancellable(
     let resolved = resolver.resolve_many(&scenario.targets).await?;
     let targets_resolved = resolved.len();
 
-    let concurrency = scenario
+    let max_concurrent = scenario
         .base
-        .rate_limit
+        .max_concurrent
         .unwrap_or(DEFAULT_CONCURRENCY)
         .max(1) as usize;
-    let scheduler = BoundedScheduler::new(concurrency);
+    let scheduler = BoundedScheduler::new(max_concurrent).with_probe_rate(scenario.base.probe_rate);
 
     let timeout_ms = scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
     let ctx = ProbeCtx {
@@ -320,6 +321,40 @@ mod tests {
             base: BaseProbeConfig::default(),
             targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
             probers,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_discovery_rejects_retired_rate_limit_field() {
+        use crate::config::{ScenarioEntry, ScenarioFile};
+
+        // The server POST /scans path bypasses parse_scenario_file, so the pipeline must reject.
+        let json = r#"{
+            "version": 1,
+            "kind": "discovery",
+            "scenarios": [
+                {
+                    "signal_type": "discover",
+                    "rate_limit": 50,
+                    "targets": [{"Ip": "127.0.0.1"}],
+                    "probers": [{"type": "tcp_connect", "ports": [22]}]
+                }
+            ]
+        }"#;
+        let file: ScenarioFile = serde_json::from_str(json).expect("deserialize");
+        let ScenarioEntry::Discover(scenario) = &file.scenarios[0];
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let err = run_discovery_with_components(scenario, resolver, Box::new(mem))
+            .await
+            .expect_err("retired rate_limit must error");
+        match err {
+            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                assert!(msg.contains("max_concurrent"), "msg: {msg}");
+                assert!(msg.contains("probe_rate"), "msg: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
         }
     }
 
@@ -1111,7 +1146,7 @@ mod tests {
         let scenario = DiscoverScenarioConfig {
             base: BaseProbeConfig {
                 timeout_ms: Some(400),
-                rate_limit: Some(4),
+                max_concurrent: Some(4),
                 ..Default::default()
             },
             targets: vec![
@@ -1226,7 +1261,7 @@ mod tests {
         let scenario = DiscoverScenarioConfig {
             base: BaseProbeConfig {
                 timeout_ms: Some(200),
-                rate_limit: Some(4),
+                max_concurrent: Some(4),
                 ..Default::default()
             },
             targets: vec![
