@@ -251,7 +251,7 @@ mod tests {
                         username: "admin".to_string(),
                         password: Password(pw.to_string()),
                     },
-                    delivery: Default::default(),
+                    flush_mode: Default::default(),
                     dead_letter: None,
                 }),
                 ..Default::default()

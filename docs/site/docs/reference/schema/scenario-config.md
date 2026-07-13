@@ -120,10 +120,10 @@ One of:
 
 One of:
 
-- { `auth_type`: `anonymous` }
-- { `auth_type`: `user_pass`, `password`: [`Password`](#password), `username`: string }
-- { `auth_type`: `token`, `token`: [`Password`](#password) }
-- { `auth_type`: `creds`, `creds_file`: string }
+- { `type`: `anonymous` }
+- { `password`: [`Password`](#password), `type`: `user_pass`, `username`: string }
+- { `token`: [`Password`](#password), `type`: `token` }
+- { `creds_file`: string, `type`: `creds` }
 
 ### `NatsDeadLetterConfig` {#natsdeadletterconfig}
 
@@ -135,12 +135,12 @@ Quarantine JetStream target for records the primary NATS publish or ack rejected
 | `stream` | string | yes | — |
 | `subject` | string | yes | — |
 
-### `NatsDelivery` {#natsdelivery}
+### `NatsFlushMode` {#natsflushmode}
 
 One of:
 
-- { `mode`: `per_record` }
-- { `mode`: `batched`, `threshold_bytes`: uint }
+- { `type`: `per_record` }
+- { `threshold_bytes`: uint, `type`: `batched` }
 
 ### `Password` {#password}
 
@@ -211,7 +211,7 @@ One of:
 - { `path`: string, `type`: `file` }
 - { `type`: `memory` }
 - { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `topic`: string, `type`: `kafka` }
-- { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `delivery`: [`NatsDelivery`](#natsdelivery), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
+- { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `flush_mode`: [`NatsFlushMode`](#natsflushmode), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
 
 ### `SnmpVersion` {#snmpversion}
 

@@ -403,7 +403,7 @@
       "oneOf": [
         {
           "properties": {
-            "auth_type": {
+            "type": {
               "enum": [
                 "anonymous"
               ],
@@ -411,65 +411,65 @@
             }
           },
           "required": [
-            "auth_type"
+            "type"
           ],
           "type": "object"
         },
         {
           "properties": {
-            "auth_type": {
+            "password": {
+              "$ref": "#/definitions/Password"
+            },
+            "type": {
               "enum": [
                 "user_pass"
               ],
               "type": "string"
-            },
-            "password": {
-              "$ref": "#/definitions/Password"
             },
             "username": {
               "type": "string"
             }
           },
           "required": [
-            "auth_type",
             "password",
+            "type",
             "username"
           ],
           "type": "object"
         },
         {
           "properties": {
-            "auth_type": {
+            "token": {
+              "$ref": "#/definitions/Password"
+            },
+            "type": {
               "enum": [
                 "token"
               ],
               "type": "string"
-            },
-            "token": {
-              "$ref": "#/definitions/Password"
             }
           },
           "required": [
-            "auth_type",
-            "token"
+            "token",
+            "type"
           ],
           "type": "object"
         },
         {
           "properties": {
-            "auth_type": {
+            "creds_file": {
+              "type": "string"
+            },
+            "type": {
               "enum": [
                 "creds"
               ],
               "type": "string"
-            },
-            "creds_file": {
-              "type": "string"
             }
           },
           "required": [
-            "auth_type",
-            "creds_file"
+            "creds_file",
+            "type"
           ],
           "type": "object"
         }
@@ -495,11 +495,11 @@
       ],
       "type": "object"
     },
-    "NatsDelivery": {
+    "NatsFlushMode": {
       "oneOf": [
         {
           "properties": {
-            "mode": {
+            "type": {
               "enum": [
                 "per_record"
               ],
@@ -507,27 +507,27 @@
             }
           },
           "required": [
-            "mode"
+            "type"
           ],
           "type": "object"
         },
         {
           "properties": {
-            "mode": {
-              "enum": [
-                "batched"
-              ],
-              "type": "string"
-            },
             "threshold_bytes": {
               "default": 65536,
               "format": "uint",
               "minimum": 0.0,
               "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "batched"
+              ],
+              "type": "string"
             }
           },
           "required": [
-            "mode"
+            "type"
           ],
           "type": "object"
         }
@@ -1213,7 +1213,7 @@
                 }
               ],
               "default": {
-                "auth_type": "anonymous"
+                "type": "anonymous"
               }
             },
             "dead_letter": {
@@ -1226,14 +1226,14 @@
                 }
               ]
             },
-            "delivery": {
+            "flush_mode": {
               "allOf": [
                 {
-                  "$ref": "#/definitions/NatsDelivery"
+                  "$ref": "#/definitions/NatsFlushMode"
                 }
               ],
               "default": {
-                "mode": "per_record"
+                "type": "per_record"
               }
             },
             "servers": {

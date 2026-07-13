@@ -12,7 +12,7 @@ pub use file::FileSink;
 pub use kafka::{DeadLetterConfig, KafkaFlushMode, KafkaSink};
 pub use memory::{MemorySink, MemorySinkHandle};
 #[cfg(feature = "nats")]
-pub use nats::{NatsCredentials, NatsDeadLetterConfig, NatsDelivery, NatsSink};
+pub use nats::{NatsCredentials, NatsDeadLetterConfig, NatsFlushMode, NatsSink};
 pub use stdout::StdoutSink;
 pub use tee::{TeeChild, TeeSink};
 
@@ -223,7 +223,7 @@ pub enum SinkConfig {
         #[serde(default)]
         credentials: NatsCredentials,
         #[serde(default)]
-        delivery: NatsDelivery,
+        flush_mode: NatsFlushMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dead_letter: Option<NatsDeadLetterConfig>,
     },
@@ -254,7 +254,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             subject,
             stream,
             credentials,
-            delivery,
+            flush_mode,
             dead_letter,
         } => {
             let mut sink = NatsSink::new(
@@ -264,7 +264,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
                 credentials.clone(),
             )
             .await?;
-            sink = sink.with_delivery(delivery.clone());
+            sink = sink.with_flush_mode(flush_mode.clone());
             if let Some(dlq) = dead_letter {
                 sink = sink.with_dead_letter(dlq.clone()).await?;
             }
@@ -621,14 +621,14 @@ mod tests {
                 subject,
                 stream,
                 credentials,
-                delivery,
+                flush_mode,
                 dead_letter,
             } => {
                 assert_eq!(servers, vec!["nats://nats:4222".to_string()]);
                 assert_eq!(subject, "rastreo.discovery.records.v1");
                 assert_eq!(stream, "rastreo");
                 assert!(matches!(credentials, NatsCredentials::Anonymous));
-                assert!(matches!(delivery, NatsDelivery::PerRecord));
+                assert!(matches!(flush_mode, NatsFlushMode::PerRecord));
                 assert!(dead_letter.is_none());
             }
             other => panic!("expected Nats, got {other:?}"),
@@ -638,7 +638,7 @@ mod tests {
     #[cfg(all(feature = "config", feature = "nats"))]
     #[test]
     fn deserialize_nats_sink_config_with_user_pass_credentials() {
-        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  auth_type: user_pass\n  username: admin\n  password: sekret\n";
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  type: user_pass\n  username: admin\n  password: sekret\n";
         let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
         match config {
             SinkConfig::Nats { credentials, .. } => match credentials {
@@ -655,7 +655,7 @@ mod tests {
     #[cfg(all(feature = "config", feature = "nats"))]
     #[test]
     fn deserialize_nats_sink_config_with_token_credentials() {
-        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  auth_type: token\n  token: tok\n";
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  type: token\n  token: tok\n";
         let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
         match config {
             SinkConfig::Nats { credentials, .. } => match credentials {
@@ -669,7 +669,7 @@ mod tests {
     #[cfg(all(feature = "config", feature = "nats"))]
     #[test]
     fn deserialize_nats_sink_config_with_creds_file() {
-        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  auth_type: creds\n  creds_file: /etc/rastreo/nats.creds\n";
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ncredentials:\n  type: creds\n  creds_file: /etc/rastreo/nats.creds\n";
         let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
         match config {
             SinkConfig::Nats { credentials, .. } => match credentials {
@@ -684,12 +684,12 @@ mod tests {
 
     #[cfg(all(feature = "config", feature = "nats"))]
     #[test]
-    fn deserialize_nats_sink_config_with_batched_delivery() {
-        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\ndelivery:\n  mode: batched\n  threshold_bytes: 4096\n";
+    fn deserialize_nats_sink_config_with_batched_flush_mode() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\nflush_mode:\n  type: batched\n  threshold_bytes: 4096\n";
         let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
         match config {
-            SinkConfig::Nats { delivery, .. } => match delivery {
-                NatsDelivery::Batched { threshold_bytes } => assert_eq!(threshold_bytes, 4096),
+            SinkConfig::Nats { flush_mode, .. } => match flush_mode {
+                NatsFlushMode::Batched { threshold_bytes } => assert_eq!(threshold_bytes, 4096),
                 other => panic!("expected Batched, got {other:?}"),
             },
             other => panic!("expected Nats, got {other:?}"),

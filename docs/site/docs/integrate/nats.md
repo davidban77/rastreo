@@ -52,7 +52,7 @@ sink:
   subject: rastreo.discovery.records.v1
   stream: rastreo
   credentials:
-    auth_type: anonymous
+    type: anonymous
 ```
 
 Username + password:
@@ -64,7 +64,7 @@ sink:
   subject: rastreo.discovery.records.v1
   stream: rastreo
   credentials:
-    auth_type: user_pass
+    type: user_pass
     username: rastreo-writer
     password: sekret
 ```
@@ -78,7 +78,7 @@ sink:
   subject: rastreo.discovery.records.v1
   stream: rastreo
   credentials:
-    auth_type: token
+    type: token
     token: bearer-token-value
 ```
 
@@ -91,7 +91,7 @@ sink:
   subject: rastreo.discovery.records.v1
   stream: rastreo
   credentials:
-    auth_type: creds
+    type: creds
     creds_file: /etc/rastreo/nats.creds
 ```
 
@@ -103,14 +103,14 @@ Password and token values are redacted in Debug output and in `source_config_has
 
 `batched` is the right choice for very high record rates where the extra ack round-trips dominate. It publishes each record as its own message and pipelines the acks, draining them at `flush()`. The pipeline calls `flush()` during graceful shutdown, which surfaces any ack error.
 
-Set `delivery.mode` to `batched`. The optional `threshold_bytes` field is the buffered-byte count that triggers the pipelined publishes (default 65536):
+Set `flush_mode.type` to `batched`. The optional `threshold_bytes` field is the buffered-byte count that triggers the pipelined publishes (default 65536):
 
 ```yaml
 sink:
   type: nats
   # ...
-  delivery:
-    mode: batched
+  flush_mode:
+    type: batched
     threshold_bytes: 65536
 ```
 
