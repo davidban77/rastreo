@@ -109,6 +109,7 @@ Each scenario prints its own status line to stderr. If ANY single scenario fails
 | `--kafka-batch-threshold <BYTES>` | `65536` (64 KiB) | Batch threshold in bytes. Records accumulate until the buffer reaches this size, then flush in one produce request that carries one message per record. Minimum 1. Only meaningful with `--sink kafka`. |
 | `--concurrency <N>` | `64` (flag-driven) / YAML `max_concurrent` (YAML-driven) | Maximum number of probes in flight at once. Minimum value is 1. In YAML-driven mode, setting `--concurrency` overrides the scenario's `max_concurrent`. |
 | `--rate <N>` | unset — no pacing (flag-driven) / YAML `probe_rate` (YAML-driven) | Maximum number of probes started per second. Minimum value is 1. When unset, probes start as fast as concurrency allows. In YAML-driven mode, setting `--rate` overrides the scenario's `probe_rate`. |
+| `--retries <N>` | `0` (flag-driven) / YAML `retries` (YAML-driven) | Retransmit attempts for the connectionless probers (UDP, SNMP, DNS, reverse DNS). Range 0–1024; `0` is single-shot. In YAML-driven mode, setting `--retries` overrides the scenario's `retries`. See [Retries on lossy links](#retries-on-lossy-links). |
 | `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
 | `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
@@ -116,6 +117,54 @@ Each scenario prints its own status line to stderr. If ANY single scenario fails
 
 !!! info "Concurrency vs rate"
     These are two different limits. `--concurrency` (YAML `max_concurrent`) sets how many probes run at the same time. `--rate` (YAML `probe_rate`) sets how many probes start each second. They compose: with `--concurrency 64 --rate 50`, up to 64 probes run at once, but no more than 50 start per second. The rate bounds the scan whenever it is the tighter limit. Leave `--rate` unset to let probes start as fast as concurrency allows — useful to be gentle on a fragile network.
+
+## Retries on lossy links
+
+On a clean LAN, one UDP, SNMP, or DNS request reaches the target and one reply comes back. On a congested or long-distance link, either the request or the reply can be dropped. A single dropped packet makes a live host look unreachable — a false negative. The `retries` knob tells a connectionless prober to resend the request before giving up. The default `0` sends one request and never resends. On a clean LAN (packet loss under 0.1%) one request almost always arrives, so `retries` stays off by default and is rarely needed.
+
+Set it two ways:
+
+- **Scenario field** `retries: N` — at the `defaults:` level or on one scenario, alongside `timeout_ms`.
+- **CLI flag** `--retries N` — with `--file`, this overrides the scenario `retries`.
+
+Only the connectionless probers that lack their own retransmission honor `retries`:
+
+- **UDP** service probers — memcached, NTP, SIP, and STUN.
+- **SNMP** — v1, v2c, and v3.
+- **DNS** and **reverse DNS**.
+
+TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) ignore `retries`, because TCP already resends at the transport layer. ICMP has its own `count` knob instead, which defaults to 3 echoes. ARP and NDP do not honor `retries` yet. Flag-driven mode (`--target` + `--port`) only runs `tcp_connect`, so `--retries` changes nothing there. To reach the connectionless probers, use `--file` with a scenario that lists them.
+
+!!! note "Retries split the timeout — they do not extend it"
+    `retries` divides the existing `timeout_ms` budget across attempts. Each attempt gets about `timeout_ms / (retries + 1)` milliseconds, floored at 1 ms. The total time per probe stays the same no matter how many retries you set. A retry recovers a dropped packet inside the same deadline, instead of adding scan time. On a high-latency link, size `timeout_ms` for `RTT × (retries + 1)` so each attempt still has room for one round trip.
+
+A WAN SNMP sweep that resends a dropped request twice. The `timeout_ms` of 1500 ms is split into three attempts of about 500 ms each:
+
+```yaml
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: wan-snmp
+    timeout_ms: 1500
+    retries: 2
+    targets:
+      - Cidr: "10.20.0.0/24"
+    probers:
+      - type: snmp
+        ports: [161]
+        version: v2c
+        community: public
+```
+
+Override the file's `retries` from the command line without editing the YAML:
+
+```bash
+rastreo discover --file wan-snmp.yml --retries 3
+```
+
+`retries` accepts `0` through `1024`. A larger value is rejected before any probe runs.
 
 ## Examples
 
@@ -160,7 +209,7 @@ rastreo discover \
 
 ## Dry-run mode
 
-`--dry-run` validates the scenario, resolves targets (DNS lookups run for real), prints the expanded plan to stdout, and exits without probing anything or opening a sink. It works in both flag-driven mode (`--target` + `--port`) and YAML-driven mode (`--file`). CLI overrides (`--sink`, `--concurrency`, `--timeout-ms`) are applied to the plan — what you see is what would run.
+`--dry-run` validates the scenario, resolves targets (DNS lookups run for real), prints the expanded plan to stdout, and exits without probing anything or opening a sink. It works in both flag-driven mode (`--target` + `--port`) and YAML-driven mode (`--file`). CLI overrides (`--sink`, `--concurrency`, `--retries`, `--timeout-ms`) are applied to the plan — what you see is what would run.
 
 The output shows one block per scenario listing each target's DNS / CIDR / range expansion, the configured probers with their parameters, the sink kind and destination, and the effective concurrency, probe rate, and per-probe timeout. The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count (unique IPs × configured probers, deduplicated across overlapping targets), matching the count the real pipeline would dispatch.
 
@@ -181,6 +230,7 @@ rastreo discover --target 10.0.0.0/24 --port 22,80 --dry-run
     sink: stdout
     concurrency: 64
     rate: unlimited
+    retries: 0
     timeout_ms: 1000
 total probes: 254
 ```
@@ -190,8 +240,8 @@ total probes: 254
 CLI flags override YAML values. Merge order per scenario, lowest to highest:
 
 1. `defaults:` block in the scenario file.
-2. Per-scenario fields (`max_concurrent`, `probe_rate`, `timeout_ms`, `sink`, `encoder`, `fuser`, `name`).
-3. CLI flags (`--concurrency`, `--rate`, `--timeout-ms`, `--sink` + `--output` / Kafka flags).
+2. Per-scenario fields (`max_concurrent`, `probe_rate`, `retries`, `timeout_ms`, `sink`, `encoder`, `fuser`, `name`).
+3. CLI flags (`--concurrency`, `--rate`, `--retries`, `--timeout-ms`, `--sink` + `--output` / Kafka flags).
 
 Only fields the CLI flag was explicitly set for are overridden. `rastreo discover --file scan.yml --concurrency 32` overrides the YAML `max_concurrent`, but leaves the rate, sink, and timeout untouched. Omitting a flag entirely lets the YAML value win.
 

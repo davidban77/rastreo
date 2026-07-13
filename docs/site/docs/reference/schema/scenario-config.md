@@ -33,6 +33,7 @@ Wire schema for ScenarioFile emitted by rastreo.
 | `max_concurrent` | uint32 \| null | no | Maximum probes in flight at once. |
 | `name` | string \| null | no | — |
 | `probe_rate` | uint32 \| null | no | Maximum probes started per second; unset means no rate limit. |
+| `retries` | uint32 \| null | no | Retransmit attempts for connectionless probers that lack native retransmission (UDP, SNMP, DNS); 0 (default) issues a single request within the same total timeout. |
 | `sink` | [`SinkConfig`](#sinkconfig) \| null | no | — |
 | `timeout_ms` | uint64 \| null | no | — |
 
@@ -196,7 +197,7 @@ One of:
 
 One of:
 
-- { `classifier`: [`ClassifierConfig`](#classifierconfig) \| null, `encoder`: [`EncoderConfig`](#encoderconfig) \| null, `fuser`: [`FuserConfig`](#fuserconfig) \| null, `max_concurrent`: uint32 \| null, `name`: string \| null, `probe_rate`: uint32 \| null, `probers`: array<[`ProberConfig`](#proberconfig)>, `signal_type`: `discover`, `sink`: [`SinkConfig`](#sinkconfig) \| null, `targets`: array<[`Target`](#target)>, `timeout_ms`: uint64 \| null }
+- { `classifier`: [`ClassifierConfig`](#classifierconfig) \| null, `encoder`: [`EncoderConfig`](#encoderconfig) \| null, `fuser`: [`FuserConfig`](#fuserconfig) \| null, `max_concurrent`: uint32 \| null, `name`: string \| null, `probe_rate`: uint32 \| null, `probers`: array<[`ProberConfig`](#proberconfig)>, `retries`: uint32 \| null, `signal_type`: `discover`, `sink`: [`SinkConfig`](#sinkconfig) \| null, `targets`: array<[`Target`](#target)>, `timeout_ms`: uint64 \| null }
 
 ### `ScenarioKind` {#scenariokind}
 

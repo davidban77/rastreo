@@ -21,6 +21,7 @@ Any string scalar in the scenario may use `${VAR}` to interpolate an environment
 | `max_concurrent` | integer \| null | `null` | Maximum number of probes in flight at once. Maps to scheduler concurrency at runtime. |
 | `probe_rate` | integer \| null | `null` | Maximum number of probes started per second. When unset, probes start as fast as `max_concurrent` allows. |
 | `timeout_ms` | integer \| null | `null` | Per-probe timeout in milliseconds. |
+| `retries` | integer \| null | `null` (0, single-shot) | Retransmit attempts for the connectionless probers (UDP, SNMP, DNS, reverse DNS) on lossy links. `0` sends one request and never resends. Range 0–1024; a larger value is rejected at load. It divides `timeout_ms` across `retries + 1` attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. See [CLI · Retries on lossy links](../discover/cli.md#retries-on-lossy-links). |
 | `encoder` | object \| null | `null` (NDJSON) | Output encoding. See [Encoders](#encoders). |
 | `fuser` | object \| null | `null` (Direct, baseline 0.1 / per-signal 0.1) | Signal-fusion strategy. See [Fusers](#fusers). |
 | `classifier` | object \| null | `null` (Noop) | Platform / os_version / role classifier applied after fusion. See [Classifier](#classifier). |
@@ -556,7 +557,7 @@ The smallest body that `POST /scans` accepts. Targets a single IP on port 80, us
 }
 ```
 
-A fuller body with explicit scheduler knobs, fuser knobs, and a custom timeout. `max_concurrent` caps how many probes run at once; `probe_rate` caps how many start per second:
+A fuller body with explicit scheduler knobs, fuser knobs, and a custom timeout. `max_concurrent` caps how many probes run at once; `probe_rate` caps how many start per second. `retries` splits the `timeout_ms` budget across `retries + 1` attempts for the connectionless probers. The `tcp_connect` prober shown here ignores it, since TCP handles its own retransmission:
 
 ```json
 {
@@ -564,6 +565,7 @@ A fuller body with explicit scheduler knobs, fuser knobs, and a custom timeout. 
   "max_concurrent": 64,
   "probe_rate": 50,
   "timeout_ms": 500,
+  "retries": 1,
   "fuser": {
     "type": "direct",
     "confidence_baseline": 0.3,

@@ -98,32 +98,45 @@ impl Prober for ReverseDnsProber {
         let mut signals = Vec::new();
         let mut reachable = false;
         let mut fault: Option<ProbeFault> = None;
+        // Split the timeout across attempts so a dropped query is retransmitted inside the same total per-probe deadline.
+        let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
+        let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
 
-        match tokio::time::timeout(ctx.timeout, self.resolver.reverse_lookup(query_name)).await {
-            Ok(Ok(lookup)) => {
-                reachable = true;
-                for record in lookup.answers() {
-                    if let RData::PTR(ref ptr) = record.data {
-                        signals.push(Signal::ReverseDnsName(trim_trailing_dot(&ptr.0.to_utf8())));
+        for _ in 0..=ctx.retries {
+            let attempt_deadline =
+                (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
+            let lookup = self.resolver.reverse_lookup(query_name.clone());
+            match tokio::time::timeout_at(attempt_deadline, lookup).await {
+                Ok(Ok(lookup)) => {
+                    reachable = true;
+                    for record in lookup.answers() {
+                        if let RData::PTR(ref ptr) = record.data {
+                            signals
+                                .push(Signal::ReverseDnsName(trim_trailing_dot(&ptr.0.to_utf8())));
+                        }
                     }
+                    break;
                 }
-            }
-            Ok(Err(err)) => {
-                if err.is_no_records_found() {
-                    // NXDOMAIN, NoError-with-empty-answers: server responded.
-                    reachable = true;
-                } else if let NetError::Dns(DnsError::ResponseCode(_)) = &err {
-                    // REFUSED / SERVFAIL / etc. — server responded.
-                    reachable = true;
-                } else if let Disposition::Fault(kind) = classify::net_error(&err) {
-                    fault = Some(ProbeFault::new(
-                        kind,
-                        format!("reverse dns probe failed for {}: {err}", target.ip),
-                    ));
+                Ok(Err(err)) => {
+                    if err.is_no_records_found() {
+                        // NXDOMAIN, NoError-with-empty-answers: server responded.
+                        reachable = true;
+                    } else if let NetError::Dns(DnsError::ResponseCode(_)) = &err {
+                        // REFUSED / SERVFAIL / etc. — server responded.
+                        reachable = true;
+                    } else if let Disposition::Fault(kind) = classify::net_error(&err) {
+                        fault = Some(ProbeFault::new(
+                            kind,
+                            format!("reverse dns probe failed for {}: {err}", target.ip),
+                        ));
+                    }
+                    break;
                 }
+                // No response within the attempt slice: retransmit until the overall deadline.
+                Err(_) => {}
             }
-            Err(_) => {
-                // Outer tokio timeout fired — reachable stays false.
+            if tokio::time::Instant::now() >= overall_deadline {
+                break;
             }
         }
 
@@ -392,6 +405,151 @@ mod tests {
             fault.detail.contains("reverse dns probe failed"),
             "got: {}",
             fault.detail
+        );
+    }
+
+    fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
+        ProbeCtx {
+            timeout: Duration::from_millis(ms),
+            retries,
+        }
+    }
+
+    async fn spawn_ptr_server_dropping(
+        drop_first: usize,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use hickory_resolver::proto::op::{Message, MessageType, OpCode, ResponseCode};
+        use hickory_resolver::proto::rr::rdata::PTR;
+        use hickory_resolver::proto::rr::Record;
+        use hickory_resolver::proto::serialize::binary::{BinDecodable, BinEncodable};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::net::UdpSocket;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        let received = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&received);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let (n, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                if seen.fetch_add(1, Ordering::SeqCst) < drop_first {
+                    continue;
+                }
+                let request = match Message::from_bytes(&buf[..n]) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let query = match request.queries.first() {
+                    Some(q) => q.clone(),
+                    None => continue,
+                };
+                let ptr = Record::from_rdata(
+                    query.name().clone(),
+                    60,
+                    RData::PTR(PTR(Name::from_ascii("router-1.lab.").expect("name"))),
+                );
+                let mut response = Message::new(0, MessageType::Response, OpCode::Query);
+                response.metadata.id = request.metadata.id;
+                response.metadata.response_code = ResponseCode::NoError;
+                response.add_query(query);
+                response.add_answer(ptr);
+                let bytes = match response.to_bytes() {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let _ = socket.send_to(&bytes, peer).await;
+            }
+        });
+        (port, received)
+    }
+
+    #[tokio::test]
+    async fn reverse_dns_retransmit_recovers_when_first_queries_are_dropped() {
+        let (port, _received) = spawn_ptr_server_dropping(2).await;
+        let target_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        let target = ResolvedTarget {
+            ip: target_ip,
+            original: Target::Ip(target_ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let outcome = prober_pinned_to(port)
+            .probe(&target, &ctx_with_retries(900, 2))
+            .await
+            .expect("probe ok");
+        assert!(
+            outcome.reachable,
+            "the third attempt reaches the resolver after two dropped queries"
+        );
+        assert_eq!(outcome.signals.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reverse_dns_without_retries_reports_absent_when_first_query_dropped() {
+        let (port, _received) = spawn_ptr_server_dropping(1).await;
+        let target_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 8));
+        let target = ResolvedTarget {
+            ip: target_ip,
+            original: Target::Ip(target_ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let outcome = prober_pinned_to(port)
+            .probe(&target, &ctx_with_retries(300, 0))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn reverse_dns_retries_u32_max_is_bounded_and_does_not_panic() {
+        let (port, received) = spawn_ptr_server_dropping(usize::MAX).await;
+        let target_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+        let target = ResolvedTarget {
+            ip: target_ip,
+            original: Target::Ip(target_ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let start = std::time::Instant::now();
+        let outcome = prober_pinned_to(port)
+            .probe(&target, &ctx_with_retries(2, u32::MAX))
+            .await
+            .expect("u32::MAX retries must not panic");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "u32::MAX retries must stay bounded near the timeout: {elapsed:?}"
+        );
+        assert!(
+            received.load(std::sync::atomic::Ordering::SeqCst) < 100,
+            "the per-attempt floor and deadline break bound the query count: {}",
+            received.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn reverse_dns_exhausted_retries_is_absence_not_fault() {
+        let (port, received) = spawn_ptr_server_dropping(usize::MAX).await;
+        let target_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+        let target = ResolvedTarget {
+            ip: target_ip,
+            original: Target::Ip(target_ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let outcome = prober_pinned_to(port)
+            .probe(&target, &ctx_with_retries(300, 2))
+            .await
+            .expect("probe ok");
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+        assert_eq!(
+            received.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "retries=2 sends the first query plus two retransmits"
         );
     }
 
