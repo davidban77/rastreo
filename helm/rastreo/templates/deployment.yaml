@@ -25,6 +25,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
+      serviceAccountName: {{ include "rastreo.serviceAccountName" . }}
       {{- with .Values.terminationGracePeriodSeconds }}
       terminationGracePeriodSeconds: {{ . }}
       {{- end }}
@@ -112,6 +113,19 @@ spec:
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_SERVICE_NAME" "value" (printf "%v" .Values.otlp.serviceName)) }}
           {{- end }}
           {{- end }}
+          {{- end }}
+          {{- if .Values.auth.enabled }}
+          {{- $secretName := "" }}
+          {{- if .Values.auth.existingSecret }}
+          {{- $secretName = .Values.auth.existingSecret }}
+          {{- else if .Values.auth.token }}
+          {{- $secretName = printf "%s-auth" (include "rastreo.fullname" .) }}
+          {{- else }}
+          {{- fail "auth.enabled is true but no token source is set: set auth.token to render a Secret, set auth.existingSecret to reference one, or set auth.enabled=false to run POST /scans unauthenticated (not recommended)" }}
+          {{- end }}
+          {{- $envs = append $envs (dict "name" "RASTREO_API_TOKEN" "valueFrom" (dict "secretKeyRef" (dict "name" $secretName "key" .Values.auth.secretKey))) }}
+          {{- else }}
+          {{- $envs = append $envs (dict "name" "RASTREO_AUTH_DISABLED" "value" "true") }}
           {{- end }}
           {{- if $envs }}
           env:

@@ -57,3 +57,15 @@ Container image reference with tag defaulting to appVersion.
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end }}
+
+{{/*
+ServiceAccount name: explicit name wins; otherwise derive from fullname when
+create is enabled, else fall back to the namespace default.
+*/}}
+{{- define "rastreo.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "rastreo.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}

@@ -3,16 +3,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rastreo_core::observability::otlp_config::parse_env_u64;
+use rastreo_core::observability::otlp_config::{parse_env_bool, parse_env_u64};
 use rastreo_core::{
     DiscoverySummary, Resolver, Sink, SinkErrorClass, SinkType, PROBE_KIND_COUNT,
     SINK_ERROR_CLASS_COUNT,
 };
 
 #[cfg(feature = "otlp")]
-pub use rastreo_core::observability::otlp_config::OtlpProtocol;
+use rastreo_core::observability::otlp_config::parse_env_protocol;
 #[cfg(feature = "otlp")]
-use rastreo_core::observability::otlp_config::{parse_env_bool, parse_env_protocol};
+pub use rastreo_core::observability::otlp_config::OtlpProtocol;
 #[cfg(feature = "otlp")]
 use std::sync::OnceLock;
 
@@ -664,6 +664,42 @@ impl SinkProbeConfig {
 /// handlers and the probe task can serialise access without blocking the runtime.
 pub type SharedSink = Arc<tokio::sync::Mutex<Box<dyn Sink>>>;
 
+#[derive(Debug, Clone, Default)]
+pub enum AuthConfig {
+    #[default]
+    Disabled,
+    Enabled {
+        token: String,
+    },
+}
+
+impl AuthConfig {
+    /// Read `RASTREO_API_TOKEN` (enables auth) and `RASTREO_AUTH_DISABLED` (explicit opt-out); errors when neither is set so the scan endpoint is never silently open.
+    pub fn from_env() -> anyhow::Result<Self> {
+        match std::env::var("RASTREO_API_TOKEN") {
+            Ok(token) if !token.trim().is_empty() => Ok(Self::Enabled { token }),
+            Ok(_) | Err(std::env::VarError::NotPresent) => {
+                if parse_env_bool("RASTREO_AUTH_DISABLED", false)? {
+                    tracing::warn!(
+                        "RASTREO_AUTH_DISABLED=true: the POST /scans endpoint is UNAUTHENTICATED — \
+                         any caller that can reach it can trigger active network probes"
+                    );
+                    Ok(Self::Disabled)
+                } else {
+                    Err(anyhow::anyhow!(
+                        "RASTREO_API_TOKEN is not set: set it to a shared secret to authenticate \
+                         POST /scans, or set RASTREO_AUTH_DISABLED=true to run the scan endpoint \
+                         unauthenticated (not recommended)"
+                    ))
+                }
+            }
+            Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+                "invalid value for RASTREO_API_TOKEN: not valid UTF-8"
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub resolver: Arc<dyn Resolver>,
@@ -671,6 +707,7 @@ pub struct AppState {
     pub readiness: Arc<ReadinessState>,
     pub sink: Option<SharedSink>,
     pub sink_reachability: Arc<SinkReachability>,
+    pub auth: AuthConfig,
 }
 
 impl AppState {
@@ -693,6 +730,7 @@ impl AppState {
             readiness: Arc::new(ReadinessState::new(readiness)),
             sink: None,
             sink_reachability: Arc::new(SinkReachability::not_configured()),
+            auth: AuthConfig::default(),
         }
     }
 
@@ -703,6 +741,11 @@ impl AppState {
     ) -> Self {
         self.sink = sink;
         self.sink_reachability = reachability;
+        self
+    }
+
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
         self
     }
 }
@@ -1216,7 +1259,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    const ENV_KEYS: [&str; 12] = [
+    const ENV_KEYS: [&str; 14] = [
         "RASTREO_MAX_INFLIGHT_SCANS",
         "RASTREO_SINK_ERROR_QUARANTINE_SECS",
         "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
@@ -1229,6 +1272,8 @@ mod tests {
         "RASTREO_SINK_CONFIG_PATH",
         "RASTREO_SINK_PROBE_INTERVAL_SECS",
         "RASTREO_SINK_PROBE_TIMEOUT_SECS",
+        "RASTREO_API_TOKEN",
+        "RASTREO_AUTH_DISABLED",
     ];
 
     fn clear_env() {
@@ -1301,6 +1346,71 @@ mod tests {
         assert_eq!(cfg.max_inflight_scans, 0);
         assert_eq!(cfg.sink_error_quarantine, Duration::ZERO);
         assert_eq!(cfg.scan_error_quarantine, Duration::ZERO);
+    }
+
+    #[test]
+    fn auth_config_default_is_disabled() {
+        assert!(matches!(AuthConfig::default(), AuthConfig::Disabled));
+    }
+
+    #[test]
+    fn auth_config_from_env_enables_with_token() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe { std::env::set_var("RASTREO_API_TOKEN", "s3cr3t") };
+        let cfg = AuthConfig::from_env().expect("from_env");
+        clear_env();
+        match cfg {
+            AuthConfig::Enabled { token } => assert_eq!(token, "s3cr3t"),
+            AuthConfig::Disabled => panic!("token set must enable auth"),
+        }
+    }
+
+    #[test]
+    fn auth_config_from_env_disabled_via_explicit_opt_out() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe { std::env::set_var("RASTREO_AUTH_DISABLED", "true") };
+        let cfg = AuthConfig::from_env().expect("from_env");
+        clear_env();
+        assert!(matches!(cfg, AuthConfig::Disabled));
+    }
+
+    #[test]
+    fn auth_config_from_env_fails_closed_when_neither_set() {
+        let _guard = env_guard();
+        clear_env();
+        let err = AuthConfig::from_env().expect_err("must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("RASTREO_API_TOKEN"), "msg: {msg}");
+        assert!(msg.contains("RASTREO_AUTH_DISABLED"), "msg: {msg}");
+    }
+
+    #[test]
+    fn auth_config_from_env_treats_blank_token_as_unset() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe { std::env::set_var("RASTREO_API_TOKEN", "   ") };
+        let err = AuthConfig::from_env().expect_err("a blank token must not enable auth");
+        clear_env();
+        assert!(err.to_string().contains("RASTREO_API_TOKEN"));
+    }
+
+    #[test]
+    fn auth_config_from_env_token_wins_over_disable_flag() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe {
+            std::env::set_var("RASTREO_API_TOKEN", "keepme");
+            std::env::set_var("RASTREO_AUTH_DISABLED", "true");
+        }
+        let cfg = AuthConfig::from_env().expect("from_env");
+        clear_env();
+        assert!(matches!(cfg, AuthConfig::Enabled { token } if token == "keepme"));
     }
 
     #[test]

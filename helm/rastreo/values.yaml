@@ -25,6 +25,44 @@ server:
   # Bind address for the rastreo-server.
   bind: "0.0.0.0"
 
+# Bearer-token auth for POST /scans. Health, readiness, and metrics are never
+# authenticated. Secure by default: with enabled=true the chart refuses to render
+# unless a token source is set. To run unauthenticated (NOT recommended), set
+# enabled=false — the pod then starts with RASTREO_AUTH_DISABLED=true.
+auth:
+  enabled: true
+  # Inline secret. When set (and existingSecret is empty) the chart renders a
+  # Secret holding it. Prefer existingSecret in production so the token never
+  # lives in values.
+  token: ""
+  # Name of a pre-existing Secret holding the token. Takes precedence over token.
+  existingSecret: ""
+  # Key within the Secret that holds the token value.
+  secretKey: "api-token"
+
+# ServiceAccount for the pod. Token automounting is disabled — the server never
+# calls the Kubernetes API.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Defense-in-depth L3/L4 ingress isolation. Off by default: a default-deny policy
+# is topology-specific and, in an enforcing CNI with no configured sources, would
+# lock out all access. Enable and configure the peers for your cluster. With
+# enabled=true and both lists empty, the policy denies all ingress.
+networkPolicy:
+  enabled: false
+  # Peers allowed to reach the API port. Each entry is a NetworkPolicyPeer
+  # (namespaceSelector and/or podSelector).
+  ingress: []
+  # Peers allowed to scrape /metrics (e.g. the monitoring namespace). Each entry
+  # is a NetworkPolicyPeer. NOTE: kubelet liveness/readiness probes originate from
+  # the node, not a pod/namespace, so a selector here does NOT admit them. On an
+  # enforcing CNI that gates host traffic, also permit the node (e.g. an ipBlock
+  # for the node/pod CIDR) or the probes fail and the pod CrashLoops.
+  monitoring: []
+
 # Time the kubelet waits between SIGTERM and SIGKILL. Must exceed the longest
 # expected in-flight scan so `axum` can drain requests before the process is
 # killed. Default sizing: `--request-timeout-ms` (60s) + probe drain (5s) +

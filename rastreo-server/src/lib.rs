@@ -8,6 +8,7 @@ pub mod state;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::timeout::TimeoutLayer;
@@ -24,13 +25,20 @@ pub fn build_app(state: AppState) -> Router {
 }
 
 pub fn build_app_with_timeout(state: AppState, request_timeout: Duration) -> Router {
+    let scans = Router::new()
+        .route("/scans", post(routes::scans::create_scan))
+        .route_layer(from_fn_with_state(
+            state.clone(),
+            routes::auth::require_bearer,
+        ));
+
     // Layer order matters: TraceLayer is added last so it wraps TimeoutLayer and logs timeouts.
     Router::new()
         .route("/health", get(routes::health::health))
         .route("/healthz", get(routes::health::healthz))
         .route("/readyz", get(routes::health::readyz))
         .route("/metrics", get(routes::metrics::get_metrics))
-        .route("/scans", post(routes::scans::create_scan))
+        .merge(scans)
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::SERVICE_UNAVAILABLE,

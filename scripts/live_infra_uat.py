@@ -103,6 +103,12 @@ RDNS_TIMEOUT_S = 20.0
 SERVER_HEALTH_URL = "http://localhost:8080/health"
 SERVER_SCANS_URL = "http://localhost:8080/scans"
 
+# The compose server this harness starts runs with auth disabled
+# (RASTREO_AUTH_DISABLED=true in docker-compose.yml), so CI needs no token. Set
+# RASTREO_API_TOKEN in the harness environment to authenticate the POST /scans
+# row when pointing the harness at an auth-enabled server.
+SERVER_API_TOKEN = os.environ.get("RASTREO_API_TOKEN") or None
+
 # Per-step time budgets. Tuned for compose healthcheck `start_period` + flush.
 READINESS_TIMEOUT_S = 60.0
 READINESS_POLL_INTERVAL_S = 1.0
@@ -176,15 +182,21 @@ def http_get(
 
 
 def http_post_json(
-    url: str, payload: dict, timeout_s: float = HTTP_REQUEST_TIMEOUT_S
+    url: str,
+    payload: dict,
+    timeout_s: float = HTTP_REQUEST_TIMEOUT_S,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes]:
     """POST ``payload`` as JSON to ``url`` and return ``(status, body)``."""
     data = json.dumps(payload).encode("utf-8")
+    merged = {"Content-Type": "application/json"}
+    if headers:
+        merged.update(headers)
     req = urllib.request.Request(
         url,
         method="POST",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=merged,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -587,9 +599,12 @@ def build_server_scan_payload(
 def run_server_post_scans(ctx: HarnessCtx) -> tuple[bool, str]:
     """Server -> POST /scans row: submit a scenario, verify the response shape."""
     payload = build_server_scan_payload()
+    headers = (
+        {"Authorization": f"Bearer {SERVER_API_TOKEN}"} if SERVER_API_TOKEN else None
+    )
     try:
         status, body = http_post_json(
-            SERVER_SCANS_URL, payload, timeout_s=SCENARIO_TIMEOUT_S
+            SERVER_SCANS_URL, payload, timeout_s=SCENARIO_TIMEOUT_S, headers=headers
         )
     except urllib.error.URLError as e:
         return False, f"POST /scans connection error: {e}"
