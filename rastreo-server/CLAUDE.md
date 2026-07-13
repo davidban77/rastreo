@@ -15,9 +15,9 @@ src/
 ├── main.rs        ← entrypoint: clap arg parsing, tracing init, resolver
 │                    construction, tokio runtime, axum serve loop
 ├── lib.rs         ← build_app(state) -> Router; reusable from tests
-├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability, auth }
+├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability, auth, max_body_bytes }
 │                    + HistogramShard + Metrics + ReadinessConfig + ReadinessState
-│                    + SinkProbeConfig + SinkReachability + AuthConfig
+│                    + SinkProbeConfig + SinkReachability + AuthConfig + TargetGuardConfig
 ├── sink_probe.rs  ← spawn_sink_probe + periodic probe task + run_probe helper
 ├── observability.rs ← OTLP exporters + instrument callbacks (feature: otlp)
 ├── error.rs       ← AppError + IntoResponse + RastreoError -> HTTP mapping
@@ -45,6 +45,9 @@ src/
 | —                      | `RASTREO_SINK_CONFIG_PATH`             | unset       | Path to a YAML `SinkConfig`. When set, the server builds the sink at startup and probes it periodically. Unset ⇒ no probe, `/readyz` reports `sink_reachable: null`. |
 | —                      | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`        | Sink reachability probe cadence in seconds (min 1). |
 | —                      | `RASTREO_SINK_PROBE_TIMEOUT_SECS`      | `5`         | Per-probe timeout in seconds (min 1). Elapsed probes count as failure. |
+| —                      | `RASTREO_TARGET_ALLOWLIST`             | unset       | Comma-separated CIDRs (or bare IPs, parsed as `/32`/`/128` host nets). When set, a `POST /scans` is rejected with 403 if any resolved target falls outside every listed range. Unset ⇒ allow all. Wraps the server resolver in a `GuardedResolver`; the CLI is unaffected. |
+| —                      | `RASTREO_MAX_TOTAL_HOSTS`              | `262144`    | Aggregate cap on total resolved hosts across all targets in one request; over-cap scans are rejected with 400. `0` disables. Independent of the per-target `CidrTooLarge` cap (65 536). |
+| —                      | `RASTREO_MAX_BODY_BYTES`               | `1048576`   | `POST /scans` request-body size limit; a larger body is rejected with 413 before JSON parsing. |
 
 ## API Surface
 
@@ -68,7 +71,9 @@ Response body:
 
 Errors:
 - 401 — auth is enabled and the request carried a missing, malformed, or wrong bearer token. Returned by the `require_bearer` middleware before the handler runs.
-- 400 — bad scenario config (empty `targets` or `probers`, malformed JSON body) or unresolvable client input (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`).
+- 403 — the target allow-list (`RASTREO_TARGET_ALLOWLIST`) is configured and at least one resolved target falls outside every listed range (`ResolverError::TargetNotAllowed`). The whole request is rejected and nothing is probed; the error body names the offending IP.
+- 413 — the request body exceeded `RASTREO_MAX_BODY_BYTES`; rejected before JSON parsing.
+- 400 — bad scenario config (empty `targets` or `probers`, malformed JSON body) or unresolvable client input (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`, `AggregateHostCapExceeded`).
 - 500 — probe / encode / sink / runtime errors. A server-configured sink that returns an error mid-scan aborts the pipeline and surfaces as 500; the response body's `records` list is not returned even if the in-memory capture succeeded.
 - 503 — request exceeded the server-side timeout (`--request-timeout-ms`), or the server-side DNS infrastructure failed (`ResolverError::DnsLookupFailed`).
 
@@ -77,7 +82,7 @@ A request holds the HTTP connection open for the duration of the scan. The pipel
 ## Error Handling
 
 - Use `anyhow` at the binary boundary.
-- `AppError` maps `RastreoError` to HTTP status codes via `IntoResponse`: `Config` errors map to 400; `Resolver` errors map to 400 for structural / client-input variants and to 503 for `DnsLookupFailed` (server-side DNS infrastructure failure); `Probe`, `Encoder`, `Sink`, and `Runtime` errors map to 500.
+- `AppError` maps `RastreoError` to HTTP status codes via `IntoResponse`: `Config` errors map to 400; `Resolver` errors map to 400 for structural / client-input variants (including `AggregateHostCapExceeded`), to 403 for `TargetNotAllowed`, and to 503 for `DnsLookupFailed` (server-side DNS infrastructure failure); `Probe`, `Encoder`, `Sink`, and `Runtime` errors map to 500.
 - Error response body is `{"error": "<message>"}`.
 - Do not panic. Recover from poisoned locks; return 500 with a JSON error body.
 

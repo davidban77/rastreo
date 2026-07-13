@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use rastreo_core::{HickoryResolver, Resolver};
+use rastreo_core::{GuardedResolver, HickoryResolver, Resolver};
 use rastreo_server::{
     build_app_with_timeout, spawn_sink_probe,
-    state::{AppState, AuthConfig, MetricsConfig, OtlpConfig, ReadinessConfig, SinkProbeConfig},
+    state::{
+        AppState, AuthConfig, MetricsConfig, OtlpConfig, ReadinessConfig, SinkProbeConfig,
+        TargetGuardConfig,
+    },
 };
 use tokio::sync::watch;
 
@@ -58,13 +61,21 @@ async fn main() -> anyhow::Result<()> {
     let otlp_config = OtlpConfig::from_env().context("failed to load OTLP config")?;
     init_tracing(cli.log_format, otlp_config.as_ref())?;
 
-    let resolver: Arc<dyn Resolver> =
-        Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
+    let guard = TargetGuardConfig::from_env().context("failed to load target-guard config")?;
+    let base_resolver =
+        HickoryResolver::from_system().context("failed to initialize system resolver")?;
+    let resolver: Arc<dyn Resolver> = Arc::new(GuardedResolver::new(
+        Arc::new(base_resolver),
+        guard.allowlist.clone(),
+        guard.max_total_hosts,
+    ));
     let readiness = ReadinessConfig::from_env().context("failed to load readiness config")?;
     let metrics_config = MetricsConfig::from_env().context("failed to load metrics config")?;
     let auth = AuthConfig::from_env().context("failed to load auth config")?;
     let sink_probe = SinkProbeConfig::from_env().context("failed to load sink-probe config")?;
-    let state = AppState::with_config(resolver, readiness, metrics_config).with_auth(auth);
+    let state = AppState::with_config(resolver, readiness, metrics_config)
+        .with_auth(auth)
+        .with_body_limit(guard.max_body_bytes);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (state, probe_handle) = spawn_sink_probe(state, &sink_probe, shutdown_rx.clone()).await;

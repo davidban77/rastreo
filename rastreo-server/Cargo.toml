@@ -42,6 +42,7 @@ path = "src/lib.rs"
 [dependencies]
 rastreo-core = { workspace = true }
 axum = "0.8"
+ipnet = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

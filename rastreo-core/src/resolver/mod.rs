@@ -7,6 +7,9 @@ use hickory_resolver::TokioResolver;
 use crate::error::{RastreoError, ResolverError};
 use crate::model::{ResolvedTarget, Target};
 
+mod guarded;
+pub use guarded::GuardedResolver;
+
 pub const DEFAULT_HOST_LIMIT: usize = 65_536;
 
 #[async_trait::async_trait]

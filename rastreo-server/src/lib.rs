@@ -7,6 +7,7 @@ pub mod state;
 
 use std::time::Duration;
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
@@ -30,7 +31,8 @@ pub fn build_app_with_timeout(state: AppState, request_timeout: Duration) -> Rou
         .route_layer(from_fn_with_state(
             state.clone(),
             routes::auth::require_bearer,
-        ));
+        ))
+        .route_layer(DefaultBodyLimit::max(state.max_body_bytes));
 
     // Layer order matters: TraceLayer is added last so it wraps TimeoutLayer and logs timeouts.
     Router::new()

@@ -3008,6 +3008,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "ipnet",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
