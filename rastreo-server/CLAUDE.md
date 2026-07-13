@@ -15,14 +15,15 @@ src/
 ├── main.rs        ← entrypoint: clap arg parsing, tracing init, resolver
 │                    construction, tokio runtime, axum serve loop
 ├── lib.rs         ← build_app(state) -> Router; reusable from tests
-├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability }
+├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability, auth }
 │                    + HistogramShard + Metrics + ReadinessConfig + ReadinessState
-│                    + SinkProbeConfig + SinkReachability
+│                    + SinkProbeConfig + SinkReachability + AuthConfig
 ├── sink_probe.rs  ← spawn_sink_probe + periodic probe task + run_probe helper
 ├── observability.rs ← OTLP exporters + instrument callbacks (feature: otlp)
 ├── error.rs       ← AppError + IntoResponse + RastreoError -> HTTP mapping
 └── routes/
     ├── mod.rs     ← route module re-exports
+    ├── auth.rs    ← require_bearer middleware (route_layer on /scans only)
     ├── health.rs  ← GET /health (alias), GET /healthz, GET /readyz
     ├── metrics.rs ← GET /metrics (Prometheus text format)
     └── scans.rs   ← POST /scans handler + ScanResponse + InflightGuard
@@ -36,6 +37,8 @@ src/
 | `--bind`               | `RASTREO_SERVER_BIND`                  | `0.0.0.0`   | Bind address                               |
 | `--request-timeout-ms` | `RASTREO_SERVER_REQUEST_TIMEOUT_MS`    | `60000`     | Per-request timeout in ms; must be > 0     |
 | `--log-format`         | `RASTREO_LOG_FORMAT`                   | `text`      | Log line format on stderr: `text` or `json` |
+| —                      | `RASTREO_API_TOKEN`                    | unset       | Shared secret gating `POST /scans` (bearer). Set & non-empty ⇒ auth enabled. |
+| —                      | `RASTREO_AUTH_DISABLED`                | unset       | `true` runs `/scans` unauthenticated. Startup fails closed unless `RASTREO_API_TOKEN` or this is set. |
 | —                      | `RASTREO_MAX_INFLIGHT_SCANS`           | `100`       | `/readyz` inflight-scan gate; `0` disables |
 | —                      | `RASTREO_SINK_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` sink-error quarantine window; `0` disables |
 | —                      | `RASTREO_SCAN_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` scan-error quarantine window; `0` disables |
@@ -51,9 +54,11 @@ src/
 | GET    | /readyz  | Readiness — 200 OK when the server can accept work; 503 with a `reason` string when the inflight-scan limit, sink-unreachable probe, or a recent-error quarantine has fired. Response body carries `sink_reachable`, `sink_type`, `seconds_since_last_probe`, `last_probe_error` (all `null` when no sink is configured).                                                                                                                                                                                                                                                             |
 | GET    | /health  | Backward-compat alias for `/healthz`.                                                                                                                                        |
 | GET    | /metrics | Prometheus text format with operational signals (scan / probe counters, records emitted, sink errors, request-duration histogram, uptime, build info). Namespace: `rastreo_server_`. |
-| POST   | /scans   | Submit a discovery scenario; runs synchronously and returns summary + records. The client-specified `sink` field is ignored; records land in the response body AND the server-configured sink (if any). |
+| POST   | /scans   | Submit a discovery scenario; runs synchronously and returns summary + records. Requires a valid bearer token when auth is enabled (401 otherwise); `/healthz`, `/readyz`, `/health`, `/metrics` are never authenticated. The client-specified `sink` field is ignored; records land in the response body AND the server-configured sink (if any). |
 
 ## POST /scans
+
+Authentication: when auth is enabled (`RASTREO_API_TOKEN` set, or the Helm `auth.enabled: true` default), the request must carry `Authorization: Bearer <token>`. A missing, malformed, or wrong credential returns `401 Unauthorized` with `{"error": "missing or invalid bearer token"}` and a `WWW-Authenticate: Bearer` header, and the scan never runs. The token is compared in constant time (`subtle::ConstantTimeEq`); the response never echoes the presented or expected token. The server refuses to start unauthenticated unless `RASTREO_AUTH_DISABLED=true`. Health, readiness, and metrics endpoints are never authenticated.
 
 Request body: JSON-encoded `DiscoverScenarioConfig`. Required fields: `targets`, `probers`. The optional `sink` field is ignored — the server captures records via a server-side `MemorySink` (returned in the response) AND fans them out to the server-configured sink from `RASTREO_SINK_CONFIG_PATH` (when set). The fan-out is performed by a `TeeSink` in `rastreo-core`; each record hits both destinations on the same pipeline pass, in order.
 
@@ -62,6 +67,7 @@ Response body:
 - `records`: array of `DeviceRecord` objects.
 
 Errors:
+- 401 — auth is enabled and the request carried a missing, malformed, or wrong bearer token. Returned by the `require_bearer` middleware before the handler runs.
 - 400 — bad scenario config (empty `targets` or `probers`, malformed JSON body) or unresolvable client input (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`).
 - 500 — probe / encode / sink / runtime errors. A server-configured sink that returns an error mid-scan aborts the pipeline and surfaces as 500; the response body's `records` list is not returned even if the in-memory capture succeeded.
 - 503 — request exceeded the server-side timeout (`--request-timeout-ms`), or the server-side DNS infrastructure failed (`ResolverError::DnsLookupFailed`).
@@ -89,6 +95,7 @@ Resolver cache staleness — the system resolver is constructed once at server s
 |----------------------------------|------------------------------------------------------|
 | `rastreo-core`                   | All discovery and lifecycle logic                    |
 | `axum`                           | HTTP routing and handler infrastructure              |
+| `subtle`                         | Constant-time bearer-token comparison (`ConstantTimeEq`) |
 | `tower` + `tower-http`           | `TraceLayer` request/response logging, `TimeoutLayer` per-request timeout |
 | `tokio`                          | Async runtime                                        |
 | `serde` + `serde_json`           | Request and response serialization                   |

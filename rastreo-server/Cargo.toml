@@ -49,6 +49,7 @@ serde_yaml_ng = { workspace = true, optional = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 async-trait = { workspace = true }
+subtle = "2"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 tower = "0.5"

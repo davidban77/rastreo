@@ -36,6 +36,12 @@ The most useful `values.yaml` knobs are:
 | `image.repository`               | `ghcr.io/davidban77/rastreo`  | The container image. See the caveat below.                |
 | `image.tag`                      | chart `appVersion`            | Tag to pull; empty means use `appVersion`.                |
 | `server.port`                    | `8080`                        | Port `rastreo-server` listens on inside the container.    |
+| `auth.enabled`                   | `true`                        | Require a bearer token on `POST /scans`. Fail-closed: render errors unless a token source is set. Set `false` to deploy unauthenticated. See [Authentication](#authentication). |
+| `auth.token`                     | `""`                          | Inline bearer token. The chart renders a `Secret` holding it. Prefer `auth.existingSecret` in production. See [Authentication](#authentication). |
+| `auth.existingSecret`            | `""`                          | Name of a pre-existing `Secret` holding the token. Takes precedence over `auth.token`. See [Authentication](#authentication). |
+| `auth.secretKey`                 | `api-token`                   | Key within the `Secret` that holds the token value.       |
+| `serviceAccount.create`          | `true`                        | Create a dedicated `ServiceAccount` with token automounting disabled. See [ServiceAccount](#serviceaccount). |
+| `networkPolicy.enabled`          | `false`                       | Create a `NetworkPolicy` restricting which peers reach the pod. See [NetworkPolicy](#networkpolicy). |
 | `service.type`                   | `ClusterIP`                   | `ClusterIP`, `NodePort`, or `LoadBalancer`.               |
 | `resources.requests` / `.limits` | `100m`/`128Mi` / `500m`/`256Mi` | Pod CPU and memory requests and limits.                 |
 | `autoscaling.enabled`            | `false`                       | Enable an HPA scaling between `minReplicas` and `maxReplicas`. |
@@ -68,6 +74,57 @@ config:
 ```
 
 Each key under `config` becomes a file at `/etc/rastreo/<key>`. The Deployment template adds a checksum annotation so pods restart when the ConfigMap changes.
+
+## Authentication
+
+`POST /scans` is authenticated by default — see [rastreo-server · Authentication](server.md#authentication) for the request shape and the 401 response. On Kubernetes the chart supplies the bearer token to the pod for you.
+
+The chart is fail-closed. With `auth.enabled: true` (the default), `helm template` and `helm install` error unless you supply a token source. This stops an unauthenticated scan endpoint from reaching the cluster by accident.
+
+```text
+Error: execution error at (rastreo/templates/deployment.yaml): auth.enabled is true but no token source is set: set auth.token to render a Secret, set auth.existingSecret to reference one, or set auth.enabled=false to run POST /scans unauthenticated (not recommended)
+```
+
+You have three ways to supply the token.
+
+=== "Existing Secret (production)"
+
+    Create the `Secret` with your own tooling, then point the chart at it with `auth.existingSecret`. The token never passes through Helm values or your shell history.
+
+    ```bash
+    kubectl create secret generic rastreo-api-token \
+      --from-literal=api-token="$(openssl rand -hex 32)"
+
+    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+      --set auth.existingSecret=rastreo-api-token
+    ```
+
+    `auth.existingSecret` takes precedence over `auth.token`. The default key inside the `Secret` is `api-token`; set `auth.secretKey` if your `Secret` uses a different key.
+
+=== "Inline token"
+
+    Pass the token to the chart with `auth.token` and it renders a `Secret` for you. This is the simplest path for a lab, but the token is stored in your release values, so avoid it in production.
+
+    ```bash
+    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+      --set auth.token="$(openssl rand -hex 32)"
+    ```
+
+=== "Unauthenticated (not recommended)"
+
+    Deploy with no authentication. The pod starts with `RASTREO_AUTH_DISABLED=true` and logs a WARNING that the endpoint is open. Only do this on a trusted, isolated network.
+
+    ```bash
+    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+      --set auth.enabled=false
+    ```
+
+!!! note "Read the token back for a client request"
+    Fetch the stored token to build an authenticated call:
+
+    ```bash
+    kubectl get secret rastreo-api-token -o jsonpath='{.data.api-token}' | base64 -d
+    ```
 
 ## Image source
 
@@ -125,6 +182,57 @@ The chart's `podSecurityContext` and container `securityContext` are restrictive
 - Seccomp: `seccompProfile.type: RuntimeDefault`.
 
 These line up with Pod Security Standards `restricted` out of the box. Most clusters do not need to override them.
+
+## ServiceAccount
+
+The chart creates a dedicated `ServiceAccount` for the pod with token automounting turned off. `rastreo-server` never calls the Kubernetes API, so the pod carries no mounted API token.
+
+- `serviceAccount.create` (default `true`) — create the `ServiceAccount`. Set `false` to use one you already manage.
+- `serviceAccount.name` — the name to use. Empty derives it from the release name.
+- `serviceAccount.annotations` — annotations to add, for example an IAM role binding.
+
+The rendered `ServiceAccount` sets `automountServiceAccountToken: false`.
+
+## NetworkPolicy
+
+The chart can render a `NetworkPolicy` that limits which peers reach the pod. It is off by default because a correct policy depends on your cluster topology. With no configured sources on an enforcing CNI, the policy would deny all access.
+
+Enable it and list the peers allowed to reach each port:
+
+- `networkPolicy.enabled` — set to `true` to create the policy.
+- `networkPolicy.ingress` — peers allowed to reach the API port, which serves `POST /scans` and the rest of the HTTP API.
+- `networkPolicy.monitoring` — peers allowed to scrape `/metrics`, such as your monitoring namespace.
+
+Each entry under `ingress` and `monitoring` is a standard `NetworkPolicyPeer`: a `namespaceSelector`, a `podSelector`, or both.
+
+```yaml
+networkPolicy:
+  enabled: true
+  ingress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: automation
+  monitoring:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+```
+
+!!! warning "Health probes need node traffic, not a selector"
+    Kubernetes liveness and readiness probes come from the kubelet on the node, not from a pod or namespace. A `namespaceSelector` or `podSelector` peer does NOT admit them. On a CNI that enforces host traffic, add the node or pod CIDR as an `ipBlock` peer. Otherwise the health probes fail and the pod restarts in a loop.
+
+    `networkPolicy.monitoring` admits metrics scraping only. It does not admit the health probes.
+
+    ```yaml
+    networkPolicy:
+      enabled: true
+      ingress:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: automation
+        - ipBlock:
+            cidr: 10.244.0.0/16   # your node or pod CIDR — where health probes originate
+    ```
 
 ## Structured logging
 

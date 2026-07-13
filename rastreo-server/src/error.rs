@@ -21,6 +21,10 @@ impl AppError {
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, message)
+    }
 }
 
 #[derive(Serialize)]
@@ -175,6 +179,13 @@ mod tests {
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("max_concurrent"));
         assert!(err.message.contains("must be positive"));
+    }
+
+    #[test]
+    fn unauthorized_maps_to_401() {
+        let err = AppError::unauthorized("missing or invalid bearer token");
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.message, "missing or invalid bearer token");
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use clap::Parser;
 use rastreo_core::{HickoryResolver, Resolver};
 use rastreo_server::{
     build_app_with_timeout, spawn_sink_probe,
-    state::{AppState, MetricsConfig, OtlpConfig, ReadinessConfig, SinkProbeConfig},
+    state::{AppState, AuthConfig, MetricsConfig, OtlpConfig, ReadinessConfig, SinkProbeConfig},
 };
 use tokio::sync::watch;
 
@@ -62,8 +62,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(HickoryResolver::from_system().context("failed to initialize system resolver")?);
     let readiness = ReadinessConfig::from_env().context("failed to load readiness config")?;
     let metrics_config = MetricsConfig::from_env().context("failed to load metrics config")?;
+    let auth = AuthConfig::from_env().context("failed to load auth config")?;
     let sink_probe = SinkProbeConfig::from_env().context("failed to load sink-probe config")?;
-    let state = AppState::with_config(resolver, readiness, metrics_config);
+    let state = AppState::with_config(resolver, readiness, metrics_config).with_auth(auth);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (state, probe_handle) = spawn_sink_probe(state, &sink_probe, shutdown_rx.clone()).await;

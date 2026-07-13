@@ -29,11 +29,72 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 | `--port`                | `RASTREO_SERVER_PORT`                  | `8080`  | TCP port to bind.                                      |
 | `--bind`                | `RASTREO_SERVER_BIND`                  | `0.0.0.0` | Bind address.                                        |
 | `--request-timeout-ms`  | `RASTREO_SERVER_REQUEST_TIMEOUT_MS`    | `60000` | Per-request timeout in milliseconds. Minimum 1.        |
+| —                       | `RASTREO_API_TOKEN`                    | unset   | Shared secret for `POST /scans` bearer auth. When set, every request to `POST /scans` must send `Authorization: Bearer <token>`. See [Authentication](#authentication). |
+| —                       | `RASTREO_AUTH_DISABLED`                | unset   | Set to `true` to run `POST /scans` with no authentication. The server refuses to start unless this or `RASTREO_API_TOKEN` is set. See [Authentication](#authentication). |
 | —                       | `RASTREO_SINK_CONFIG_PATH`             | unset   | Path to a YAML file with a `SinkConfig`. When set, the server builds the sink at startup and probes it every `RASTREO_SINK_PROBE_INTERVAL_SECS`. Sink construction failure is non-fatal — the pod stays up, `/readyz` reports `sink_unreachable`. |
 | —                       | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`    | Sink reachability probe cadence in seconds. Minimum 1. |
 | —                       | `RASTREO_SINK_PROBE_TIMEOUT_SECS`      | `5`     | Per-probe timeout in seconds. Probes exceeding this count as failures. Minimum 1. |
 
 The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
+
+## Authentication
+
+`POST /scans` triggers active network probes, so it is authenticated by default with a bearer token. The health, readiness, and metrics endpoints are never authenticated, so Kubernetes probes and Prometheus scraping keep working with no credential.
+
+Two environment variables control authentication:
+
+- `RASTREO_API_TOKEN` — the shared secret. When set, every `POST /scans` request must carry `Authorization: Bearer <token>`.
+- `RASTREO_AUTH_DISABLED` — set to `true` to run `POST /scans` with no authentication. Use this only on a trusted, isolated network.
+
+### Secure by default
+
+The server refuses to start unless one of those two variables is set. This stops a scan endpoint from being exposed with no credential by accident. With neither set, startup fails with:
+
+```text
+RASTREO_API_TOKEN is not set: set it to a shared secret to authenticate POST /scans, or set RASTREO_AUTH_DISABLED=true to run the scan endpoint unauthenticated (not recommended)
+```
+
+!!! warning "Running without authentication"
+    With `RASTREO_AUTH_DISABLED=true` the server starts and logs a prominent WARNING. Any caller that can reach `POST /scans` can trigger active network probes. Only disable authentication where every client is already trusted.
+
+    ```text
+    WARN rastreo_server::state: RASTREO_AUTH_DISABLED=true: the POST /scans endpoint is UNAUTHENTICATED — any caller that can reach it can trigger active network probes
+    ```
+
+### Send an authenticated request
+
+Set the token, then send it in the `Authorization` header:
+
+```bash
+export RASTREO_API_TOKEN='a-long-random-secret'
+rastreo-server &
+
+curl -H "Authorization: Bearer $RASTREO_API_TOKEN" \
+  -X POST http://localhost:8080/scans \
+  -H 'content-type: application/json' \
+  -d '{
+    "targets": [{"Ip": "10.50.0.10"}],
+    "probers": [{"type": "tcp_connect", "ports": [80]}]
+  }'
+```
+
+You can also read the body from a file with `-d @scenario.json`.
+
+### 401 response
+
+A missing, malformed, or wrong token returns `401 Unauthorized` with a `WWW-Authenticate: Bearer` response header:
+
+```text
+HTTP/1.1 401 Unauthorized
+content-type: application/json
+www-authenticate: Bearer
+
+{"error":"missing or invalid bearer token"}
+```
+
+The response is the same whether the token is missing or wrong. It never reveals which, and it never echoes the token you sent.
+
+On Kubernetes the Helm chart supplies the token from a Secret. See [Authentication on Kubernetes](kubernetes.md#authentication) for the chart values.
 
 ## Graceful shutdown
 
@@ -123,10 +184,13 @@ All counters are monotonic across the server process's lifetime and reset only o
 
 `POST /scans` submits a discovery scenario, runs it synchronously, and returns the summary and records in the response body. The request body is a `DiscoverScenarioConfig` JSON object. The required fields are `targets` (a non-empty list of targets) and `probers` (a non-empty list of prober configurations). Optional fields on the embedded `base` include `max_concurrent`, `probe_rate`, `timeout_ms`, `fuser`, and `name`. The `encoder` and `sink` fields are accepted but ignored — the server forces NDJSON encoding and captures records in memory so it can return them in the response.
 
+When authentication is enabled (the default), the request must carry a bearer token or it returns `401`. See [Authentication](#authentication) for the header shape and the 401 response.
+
 When `RASTREO_SINK_CONFIG_PATH` is set, each record is fanned out to both the in-memory capture and the server-configured sink on the same pipeline pass. The response body remains identical to the unconfigured case; the server-configured sink additionally receives every record. A write error from the server-configured sink aborts the scan and returns 500 — the response body's `records` list is not returned even if the in-memory capture succeeded. When `RASTREO_SINK_CONFIG_PATH` is unset, the response body is the only destination and behavior is identical to earlier releases.
 
 ```bash
 curl -sS -X POST http://localhost:8080/scans \
+  -H "Authorization: Bearer $RASTREO_API_TOKEN" \
   -H 'content-type: application/json' \
   -d '{
     "targets": [{"Ip": "10.50.0.10"}],
@@ -224,6 +288,7 @@ Error surfaces:
 
 | Status | When                                                                                                         |
 |--------|--------------------------------------------------------------------------------------------------------------|
+| `401`  | Authentication is enabled and the request carried a missing, malformed, or wrong bearer token. Checked before the scan runs. See [Authentication](#authentication). |
 | `400`  | `scenario.targets` empty, `scenario.probers` empty, malformed JSON body, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). |
 | `500`  | Internal probe / encoder / sink / runtime error. The response body carries `{"error":"internal server error"}` — full detail is logged for operators, not returned to the client. |
 | `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`) or the request exceeded `--request-timeout-ms`. |
