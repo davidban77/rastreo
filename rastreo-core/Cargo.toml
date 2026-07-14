@@ -38,7 +38,7 @@ icmp = ["dep:socket2", "dep:pnet_packet"]
 tls = ["dep:rustls", "dep:rustls-pki-types", "dep:tokio-rustls", "dep:x509-parser"]
 
 [dependencies]
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_yaml_ng = { workspace = true, optional = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

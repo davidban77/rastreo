@@ -11,7 +11,8 @@ use crate::encoder::{create_encoder, EncoderConfig};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::fuser::{create_fuser, FuserConfig};
 use crate::model::{
-    ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ScanMetadata, Target, PROBE_KIND_COUNT,
+    DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ScanMetadata, Target,
+    PROBE_KIND_COUNT,
 };
 use crate::prober::create_prober;
 use crate::resolver::{HickoryResolver, Resolver};
@@ -138,7 +139,7 @@ pub async fn run_discovery_with_components_cancellable(
     }
 
     let start = Instant::now();
-    let scan_metadata = ScanMetadata::new(scenario);
+    let scan_metadata = Arc::new(ScanMetadata::new(scenario));
 
     let resolved = resolver.resolve_many(&scenario.targets).await?;
     let targets_resolved = resolved.len();
@@ -233,7 +234,7 @@ pub async fn run_discovery_with_components_cancellable(
     let mut records = fuser.fuse_many(all_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
-        record.scan_metadata = scan_metadata.clone();
+        stamp_scan_metadata(record, &scan_metadata);
     }
 
     let mut buf: Vec<u8> = Vec::new();
@@ -285,6 +286,10 @@ pub async fn run_discovery_with_components_cancellable(
         first_probe_error,
         elapsed: start.elapsed(),
     })
+}
+
+fn stamp_scan_metadata(record: &mut DeviceRecord, scan_metadata: &Arc<ScanMetadata>) {
+    record.scan_metadata = Arc::clone(scan_metadata);
 }
 
 fn build_probes_by_kind(
@@ -1553,6 +1558,46 @@ mod tests {
             assert_eq!(r.schema_version, crate::model::CURRENT_SCHEMA_VERSION);
             assert_eq!(r.schema_id, crate::model::CURRENT_SCHEMA_ID);
         }
+    }
+
+    #[test]
+    fn stamp_scan_metadata_shares_one_arc_across_records() {
+        fn stub() -> DeviceRecord {
+            DeviceRecord {
+                identity_key: crate::model::IdentityKey::new("id").expect("identity"),
+                mgmt_ip: None,
+                mac: None,
+                manufacturer: None,
+                platform: None,
+                os_version: None,
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+                role: None,
+                confidence: crate::model::Confidence::new(0.0).expect("confidence"),
+                last_seen: std::time::SystemTime::UNIX_EPOCH,
+                signals: Vec::new(),
+                probe_kinds: Vec::new(),
+                schema_version: crate::model::CURRENT_SCHEMA_VERSION.to_string(),
+                schema_id: crate::model::CURRENT_SCHEMA_ID.to_string(),
+                alt_ips: Vec::new(),
+                possible_alias_of: None,
+                scan_metadata: Arc::new(ScanMetadata::default()),
+            }
+        }
+
+        let scan_metadata = Arc::new(ScanMetadata::new(&scenario_with_probers(vec![
+            ProberConfig::TcpConnect { ports: vec![22] },
+        ])));
+        let mut first = stub();
+        let mut second = stub();
+        stamp_scan_metadata(&mut first, &scan_metadata);
+        stamp_scan_metadata(&mut second, &scan_metadata);
+
+        assert!(
+            Arc::ptr_eq(&first.scan_metadata, &second.scan_metadata),
+            "every record from one scan must share ONE Arc<ScanMetadata>, not a per-record clone"
+        );
     }
 
     #[tokio::test]
