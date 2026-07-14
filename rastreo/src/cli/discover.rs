@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::net::IpAddr;
 #[cfg(feature = "config")]
 use std::path::Path;
@@ -17,7 +16,8 @@ use rastreo_core::KafkaFlushMode;
 use rastreo_core::Resolver;
 use rastreo_core::{
     hint_for_error_kind, resolve_scenario_targets, run_discovery_cancellable, ConfigError,
-    HickoryResolver, ProberConfig, ResolvedScenarioTarget, SinkConfig, Target,
+    DiscoveryPlan, HickoryResolver, PlanKnobs, ProberConfig, ResolvedScenarioTarget, SinkConfig,
+    Target,
 };
 use tokio::sync::watch;
 
@@ -136,8 +136,6 @@ pub async fn run(args: DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()
     run_legacy(&args, cancel).await
 }
 
-const DRY_RUN_CIDR_LIST_CUTOFF: usize = 6;
-
 async fn run_dry_run(args: &DiscoverArgs) -> Result<()> {
     let resolver = HickoryResolver::from_system()?;
 
@@ -229,6 +227,21 @@ fn write_dry_run_header(out: &mut String, scenario_count: usize) {
     writeln!(out, "[dry-run] would run {scenario_count} {noun}").expect("write to String");
 }
 
+fn effective_knobs(scenario: &DiscoverScenarioConfig, args: &DiscoverArgs) -> PlanKnobs {
+    PlanKnobs {
+        max_concurrent: scenario
+            .base
+            .max_concurrent
+            .unwrap_or_else(|| args.concurrency.unwrap_or(DEFAULT_CONCURRENCY)),
+        probe_rate: scenario.base.probe_rate.or(args.rate),
+        retries: scenario.base.retries.or(args.retries).unwrap_or(0),
+        timeout_ms: scenario
+            .base
+            .timeout_ms
+            .unwrap_or_else(|| args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
+    }
+}
+
 fn write_scenario_plan(
     out: &mut String,
     label: &str,
@@ -237,50 +250,14 @@ fn write_scenario_plan(
     args: &DiscoverArgs,
 ) -> usize {
     use std::fmt::Write as _;
-
-    writeln!(out, "  scenario: {label}").expect("write to String");
-
-    writeln!(out, "    targets:").expect("write to String");
-    let mut unique_ips: HashSet<IpAddr> = HashSet::new();
-    for entry in resolutions {
-        let head = target_display(&entry.target);
-        match &entry.result {
-            Ok(ips) => {
-                unique_ips.extend(ips.iter().copied());
-                writeln!(out, "      {head} → {}", format_ip_list(ips)).expect("write to String");
-            }
-            Err(err) => {
-                writeln!(out, "      {head} → <error: {err}>").expect("write to String");
-            }
-        }
-    }
-
-    writeln!(out, "    probers: {}", format_probers(&scenario.probers)).expect("write to String");
-    writeln!(
-        out,
-        "    sink: {}",
-        format_sink(scenario.base.sink.as_ref())
-    )
-    .expect("write to String");
-
-    let concurrency = scenario
-        .base
-        .max_concurrent
-        .unwrap_or_else(|| args.concurrency.unwrap_or(DEFAULT_CONCURRENCY));
-    let timeout_ms = scenario
-        .base
-        .timeout_ms
-        .unwrap_or_else(|| args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    writeln!(out, "    concurrency: {concurrency}").expect("write to String");
-    match scenario.base.probe_rate.or(args.rate) {
-        Some(r) => writeln!(out, "    rate: {r}/sec").expect("write to String"),
-        None => writeln!(out, "    rate: unlimited").expect("write to String"),
-    }
-    let retries = scenario.base.retries.or(args.retries).unwrap_or(0);
-    writeln!(out, "    retries: {retries}").expect("write to String");
-    writeln!(out, "    timeout_ms: {timeout_ms}").expect("write to String");
-
-    unique_ips.len().saturating_mul(scenario.probers.len())
+    let plan = DiscoveryPlan::new(
+        label.to_string(),
+        scenario,
+        resolutions,
+        effective_knobs(scenario, args),
+    );
+    write!(out, "{plan}").expect("write to String");
+    plan.total_probes
 }
 
 fn write_totals(out: &mut String, _scenario_count: usize, total_probes: usize) {
@@ -305,139 +282,6 @@ fn dry_run_exit_status(all: &[Vec<ResolvedScenarioTarget>]) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn target_display(target: &Target) -> String {
-    match target {
-        Target::Ip(ip) => ip.to_string(),
-        Target::Cidr(net) => net.to_string(),
-        Target::Range { start, end } => format!("{start}-{end}"),
-        Target::DnsName(name) => name.clone(),
-        #[allow(unreachable_patterns)]
-        _ => "<unknown target>".to_string(),
-    }
-}
-
-fn format_ip_list(ips: &[IpAddr]) -> String {
-    if ips.len() <= DRY_RUN_CIDR_LIST_CUTOFF {
-        let mut buf = String::new();
-        for (i, ip) in ips.iter().enumerate() {
-            if i > 0 {
-                buf.push_str(", ");
-            }
-            buf.push_str(&ip.to_string());
-        }
-        return buf;
-    }
-    let mut buf = String::new();
-    for ip in ips.iter().take(3) {
-        if !buf.is_empty() {
-            buf.push_str(", ");
-        }
-        buf.push_str(&ip.to_string());
-    }
-    let plural = if ips.len() == 1 {
-        "address"
-    } else {
-        "addresses"
-    };
-    let count = ips.len();
-    format!("{buf}, ... ({count} {plural})")
-}
-
-fn format_probers(probers: &[ProberConfig]) -> String {
-    if probers.is_empty() {
-        return "<none>".to_string();
-    }
-    let mut parts = Vec::with_capacity(probers.len());
-    for p in probers {
-        parts.push(describe_prober(p));
-    }
-    parts.join(", ")
-}
-
-fn describe_prober(p: &ProberConfig) -> String {
-    match p {
-        ProberConfig::TcpConnect { ports } => {
-            format!("tcp_connect (ports {})", format_ports(ports))
-        }
-        #[cfg(feature = "http")]
-        ProberConfig::Http { ports, .. } => format!("http (ports {})", format_ports(ports)),
-        ProberConfig::Dns {
-            ports, query_names, ..
-        } => format!(
-            "dns (ports {}, queries {})",
-            format_ports(ports),
-            query_names.join(", ")
-        ),
-        ProberConfig::Udp { ports, protocol } => format!(
-            "udp (ports {}, protocol {:?})",
-            format_ports(ports),
-            protocol
-        ),
-        #[cfg(feature = "snmp")]
-        ProberConfig::Snmp { ports, version, .. } => {
-            format!("snmp (ports {}, {:?})", format_ports(ports), version)
-        }
-        #[cfg(feature = "arp")]
-        ProberConfig::Arp { interface } => format!("arp (interface {interface:?})"),
-        #[cfg(feature = "ndp")]
-        ProberConfig::Ndp { interface } => format!("ndp (interface {interface:?})"),
-        #[cfg(feature = "ssh")]
-        ProberConfig::Ssh { ports } => format!("ssh (ports {})", format_ports(ports)),
-        #[cfg(feature = "icmp")]
-        ProberConfig::Icmp { count, interval_ms } => {
-            format!("icmp (count {count}, interval_ms {interval_ms})")
-        }
-        #[cfg(feature = "tls")]
-        ProberConfig::Tls { ports } => format!("tls (ports {})", format_ports(ports)),
-        ProberConfig::ReverseDns { resolvers } => {
-            if resolvers.is_empty() {
-                "reverse_dns (system resolvers)".to_string()
-            } else {
-                let list: Vec<String> = resolvers.iter().map(|r| r.to_string()).collect();
-                format!("reverse_dns (resolvers {})", list.join(", "))
-            }
-        }
-        #[allow(unreachable_patterns)]
-        _ => "<unknown prober>".to_string(),
-    }
-}
-
-fn format_ports(ports: &[u16]) -> String {
-    let mut buf = String::new();
-    for (i, p) in ports.iter().enumerate() {
-        if i > 0 {
-            buf.push_str(", ");
-        }
-        buf.push_str(&p.to_string());
-    }
-    buf
-}
-
-fn format_sink(sink: Option<&SinkConfig>) -> String {
-    match sink {
-        None => "stdout (default)".to_string(),
-        Some(SinkConfig::Stdout) => "stdout".to_string(),
-        Some(SinkConfig::File { path }) => format!("file: {}", path.display()),
-        Some(SinkConfig::Memory) => "memory".to_string(),
-        #[cfg(feature = "kafka")]
-        Some(SinkConfig::Kafka { brokers, topic, .. }) => {
-            format!("kafka: brokers={} topic={topic}", brokers.join(","))
-        }
-        #[cfg(feature = "nats")]
-        Some(SinkConfig::Nats {
-            servers,
-            subject,
-            stream,
-            ..
-        }) => format!(
-            "nats: servers={} subject={subject} stream={stream}",
-            servers.join(",")
-        ),
-        #[allow(unreachable_patterns)]
-        Some(_) => "<unknown sink>".to_string(),
-    }
 }
 
 async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
@@ -1561,98 +1405,6 @@ mod tests {
             DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1", "--port", "22"])
                 .expect("parses");
         assert!(!parsed.dry_run);
-    }
-
-    #[test]
-    fn format_ip_list_under_cutoff_prints_all_addresses() {
-        let ips: Vec<IpAddr> = (1..=DRY_RUN_CIDR_LIST_CUTOFF)
-            .map(|i| IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8)))
-            .collect();
-        let out = format_ip_list(&ips);
-        assert!(!out.contains("..."), "no ellipsis at cutoff: {out}");
-        assert!(out.contains("10.0.0.1"));
-        assert!(out.contains("10.0.0.6"));
-    }
-
-    #[test]
-    fn format_ip_list_over_cutoff_uses_ellipsis_and_count() {
-        let ips: Vec<IpAddr> = (1..=8)
-            .map(|i| IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)))
-            .collect();
-        let out = format_ip_list(&ips);
-        assert!(
-            out.starts_with("10.0.0.1, 10.0.0.2, 10.0.0.3, ..."),
-            "got: {out}"
-        );
-        assert!(out.ends_with("(8 addresses)"), "got: {out}");
-    }
-
-    #[test]
-    fn format_ip_list_single_entry_uses_singular_noun_when_over_cutoff() {
-        // Guardrail: single-entry never hits the ellipsis branch (1 <= cutoff),
-        // but this pins the singular formatting for readers.
-        let ips = vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))];
-        assert_eq!(format_ip_list(&ips), "10.0.0.1");
-    }
-
-    #[test]
-    fn format_sink_stdout_prints_stdout() {
-        assert_eq!(format_sink(Some(&SinkConfig::Stdout)), "stdout");
-    }
-
-    #[test]
-    fn format_sink_file_prints_path() {
-        let sink = SinkConfig::File {
-            path: PathBuf::from("/tmp/x.ndjson"),
-        };
-        assert_eq!(format_sink(Some(&sink)), "file: /tmp/x.ndjson");
-    }
-
-    #[cfg(feature = "kafka")]
-    #[test]
-    fn format_sink_kafka_shows_brokers_and_topic_without_instantiating() {
-        let sink = SinkConfig::Kafka {
-            brokers: vec!["127.0.0.1:1".into(), "127.0.0.1:2".into()],
-            topic: "rastreo.devices".into(),
-            flush_mode: KafkaFlushMode::default(),
-            dead_letter: None,
-        };
-        let s = format_sink(Some(&sink));
-        assert!(s.contains("kafka:"), "{s}");
-        assert!(s.contains("brokers=127.0.0.1:1,127.0.0.1:2"), "{s}");
-        assert!(s.contains("topic=rastreo.devices"), "{s}");
-    }
-
-    #[test]
-    fn format_probers_lists_kind_and_ports() {
-        let probers = vec![ProberConfig::TcpConnect {
-            ports: vec![22, 80, 443],
-        }];
-        let out = format_probers(&probers);
-        assert_eq!(out, "tcp_connect (ports 22, 80, 443)");
-    }
-
-    #[test]
-    fn target_display_uses_natural_form_per_variant() {
-        assert_eq!(
-            target_display(&Target::Ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))),
-            "10.0.0.1"
-        );
-        assert_eq!(
-            target_display(&Target::Cidr("10.0.0.0/24".parse().expect("cidr"))),
-            "10.0.0.0/24"
-        );
-        assert_eq!(
-            target_display(&Target::DnsName("example.com".into())),
-            "example.com"
-        );
-        assert_eq!(
-            target_display(&Target::Range {
-                start: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                end: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
-            }),
-            "10.0.0.1-10.0.0.5"
-        );
     }
 
     #[tokio::test]
