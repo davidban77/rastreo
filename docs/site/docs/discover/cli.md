@@ -112,6 +112,7 @@ Each scenario prints its own status line to stderr. If ANY single scenario fails
 | `--retries <N>` | `0` (flag-driven) / YAML `retries` (YAML-driven) | Retransmit attempts for the connectionless probers (UDP, SNMP, DNS, reverse DNS). Range 0–1024; `0` is single-shot. In YAML-driven mode, setting `--retries` overrides the scenario's `retries`. See [Retries on lossy links](#retries-on-lossy-links). |
 | `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
 | `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
+| `--dry-run-format <text\|json>` | `text` | Output format for `--dry-run`. `text` is the human-readable plan. `json` emits a machine-readable JSON array of plan objects, one per scenario, ready to pipe to `jq`. Only meaningful with `--dry-run`. See [Machine-readable output](#machine-readable-output) below. |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
 | `-q`, `--quiet` | — | Drop the log level to `error`. Mutually exclusive in spirit with `-v`. |
 
@@ -234,6 +235,51 @@ rastreo discover --target 10.0.0.0/24 --port 22,80 --dry-run
     timeout_ms: 1000
 total probes: 254
 ```
+
+### Machine-readable output
+
+`--dry-run-format` chooses how the plan is printed. The default `text` is the human-readable plan shown above, unchanged. Set `json` to emit a plan you can pipe to `jq` or store as an artifact. Like the text plan, `json` resolves targets only — it never probes a host or opens a sink.
+
+```bash
+rastreo discover --file @lab --dry-run --dry-run-format json
+```
+
+The output is a JSON array with one object per scenario. Each object carries these fields:
+
+- `scenario` — the scenario name. This is the plain name, the same value the HTTP server reports for a dry-run scan.
+- `targets` — one entry per configured target. Each has the original `target` string and a `resolution` that is either `{"resolved": [ip, ...]}` or `{"error": "..."}`.
+- `probers` — the probers that would run, with their ports.
+- `sink` — the destination.
+- `max_concurrent` — probes allowed in flight at once.
+- `probe_rate` — probes started per second, or `null` when no pacing is set.
+- `retries` — retransmit attempts for the connectionless probers.
+- `timeout_ms` — per-probe timeout in milliseconds.
+- `total_probes` — unique IPs × probers, deduplicated across overlapping targets.
+
+```json
+[
+  {
+    "scenario": "lab",
+    "targets": [
+      {
+        "target": "10.0.0.0/30",
+        "resolution": {
+          "resolved": ["10.0.0.1", "10.0.0.2"]
+        }
+      }
+    ],
+    "probers": ["tcp_connect (ports 22)"],
+    "sink": "stdout",
+    "max_concurrent": 64,
+    "probe_rate": null,
+    "retries": 0,
+    "timeout_ms": 1000,
+    "total_probes": 2
+  }
+]
+```
+
+A `--file` with several scenarios produces one array element per scenario, in file order. When a target fails to resolve, its `resolution` holds the error string and the plan still lists the remaining targets. The exit code follows the same rule as the text plan: `0` when at least one target resolves, `1` only when every target fails.
 
 ## Override precedence in YAML-driven mode
 

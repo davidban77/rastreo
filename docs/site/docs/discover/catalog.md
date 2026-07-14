@@ -74,6 +74,28 @@ When `RASTREO_CATALOG_DIR` is set, the user and system directories are **not** c
 
 The separator is `:` (Unix `PATH` convention); rastreo ships musl Linux and macOS binaries only, so Windows-style `;` is not supported.
 
+## Listing catalog scenarios
+
+`rastreo catalog list` prints every `@name` you can pass to `--file`, one per line, next to the exact file a run would load. Use it to see what names are available before you type one. It also confirms which file a name resolves to when several directories hold scenarios.
+
+```bash
+rastreo catalog list
+```
+
+```text
+@datacenter-hosts  ->  /home/dave/.config/rastreo/catalog/datacenter-hosts.yml
+@lab               ->  /opt/team-scans/lab.yml
+@office-network    ->  /home/dave/.config/rastreo/catalog/office-network.yml
+```
+
+The command searches the same directories in the same order as an `@name` reference — see [Search order](#search-order) above. Names are deduplicated and sorted. When one name exists in more than one directory, the listed path is the file a run would pick: first directory wins, `.yml` before `.yaml`.
+
+When the search path holds no scenarios (every directory is missing or empty), the command prints a note to stderr and exits `0`. An empty catalog is not an error:
+
+```text
+no catalog scenarios found (searched: /home/dave/.config/rastreo/catalog, /etc/rastreo/catalog)
+```
+
 ## Restrictions
 
 - **No path separators** in the name. `@subdir/foo` and `@..\/foo` are rejected. Files must live directly inside a catalog directory; no subdirectory navigation.

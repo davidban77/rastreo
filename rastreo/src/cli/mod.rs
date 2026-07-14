@@ -45,14 +45,37 @@ pub struct Cli {
     pub log_format: LogFormat,
 }
 
+// One Command per process from argv; clap cannot derive Args on a boxed variant, so the size gap is harmless.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Probe one or more targets and emit DeviceRecord events.
     Discover(DiscoverArgs),
+    /// Inspect the scenario catalog.
+    #[cfg(feature = "config")]
+    Catalog(CatalogArgs),
+}
+
+#[cfg(feature = "config")]
+#[derive(clap::Args, Debug)]
+pub struct CatalogArgs {
+    #[command(subcommand)]
+    pub action: CatalogAction,
+}
+
+#[cfg(feature = "config")]
+#[derive(Subcommand, Debug)]
+pub enum CatalogAction {
+    /// List every catalog scenario (@name) with its resolved path.
+    List,
 }
 
 pub async fn run(cli: Cli, cancel: tokio::sync::watch::Receiver<bool>) -> Result<()> {
     match cli.command {
         Command::Discover(args) => discover::run(args, cancel).await,
+        #[cfg(feature = "config")]
+        Command::Catalog(args) => match args.action {
+            CatalogAction::List => catalog::run_list(),
+        },
     }
 }

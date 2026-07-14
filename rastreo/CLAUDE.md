@@ -27,13 +27,18 @@ src/
 
 ## CLI Surface
 
-| Subcommand | Purpose                                                            |
-|------------|--------------------------------------------------------------------|
-| `discover` | Probe one or more targets and emit DeviceRecord events to a sink   |
+| Subcommand      | Purpose                                                            |
+|-----------------|--------------------------------------------------------------------|
+| `discover`      | Probe one or more targets and emit DeviceRecord events to a sink   |
+| `catalog list`  | List every `@name` catalog scenario with its resolved path (feature = "config") |
 
 ### `rastreo discover`
 
-Flags: `--target` (repeatable; IP / CIDR / range / DNS), `--port` (repeatable or comma-separated), `--file` / `-f` (YAML scenario file path or `@name` catalog reference; mutually exclusive with `--target` / `--port`), `--sink` (`stdout` | `file` | `kafka` with `--features kafka` | `nats` with `--features nats`), `--output` (file sink path), `--brokers` and `--topic` (kafka sink), `--concurrency` (default 64), `--timeout-ms` (default 1000), `--dry-run` (resolve targets and print the plan; no probes, no sink IO), the global `-v` / `-q` verbosity flags, and the global `--log-format` flag (`text` or `json`, env var `RASTREO_LOG_FORMAT`, default `text`).
+Flags: `--target` (repeatable; IP / CIDR / range / DNS), `--port` (repeatable or comma-separated), `--file` / `-f` (YAML scenario file path or `@name` catalog reference; mutually exclusive with `--target` / `--port`), `--sink` (`stdout` | `file` | `kafka` with `--features kafka` | `nats` with `--features nats`), `--output` (file sink path), `--brokers` and `--topic` (kafka sink), `--concurrency` (default 64), `--timeout-ms` (default 1000), `--dry-run` (resolve targets and print the plan; no probes, no sink IO), `--dry-run-format` (`text` default or `json`; only meaningful with `--dry-run` — `json` emits an array of `DiscoveryPlan` objects, one per scenario), the global `-v` / `-q` verbosity flags, and the global `--log-format` flag (`text` or `json`, env var `RASTREO_LOG_FORMAT`, default `text`).
+
+### `rastreo catalog list`
+
+Lists every catalog scenario reachable via `@name` across the search path (`RASTREO_CATALOG_DIR` colon-separated, else `$XDG_CONFIG_HOME/rastreo/catalog/` — fallback `$HOME/.config/rastreo/catalog/` — then `/etc/rastreo/catalog/`), one `@name` per line with the exact path a run would load. Names are deduped and sorted; the resolved path follows the same precedence as an `@name` reference (first directory wins, `.yml` before `.yaml`). An empty search path prints a `no catalog scenarios found (searched: ...)` line to stderr and exits 0. Gated behind the `config` feature.
 
 Two modes:
 
