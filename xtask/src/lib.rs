@@ -27,6 +27,7 @@ pub fn generate_all() -> Result<()> {
         ("device-record-v1.json", device_record_schema()?),
         ("scan-metadata-v1.json", scan_metadata_schema()?),
         ("scenario-v1.json", scenario_file_schema()?),
+        ("discovery-plan-v1.json", discovery_plan_schema()?),
     ] {
         write_schema(&schemas_dir, name, &content)?;
         write_schema(&docs_schemas_dir, name, &content)?;
@@ -60,6 +61,11 @@ pub fn render_all() -> Result<()> {
         &docs_dir.join("scenario-config.md"),
         "rastreo-core/src/config/mod.rs",
     )?;
+    render_schema_file(
+        &schemas_dir.join("discovery-plan-v1.json"),
+        &docs_dir.join("discovery-plan.md"),
+        "rastreo-core/src/plan.rs",
+    )?;
     Ok(())
 }
 
@@ -84,6 +90,14 @@ pub fn scenario_file_schema() -> Result<String> {
         schema_for!(rastreo_core::config::ScenarioFile),
         "scenario-v1.json",
         "ScenarioFile",
+    )
+}
+
+pub fn discovery_plan_schema() -> Result<String> {
+    render_schema_json(
+        schema_for!(rastreo_core::DiscoveryPlan),
+        "discovery-plan-v1.json",
+        "DiscoveryPlan",
     )
 }
 
@@ -430,6 +444,11 @@ mod tests {
         serde_json::from_str(&raw).expect("parse scenario schema")
     }
 
+    fn discovery_plan_schema_value() -> Value {
+        let raw = discovery_plan_schema().expect("discovery-plan schema");
+        serde_json::from_str(&raw).expect("parse discovery-plan schema")
+    }
+
     #[test]
     fn regenerate_schemas_is_idempotent() {
         let a = device_record_schema().expect("first gen");
@@ -561,6 +580,51 @@ mod tests {
     fn scan_metadata_schema_names_current_type() {
         let json = scan_metadata_schema().expect("gen");
         assert!(json.contains("\"title\": \"ScanMetadata\""));
+    }
+
+    #[test]
+    fn discovery_plan_schema_generation_is_idempotent() {
+        let a = discovery_plan_schema().expect("first gen");
+        let b = discovery_plan_schema().expect("second gen");
+        assert_eq!(a.as_bytes(), b.as_bytes());
+    }
+
+    #[test]
+    fn discovery_plan_schema_names_current_type() {
+        let json = discovery_plan_schema().expect("gen");
+        assert!(json.contains("\"title\": \"DiscoveryPlan\""));
+    }
+
+    #[test]
+    fn discovery_plan_schema_id_matches_served_url() {
+        let value = discovery_plan_schema_value();
+        assert_eq!(
+            value["$id"].as_str(),
+            Some(format!("{SCHEMA_BASE_URL}/discovery-plan-v1.json").as_str())
+        );
+    }
+
+    #[test]
+    fn discovery_plan_schema_expresses_target_resolution_as_one_of() {
+        let value = discovery_plan_schema_value();
+        let defs = value["definitions"]
+            .as_object()
+            .or_else(|| value["$defs"].as_object())
+            .expect("definitions present");
+        let target_resolution = defs
+            .get("TargetResolution")
+            .expect("TargetResolution definition present");
+        let variants = target_resolution["oneOf"]
+            .as_array()
+            .expect("TargetResolution is a oneOf");
+        assert_eq!(variants.len(), 2, "resolved and error arms");
+        let keys: Vec<String> = variants
+            .iter()
+            .filter_map(|v| v["properties"].as_object())
+            .flat_map(|m| m.keys().cloned())
+            .collect();
+        assert!(keys.contains(&"resolved".to_string()), "got {keys:?}");
+        assert!(keys.contains(&"error".to_string()), "got {keys:?}");
     }
 
     #[test]

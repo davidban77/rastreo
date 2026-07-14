@@ -79,6 +79,42 @@ async fn post_scans_out_of_allowlist_target_returns_403_and_probes_nothing() {
 }
 
 #[tokio::test]
+async fn post_scans_dry_run_out_of_allowlist_target_surfaces_per_target_error() {
+    let addr = spawn_guarded_server(Some(vec![net("10.0.0.0/8")]), 1_048_576).await;
+
+    let body = json!({
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [22]}],
+        "timeout_ms": 500,
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/scans?dry_run=true"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    let err = payload["targets"][0]["resolution"]["error"]
+        .as_str()
+        .expect("out-of-allow-list target surfaces as a per-target error");
+    assert!(
+        err.contains("127.0.0.1"),
+        "the plan names the rejected target: {payload}"
+    );
+    assert_eq!(
+        payload["total_probes"], 0,
+        "an all-error plan probes nothing: {payload}"
+    );
+    assert!(
+        payload.get("records").is_none(),
+        "a dry-run returns a plan, not a scan response: {payload}"
+    );
+}
+
+#[tokio::test]
 async fn post_scans_in_allowlist_target_scans_normally() {
     let addr = spawn_guarded_server(Some(vec![net("127.0.0.0/8")]), 1_048_576).await;
     let target_port = spawn_target_listener().await;
