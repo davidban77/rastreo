@@ -80,7 +80,7 @@ Errors:
 - 429 — the inflight-scan cap (`RASTREO_MAX_INFLIGHT_SCANS`, when non-zero) is reached; a real scan submitted while the server is at capacity is rejected rather than queued. The gauge is rolled back atomically so a rejected request never inflates it. Dry-runs consume no slot and are never 429'd.
 - 400 — bad scenario config (empty `targets` or `probers`, malformed JSON body) or unresolvable client input (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`, `AggregateHostCapExceeded`).
 - 500 — probe / encode / sink / runtime errors. A server-configured sink that returns an error mid-scan aborts the pipeline and surfaces as 500; the response body's `records` list is not returned even if the in-memory capture succeeded.
-- 503 — request exceeded the server-side timeout (`--request-timeout-ms`), or the server-side DNS infrastructure failed (`ResolverError::DnsLookupFailed`).
+- 503 — request exceeded the server-side timeout (`--request-timeout-ms`), or the server-side DNS infrastructure failed (`ResolverError::DnsLookupFailed`). A scan dropped by the request-timeout aborts its in-flight probes and records `rastreo_server_scans_total{outcome="cancelled"}` plus its duration in the scan-duration histogram; it does not trip the `/readyz` scan-error quarantine (a client timeout is not a server fault).
 
 A request holds the HTTP connection open for the duration of the scan. The pipeline's own `BoundedScheduler` enforces per-scan concurrency via the scenario's `max_concurrent` and paces probe starts via `probe_rate`.
 

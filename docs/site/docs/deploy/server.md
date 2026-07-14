@@ -39,7 +39,7 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 | —                       | `RASTREO_MAX_TOTAL_HOSTS`              | `262144` | Aggregate cap on the total resolved hosts across all targets in one request. `0` disables. See [Restricting scan targets](#restricting-scan-targets). |
 | —                       | `RASTREO_MAX_BODY_BYTES`               | `1048576` | `POST /scans` request body size limit in bytes (1 MiB by default). An over-limit body is rejected with `413`. See [Restricting scan targets](#restricting-scan-targets). |
 
-The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
+The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. When the timeout drops a scan, its in-flight probes stop. The server no longer keeps probing an abandoned scan in the background, so wasted probing is bounded by the timeout. A dropped scan is counted under `rastreo_server_scans_total{outcome="cancelled"}` — see [GET /metrics](#get-metrics). Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
 
 ## Authentication
 
@@ -254,7 +254,7 @@ Metrics exposed:
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. |
+| `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. A scan dropped by the request timeout counts as `cancelled` (see the note below). |
 | `rastreo_server_probes_total` | counter | `outcome="success"\|"error"` | Probes executed across all scans. `success` is computed as `attempted - errored` and covers every probe that ran, including probes whose target stayed silent. `error` counts probe faults only. See [Observability · what `outcome` means](../reference/observability.md#what-outcome-means). |
 | `rastreo_server_records_emitted_total` | counter | — | `DeviceRecord` events emitted across all scans. |
 | `rastreo_server_sink_errors_total` | counter | — | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant). |
@@ -265,6 +265,9 @@ Metrics exposed:
 | `rastreo_server_build_info` | gauge | `version` | Static `1`; the `version` label carries the binary's `CARGO_PKG_VERSION`. |
 
 All counters are monotonic across the server process's lifetime and reset only on restart. The histogram observes the same elapsed time the handler measures from the moment the request body is parsed to the moment the response is built.
+
+!!! note "A rising `cancelled` count means scans are exceeding the request timeout"
+    `rastreo_server_scans_total{outcome="cancelled"}` counts scans dropped by `--request-timeout-ms`, not a server fault. The dropped scan's in-flight probes are stopped, so an abandoned scan cannot keep probing in the background. A `cancelled` scan does not trigger the `/readyz` scan-error quarantine — a client-side timeout is not a server error. If this count climbs, size scans to fit the timeout or raise `--request-timeout-ms`.
 
 ## POST /scans
 
@@ -384,7 +387,7 @@ Error surfaces:
 | `429`  | `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running. The body is `{"error":"inflight scan limit reached; retry once running scans complete"}`. A dry-run never counts against the cap and is never rejected. Setting the cap to `0` disables it. See [POST /scans](#post-scans). |
 | `400`  | `scenario.targets` empty, `scenario.probers` empty, malformed JSON body, the request exceeded `RASTREO_MAX_TOTAL_HOSTS`, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). |
 | `500`  | Internal probe / encoder / sink / runtime error. The response body carries `{"error":"internal server error"}` — full detail is logged for operators, not returned to the client. |
-| `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`) or the request exceeded `--request-timeout-ms`. |
+| `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`) or the request exceeded `--request-timeout-ms`. A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
 
 The response body is JSON in all cases: `{"error": "<message>"}` for 4xx and 5xx.
 

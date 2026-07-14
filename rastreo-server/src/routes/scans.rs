@@ -13,7 +13,7 @@ use rastreo_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::state::{AppState, ReadinessState};
+use crate::state::{AppState, Metrics, ReadinessState};
 
 const DEFAULT_CONCURRENCY: u32 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
@@ -35,6 +35,38 @@ impl InflightGuard {
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         self.0.inflight_scans.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct ScanOutcomeGuard {
+    metrics: Arc<Metrics>,
+    start: Instant,
+    scenario: String,
+    armed: bool,
+}
+
+impl ScanOutcomeGuard {
+    fn new(metrics: Arc<Metrics>, start: Instant, scenario: String) -> Self {
+        Self {
+            metrics,
+            start,
+            scenario,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ScanOutcomeGuard {
+    fn drop(&mut self) {
+        // Records the timeout path: a request-timeout drops the scan future still-armed, before the match records the real outcome.
+        if self.armed {
+            self.metrics
+                .record_scan_cancelled(self.start.elapsed(), &self.scenario);
+        }
     }
 }
 
@@ -155,8 +187,8 @@ async fn run_scan(
     }
     let pipeline_sink: Box<dyn Sink> = Box::new(TeeSink::new(children));
 
-    // MemorySink has no buffer to flush; TimeoutLayer handles request-lifecycle drop, so the
-    // non-cancellable wrapper is correct here.
+    let mut outcome_guard =
+        ScanOutcomeGuard::new(Arc::clone(&state.metrics), start, scenario_label.clone());
     let summary_result =
         run_discovery_with_components(&scenario, state.resolver.clone(), pipeline_sink).await;
 
@@ -165,6 +197,7 @@ async fn run_scan(
             state
                 .metrics
                 .record_scan_completion(&summary, &scenario_label);
+            outcome_guard.disarm();
             let records: Vec<DeviceRecord> = handle
                 .ndjson_lines()
                 .into_iter()
@@ -188,6 +221,7 @@ async fn run_scan(
                 .metrics
                 .record_scan_error(start.elapsed(), sink_class, &scenario_label);
             state.readiness.record_scan_error(is_sink_error);
+            outcome_guard.disarm();
             Err(err.into())
         }
     }
@@ -730,6 +764,84 @@ mod tests {
             .await
             .expect("cap 0 disables admission control");
         assert_eq!(response.summary.records_emitted, 1);
+    }
+
+    #[test]
+    fn scan_outcome_guard_armed_drop_records_cancelled() {
+        let metrics = Arc::new(Metrics::new());
+        drop(ScanOutcomeGuard::new(
+            Arc::clone(&metrics),
+            Instant::now(),
+            "unnamed".to_string(),
+        ));
+        assert_eq!(metrics.scans_total_cancelled.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.scan_duration.all.snapshot().count, 1);
+    }
+
+    #[test]
+    fn scan_outcome_guard_disarmed_drop_records_nothing() {
+        let metrics = Arc::new(Metrics::new());
+        let mut guard =
+            ScanOutcomeGuard::new(Arc::clone(&metrics), Instant::now(), "unnamed".to_string());
+        guard.disarm();
+        drop(guard);
+        assert_eq!(metrics.scans_total_cancelled.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.scan_duration.all.snapshot().count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_scan_dropped_mid_scan_records_cancelled() {
+        let state = state_with_system_resolver();
+        let metrics = Arc::clone(&state.metrics);
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![9] }],
+        );
+        s.base.timeout_ms = Some(5000);
+        let label = scenario_label(&s);
+
+        // Poll run_scan exactly once — enough to arm the guard at its first await — then drop it,
+        // exactly as a request-timeout drops the handler future mid-scan.
+        let mut scan = Box::pin(run_scan(state, s, Instant::now(), label));
+        tokio::select! {
+            biased;
+            _ = scan.as_mut() => panic!("scan must not complete before it is dropped"),
+            _ = std::future::ready(()) => {}
+        }
+        drop(scan);
+
+        assert_eq!(
+            metrics.scans_total_cancelled.load(Ordering::Relaxed),
+            1,
+            "a scan dropped mid-await must record a cancelled outcome"
+        );
+        assert_eq!(metrics.scans_total_success.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.scans_total_error.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn run_scan_normal_completion_does_not_record_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        let metrics = Arc::clone(&state.metrics);
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = run_real(state, s).await.expect("create_scan");
+        assert_eq!(response.summary.records_emitted, 1);
+        assert_eq!(
+            metrics.scans_total_cancelled.load(Ordering::Relaxed),
+            0,
+            "a completed scan must disarm the guard"
+        );
+        assert_eq!(metrics.scans_total_success.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

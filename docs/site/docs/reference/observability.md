@@ -12,7 +12,7 @@ Every metric uses the `rastreo_server_` prefix. All counters are monotonic acros
 
 | Metric | Type | Labels | Unit | Meaning |
 |---|---|---|---|---|
-| `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | requests | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. |
+| `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | requests | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. A scan dropped by the request timeout counts as `cancelled` — it does not trigger the `/readyz` scan-error quarantine. See [A rising `cancelled` count](../deploy/server.md#get-metrics). |
 | `rastreo_server_probes_total` | counter | `outcome="success"\|"error"`, `probe_kind` | probes | Probes executed across all scans, partitioned by outcome and probe kind. See the [probe_kind taxonomy](#probe_kind-taxonomy) and [what `outcome` means](#what-outcome-means) below. `success` is a monotonic per-scan counter incremented by `probe_attempts` minus the faulted probes so both `/metrics` and the OTLP observable counter remain non-decreasing per attribute-set. |
 | `rastreo_server_records_emitted_total` | counter | — | records | `DeviceRecord` events emitted across all scans. |
 | `rastreo_server_sink_errors_total` | counter | `error_class` | errors | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant), partitioned by error class. See the [error_class taxonomy](#error_class-taxonomy) below. |
