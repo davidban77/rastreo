@@ -335,6 +335,13 @@ impl Metrics {
         self.record_otlp_scan_duration(seconds, scenario);
     }
 
+    pub fn record_scan_cancelled(&self, elapsed: Duration, scenario: &str) {
+        self.scans_total_cancelled.fetch_add(1, Ordering::Relaxed);
+        let seconds = elapsed.as_secs_f64();
+        self.scan_duration.observe(seconds, scenario);
+        self.record_otlp_scan_duration(seconds, scenario);
+    }
+
     fn record_dlq(&self, sink_type: SinkType, class: SinkErrorClass, count: u64) {
         let bucket = match sink_type {
             SinkType::Kafka => &self.dlq.kafka,
@@ -1039,6 +1046,16 @@ mod tests {
             metrics.sink_errors[SinkErrorClass::AckRejection.index()].load(Ordering::Relaxed),
             0
         );
+    }
+
+    #[test]
+    fn metrics_record_scan_cancelled_increments_cancelled_and_histogram_only() {
+        let metrics = Metrics::new();
+        metrics.record_scan_cancelled(Duration::from_millis(50), "unnamed");
+        assert_eq!(metrics.scans_total_cancelled.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.scans_total_success.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.scans_total_error.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.scan_duration.all.snapshot().count, 1);
     }
 
     #[test]

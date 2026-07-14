@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::task::{Id, JoinSet};
 use tokio::time::Instant;
 
 use crate::error::{RastreoError, RuntimeError};
@@ -96,19 +97,19 @@ impl Scheduler for BoundedScheduler {
         }
 
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
-        let mut handles: Vec<JoinHandle<Result<ProbeOutcome, RastreoError>>> =
-            Vec::with_capacity(targets.len());
+        let len = targets.len();
 
-        // Order-preserving spawn: collect JoinHandles in input order and await sequentially.
-        // Tasks still execute in parallel on the multi-thread runtime; await order alone
-        // determines result order.
-        for target in targets {
+        // JoinSet aborts every spawned probe on drop, bounding an abandoned scan to the request-timeout instead of leaking detached tasks.
+        let mut set: JoinSet<Result<ProbeOutcome, RastreoError>> = JoinSet::new();
+        let mut index_by_id: HashMap<Id, usize> = HashMap::with_capacity(len);
+
+        for (index, target) in targets.into_iter().enumerate() {
             let permit_source = Arc::clone(&semaphore);
             let prober_for_task = Arc::clone(&prober);
             let ctx_for_task = ctx.clone();
             let pacer_for_task = self.pacer.clone();
 
-            let handle = tokio::spawn(async move {
+            let handle = set.spawn(async move {
                 if let Some(pacer) = pacer_for_task {
                     pacer.wait_for_slot().await;
                 }
@@ -118,26 +119,37 @@ impl Scheduler for BoundedScheduler {
                     .expect("scheduler semaphore is never closed");
                 prober_for_task.probe(&target, &ctx_for_task).await
             });
-            handles.push(handle);
+            index_by_id.insert(handle.id(), index);
         }
 
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(probe_result) => results.push(probe_result),
+        let mut slots: Vec<Option<Result<ProbeOutcome, RastreoError>>> =
+            (0..len).map(|_| None).collect();
+        while let Some(joined) = set.join_next_with_id().await {
+            let (id, outcome) = match joined {
+                Ok((id, probe_result)) => (id, probe_result),
                 Err(join_err) => {
                     let reason = if join_err.is_panic() {
                         "prober task panicked"
                     } else {
                         "prober task cancelled"
                     };
-                    results.push(Err(RastreoError::Runtime(RuntimeError::TaskPanicked(
-                        reason.to_string(),
-                    ))));
+                    (
+                        join_err.id(),
+                        Err(RastreoError::Runtime(RuntimeError::TaskPanicked(
+                            reason.to_string(),
+                        ))),
+                    )
                 }
+            };
+            if let Some(&index) = index_by_id.get(&id) {
+                slots[index] = Some(outcome);
             }
         }
-        results
+
+        slots
+            .into_iter()
+            .map(|slot| slot.expect("every spawned probe reports its index exactly once"))
+            .collect()
     }
 }
 
@@ -174,6 +186,35 @@ mod tests {
                 timestamp: SystemTime::UNIX_EPOCH,
                 reachable: true,
                 signals: vec![Signal::OpenPort(22)],
+                fault: None,
+            })
+        }
+    }
+
+    struct SlowCountingProber {
+        delay: Duration,
+        completed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Prober for SlowCountingProber {
+        fn kind(&self) -> ProbeKind {
+            ProbeKind::TcpConnect
+        }
+
+        async fn probe(
+            &self,
+            target: &ResolvedTarget,
+            _ctx: &ProbeCtx,
+        ) -> Result<ProbeOutcome, RastreoError> {
+            tokio::time::sleep(self.delay).await;
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            Ok(ProbeOutcome {
+                kind: ProbeKind::TcpConnect,
+                target_ip: target.ip,
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable: true,
+                signals: Vec::new(),
                 fault: None,
             })
         }
@@ -470,6 +511,32 @@ mod tests {
             let expected = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8));
             assert_eq!(result.as_ref().expect("ok").target_ip, expected);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_run_future_aborts_in_flight_probes() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let prober: Arc<dyn Prober> = Arc::new(SlowCountingProber {
+            delay: Duration::from_millis(200),
+            completed: Arc::clone(&completed),
+        });
+        let s = BoundedScheduler::with_default_concurrency();
+        let targets: Vec<ResolvedTarget> = (1u8..=8).map(target).collect();
+
+        let dropped =
+            tokio::time::timeout(Duration::from_millis(50), s.run(prober, targets, ctx())).await;
+        assert!(
+            dropped.is_err(),
+            "the timeout must drop the run future mid-scan"
+        );
+
+        // Advance past every probe's 200ms completion; aborted tasks never increment, detached ones would.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            completed.load(Ordering::SeqCst),
+            0,
+            "dropping the run future must abort in-flight probes, not detach them"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
