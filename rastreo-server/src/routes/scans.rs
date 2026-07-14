@@ -74,6 +74,8 @@ impl Drop for ScanOutcomeGuard {
 pub struct ScanResponse {
     pub summary: DiscoverySummary,
     pub records: Vec<DeviceRecord>,
+    /// True when the response capture hit `RASTREO_MAX_RESULT_BYTES`: `records` is a subset, `summary.records_emitted` is the true total, and any server-configured sink still received every record.
+    pub truncated: bool,
     /// Operator guidance for the first probe fault, keyed on its [`rastreo_core::ProbeErrorKind`]; absent when no probe faulted or the kind carries no specific action.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
@@ -177,7 +179,7 @@ async fn run_scan(
     // Pin the encoder server-side so the MemorySink read-back parses line-by-line as JSON.
     scenario.base.encoder = Some(EncoderConfig::Ndjson);
 
-    let memory_sink = MemorySink::new();
+    let memory_sink = MemorySink::with_max_bytes(state.max_result_bytes);
     let handle = memory_sink.handle();
 
     // Memory child first so the response body captures every record even if the shared sink aborts mid-scan.
@@ -211,6 +213,7 @@ async fn run_scan(
             Ok(Json(ScanResponse {
                 summary,
                 records,
+                truncated: handle.truncated(),
                 hint,
             }))
         }
@@ -338,6 +341,7 @@ mod tests {
         let response = ScanResponse {
             summary,
             records: Vec::new(),
+            truncated: false,
             hint: None,
         };
         let value: serde_json::Value = serde_json::to_value(&response).expect("serialize");
@@ -345,6 +349,7 @@ mod tests {
         assert_eq!(value["summary"]["records_emitted"], 1);
         assert!(value["records"].is_array());
         assert_eq!(value["records"].as_array().unwrap().len(), 0);
+        assert_eq!(value["truncated"], false);
         assert!(
             value.get("hint").is_none(),
             "hint must be skipped when None: {value}"
@@ -542,6 +547,106 @@ mod tests {
 
         let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_scan_under_result_cap_returns_all_records_untruncated() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = run_real(state, s).await.expect("create_scan");
+        assert_eq!(response.summary.records_emitted, 1);
+        assert_eq!(response.records.len(), 1);
+        assert!(!response.truncated, "a scan under the cap is not truncated");
+        let value: serde_json::Value = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(value["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn create_scan_truncates_response_when_records_exceed_result_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        // A tiny cap drops the sole record from the response capture; the scan still completes.
+        let state = state_with_system_resolver().with_result_limit(10);
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = run_real(state, s).await.expect("create_scan");
+        assert_eq!(
+            response.summary.records_emitted, 1,
+            "records_emitted is the true total, unaffected by the response cap"
+        );
+        assert!(
+            response.truncated,
+            "an over-cap response must flag truncation"
+        );
+        assert!(
+            response.records.len() < response.summary.records_emitted,
+            "the response carries only the records that fit under the cap"
+        );
+        let value: serde_json::Value = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn create_scan_configured_sink_receives_all_records_even_when_response_truncated() {
+        use crate::state::{SharedSink, SinkReachability};
+        use rastreo_core::SinkType;
+        use tokio::sync::Mutex;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let base = state_with_system_resolver().with_result_limit(10);
+        // The server-configured sink is UNcapped — the cap is on the response capture only.
+        let sink = MemorySink::new();
+        let handle = sink.handle();
+        let shared: SharedSink =
+            Arc::new(Mutex::new(Box::new(sink) as Box<dyn rastreo_core::Sink>));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Memory,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        reach.record_success();
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = run_real(state, s).await.expect("create_scan");
+        assert!(response.truncated, "the response capture hit the tiny cap");
+        assert!(
+            response.records.is_empty(),
+            "no record fits under the 10-byte response cap"
+        );
+        assert_eq!(response.summary.records_emitted, 1);
+        let lines = handle.ndjson_lines();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the server-configured sink is uncapped and receives every record"
+        );
     }
 
     #[tokio::test]

@@ -38,6 +38,7 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 | —                       | `RASTREO_TARGET_ALLOWLIST`             | unset   | Comma-separated CIDRs (bare IPs accepted, treated as `/32` or `/128`) the server may probe. Unset or empty allows any target. See [Restricting scan targets](#restricting-scan-targets). |
 | —                       | `RASTREO_MAX_TOTAL_HOSTS`              | `262144` | Aggregate cap on the total resolved hosts across all targets in one request. `0` disables. See [Restricting scan targets](#restricting-scan-targets). |
 | —                       | `RASTREO_MAX_BODY_BYTES`               | `1048576` | `POST /scans` request body size limit in bytes (1 MiB by default). An over-limit body is rejected with `413`. See [Restricting scan targets](#restricting-scan-targets). |
+| —                       | `RASTREO_MAX_RESULT_BYTES`             | `33554432` | `POST /scans` response record cap in bytes (32 MiB by default). A scan producing more still returns `200`, with `records` truncated to the subset that fit and `truncated: true`; a server-configured sink still receives every record. Peak memory at response time is roughly 3× this cap, so raise the pod's `limits.memory` before raising it. See [Bounded response size](#bounded-response-size). |
 
 The request timeout is enforced by middleware in front of every route. A request that runs longer than the timeout is aborted and the client sees `503 Service Unavailable`. When the timeout drops a scan, its in-flight probes stop. The server no longer keeps probing an abandoned scan in the background, so wasted probing is bounded by the timeout. A dropped scan is counted under `rastreo_server_scans_total{outcome="cancelled"}` — see [GET /metrics](#get-metrics). Large scans against a populated subnet can easily exceed 60 seconds — size the scan to fit the timeout, or raise the timeout to match the workload.
 
@@ -291,7 +292,7 @@ curl -sS -X POST http://localhost:8080/scans \
   }'
 ```
 
-The response is `{summary, records}`, plus an optional `hint` when a probe faulted. `summary` carries the counters and the elapsed time; `records` is the list of `DeviceRecord` events the scan produced. A clean scan omits `hint` — see [The hint field](#the-hint-field) below.
+The response is `{summary, records, truncated}`, plus an optional `hint` when a probe faulted. `summary` carries the counters and the elapsed time. `records` is the list of `DeviceRecord` events the scan produced. `truncated` is a boolean and is always present. It is `true` when `RASTREO_MAX_RESULT_BYTES` capped the response, so `records` holds only a subset. A clean, uncapped scan returns `truncated: false` and omits `hint`. See [Bounded response size](#bounded-response-size) and [The hint field](#the-hint-field) below.
 
 ```json
 {
@@ -319,7 +320,8 @@ The response is `{summary, records}`, plus an optional `hint` when a probe fault
       "last_seen": "2026-07-05T13:47:22.678133082Z",
       "signals": [ { "OpenPort": 80 } ]
     }
-  ]
+  ],
+  "truncated": false
 }
 ```
 
@@ -365,6 +367,7 @@ When a probe faults, `error_counts` tallies it by kind and `first_probe_error` n
       "probe_kinds": ["Snmp"]
     }
   ],
+  "truncated": false,
   "hint": "the target answered with a reply the prober could not parse — check the protocol, credentials, and the service on the port"
 }
 ```
@@ -376,6 +379,46 @@ When a probe faults with a kind that has a specific remedy, the response adds a 
 You will see a hint for the faults that carry a clear next step. A `decode_failed` fault suggests checking the protocol, credentials, and the service on the port. A `permission_denied` fault points at granting `CAP_NET_RAW` or checking local egress policy. A `dns_failed` fault points at the resolver configuration and DNS reachability. The exact wording is guidance text and may change between releases — read it, do not match on it.
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).
+
+### Bounded response size
+
+The server holds the whole response in memory before sending it. A very large scan could then exhaust the server's memory. To prevent this, the response is capped at `RASTREO_MAX_RESULT_BYTES` bytes of records. The default is `33554432` (32 MiB).
+
+A scan that produces more records than the cap still completes and returns `200 OK`. The response then carries only the records that fit under the cap. Two fields tell the client it received a subset:
+
+- `truncated` is `true`.
+- `summary.records_emitted` stays the true total. The cap never changes it.
+
+So the client always knows it received N of M records. `records` holds N. `records_emitted` is M.
+
+The example below used a deliberately tiny cap, so the single record did not fit. The scan still completed and still reported the true total:
+
+```json
+{
+  "summary": {
+    "targets_resolved": 1,
+    "probe_attempts": 1,
+    "records_emitted": 1,
+    "probes_by_kind": [
+      { "kind": "TcpConnect", "attempted": 1, "errored": 0 }
+    ],
+    "dlq_records": 0,
+    "sink_type": "tee",
+    "cancelled": false,
+    "elapsed_ms": 1
+  },
+  "records": [],
+  "truncated": true
+}
+```
+
+With the default 32 MiB cap, a truncated response still carries thousands of records — just fewer than `records_emitted`.
+
+!!! note "A server-configured sink still receives every record"
+    The cap applies only to the response body. When `RASTREO_SINK_CONFIG_PATH` is set, the server-configured sink receives every record, even when the response truncates. To get the full result of a large scan, configure a server-side sink and read the records there. Or narrow the scan's scope so the result fits under the cap.
+
+!!! warning "Raise the memory limit before raising the cap"
+    Peak memory at response time is roughly 3× the cap. The record buffer, the parsed records, and the serialized JSON body all exist at once. The 32 MiB default fits under the chart's `limits.memory` of `256Mi`. If you raise `RASTREO_MAX_RESULT_BYTES`, raise `limits.memory` by the same proportion.
 
 Error surfaces:
 

@@ -11,6 +11,8 @@ use super::{Sink, SinkType};
 struct Inner {
     buffer: Mutex<Vec<u8>>,
     delivered: AtomicBool,
+    truncated: AtomicBool,
+    max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -21,6 +23,17 @@ pub struct MemorySink {
 impl MemorySink {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A `MemorySink` that drops any write which would push the buffer past `max_bytes`,
+    /// flagging [`MemorySinkHandle::truncated`] instead of growing unbounded.
+    pub fn with_max_bytes(max_bytes: usize) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                max_bytes: Some(max_bytes),
+                ..Default::default()
+            }),
+        }
     }
 
     /// Cheap clone that observes writes after the sink has been moved into a
@@ -54,16 +67,24 @@ impl MemorySinkHandle {
     pub fn last_write_delivered(&self) -> bool {
         self.inner.delivered.load(Ordering::SeqCst)
     }
+
+    pub fn truncated(&self) -> bool {
+        self.inner.truncated.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl Sink for MemorySink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
-        self.inner
-            .buffer
-            .lock()
-            .expect("memory sink mutex")
-            .extend_from_slice(data);
+        let mut buffer = self.inner.buffer.lock().expect("memory sink mutex");
+        if let Some(max) = self.inner.max_bytes {
+            // Drop the whole write rather than erroring so the scan still completes; each write is one NDJSON record, so skipping keeps the buffer whole lines under the cap.
+            if buffer.len() + data.len() > max {
+                self.inner.truncated.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+        }
+        buffer.extend_from_slice(data);
         self.inner.delivered.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -136,5 +157,72 @@ mod tests {
         assert_send_sync::<MemorySink>();
         assert_send_sync::<MemorySinkHandle>();
         assert_send_sync::<Box<dyn Sink>>();
+    }
+
+    #[tokio::test]
+    async fn new_is_unbounded_and_never_truncates() {
+        let mut sink = MemorySink::new();
+        let handle = sink.handle();
+        let record = vec![b'x'; 10_000];
+        for _ in 0..100 {
+            sink.write(&record).await.expect("write");
+        }
+        assert_eq!(handle.bytes().len(), 1_000_000);
+        assert!(!handle.truncated());
+    }
+
+    #[tokio::test]
+    async fn with_max_bytes_appends_writes_that_fit() {
+        let mut sink = MemorySink::with_max_bytes(100);
+        let handle = sink.handle();
+        sink.write(b"{\"a\":1}\n").await.expect("write");
+        sink.write(b"{\"b\":2}\n").await.expect("write");
+        assert_eq!(handle.bytes(), b"{\"a\":1}\n{\"b\":2}\n");
+        assert!(!handle.truncated());
+    }
+
+    #[tokio::test]
+    async fn with_max_bytes_allows_write_that_exactly_reaches_cap() {
+        let mut sink = MemorySink::with_max_bytes(8);
+        let handle = sink.handle();
+        sink.write(b"{\"a\":1}\n").await.expect("write"); // exactly 8 bytes
+        assert_eq!(handle.bytes().len(), 8);
+        assert!(!handle.truncated());
+    }
+
+    #[tokio::test]
+    async fn with_max_bytes_skips_a_single_write_larger_than_cap() {
+        let mut sink = MemorySink::with_max_bytes(4);
+        let handle = sink.handle();
+        sink.write(b"{\"a\":1}\n").await.expect("write");
+        assert!(
+            handle.bytes().is_empty(),
+            "an over-cap first write leaves the buffer empty, never a partial line"
+        );
+        assert!(handle.truncated());
+    }
+
+    #[tokio::test]
+    async fn with_max_bytes_never_exceeds_cap_and_stays_valid_ndjson() {
+        let cap = 40;
+        let mut sink = MemorySink::with_max_bytes(cap);
+        let handle = sink.handle();
+        for i in 0..1000 {
+            let line = format!("{{\"n\":{i}}}\n");
+            sink.write(line.as_bytes()).await.expect("write");
+        }
+        let bytes = handle.bytes();
+        assert!(
+            bytes.len() <= cap,
+            "buffer {} exceeded cap {cap}",
+            bytes.len()
+        );
+        assert!(handle.truncated(), "over-cap writes must flag truncation");
+        let lines = handle.ndjson_lines();
+        assert!(!lines.is_empty(), "records under the cap must still land");
+        for line in lines {
+            let _: serde_json::Value =
+                serde_json::from_str(&line).expect("each retained line is complete valid JSON");
+        }
     }
 }

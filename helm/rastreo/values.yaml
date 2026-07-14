@@ -24,6 +24,12 @@ server:
   port: 8080
   # Bind address for the rastreo-server.
   bind: "0.0.0.0"
+  # Byte cap on the POST /scans response capture (RASTREO_MAX_RESULT_BYTES). A scan
+  # producing more still completes; the response carries the records that fit plus
+  # `truncated: true` and the true total, and any server-configured sink still gets
+  # every record. Peak memory is ~3x this value, so the 32 MiB default fits inside
+  # resources.limits.memory (256Mi) below — raise both together if you raise this.
+  maxResultBytes: 33554432
 
 # Bearer-token auth for POST /scans. Health, readiness, and metrics are never
 # authenticated. Secure by default: with enabled=true the chart refuses to render

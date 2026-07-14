@@ -15,7 +15,7 @@ src/
 ├── main.rs        ← entrypoint: clap arg parsing, tracing init, resolver
 │                    construction, tokio runtime, axum serve loop
 ├── lib.rs         ← build_app(state) -> Router; reusable from tests
-├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability, auth, max_body_bytes }
+├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability, auth, max_body_bytes, max_result_bytes }
 │                    + HistogramShard + Metrics + ReadinessConfig + ReadinessState
 │                    + SinkProbeConfig + SinkReachability + AuthConfig + TargetGuardConfig
 ├── sink_probe.rs  ← spawn_sink_probe + periodic probe task + run_probe helper
@@ -49,6 +49,7 @@ src/
 | —                      | `RASTREO_TARGET_ALLOWLIST`             | unset       | Comma-separated CIDRs (or bare IPs, parsed as `/32`/`/128` host nets). When set, a `POST /scans` is rejected with 403 if any resolved target falls outside every listed range. Unset ⇒ allow all. Wraps the server resolver in a `GuardedResolver`; the CLI is unaffected. |
 | —                      | `RASTREO_MAX_TOTAL_HOSTS`              | `262144`    | Aggregate cap on total resolved hosts across all targets in one request; over-cap scans are rejected with 400. `0` disables. Independent of the per-target `CidrTooLarge` cap (65 536). |
 | —                      | `RASTREO_MAX_BODY_BYTES`               | `1048576`   | `POST /scans` request-body size limit; a larger body is rejected with 413 before JSON parsing. |
+| —                      | `RASTREO_MAX_RESULT_BYTES`             | `33554432`  | Byte cap on the `POST /scans` response capture (32 MiB). A scan producing more still completes; the response carries the records that fit plus `truncated: true` and the true `records_emitted`. A server-configured sink still receives EVERY record — the cap is response-only. Peak memory ≈ 3× the cap, so raising it requires raising `limits.memory`. |
 
 ## API Surface
 
@@ -71,7 +72,8 @@ Query parameters:
 
 Response body:
 - `summary`: `DiscoverySummary` — `targets_resolved`, `probe_attempts`, `error_counts` (by `ProbeErrorKind`), `first_probe_error`, `records_emitted`, `elapsed_ms`.
-- `records`: array of `DeviceRecord` objects.
+- `records`: array of `DeviceRecord` objects. Bounded by `RASTREO_MAX_RESULT_BYTES`: when the encoded records exceed the cap the array is truncated to the subset that fit.
+- `truncated`: bool — `true` when the response capture hit `RASTREO_MAX_RESULT_BYTES`, so `records` is a subset while `summary.records_emitted` is the true total. A server-configured sink still received every record. Always present.
 
 Errors:
 - 401 — auth is enabled and the request carried a missing, malformed, or wrong bearer token. Returned by the `require_bearer` middleware before the handler runs.
@@ -93,7 +95,7 @@ A request holds the HTTP connection open for the duration of the scan. The pipel
 
 ## Known Limitations
 
-Pagination — `POST /scans` returns the full record list in a single response body. Large scans (a `/16` against a populated subnet, for example) can produce responses of several MB. Callers should size scans accordingly; a streaming or paginated response shape may be added later.
+Pagination — `POST /scans` returns the record list in a single response body, bounded by `RASTREO_MAX_RESULT_BYTES` (32 MiB default). Large scans (a `/16` against a populated subnet, for example) that exceed the cap complete normally but return a truncated `records` array with `truncated: true`; the full set still reaches a server-configured sink. A streaming or paginated response shape (async `202 + GET /scans/{id}`) may be added later.
 
 CORS — the server does not enable CORS today. Browser-based clients (a future dashboard) will need a `tower-http::cors::CorsLayer` added to `build_app`. Server-to-server callers are unaffected.
 
