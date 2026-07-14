@@ -1268,6 +1268,8 @@ mod tests {
             base: BaseProbeConfig {
                 timeout_ms: Some(200),
                 max_concurrent: Some(4),
+                // pace starts so scheduler.run outlasts the 50ms cancel — deterministic, not connect-timing dependent
+                probe_rate: Some(10),
                 ..Default::default()
             },
             targets: vec![
