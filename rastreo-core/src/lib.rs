@@ -7,6 +7,7 @@ pub mod hints;
 pub mod model;
 pub mod observability;
 pub mod pipeline;
+pub mod plan;
 pub mod prober;
 pub mod resolver;
 pub mod scheduler;
@@ -33,6 +34,7 @@ pub use pipeline::{
     run_discovery_with_components, run_discovery_with_components_cancellable, DiscoverySummary,
     ProbeKindSummary, ResolvedScenarioTarget,
 };
+pub use plan::{DiscoveryPlan, PlanKnobs, PlannedTarget, TargetResolution};
 #[cfg(feature = "icmp")]
 pub use prober::IcmpProber;
 #[cfg(feature = "ssh")]
