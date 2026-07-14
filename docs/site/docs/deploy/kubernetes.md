@@ -36,6 +36,7 @@ The most useful `values.yaml` knobs are:
 | `image.repository`               | `ghcr.io/davidban77/rastreo`  | The container image. See the caveat below.                |
 | `image.tag`                      | chart `appVersion`            | Tag to pull; empty means use `appVersion`.                |
 | `server.port`                    | `8080`                        | Port `rastreo-server` listens on inside the container.    |
+| `server.maxResultBytes`          | `33554432`                    | Byte cap on the `POST /scans` response records (32 MiB). Renders `RASTREO_MAX_RESULT_BYTES`. Peak memory is ~3× this value, so raise `resources.limits.memory` before raising it. See [rastreo-server · Bounded response size](server.md#bounded-response-size). |
 | `auth.enabled`                   | `true`                        | Require a bearer token on `POST /scans`. Fail-closed: render errors unless a token source is set. Set `false` to deploy unauthenticated. See [Authentication](#authentication). |
 | `auth.token`                     | `""`                          | Inline bearer token. The chart renders a `Secret` holding it. Prefer `auth.existingSecret` in production. See [Authentication](#authentication). |
 | `auth.existingSecret`            | `""`                          | Name of a pre-existing `Secret` holding the token. Takes precedence over `auth.token`. See [Authentication](#authentication). |
@@ -77,6 +78,9 @@ config:
 ```
 
 Each key under `config` becomes a file at `/etc/rastreo/<key>`. The Deployment template adds a checksum annotation so pods restart when the ConfigMap changes.
+
+!!! note "The result cap and the memory limit move together"
+    `server.maxResultBytes` caps the `POST /scans` response at 32 MiB by default. Peak memory at response time is roughly 3× that cap, so the default fits under `resources.limits.memory` of `256Mi`. If you raise `server.maxResultBytes`, raise `resources.limits.memory` by the same proportion. A scan too large to return in one response still streams every record to a server-configured sink — see [rastreo-server · Bounded response size](server.md#bounded-response-size).
 
 ## Authentication
 

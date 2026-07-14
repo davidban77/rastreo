@@ -441,6 +441,14 @@ impl ShutdownConfig {
 
 pub const DEFAULT_MAX_TOTAL_HOSTS: usize = 262_144;
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
+pub const DEFAULT_MAX_RESULT_BYTES: usize = 33_554_432;
+
+/// Read `RASTREO_MAX_RESULT_BYTES` (default 32 MiB), the byte cap on the `POST /scans` response
+/// capture. Peak memory is ~3× the cap (NDJSON buffer + parsed records + serialized body), so
+/// raising it requires raising the pod's `limits.memory`.
+pub fn max_result_bytes_from_env() -> anyhow::Result<usize> {
+    Ok(parse_env_u64("RASTREO_MAX_RESULT_BYTES", DEFAULT_MAX_RESULT_BYTES as u64)? as usize)
+}
 
 /// SSRF and DoS guards applied to `POST /scans` — an optional target allow-list, an
 /// aggregate host cap across all targets in a request, and a request-body size limit.
@@ -814,6 +822,7 @@ pub struct AppState {
     pub sink_reachability: Arc<SinkReachability>,
     pub auth: AuthConfig,
     pub max_body_bytes: usize,
+    pub max_result_bytes: usize,
 }
 
 impl AppState {
@@ -838,6 +847,7 @@ impl AppState {
             sink_reachability: Arc::new(SinkReachability::not_configured()),
             auth: AuthConfig::default(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
         }
     }
 
@@ -858,6 +868,11 @@ impl AppState {
 
     pub fn with_body_limit(mut self, max_body_bytes: usize) -> Self {
         self.max_body_bytes = max_body_bytes;
+        self
+    }
+
+    pub fn with_result_limit(mut self, max_result_bytes: usize) -> Self {
+        self.max_result_bytes = max_result_bytes;
         self
     }
 }
@@ -1381,7 +1396,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    const ENV_KEYS: [&str; 18] = [
+    const ENV_KEYS: [&str; 19] = [
         "RASTREO_MAX_INFLIGHT_SCANS",
         "RASTREO_SINK_ERROR_QUARANTINE_SECS",
         "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
@@ -1400,6 +1415,7 @@ mod tests {
         "RASTREO_TARGET_ALLOWLIST",
         "RASTREO_MAX_TOTAL_HOSTS",
         "RASTREO_MAX_BODY_BYTES",
+        "RASTREO_MAX_RESULT_BYTES",
     ];
 
     fn clear_env() {
@@ -1993,6 +2009,52 @@ mod tests {
     fn app_state_with_body_limit_overrides_default() {
         let state = build_state().with_body_limit(4096);
         assert_eq!(state.max_body_bytes, 4096);
+    }
+
+    #[test]
+    fn app_state_defaults_result_limit_to_thirty_two_mib() {
+        let state = build_state();
+        assert_eq!(state.max_result_bytes, DEFAULT_MAX_RESULT_BYTES);
+        assert_eq!(DEFAULT_MAX_RESULT_BYTES, 33_554_432);
+    }
+
+    #[test]
+    fn app_state_with_result_limit_overrides_default() {
+        let state = build_state().with_result_limit(4096);
+        assert_eq!(state.max_result_bytes, 4096);
+    }
+
+    #[test]
+    fn max_result_bytes_from_env_uses_default_when_unset() {
+        let _guard = env_guard();
+        clear_env();
+        let cap = max_result_bytes_from_env().expect("from_env");
+        assert_eq!(cap, DEFAULT_MAX_RESULT_BYTES);
+    }
+
+    #[test]
+    fn max_result_bytes_from_env_reads_custom_value() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe { std::env::set_var("RASTREO_MAX_RESULT_BYTES", "50000000") };
+        let cap = max_result_bytes_from_env().expect("from_env");
+        clear_env();
+        assert_eq!(cap, 50_000_000);
+    }
+
+    #[test]
+    fn max_result_bytes_from_env_rejects_non_numeric_value() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe { std::env::set_var("RASTREO_MAX_RESULT_BYTES", "lots") };
+        let err = max_result_bytes_from_env().expect_err("must reject non-numeric");
+        clear_env();
+        assert!(
+            err.to_string().contains("RASTREO_MAX_RESULT_BYTES"),
+            "msg: {err}"
+        );
     }
 
     #[cfg(feature = "otlp")]

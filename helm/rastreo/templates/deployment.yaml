@@ -62,6 +62,9 @@ spec:
               containerPort: {{ .Values.server.port }}
               protocol: TCP
           {{- $envs := list }}
+          {{- if hasKey .Values.server "maxResultBytes" }}
+          {{- $envs = append $envs (dict "name" "RASTREO_MAX_RESULT_BYTES" "value" (printf "%d" (int64 .Values.server.maxResultBytes))) }}
+          {{- end }}
           {{- if hasKey .Values.readiness "maxInflightScans" }}
           {{- $envs = append $envs (dict "name" "RASTREO_MAX_INFLIGHT_SCANS" "value" (printf "%d" (int64 .Values.readiness.maxInflightScans))) }}
           {{- end }}

@@ -75,9 +75,12 @@ async fn main() -> anyhow::Result<()> {
     let auth = AuthConfig::from_env().context("failed to load auth config")?;
     let sink_probe = SinkProbeConfig::from_env().context("failed to load sink-probe config")?;
     let shutdown = ShutdownConfig::from_env().context("failed to load shutdown config")?;
+    let max_result_bytes = rastreo_server::state::max_result_bytes_from_env()
+        .context("failed to load result-capture limit")?;
     let state = AppState::with_config(resolver, readiness, metrics_config)
         .with_auth(auth)
-        .with_body_limit(guard.max_body_bytes);
+        .with_body_limit(guard.max_body_bytes)
+        .with_result_limit(max_result_bytes);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (state, probe_handle) = spawn_sink_probe(state, &sink_probe, shutdown_rx.clone()).await;
