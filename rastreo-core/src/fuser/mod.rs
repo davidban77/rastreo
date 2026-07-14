@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use schemars::JsonSchema;
@@ -165,7 +166,7 @@ impl Fuser for DirectFuser {
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
             possible_alias_of: None,
-            scan_metadata: ScanMetadata::default(),
+            scan_metadata: Arc::new(ScanMetadata::default()),
         }))
     }
 }

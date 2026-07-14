@@ -30,6 +30,7 @@ impl Encoder for NdjsonEncoder {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
     use std::time::SystemTime;
 
     use crate::model::{
@@ -56,7 +57,7 @@ mod tests {
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
             possible_alias_of: None,
-            scan_metadata: ScanMetadata::default(),
+            scan_metadata: Arc::new(ScanMetadata::default()),
         }
     }
 

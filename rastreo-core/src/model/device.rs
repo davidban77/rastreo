@@ -171,7 +171,7 @@ pub struct DeviceRecord {
     pub possible_alias_of: Option<IdentityKey>,
     /// Provenance stamped by the pipeline at scan entry.
     #[serde(default)]
-    pub scan_metadata: ScanMetadata,
+    pub scan_metadata: Arc<ScanMetadata>,
 }
 
 #[cfg(test)]
@@ -281,7 +281,7 @@ mod tests {
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
             possible_alias_of: None,
-            scan_metadata: ScanMetadata::default(),
+            scan_metadata: Arc::new(ScanMetadata::default()),
         };
         let s = serde_json::to_string(&record).expect("serialize");
         let back: DeviceRecord = serde_json::from_str(&s).expect("deserialize");
@@ -389,7 +389,7 @@ mod tests {
             schema_id: CURRENT_SCHEMA_ID.to_string(),
             alt_ips: Vec::new(),
             possible_alias_of: None,
-            scan_metadata: ScanMetadata::default(),
+            scan_metadata: Arc::new(ScanMetadata::default()),
         }
     }
 
