@@ -104,6 +104,17 @@ pub struct DiscoverArgs {
     /// Print what would run without executing any probe or opening any sink. Targets are still resolved (DNS lookups execute) so operators see the expanded plan.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Format for --dry-run output: `text` (default, human-readable) or `json` (a machine-readable array of plans). Only meaningful with --dry-run.
+    #[arg(long, value_enum, default_value_t = DryRunFormat::Text)]
+    pub dry_run_format: DryRunFormat,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DryRunFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[cfg(feature = "kafka")]
@@ -146,11 +157,8 @@ async fn run_dry_run(args: &DiscoverArgs) -> Result<()> {
 
     let scenario = build_scenario(args)?;
     let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
-    let mut out = String::new();
-    write_dry_run_header(&mut out, 1);
-    let total_probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolutions, args);
-    write_totals(&mut out, 1, total_probes);
-    print!("{out}");
+    let plan = build_scenario_plan("discovery", &scenario, &resolutions, args);
+    render_dry_run(&[plan], args.dry_run_format)?;
     dry_run_exit_status(&[resolutions])
 }
 
@@ -190,23 +198,33 @@ async fn run_dry_run_from_file(args: &DiscoverArgs, resolver: &dyn Resolver) -> 
         };
         merge_defaults(&mut cfg.base, &file.defaults);
         apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref());
-        let label = dry_run_scenario_label(&cfg.base, idx, total);
+        let label = scenario_plan_label(&cfg.base, idx, total, args.dry_run_format);
         scenarios.push((label, cfg));
     }
 
-    let mut out = String::new();
-    let mut total_probes: usize = 0;
+    let mut plans: Vec<DiscoveryPlan> = Vec::with_capacity(scenarios.len());
     let mut all_resolutions: Vec<Vec<ResolvedScenarioTarget>> = Vec::with_capacity(scenarios.len());
-    write_dry_run_header(&mut out, scenarios.len());
     for (label, scenario) in &scenarios {
         let resolutions = resolve_scenario_targets(scenario, resolver).await;
-        let scenario_probes = write_scenario_plan(&mut out, label, scenario, &resolutions, args);
-        total_probes += scenario_probes;
+        plans.push(build_scenario_plan(label, scenario, &resolutions, args));
         all_resolutions.push(resolutions);
     }
-    write_totals(&mut out, scenarios.len(), total_probes);
-    print!("{out}");
+    render_dry_run(&plans, args.dry_run_format)?;
     dry_run_exit_status(&all_resolutions)
+}
+
+// json carries the plain scenario name (matching rastreo-server's scenario_label so both surfaces emit the same DiscoveryPlan.scenario); text keeps the multi-scenario `'name' (N of M)` header decoration.
+#[cfg(feature = "config")]
+fn scenario_plan_label(
+    base: &BaseProbeConfig,
+    idx: usize,
+    total: usize,
+    format: DryRunFormat,
+) -> String {
+    match format {
+        DryRunFormat::Text => dry_run_scenario_label(base, idx, total),
+        DryRunFormat::Json => base.name.clone().unwrap_or_else(|| "unnamed".to_string()),
+    }
 }
 
 #[cfg(feature = "config")]
@@ -243,6 +261,47 @@ fn effective_knobs(scenario: &DiscoverScenarioConfig, args: &DiscoverArgs) -> Pl
     }
 }
 
+fn build_scenario_plan(
+    label: &str,
+    scenario: &DiscoverScenarioConfig,
+    resolutions: &[ResolvedScenarioTarget],
+    args: &DiscoverArgs,
+) -> DiscoveryPlan {
+    DiscoveryPlan::new(
+        label.to_string(),
+        scenario,
+        resolutions,
+        effective_knobs(scenario, args),
+    )
+}
+
+fn render_dry_run(plans: &[DiscoveryPlan], format: DryRunFormat) -> Result<()> {
+    match format {
+        DryRunFormat::Text => print!("{}", render_dry_run_text(plans)),
+        DryRunFormat::Json => println!("{}", render_dry_run_json(plans)?),
+    }
+    Ok(())
+}
+
+fn render_dry_run_text(plans: &[DiscoveryPlan]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    write_dry_run_header(&mut out, plans.len());
+    let mut total_probes = 0usize;
+    for plan in plans {
+        write!(out, "{plan}").expect("write to String");
+        total_probes += plan.total_probes;
+    }
+    write_totals(&mut out, plans.len(), total_probes);
+    out
+}
+
+fn render_dry_run_json(plans: &[DiscoveryPlan]) -> Result<String> {
+    serde_json::to_string_pretty(plans)
+        .map_err(|e| anyhow!("failed to serialize dry-run plans to JSON: {e}"))
+}
+
+#[cfg(test)]
 fn write_scenario_plan(
     out: &mut String,
     label: &str,
@@ -251,12 +310,7 @@ fn write_scenario_plan(
     args: &DiscoverArgs,
 ) -> usize {
     use std::fmt::Write as _;
-    let plan = DiscoveryPlan::new(
-        label.to_string(),
-        scenario,
-        resolutions,
-        effective_knobs(scenario, args),
-    );
+    let plan = build_scenario_plan(label, scenario, resolutions, args);
     write!(out, "{plan}").expect("write to String");
     plan.total_probes
 }
@@ -693,6 +747,7 @@ mod tests {
             retries: None,
             timeout_ms: None,
             dry_run: false,
+            dry_run_format: DryRunFormat::Text,
         }
     }
 
@@ -1408,6 +1463,120 @@ mod tests {
         assert!(!parsed.dry_run);
     }
 
+    #[test]
+    fn parse_dry_run_format_defaults_to_text() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "22",
+            "--dry-run",
+        ])
+        .expect("parses");
+        assert_eq!(parsed.dry_run_format, DryRunFormat::Text);
+    }
+
+    #[test]
+    fn parse_dry_run_format_accepts_json() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "22",
+            "--dry-run",
+            "--dry-run-format",
+            "json",
+        ])
+        .expect("parses");
+        assert_eq!(parsed.dry_run_format, DryRunFormat::Json);
+    }
+
+    #[test]
+    fn parse_dry_run_format_rejects_unknown_value() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "22",
+            "--dry-run",
+            "--dry-run-format",
+            "yaml",
+        ]);
+        assert!(result.is_err(), "unknown dry-run format must be rejected");
+    }
+
+    #[tokio::test]
+    async fn render_dry_run_text_matches_legacy_primitive_output() {
+        let mut a = args(&["127.0.0.1"], &[22, 80]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+
+        let mut legacy = String::new();
+        write_dry_run_header(&mut legacy, 1);
+        let probes = write_scenario_plan(&mut legacy, "discovery", &scenario, &resolutions, &a);
+        write_totals(&mut legacy, 1, probes);
+
+        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a);
+        assert_eq!(render_dry_run_text(&[plan]), legacy);
+    }
+
+    #[tokio::test]
+    async fn render_dry_run_json_emits_array_of_one_plan() {
+        let mut a = args(&["127.0.0.1"], &[22]);
+        a.dry_run = true;
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a);
+
+        let json = render_dry_run_json(&[plan]).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let arr = value.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["scenario"], "discovery");
+        assert_eq!(arr[0]["total_probes"], 1);
+        assert_eq!(arr[0]["sink"], "stdout");
+        assert_eq!(arr[0]["probers"][0], "tcp_connect (ports 22)");
+    }
+
+    #[test]
+    fn render_dry_run_json_multi_plan_is_array_in_order() {
+        let a = args(&["127.0.0.1"], &[22]);
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolutions = vec![ResolvedScenarioTarget::new(
+            Target::Ip("127.0.0.1".parse().expect("ip")),
+            Ok(vec!["127.0.0.1".parse().expect("ip")]),
+        )];
+        let first = build_scenario_plan("one", &scenario, &resolutions, &a);
+        let second = build_scenario_plan("two", &scenario, &resolutions, &a);
+
+        let json = render_dry_run_json(&[first, second]).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let arr = value.as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["scenario"], "one");
+        assert_eq!(arr[1]["scenario"], "two");
+    }
+
+    #[test]
+    fn render_dry_run_json_contains_no_text_prose() {
+        let a = args(&["127.0.0.1"], &[22]);
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolutions = vec![ResolvedScenarioTarget::new(
+            Target::Ip("127.0.0.1".parse().expect("ip")),
+            Ok(vec!["127.0.0.1".parse().expect("ip")]),
+        )];
+        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a);
+        let json = render_dry_run_json(&[plan]).expect("json");
+        assert!(!json.contains("[dry-run]"), "{json}");
+        assert!(!json.contains("total probes:"), "{json}");
+    }
+
     #[tokio::test]
     async fn dry_run_flag_driven_prints_plan_and_exits_ok() {
         let mut a = args(&["127.0.0.1"], &[22, 80]);
@@ -1559,6 +1728,38 @@ mod tests {
     fn dry_run_scenario_label_uses_bare_index_when_unnamed() {
         let base = BaseProbeConfig::new();
         assert_eq!(dry_run_scenario_label(&base, 2, 4), "3 of 4");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn scenario_plan_label_text_keeps_the_multi_scenario_decoration() {
+        let mut base = BaseProbeConfig::new();
+        base.name = Some("routers".into());
+        assert_eq!(
+            scenario_plan_label(&base, 0, 3, DryRunFormat::Text),
+            "'routers' (1 of 3)"
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn scenario_plan_label_json_uses_plain_name_like_the_server() {
+        let mut base = BaseProbeConfig::new();
+        base.name = Some("routers".into());
+        assert_eq!(
+            scenario_plan_label(&base, 0, 3, DryRunFormat::Json),
+            "routers"
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn scenario_plan_label_json_falls_back_to_unnamed_when_no_name() {
+        let base = BaseProbeConfig::new();
+        assert_eq!(
+            scenario_plan_label(&base, 1, 2, DryRunFormat::Json),
+            "unnamed"
+        );
     }
 
     #[test]

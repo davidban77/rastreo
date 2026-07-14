@@ -1,5 +1,7 @@
 #![cfg(feature = "config")]
 
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -25,6 +27,60 @@ impl Env for StdEnv {
     fn var(&self, key: &str) -> Option<String> {
         std::env::var(key).ok()
     }
+}
+
+/// List every catalog `@name` across the search path with the exact scenario path a run would load, sorted and deduped by name.
+pub fn list_catalog() -> Vec<(String, PathBuf)> {
+    list_catalog_with_env(&StdEnv)
+}
+
+pub fn run_list() -> Result<()> {
+    let entries = list_catalog();
+    if entries.is_empty() {
+        eprintln!("{}", none_found_message(&search_dirs(&StdEnv)));
+        return Ok(());
+    }
+    print!("{}", format_listing(&entries));
+    Ok(())
+}
+
+fn list_catalog_with_env(env: &dyn Env) -> Vec<(String, PathBuf)> {
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for dir in &search_dirs(env) {
+        names.extend(list_catalog_names(dir));
+    }
+    // Resolve each name back through resolve_catalog_name so the listed path matches what a run picks: first directory wins, .yml before .yaml.
+    names
+        .into_iter()
+        .filter_map(|name| {
+            resolve_catalog_name_with_env(&name, env)
+                .ok()
+                .map(|path| (name, path))
+        })
+        .collect()
+}
+
+fn none_found_message(dirs: &[PathBuf]) -> String {
+    let searched = dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("no catalog scenarios found (searched: {searched})")
+}
+
+fn format_listing(entries: &[(String, PathBuf)]) -> String {
+    let width = entries
+        .iter()
+        .map(|(name, _)| name.len() + 1)
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (name, path) in entries {
+        let handle = format!("@{name}");
+        let _ = writeln!(out, "{handle:<width$}  ->  {}", path.display());
+    }
+    out
 }
 
 fn resolve_catalog_name_with_env(name: &str, env: &dyn Env) -> Result<PathBuf> {
@@ -365,5 +421,83 @@ mod tests {
         touch(dir.path(), "c.txt");
         let names = list_catalog_names(dir.path());
         assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn list_catalog_returns_names_sorted_with_resolved_paths() {
+        let dir = TempDir::new().expect("tempdir");
+        let foo = touch(dir.path(), "foo.yml");
+        let bar = touch(dir.path(), "bar.yaml");
+        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let got = list_catalog_with_env(&env);
+        assert_eq!(
+            got,
+            vec![("bar".to_string(), bar), ("foo".to_string(), foo)]
+        );
+    }
+
+    #[test]
+    fn list_catalog_first_dir_wins_matches_resolve_catalog_name() {
+        let a = TempDir::new().expect("a");
+        let b = TempDir::new().expect("b");
+        let a_file = touch(a.path(), "shared.yml");
+        let _b_file = touch(b.path(), "shared.yml");
+        let joined = format!(
+            "{}:{}",
+            a.path().to_string_lossy(),
+            b.path().to_string_lossy()
+        );
+        let env = FakeEnv::new().set(CATALOG_DIR_ENV, joined);
+        let listed = list_catalog_with_env(&env);
+        let shared = listed
+            .iter()
+            .find(|(name, _)| name == "shared")
+            .expect("shared listed");
+        let resolved = resolve_catalog_name_with_env("shared", &env).expect("resolves");
+        assert_eq!(shared.1, a_file);
+        assert_eq!(shared.1, resolved);
+    }
+
+    #[test]
+    fn list_catalog_yml_shadows_yaml_of_same_name() {
+        let dir = TempDir::new().expect("tempdir");
+        let yml = touch(dir.path(), "office.yml");
+        let _yaml = touch(dir.path(), "office.yaml");
+        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let office: Vec<_> = list_catalog_with_env(&env)
+            .into_iter()
+            .filter(|(name, _)| name == "office")
+            .collect();
+        assert_eq!(office.len(), 1);
+        assert_eq!(office[0].1, yml);
+    }
+
+    #[test]
+    fn list_catalog_is_empty_when_no_catalog_files_present() {
+        let dir = TempDir::new().expect("tempdir");
+        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        assert!(list_catalog_with_env(&env).is_empty());
+    }
+
+    #[test]
+    fn none_found_message_lists_searched_dirs() {
+        let msg = none_found_message(&[PathBuf::from("/a/catalog"), PathBuf::from("/b/catalog")]);
+        assert!(msg.contains("no catalog scenarios found"), "{msg}");
+        assert!(msg.contains("/a/catalog"), "{msg}");
+        assert!(msg.contains("/b/catalog"), "{msg}");
+    }
+
+    #[test]
+    fn format_listing_shows_each_handle_and_path_on_its_own_line() {
+        let entries = vec![
+            ("a".to_string(), PathBuf::from("/x/a.yml")),
+            ("longer".to_string(), PathBuf::from("/x/longer.yaml")),
+        ];
+        let out = format_listing(&entries);
+        assert_eq!(out.lines().count(), 2, "{out}");
+        assert!(out.contains("@a"), "{out}");
+        assert!(out.contains("@longer"), "{out}");
+        assert!(out.contains("/x/a.yml"), "{out}");
+        assert!(out.contains("/x/longer.yaml"), "{out}");
     }
 }
