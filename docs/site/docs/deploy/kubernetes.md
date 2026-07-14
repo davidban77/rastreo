@@ -8,10 +8,10 @@ The repository ships a Helm chart at `helm/rastreo/` that installs `rastreo-serv
 
 ## Install
 
-The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. Pin the version explicitly so upgrades are intentional.
+The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. The current published chart version is `0.6.0`. <!-- x-release-please-version --> An install with no `--version` pulls the latest published chart. To pin an upgrade intentionally, add `--version` with that version.
 
 ```bash
-helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo
 ```
 
 Or install from the checked-out source tree without pulling from the registry:
@@ -23,7 +23,7 @@ helm install rastreo ./helm/rastreo
 Use `--values myvalues.yaml` to override defaults without forking the chart.
 
 ```bash
-helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0 --values myvalues.yaml
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --values myvalues.yaml
 ```
 
 ## Key values
@@ -59,7 +59,7 @@ The most useful `values.yaml` knobs are:
 | `grafana.dashboardsEnabled`      | `false`                       | Deploy the bundled Grafana dashboard as a labeled `ConfigMap` for sidecar auto-discovery. See [Observability · Grafana dashboard](../reference/observability.md#grafana-dashboard). |
 | `podSecurity.netRaw`             | `false`                       | Add `NET_RAW` to the container capabilities. Required for the ARP and NDP probers. See [`podSecurity.netRaw`](#podsecuritynetraw-arp-and-ndp-probers). |
 | `logFormat`                      | unset (binary default `text`) | Log line format on stderr. Set to `json` for Loki / ELK / Splunk ingestion; renders `RASTREO_LOG_FORMAT` on the pod. See [Logging](../reference/logging.md). |
-| `otlp.metricsEnabled`            | `false`                       | Push metrics via OpenTelemetry OTLP. Requires an OTLP-enabled image build (see `image.tag: <VERSION>-otlp`). See [OTLP](../reference/otlp.md). |
+| `otlp.metricsEnabled`            | `false`                       | Push metrics via OpenTelemetry OTLP. Requires an OTLP-enabled image build (see `image.tag: X.Y.Z-otlp`). See [OTLP](../reference/otlp.md). |
 | `otlp.logsEnabled`               | `false`                       | Push logs via OpenTelemetry OTLP. Requires an OTLP-enabled image build. See [OTLP](../reference/otlp.md). |
 | `otlp.endpoint`                  | `""`                          | OTLP collector URL, e.g. `http://otel-collector.observability.svc:4317` (gRPC) or `http://otel-collector.observability.svc:4318` (HTTP+protobuf). Required when either OTLP toggle is on. |
 | `otlp.protocol`                  | `grpc`                        | OTLP transport protocol. `grpc` targets a collector's gRPC port (4317). `http-protobuf` targets the HTTP+protobuf port (4318). See [OTLP · Transport protocol](../reference/otlp.md#transport-protocol). |
@@ -102,7 +102,7 @@ You have three ways to supply the token.
     kubectl create secret generic rastreo-api-token \
       --from-literal=api-token="$(openssl rand -hex 32)"
 
-    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
       --set auth.existingSecret=rastreo-api-token
     ```
 
@@ -113,7 +113,7 @@ You have three ways to supply the token.
     Pass the token to the chart with `auth.token` and it renders a `Secret` for you. This is the simplest path for a lab, but the token is stored in your release values, so avoid it in production.
 
     ```bash
-    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
       --set auth.token="$(openssl rand -hex 32)"
     ```
 
@@ -122,7 +122,7 @@ You have three ways to supply the token.
     Deploy with no authentication. The pod starts with `RASTREO_AUTH_DISABLED=true` and logs a WARNING that the endpoint is open. Only do this on a trusted, isolated network.
 
     ```bash
-    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
       --set auth.enabled=false
     ```
 
@@ -146,7 +146,7 @@ The chart exposes three values under `targetGuard`:
 Set the allow-list and keep the two always-on caps at their defaults:
 
 ```bash
-helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.7.0 \
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
   --set auth.existingSecret=rastreo-api-token \
   --set 'targetGuard.allowlist={10.0.0.0/8,192.168.0.0/16}'
 ```
@@ -167,14 +167,14 @@ targetGuard:
 
 ## Image source
 
-The chart's default `image.repository` is `ghcr.io/davidban77/rastreo` — a multi-arch image built from the same source tree, published on every `v*` tag. `image.tag` defaults to the chart's `appVersion`, so `helm install ... --version 0.3.0` pulls `ghcr.io/davidban77/rastreo:0.3.0` out of the box.
+The chart's default `image.repository` is `ghcr.io/davidban77/rastreo` — a multi-arch image built from the same source tree, published on every `v*` tag. `image.tag` defaults to the chart's `appVersion`, so the install pulls the matching `ghcr.io/davidban77/rastreo` image.
 
 To pin to a different image (a fork in a private registry, a mid-cycle build, or a specific SHA), override `image.repository` and `image.tag`:
 
 ```bash
-helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0 \
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
   --set image.repository=my-registry.example.com/rastreo \
-  --set image.tag=0.3.0
+  --set image.tag=X.Y.Z
 ```
 
 ## ServiceMonitor

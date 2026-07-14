@@ -17,7 +17,7 @@ cargo build --release -p rastreo-server --features otlp
 cargo build --release -p rastreo --features otlp
 ```
 
-The default `ghcr.io/davidban77/rastreo:<VERSION>` image does NOT ship with the OTLP feature enabled — this keeps the default image lean for the common case where metrics are pulled by a Prometheus scrape target and logs are shipped from stdout by a log aggregator. An OTLP-enabled companion image is published alongside every release at `ghcr.io/davidban77/rastreo:<VERSION>-otlp`; see [Docker image with OTLP support](#docker-image-with-otlp-support) below.
+The default `ghcr.io/davidban77/rastreo:X.Y.Z` image does NOT ship with the OTLP feature enabled — this keeps the default image lean for the common case where metrics are pulled by a Prometheus scrape target and logs are shipped from stdout by a log aggregator. An OTLP-enabled companion image is published alongside every release at `ghcr.io/davidban77/rastreo:X.Y.Z-otlp`; see [Docker image with OTLP support](#docker-image-with-otlp-support) below.
 
 ## Configuration
 
@@ -85,20 +85,20 @@ If a real user runs into a symptom where traces would help — a slow-tail scan 
 
 ## Docker image with OTLP support
 
-The default `ghcr.io/davidban77/rastreo:<VERSION>` image does not include `--features otlp` — the OpenTelemetry Rust stack pulls in `tonic`, `prost`, and `reqwest`, and shipping those to every operator would grow the image for the majority of users who scrape `/metrics` and ship logs off stdout. An OTLP-enabled companion image is published alongside every release under the same repository:
+The default `ghcr.io/davidban77/rastreo:X.Y.Z` image does not include `--features otlp` — the OpenTelemetry Rust stack pulls in `tonic`, `prost`, and `reqwest`, and shipping those to every operator would grow the image for the majority of users who scrape `/metrics` and ship logs off stdout. An OTLP-enabled companion image is published alongside every release under the same repository:
 
 ```
-ghcr.io/davidban77/rastreo:<VERSION>-otlp
+ghcr.io/davidban77/rastreo:X.Y.Z-otlp
 ```
 
-Both variants are multi-arch (`linux/amd64`, `linux/arm64`) and identical apart from the compiled-in `otlp` feature. Every release tag has a matching `-otlp` sibling: the full semver (`0.4.0` and `0.4.0-otlp`), the minor line (`0.4` and `0.4-otlp`), the major line (`0` and `0-otlp`), and the rolling `latest` and `latest-otlp` tags.
+Both variants are multi-arch (`linux/amd64`, `linux/arm64`) and identical apart from the compiled-in `otlp` feature. Every release tag has a matching `-otlp` sibling: the full semver (`X.Y.Z` and `X.Y.Z-otlp`), the minor line (`X.Y` and `X.Y-otlp`), the major line (`X` and `X-otlp`), and the rolling `latest` and `latest-otlp` tags.
 
 Operators who want OTLP change one tag in their Deployment or Helm values:
 
 ```yaml
 image:
   repository: ghcr.io/davidban77/rastreo
-  tag: "0.4.0-otlp"
+  tag: "X.Y.Z-otlp"
 ```
 
 A future chart iteration may add an `image.variant: otlp` shortcut so the `-otlp` suffix is toggled by a semantic key rather than embedded in the tag string; the raw tag override works today.

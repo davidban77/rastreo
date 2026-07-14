@@ -17,7 +17,7 @@ The installer detects your OS and architecture, downloads the matching tarball p
 Pin a specific version or install to a different directory via environment variables:
 
 ```bash
-RASTREO_VERSION=v0.3.0 curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
+RASTREO_VERSION=vX.Y.Z curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
 RASTREO_INSTALL_DIR=$HOME/.local/bin curl -fsSL https://raw.githubusercontent.com/davidban77/rastreo/main/install.sh | sh
 ```
 
@@ -33,15 +33,15 @@ The image is multi-arch (linux amd64 + arm64) and ships both binaries. The defau
 docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:latest discover --target 1.1.1.1 --port 443
 ```
 
-Pinned tags (`0.3.0`, `0.3`, `0`) are available on every release. See [Docker](../deploy/docker.md) for the full surface.
+Pinned tags (`X.Y.Z`, `X.Y`, `X`) are available on every release. See [Docker](../deploy/docker.md) for the full surface.
 
 ## Helm chart (Kubernetes)
 
 ```bash
-helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --version 0.3.0
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo
 ```
 
-The chart deploys `rastreo-server` as a Deployment with sensible defaults (non-root UID, read-only rootfs, dropped capabilities). See [Kubernetes](../deploy/kubernetes.md) for values reference and ServiceMonitor setup.
+The chart deploys `rastreo-server` as a Deployment with sensible defaults (non-root UID, read-only rootfs, dropped capabilities). An install with no `--version` pulls the latest published chart. See [Kubernetes](../deploy/kubernetes.md) for values reference, version pinning, and ServiceMonitor setup.
 
 ## From source (Cargo)
 
