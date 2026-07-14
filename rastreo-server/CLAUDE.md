@@ -37,9 +37,10 @@ src/
 | `--bind`               | `RASTREO_SERVER_BIND`                  | `0.0.0.0`   | Bind address                               |
 | `--request-timeout-ms` | `RASTREO_SERVER_REQUEST_TIMEOUT_MS`    | `60000`     | Per-request timeout in ms; must be > 0     |
 | `--log-format`         | `RASTREO_LOG_FORMAT`                   | `text`      | Log line format on stderr: `text` or `json` |
+| —                      | `RASTREO_SHUTDOWN_TIMEOUT_SECS`        | `60`        | Hard cap on the graceful-drain window after the shutdown signal; on expiry the server logs a warning and force-exits. Clamped to ≥ 1s. Keep below the pod's `terminationGracePeriodSeconds`. |
 | —                      | `RASTREO_API_TOKEN`                    | unset       | Shared secret gating `POST /scans` (bearer). Set & non-empty ⇒ auth enabled. |
 | —                      | `RASTREO_AUTH_DISABLED`                | unset       | `true` runs `/scans` unauthenticated. Startup fails closed unless `RASTREO_API_TOKEN` or this is set. |
-| —                      | `RASTREO_MAX_INFLIGHT_SCANS`           | `100`       | `/readyz` inflight-scan gate; `0` disables |
+| —                      | `RASTREO_MAX_INFLIGHT_SCANS`           | `100`       | Inflight-scan cap: flips `/readyz` to 503 AND rejects a real `POST /scans` over the cap with 429; `0` disables. Dry-runs are never counted or rejected. |
 | —                      | `RASTREO_SINK_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` sink-error quarantine window; `0` disables |
 | —                      | `RASTREO_SCAN_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` scan-error quarantine window; `0` disables |
 | —                      | `RASTREO_SINK_CONFIG_PATH`             | unset       | Path to a YAML `SinkConfig`. When set, the server builds the sink at startup and probes it periodically. Unset ⇒ no probe, `/readyz` reports `sink_reachable: null`. |
@@ -76,6 +77,7 @@ Errors:
 - 401 — auth is enabled and the request carried a missing, malformed, or wrong bearer token. Returned by the `require_bearer` middleware before the handler runs.
 - 403 — the target allow-list (`RASTREO_TARGET_ALLOWLIST`) is configured and at least one resolved target falls outside every listed range (`ResolverError::TargetNotAllowed`). The whole request is rejected and nothing is probed; the error body names the offending IP.
 - 413 — the request body exceeded `RASTREO_MAX_BODY_BYTES`; rejected before JSON parsing.
+- 429 — the inflight-scan cap (`RASTREO_MAX_INFLIGHT_SCANS`, when non-zero) is reached; a real scan submitted while the server is at capacity is rejected rather than queued. The gauge is rolled back atomically so a rejected request never inflates it. Dry-runs consume no slot and are never 429'd.
 - 400 — bad scenario config (empty `targets` or `probers`, malformed JSON body) or unresolvable client input (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`, `AggregateHostCapExceeded`).
 - 500 — probe / encode / sink / runtime errors. A server-configured sink that returns an error mid-scan aborts the pipeline and surfaces as 500; the response body's `records` list is not returned even if the in-memory capture succeeded.
 - 503 — request exceeded the server-side timeout (`--request-timeout-ms`), or the server-side DNS infrastructure failed (`ResolverError::DnsLookupFailed`).

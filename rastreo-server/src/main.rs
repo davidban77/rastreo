@@ -1,3 +1,4 @@
+use std::future::IntoFuture;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,8 +9,8 @@ use rastreo_core::{GuardedResolver, HickoryResolver, Resolver};
 use rastreo_server::{
     build_app_with_timeout, spawn_sink_probe,
     state::{
-        AppState, AuthConfig, MetricsConfig, OtlpConfig, ReadinessConfig, SinkProbeConfig,
-        TargetGuardConfig,
+        AppState, AuthConfig, MetricsConfig, OtlpConfig, ReadinessConfig, ShutdownConfig,
+        SinkProbeConfig, TargetGuardConfig,
     },
 };
 use tokio::sync::watch;
@@ -73,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics_config = MetricsConfig::from_env().context("failed to load metrics config")?;
     let auth = AuthConfig::from_env().context("failed to load auth config")?;
     let sink_probe = SinkProbeConfig::from_env().context("failed to load sink-probe config")?;
+    let shutdown = ShutdownConfig::from_env().context("failed to load shutdown config")?;
     let state = AppState::with_config(resolver, readiness, metrics_config)
         .with_auth(auth)
         .with_body_limit(guard.max_body_bytes);
@@ -101,14 +103,32 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut shutdown_wait = shutdown_rx.clone();
-    axum::serve(listener, app)
+    let graceful = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = shutdown_wait.changed().await;
         })
-        .await?;
+        .into_future();
 
-    if let Some(handle) = probe_handle {
-        let _ = handle.await;
+    let mut hard_timeout_rx = shutdown_rx.clone();
+    let hard_timeout = shutdown.timeout;
+    tokio::select! {
+        result = graceful => {
+            result?;
+            if let Some(handle) = probe_handle {
+                let _ = handle.await;
+            }
+        }
+        _ = async move {
+            // The hard-timeout clock starts on the signal, not at startup, so an idle server is never force-exited early.
+            let _ = hard_timeout_rx.wait_for(|drain| *drain).await;
+            tokio::time::sleep(hard_timeout).await;
+        } => {
+            tracing::warn!(
+                timeout_secs = hard_timeout.as_secs(),
+                "graceful shutdown exceeded timeout; forcing exit"
+            );
+            std::process::exit(0);
+        }
     }
     Ok(())
 }

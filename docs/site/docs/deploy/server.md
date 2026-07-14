@@ -29,7 +29,8 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 | `--port`                | `RASTREO_SERVER_PORT`                  | `8080`  | TCP port to bind.                                      |
 | `--bind`                | `RASTREO_SERVER_BIND`                  | `0.0.0.0` | Bind address.                                        |
 | `--request-timeout-ms`  | `RASTREO_SERVER_REQUEST_TIMEOUT_MS`    | `60000` | Per-request timeout in milliseconds. Minimum 1.        |
-| —                       | `RASTREO_API_TOKEN`                    | unset   | Shared secret for `POST /scans` bearer auth. When set, every request to `POST /scans` must send `Authorization: Bearer <token>`. See [Authentication](#authentication). |
+| —                       | `RASTREO_SHUTDOWN_TIMEOUT_SECS`        | `60`    | Hard cap in seconds on the graceful-drain window after a shutdown signal. When the drain runs longer, the server logs a warning and force-exits. Minimum 1. Keep it below the pod's `terminationGracePeriodSeconds`. See [Graceful shutdown](#graceful-shutdown). |
+| —                       | `RASTREO_API_TOKEN`                    | unset   | Shared secret for `POST /scans` bearer auth. When set, every request to `POST /scans` must send `Authorization: Bearer <token>`. A trailing newline is tolerated. See [Authentication](#authentication). |
 | —                       | `RASTREO_AUTH_DISABLED`                | unset   | Set to `true` to run `POST /scans` with no authentication. The server refuses to start unless this or `RASTREO_API_TOKEN` is set. See [Authentication](#authentication). |
 | —                       | `RASTREO_SINK_CONFIG_PATH`             | unset   | Path to a YAML file with a `SinkConfig`. When set, the server builds the sink at startup and probes it every `RASTREO_SINK_PROBE_INTERVAL_SECS`. Sink construction failure is non-fatal — the pod stays up, `/readyz` reports `sink_unreachable`. |
 | —                       | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`    | Sink reachability probe cadence in seconds. Minimum 1. |
@@ -48,6 +49,9 @@ Two environment variables control authentication:
 
 - `RASTREO_API_TOKEN` — the shared secret. When set, every `POST /scans` request must carry `Authorization: Bearer <token>`.
 - `RASTREO_AUTH_DISABLED` — set to `true` to run `POST /scans` with no authentication. Use this only on a trusted, isolated network.
+
+!!! tip "A trailing newline in the token is tolerated"
+    `RASTREO_API_TOKEN` is trimmed of surrounding whitespace, so a trailing newline does not break authentication. This often happens when the token comes from a Kubernetes Secret's `stringData`, or from a shell `echo` that adds a newline. The token still authenticates.
 
 ### Secure by default
 
@@ -176,6 +180,12 @@ On Kubernetes, set all three controls through the Helm chart. See [Restricting s
 
 On `SIGTERM` (production) or `SIGINT` (`Ctrl+C` during local dev), the server stops accepting new connections, lets inflight requests drain against the per-request timeout above, and stops the background sink-reachability probe after its current iteration. Provided the deploy-side grace period is large enough, a scan in flight completes and its records reach the server-configured sink before shutdown; if the platform kills the process before drain completes (SIGKILL after the grace period elapses, or an unclean pod eviction), the in-flight scan is lost. The chart ships `terminationGracePeriodSeconds: 75` — see the [Kubernetes deploy page](kubernetes.md) for sizing guidance.
 
+A hard cap bounds the drain so a stuck scan cannot block shutdown forever. `RASTREO_SHUTDOWN_TIMEOUT_SECS` (default 60 seconds) sets it. When the drain runs longer than this, the server logs a warning and force-exits. On Kubernetes, keep this value below the pod's `terminationGracePeriodSeconds` so the app exits on its own before the kubelet sends `SIGKILL`.
+
+```text
+WARN rastreo_server: graceful shutdown exceeded timeout; forcing exit timeout_secs=60
+```
+
 ## GET /healthz and GET /readyz
 
 `GET /healthz` is a liveness probe. It always returns `200 OK` with a static JSON body, and never runs any discovery work. Use it from Kubernetes liveness probes, from external uptime monitors, or from a quick `curl` to verify the server is up.
@@ -263,6 +273,8 @@ All counters are monotonic across the server process's lifetime and reset only o
 To preview what a scan would do without probing anything, add the `?dry_run=true` query parameter. The server resolves the targets and returns a discovery plan instead of running the scan. See [Preview a scenario with a dry-run](#preview-a-scenario-with-a-dry-run).
 
 When authentication is enabled (the default), the request must carry a bearer token or it returns `401`. See [Authentication](#authentication) for the header shape and the 401 response.
+
+When `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running, a new `POST /scans` is rejected with `429 Too Many Requests` instead of being queued. The same cap also makes `/readyz` return `503`, so it both marks the pod not-ready and refuses new scans. A dry-run does not count against the cap and is never rejected. Set `RASTREO_MAX_INFLIGHT_SCANS=0` to disable the cap. See [GET /readyz](#get-healthz-and-get-readyz) for the readiness gate.
 
 When `RASTREO_SINK_CONFIG_PATH` is set, each record is fanned out to both the in-memory capture and the server-configured sink on the same pipeline pass. The response body remains identical to the unconfigured case; the server-configured sink additionally receives every record. A write error from the server-configured sink aborts the scan and returns 500 — the response body's `records` list is not returned even if the in-memory capture succeeded. When `RASTREO_SINK_CONFIG_PATH` is unset, the response body is the only destination and behavior is identical to earlier releases.
 
@@ -369,6 +381,7 @@ Error surfaces:
 | `401`  | Authentication is enabled and the request carried a missing, malformed, or wrong bearer token. Checked before the scan runs. See [Authentication](#authentication). |
 | `403`  | The target allow-list is set and a resolved target falls outside every allowed network. The whole request is rejected and nothing is probed. See [Restricting scan targets](#restricting-scan-targets). |
 | `413`  | The request body exceeded `RASTREO_MAX_BODY_BYTES`. Rejected before the JSON body is parsed. See [Restricting scan targets](#restricting-scan-targets). |
+| `429`  | `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running. The body is `{"error":"inflight scan limit reached; retry once running scans complete"}`. A dry-run never counts against the cap and is never rejected. Setting the cap to `0` disables it. See [POST /scans](#post-scans). |
 | `400`  | `scenario.targets` empty, `scenario.probers` empty, malformed JSON body, the request exceeded `RASTREO_MAX_TOTAL_HOSTS`, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). |
 | `500`  | Internal probe / encoder / sink / runtime error. The response body carries `{"error":"internal server error"}` — full detail is logged for operators, not returned to the client. |
 | `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`) or the request exceeded `--request-timeout-ms`. |
