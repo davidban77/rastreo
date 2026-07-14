@@ -146,6 +146,7 @@ nav:
           - DeviceRecord: reference/schema/device-record.md
           - ScanMetadata: reference/schema/scan-metadata.md
           - ScenarioFile: reference/schema/scenario-config.md
+          - DiscoveryPlan: reference/schema/discovery-plan.md
           - Streaming API: reference/schema/streaming-api.md
           - DlqEnvelope: reference/schema/dlq-envelope.md
       - Errors: reference/errors.md

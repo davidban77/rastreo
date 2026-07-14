@@ -232,7 +232,8 @@ fn effective_knobs(scenario: &DiscoverScenarioConfig, args: &DiscoverArgs) -> Pl
         max_concurrent: scenario
             .base
             .max_concurrent
-            .unwrap_or_else(|| args.concurrency.unwrap_or(DEFAULT_CONCURRENCY)),
+            .unwrap_or_else(|| args.concurrency.unwrap_or(DEFAULT_CONCURRENCY))
+            .max(1),
         probe_rate: scenario.base.probe_rate.or(args.rate),
         retries: scenario.base.retries.or(args.retries).unwrap_or(0),
         timeout_ms: scenario

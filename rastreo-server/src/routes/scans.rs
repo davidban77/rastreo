@@ -1,17 +1,22 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
 use rastreo_core::{
-    hint_for_error_kind, run_discovery_with_components, DeviceRecord, DiscoverySummary,
-    EncoderConfig, MemorySink, Sink, TeeChild, TeeSink,
+    hint_for_error_kind, resolve_scenario_targets, run_discovery_with_components, DeviceRecord,
+    DiscoveryPlan, DiscoverySummary, EncoderConfig, MemorySink, PlanKnobs, Sink, TeeChild, TeeSink,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::state::{AppState, ReadinessState};
+
+const DEFAULT_CONCURRENCY: u32 = 64;
+const DEFAULT_TIMEOUT_MS: u64 = 1000;
 
 struct InflightGuard(Arc<ReadinessState>);
 
@@ -37,34 +42,79 @@ pub struct ScanResponse {
     pub hint: Option<String>,
 }
 
-/// Run a discovery scenario synchronously; the client-supplied `sink` field is ignored and records are returned in the response body.
-pub async fn create_scan(
-    State(state): State<AppState>,
-    Json(scenario): Json<DiscoverScenarioConfig>,
-) -> Result<Json<ScanResponse>, AppError> {
-    let start = std::time::Instant::now();
-    let _inflight = InflightGuard::new(state.readiness.clone());
+#[derive(Debug, Default, Deserialize)]
+pub struct ScanParams {
+    #[serde(default)]
+    pub dry_run: bool,
+}
 
-    let scenario_label = scenario
+fn scenario_label(scenario: &DiscoverScenarioConfig) -> String {
+    scenario
         .base
         .name
         .clone()
-        .unwrap_or_else(|| "unnamed".to_string());
+        .unwrap_or_else(|| "unnamed".to_string())
+}
+
+/// Submit a discovery scenario. `?dry_run=true` resolves targets and returns the [`DiscoveryPlan`] without probing or writing a sink; otherwise the scenario runs synchronously and records are returned in the response body (the client-supplied `sink` field is ignored on the real-scan path).
+pub async fn create_scan(
+    State(state): State<AppState>,
+    Query(params): Query<ScanParams>,
+    Json(scenario): Json<DiscoverScenarioConfig>,
+) -> Result<Response, AppError> {
+    let start = Instant::now();
+    let label = scenario_label(&scenario);
 
     if scenario.targets.is_empty() {
         state
             .metrics
-            .record_scan_error(start.elapsed(), None, &scenario_label);
+            .record_scan_error(start.elapsed(), None, &label);
         state.readiness.record_scan_error(false);
         return Err(AppError::bad_request("scenario.targets must not be empty"));
     }
     if scenario.probers.is_empty() {
         state
             .metrics
-            .record_scan_error(start.elapsed(), None, &scenario_label);
+            .record_scan_error(start.elapsed(), None, &label);
         state.readiness.record_scan_error(false);
         return Err(AppError::bad_request("scenario.probers must not be empty"));
     }
+
+    if params.dry_run {
+        return Ok(Json(dry_run_plan(&state, &scenario, label).await).into_response());
+    }
+
+    Ok(run_scan(state, scenario, start, label)
+        .await?
+        .into_response())
+}
+
+async fn dry_run_plan(
+    state: &AppState,
+    scenario: &DiscoverScenarioConfig,
+    label: String,
+) -> DiscoveryPlan {
+    let resolutions = resolve_scenario_targets(scenario, state.resolver.as_ref()).await;
+    let knobs = PlanKnobs {
+        max_concurrent: scenario
+            .base
+            .max_concurrent
+            .unwrap_or(DEFAULT_CONCURRENCY)
+            .max(1),
+        probe_rate: scenario.base.probe_rate,
+        retries: scenario.base.retries.unwrap_or(0),
+        timeout_ms: scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+    };
+    DiscoveryPlan::new(label, scenario, &resolutions, knobs)
+}
+
+async fn run_scan(
+    state: AppState,
+    scenario: DiscoverScenarioConfig,
+    start: Instant,
+    scenario_label: String,
+) -> Result<Json<ScanResponse>, AppError> {
+    let _inflight = InflightGuard::new(state.readiness.clone());
 
     let mut scenario = scenario;
     if scenario.base.sink.is_some() {
@@ -152,6 +202,14 @@ mod tests {
         DiscoverScenarioConfig::new(BaseProbeConfig::default(), targets, probers)
     }
 
+    async fn run_real(
+        state: AppState,
+        scenario: DiscoverScenarioConfig,
+    ) -> Result<Json<ScanResponse>, AppError> {
+        let label = scenario_label(&scenario);
+        run_scan(state, scenario, Instant::now(), label).await
+    }
+
     #[tokio::test]
     async fn create_scan_with_empty_targets_returns_400() {
         let state = state_with_system_resolver();
@@ -159,7 +217,7 @@ mod tests {
             Vec::new(),
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let err = create_scan(State(state), Json(scenario))
+        let err = create_scan(State(state), Query(ScanParams::default()), Json(scenario))
             .await
             .expect_err("empty targets must error");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -173,7 +231,7 @@ mod tests {
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
             Vec::new(),
         );
-        let err = create_scan(State(state), Json(scenario))
+        let err = create_scan(State(state), Query(ScanParams::default()), Json(scenario))
             .await
             .expect_err("empty probers must error");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -194,9 +252,7 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.summary.records_emitted, 1);
         assert_eq!(response.records.len(), 1);
         assert_eq!(
@@ -243,9 +299,7 @@ mod tests {
         s.base.timeout_ms = Some(500);
         assert!(s.base.encoder.is_none(), "client omits encoder");
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.summary.records_emitted, 1);
         assert_eq!(response.records.len(), 1);
     }
@@ -265,9 +319,7 @@ mod tests {
         s.base.timeout_ms = Some(500);
         s.base.encoder = Some(EncoderConfig::Ndjson);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.summary.records_emitted, 1);
         assert_eq!(response.records.len(), 1);
     }
@@ -287,9 +339,7 @@ mod tests {
         s.base.timeout_ms = Some(500);
         s.base.sink = Some(SinkConfig::Stdout);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.summary.records_emitted, 1);
         assert_eq!(response.records.len(), 1);
     }
@@ -324,9 +374,7 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.summary.records_emitted, 1);
         assert_eq!(response.records.len(), 1);
         let lines = handle.ndjson_lines();
@@ -400,9 +448,7 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.summary.records_emitted, 1);
         let committed = inner.committed.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
@@ -427,9 +473,7 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert_eq!(response.records.len(), 1);
     }
 
@@ -447,9 +491,7 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
 
         let value: serde_json::Value = serde_json::to_value(&response).expect("serialize response");
         let records = value["records"].as_array().expect("records array");
@@ -476,9 +518,7 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         assert!(response.summary.first_probe_error.is_none());
         assert!(
             response.hint.is_none(),
@@ -523,9 +563,7 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let Json(response) = create_scan(State(state), Json(s))
-            .await
-            .expect("create_scan");
+        let Json(response) = run_real(state, s).await.expect("create_scan");
         let fault = response
             .summary
             .first_probe_error
@@ -543,6 +581,140 @@ mod tests {
         assert!(
             !wire_hint.starts_with("hint:"),
             "the wire `hint` field must not carry the CLI presentation prefix: {wire_hint}"
+        );
+    }
+
+    #[test]
+    fn scan_params_default_is_not_dry_run() {
+        assert!(!ScanParams::default().dry_run);
+    }
+
+    #[tokio::test]
+    async fn dry_run_plan_resolves_targets_and_applies_pipeline_defaults() {
+        use rastreo_core::TargetResolution;
+
+        let state = state_with_system_resolver();
+        let s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect {
+                ports: vec![22, 80],
+            }],
+        );
+        let plan = dry_run_plan(&state, &s, "unit-plan".to_string()).await;
+
+        assert_eq!(plan.scenario, "unit-plan");
+        assert_eq!(plan.max_concurrent, DEFAULT_CONCURRENCY);
+        assert_eq!(plan.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(plan.retries, 0);
+        assert_eq!(plan.probers.len(), 1);
+        assert_eq!(plan.total_probes, 1);
+        assert!(matches!(
+            &plan.targets[0].resolution,
+            TargetResolution::Resolved(ips) if ips.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST))
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_scan_dry_run_returns_plan_and_does_not_write_server_sink() {
+        use crate::state::{SharedSink, SinkReachability};
+        use rastreo_core::SinkType;
+        use tokio::sync::Mutex;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let base = state_with_system_resolver();
+        let sink = MemorySink::new();
+        let handle = sink.handle();
+        let shared: SharedSink = Arc::new(Mutex::new(Box::new(sink) as Box<dyn Sink>));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Memory,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        reach.record_success();
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let response = create_scan(State(state), Query(ScanParams { dry_run: true }), Json(s))
+            .await
+            .expect("dry-run");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("plan json");
+        assert!(
+            value["total_probes"].is_number(),
+            "plan carries total_probes: {value}"
+        );
+        assert!(value["probers"].is_array());
+        assert_eq!(
+            value["targets"][0]["resolution"]["resolved"][0],
+            "127.0.0.1"
+        );
+        assert!(
+            value.get("records").is_none(),
+            "dry-run body is a plan, not a scan response"
+        );
+        assert!(
+            value.get("summary").is_none(),
+            "dry-run body is a plan, not a scan response"
+        );
+        assert!(
+            handle.ndjson_lines().is_empty(),
+            "dry-run must not open or write the server-configured sink"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_scan_dry_run_with_empty_targets_returns_400() {
+        let state = state_with_system_resolver();
+        let s = scenario(
+            Vec::new(),
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        let err = create_scan(State(state), Query(ScanParams { dry_run: true }), Json(s))
+            .await
+            .expect_err("dry-run of an invalid scenario must 400");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("targets"));
+    }
+
+    #[cfg(feature = "nats")]
+    #[tokio::test]
+    async fn create_scan_dry_run_nats_sink_strips_credentials_from_plan() {
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        s.base.sink = Some(SinkConfig::Nats {
+            servers: vec!["nats://u:p@broker:4222".into()],
+            subject: "rastreo.devices".into(),
+            stream: "RASTREO".into(),
+            credentials: rastreo_core::NatsCredentials::default(),
+            flush_mode: rastreo_core::NatsFlushMode::default(),
+            dead_letter: None,
+        });
+
+        let plan = dry_run_plan(&state, &s, "nats-plan".to_string()).await;
+        assert_eq!(
+            plan.sink,
+            "nats: servers=nats://broker:4222 subject=rastreo.devices stream=RASTREO"
+        );
+        assert!(
+            !plan.sink.contains("u:p"),
+            "dry-run plan must not leak credentials: {}",
+            plan.sink
         );
     }
 }

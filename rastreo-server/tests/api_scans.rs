@@ -66,6 +66,94 @@ async fn post_scans_returns_summary_and_records_for_open_loopback_port() {
 }
 
 #[tokio::test]
+async fn post_scans_dry_run_returns_plan_and_writes_no_records_to_server_sink() {
+    let resolver: Arc<dyn Resolver> =
+        Arc::new(HickoryResolver::from_system().expect("system resolver"));
+    let server_sink = MemorySink::new();
+    let server_handle = server_sink.handle();
+    let boxed: Box<dyn Sink> = Box::new(server_sink);
+    let shared: SharedSink = Arc::new(tokio::sync::Mutex::new(boxed));
+    let reach = Arc::new(SinkReachability::configured(
+        SinkType::Memory,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(5),
+    ));
+    reach.record_success();
+    let state = AppState::new(resolver).with_sink(Some(Arc::clone(&shared)), reach);
+    let app = build_app(state);
+
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind server");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let target_port = spawn_target_listener().await;
+    let body = json!({
+        "name": "dry-run-scan",
+        "timeout_ms": 500,
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [target_port]}],
+    });
+
+    let url = format!("http://{addr}/scans?dry_run=true");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert_eq!(payload["scenario"], "dry-run-scan");
+    assert!(
+        payload["total_probes"].is_number(),
+        "plan carries total_probes: {payload}"
+    );
+    assert_eq!(
+        payload["targets"][0]["resolution"]["resolved"][0],
+        "127.0.0.1"
+    );
+    assert!(
+        payload.get("records").is_none() && payload.get("summary").is_none(),
+        "a dry-run returns a plan, not a scan response: {payload}"
+    );
+
+    assert!(
+        server_handle.ndjson_lines().is_empty(),
+        "a dry-run must not probe or write the server-configured sink"
+    );
+}
+
+#[tokio::test]
+async fn post_scans_dry_run_with_empty_targets_returns_400() {
+    let server_addr = spawn_server().await;
+    let url = format!("http://{server_addr}/scans?dry_run=true");
+    let body = json!({
+        "targets": [],
+        "probers": [{"type": "tcp_connect", "ports": [22]}],
+    });
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert!(
+        payload["error"]
+            .as_str()
+            .map(|s| s.contains("targets"))
+            .unwrap_or(false),
+        "error must mention targets, got {payload}"
+    );
+}
+
+#[tokio::test]
 async fn post_scans_with_malformed_json_returns_400() {
     let server_addr = spawn_server().await;
     let url = format!("http://{server_addr}/scans");

@@ -1,0 +1,114 @@
+{
+  "$id": "https://davidban77.github.io/rastreo/schemas/discovery-plan-v1.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "PlannedTarget": {
+      "properties": {
+        "resolution": {
+          "$ref": "#/definitions/TargetResolution"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resolution",
+        "target"
+      ],
+      "type": "object"
+    },
+    "TargetResolution": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "resolved": {
+              "items": {
+                "format": "ip",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "resolved"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "description": "Structured plan of a single discovery scenario — what a dry-run would probe, without executing it.",
+  "properties": {
+    "max_concurrent": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "probe_rate": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "probers": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "retries": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "scenario": {
+      "type": "string"
+    },
+    "sink": {
+      "type": "string"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/definitions/PlannedTarget"
+      },
+      "type": "array"
+    },
+    "timeout_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "total_probes": {
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "max_concurrent",
+    "probers",
+    "retries",
+    "scenario",
+    "sink",
+    "targets",
+    "timeout_ms",
+    "total_probes"
+  ],
+  "title": "DiscoveryPlan",
+  "type": "object"
+}

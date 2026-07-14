@@ -83,6 +83,27 @@ async fn post_scans_without_authorization_header_returns_401() {
 }
 
 #[tokio::test]
+async fn post_scans_dry_run_without_authorization_header_returns_401() {
+    let addr = spawn_server(enabled()).await;
+    let target_port = spawn_target_listener().await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/scans?dry_run=true"))
+        .json(&scan_body(target_port))
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let value: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(value["error"], "missing or invalid bearer token");
+    assert!(
+        value.get("scenario").is_none(),
+        "an unauthenticated dry-run must not return a plan"
+    );
+}
+
+#[tokio::test]
 async fn post_scans_with_basic_auth_scheme_returns_401() {
     let addr = spawn_server(enabled()).await;
 

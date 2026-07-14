@@ -57,6 +57,22 @@ fn committed_scenario_render_matches_current_schema() {
 }
 
 #[test]
+fn committed_discovery_plan_render_matches_current_schema() {
+    let root = workspace_root();
+    let raw = fs::read_to_string(root.join("schemas/discovery-plan-v1.json"))
+        .expect("read discovery-plan schema");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse schema");
+    let rendered = xtask::render_schema(&value, "rastreo-core/src/plan.rs");
+    let committed =
+        fs::read_to_string(root.join("docs/site/docs/reference/schema/discovery-plan.md"))
+            .expect("read committed discovery-plan.md");
+    assert_eq!(
+        rendered, committed,
+        "committed discovery-plan.md is out of sync with the schema. Run `task schema:all`."
+    );
+}
+
+#[test]
 fn committed_schemas_match_derives() {
     let root = workspace_root();
     let device_committed =
@@ -81,6 +97,14 @@ fn committed_schemas_match_derives() {
     assert_eq!(
         scenario_committed, scenario_current,
         "committed scenario-v1.json is out of sync with the ScenarioFile derives. Run `task schema:generate`."
+    );
+
+    let plan_committed = fs::read_to_string(root.join("schemas/discovery-plan-v1.json"))
+        .expect("read discovery-plan schema");
+    let plan_current = xtask::discovery_plan_schema().expect("discovery-plan schema");
+    assert_eq!(
+        plan_committed, plan_current,
+        "committed discovery-plan-v1.json is out of sync with the DiscoveryPlan derives. Run `task schema:generate`."
     );
 }
 

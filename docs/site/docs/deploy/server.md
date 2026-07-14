@@ -260,6 +260,8 @@ All counters are monotonic across the server process's lifetime and reset only o
 
 `POST /scans` submits a discovery scenario, runs it synchronously, and returns the summary and records in the response body. The request body is a `DiscoverScenarioConfig` JSON object. The required fields are `targets` (a non-empty list of targets) and `probers` (a non-empty list of prober configurations). Optional fields on the embedded `base` include `max_concurrent`, `probe_rate`, `timeout_ms`, `fuser`, and `name`. The `encoder` and `sink` fields are accepted but ignored — the server forces NDJSON encoding and captures records in memory so it can return them in the response.
 
+To preview what a scan would do without probing anything, add the `?dry_run=true` query parameter. The server resolves the targets and returns a discovery plan instead of running the scan. See [Preview a scenario with a dry-run](#preview-a-scenario-with-a-dry-run).
+
 When authentication is enabled (the default), the request must carry a bearer token or it returns `401`. See [Authentication](#authentication) for the header shape and the 401 response.
 
 When `RASTREO_SINK_CONFIG_PATH` is set, each record is fanned out to both the in-memory capture and the server-configured sink on the same pipeline pass. The response body remains identical to the unconfigured case; the server-configured sink additionally receives every record. A write error from the server-configured sink aborts the scan and returns 500 — the response body's `records` list is not returned even if the in-memory capture succeeded. When `RASTREO_SINK_CONFIG_PATH` is unset, the response body is the only destination and behavior is identical to earlier releases.
@@ -372,6 +374,82 @@ Error surfaces:
 | `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`) or the request exceeded `--request-timeout-ms`. |
 
 The response body is JSON in all cases: `{"error": "<message>"}` for 4xx and 5xx.
+
+### Preview a scenario with a dry-run
+
+Before a scan probes anything, you can preview exactly what it would do. Add `?dry_run=true` to the request. The server resolves every target and returns a discovery plan with HTTP 200. A dry-run runs no probers and writes to no sink.
+
+Use a dry-run to validate a scenario before it probes the network:
+
+- Confirm each target resolves to the addresses you expect.
+- See how many probes the scan would start.
+- Check the sink the scan would write to, with any inline credentials removed.
+
+!!! note "A dry-run does not probe or write to a sink"
+    A dry-run only resolves targets and builds the plan. It still requires a bearer token when authentication is enabled, and it still routes through the target allow-list.
+
+```bash
+curl -sS -X POST "http://localhost:8080/scans?dry_run=true" \
+  -H "Authorization: Bearer $RASTREO_API_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{
+    "name": "mgmt-sweep",
+    "targets": [{"Ip": "10.50.0.10"}],
+    "probers": [{"type": "tcp_connect", "ports": [22, 443]}]
+  }'
+```
+
+The response is a `DiscoveryPlan`. Its fields are:
+
+- `scenario` — the scenario name, or `unnamed` when the request omits `name`.
+- `targets` — one entry per target you sent, each with the original `target` spec and a `resolution`.
+- `resolution` — `resolved` with the list of IP addresses when the target resolves, or `error` with the reason when it fails to resolve or is blocked.
+- `probers` — a readable summary of each prober the scan would run.
+- `sink` — the destination the scan would write to.
+- `max_concurrent` — the most probes the scan would run at once.
+- `probe_rate` — the probes-per-second pace, or `null` for unlimited.
+- `retries` — the retransmit count for connectionless probers.
+- `timeout_ms` — the per-probe timeout in milliseconds.
+- `total_probes` — unique resolved addresses across all targets, multiplied by the number of probers.
+
+```json
+{
+  "scenario": "mgmt-sweep",
+  "targets": [
+    { "target": "10.50.0.10", "resolution": { "resolved": ["10.50.0.10"] } }
+  ],
+  "probers": ["tcp_connect (ports 22, 443)"],
+  "sink": "stdout (default)",
+  "max_concurrent": 64,
+  "probe_rate": null,
+  "retries": 0,
+  "timeout_ms": 1000,
+  "total_probes": 1
+}
+```
+
+!!! tip "Safe to log or share"
+    The plan strips inline credentials from a sink URL. A NATS server URL written as `nats://user:pass@host` renders as `nats://host` in the plan.
+
+A real scan rejects an out-of-allow-list target with a hard `403` and probes nothing. A dry-run is more informative. It resolves what it can and reports the blocked target in the plan. The blocked target carries an `error` in its `resolution`, and it does not add to `total_probes`.
+
+```json
+{
+  "scenario": "mgmt-sweep",
+  "targets": [
+    { "target": "192.168.1.1", "resolution": { "error": "resolver error: target 192.168.1.1 is outside the configured allow-list" } }
+  ],
+  "probers": ["tcp_connect (ports 22, 443)"],
+  "sink": "stdout (default)",
+  "max_concurrent": 64,
+  "probe_rate": null,
+  "retries": 0,
+  "timeout_ms": 1000,
+  "total_probes": 0
+}
+```
+
+The plan is described field by field in the [DiscoveryPlan schema reference](../reference/schema/discovery-plan.md).
 
 ## Server vs CLI
 
