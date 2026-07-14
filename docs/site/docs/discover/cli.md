@@ -95,7 +95,7 @@ scenarios:
         ports: [80, 443]
 ```
 
-Each scenario prints its own status line to stderr. If ANY single scenario fails, the CLI continues to the next; the process exits non-zero only when the file itself is invalid, or when every scenario fails.
+Each scenario prints its own status line to stderr, and the CLI runs every scenario in the file even if one fails. The process exits non-zero if the file itself is invalid or if **any** scenario fails — a partial failure (some scenarios succeed, some fail) is a non-zero exit, so a CI wrapper checking the exit code catches it. The final stderr line reads `N of M scenario(s) failed`. A scenario that completes but finds no reachable hosts is a success, not a failure.
 
 ## Optional flags
 
