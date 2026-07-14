@@ -423,9 +423,9 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
         }
     }
 
-    if errors == total {
+    if errors > 0 {
         return Err(anyhow!(
-            "all {total} scenario(s) failed; see individual errors above"
+            "{errors} of {total} scenario(s) failed; see individual errors above"
         ));
     }
     Ok(())

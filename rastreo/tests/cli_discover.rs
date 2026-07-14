@@ -638,7 +638,7 @@ async fn output_flag_overrides_yaml_file_sink_path() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
-async fn multi_scenario_partial_failure_continues_and_exits_zero() {
+async fn multi_scenario_partial_failure_continues_and_exits_nonzero() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -664,8 +664,8 @@ async fn multi_scenario_partial_failure_continues_and_exits_zero() {
     drop(listener);
 
     assert!(
-        output.status.success(),
-        "expected exit 0 when at least one scenario succeeds; stderr: {}",
+        !output.status.success(),
+        "expected nonzero exit when any scenario fails; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -682,13 +682,56 @@ async fn multi_scenario_partial_failure_continues_and_exits_zero() {
         stderr.contains("scenario 'good'"),
         "stderr missing second scenario label: {stderr}"
     );
+    assert!(
+        stderr.contains("1 of 2 scenario(s) failed"),
+        "stderr missing partial-failure summary: {stderr}"
+    );
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(
         lines.len(),
         1,
-        "expected the good scenario to emit one NDJSON line; stderr: {stderr}"
+        "expected the good scenario to still emit one NDJSON line; stderr: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn zero_reachable_hosts_scenario_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: empty-scan\n    timeout_ms: 200\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"192.0.2.1\"\n    probers:\n      - type: tcp_connect\n        ports: [1]\n";
+    let path = write_yaml(&dir, "zero-reachable.yml", yaml);
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "a successful scan that found nothing must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("records_emitted=0"),
+        "stderr missing zero-records summary: {stderr}"
+    );
+    assert!(
+        !stderr.contains("scenario(s) failed"),
+        "an empty scan must not be reported as a scenario failure: {stderr}"
+    );
+    assert!(
+        String::from_utf8(output.stdout).expect("utf-8").is_empty(),
+        "stdout should be empty when nothing was reachable"
     );
 }
 
