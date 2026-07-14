@@ -25,7 +25,8 @@
           "type": "yaml",
           "path": "helm/rastreo/Chart.yaml",
           "jsonpath": "$.appVersion"
-        }
+        },
+        "docs/site/docs/deploy/kubernetes.md"
       ],
       "changelog-sections": [
         { "type": "feat", "section": "Features" },

@@ -239,7 +239,7 @@ jobs:
           version: v3.15.2
 
       - name: Lint chart
-        run: helm lint helm/rastreo
+        run: helm lint --strict helm/rastreo
 
       - name: Package chart
         run: helm package helm/rastreo --destination .
