@@ -408,6 +408,30 @@ impl ReadinessConfig {
     }
 }
 
+/// Hard cap on the graceful-drain window after the shutdown signal; the server force-exits once it elapses.
+#[derive(Debug, Clone)]
+pub struct ShutdownConfig {
+    pub timeout: Duration,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(60),
+        }
+    }
+}
+
+impl ShutdownConfig {
+    /// Read `RASTREO_SHUTDOWN_TIMEOUT_SECS` (default 60, clamped to a 1s minimum), falling back to the default when unset.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let secs = parse_env_u64("RASTREO_SHUTDOWN_TIMEOUT_SECS", 60)?.max(1);
+        Ok(Self {
+            timeout: Duration::from_secs(secs),
+        })
+    }
+}
+
 pub const DEFAULT_MAX_TOTAL_HOSTS: usize = 262_144;
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 
@@ -498,7 +522,7 @@ impl OtlpConfig {
             return Ok(None);
         }
         let endpoint = match std::env::var("RASTREO_OTLP_ENDPOINT") {
-            Ok(raw) if !raw.trim().is_empty() => raw,
+            Ok(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
             Ok(_) | Err(std::env::VarError::NotPresent) => {
                 return Err(anyhow::anyhow!(
                     "RASTREO_OTLP_ENDPOINT is required when RASTREO_OTLP_METRICS_ENABLED or \
@@ -518,7 +542,8 @@ impl OtlpConfig {
             Duration::from_secs(parse_env_u64("RASTREO_OTLP_METRICS_INTERVAL_SECS", 30)?);
         let service_name = std::env::var("RASTREO_OTLP_SERVICE_NAME")
             .ok()
-            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "rastreo-server".to_string());
         Ok(Some(Self {
             endpoint,
@@ -748,7 +773,9 @@ impl AuthConfig {
     /// Read `RASTREO_API_TOKEN` (enables auth) and `RASTREO_AUTH_DISABLED` (explicit opt-out); errors when neither is set so the scan endpoint is never silently open.
     pub fn from_env() -> anyhow::Result<Self> {
         match std::env::var("RASTREO_API_TOKEN") {
-            Ok(token) if !token.trim().is_empty() => Ok(Self::Enabled { token }),
+            Ok(token) if !token.trim().is_empty() => Ok(Self::Enabled {
+                token: token.trim().to_string(),
+            }),
             Ok(_) | Err(std::env::VarError::NotPresent) => {
                 if parse_env_bool("RASTREO_AUTH_DISABLED", false)? {
                     tracing::warn!(
@@ -1337,10 +1364,11 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    const ENV_KEYS: [&str; 17] = [
+    const ENV_KEYS: [&str; 18] = [
         "RASTREO_MAX_INFLIGHT_SCANS",
         "RASTREO_SINK_ERROR_QUARANTINE_SECS",
         "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
+        "RASTREO_SHUTDOWN_TIMEOUT_SECS",
         "RASTREO_OTLP_ENDPOINT",
         "RASTREO_OTLP_METRICS_ENABLED",
         "RASTREO_OTLP_LOGS_ENABLED",
@@ -1430,6 +1458,55 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_config_default_is_sixty_seconds() {
+        assert_eq!(ShutdownConfig::default().timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn shutdown_config_from_env_uses_default_when_unset() {
+        let _guard = env_guard();
+        clear_env();
+        let cfg = ShutdownConfig::from_env().expect("from_env");
+        assert_eq!(cfg.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn shutdown_config_from_env_reads_custom_value() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+        unsafe { std::env::set_var("RASTREO_SHUTDOWN_TIMEOUT_SECS", "15") };
+        let cfg = ShutdownConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(cfg.timeout, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn shutdown_config_from_env_clamps_zero_to_one_second() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+        unsafe { std::env::set_var("RASTREO_SHUTDOWN_TIMEOUT_SECS", "0") };
+        let cfg = ShutdownConfig::from_env().expect("from_env");
+        clear_env();
+        assert_eq!(cfg.timeout, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn shutdown_config_from_env_rejects_non_numeric_value() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+        unsafe { std::env::set_var("RASTREO_SHUTDOWN_TIMEOUT_SECS", "soon") };
+        let err = ShutdownConfig::from_env().expect_err("must reject non-numeric");
+        clear_env();
+        assert!(
+            err.to_string().contains("RASTREO_SHUTDOWN_TIMEOUT_SECS"),
+            "msg was {err}"
+        );
+    }
+
+    #[test]
     fn auth_config_default_is_disabled() {
         assert!(matches!(AuthConfig::default(), AuthConfig::Disabled));
     }
@@ -1478,6 +1555,17 @@ mod tests {
         let err = AuthConfig::from_env().expect_err("a blank token must not enable auth");
         clear_env();
         assert!(err.to_string().contains("RASTREO_API_TOKEN"));
+    }
+
+    #[test]
+    fn auth_config_from_env_trims_trailing_newline_from_token() {
+        let _guard = env_guard();
+        clear_env();
+        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
+        unsafe { std::env::set_var("RASTREO_API_TOKEN", "s3cret\n") };
+        let cfg = AuthConfig::from_env().expect("from_env");
+        clear_env();
+        assert!(matches!(cfg, AuthConfig::Enabled { token } if token == "s3cret"));
     }
 
     #[test]
@@ -1939,6 +2027,35 @@ mod tests {
             assert!(cfg.logs_enabled);
             assert_eq!(cfg.metrics_interval, Duration::from_secs(10));
             assert_eq!(cfg.service_name, "custom-name");
+        }
+
+        #[test]
+        fn otlp_config_from_env_trims_endpoint() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "  http://collector:4317\n");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert_eq!(cfg.endpoint, "http://collector:4317");
+        }
+
+        #[test]
+        fn otlp_config_from_env_trims_service_name() {
+            let _guard = env_guard();
+            clear_env();
+            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
+            unsafe {
+                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
+                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                std::env::set_var("RASTREO_OTLP_SERVICE_NAME", "  edge-scanner \n");
+            }
+            let cfg = OtlpConfig::from_env().expect("from_env").expect("some");
+            clear_env();
+            assert_eq!(cfg.service_name, "edge-scanner");
         }
 
         #[test]

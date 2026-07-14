@@ -21,9 +21,14 @@ const DEFAULT_TIMEOUT_MS: u64 = 1000;
 struct InflightGuard(Arc<ReadinessState>);
 
 impl InflightGuard {
-    fn new(state: Arc<ReadinessState>) -> Self {
-        state.inflight_scans.fetch_add(1, Ordering::Relaxed);
-        Self(state)
+    fn try_acquire(state: Arc<ReadinessState>, max_inflight: u64) -> Option<Self> {
+        let prior = state.inflight_scans.fetch_add(1, Ordering::Relaxed);
+        if max_inflight > 0 && prior + 1 > max_inflight {
+            // Roll back the speculative increment so a rejected request never inflates the gauge.
+            state.inflight_scans.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(Self(state))
     }
 }
 
@@ -114,7 +119,14 @@ async fn run_scan(
     start: Instant,
     scenario_label: String,
 ) -> Result<Json<ScanResponse>, AppError> {
-    let _inflight = InflightGuard::new(state.readiness.clone());
+    let Some(_inflight) = InflightGuard::try_acquire(
+        state.readiness.clone(),
+        state.readiness.config.max_inflight_scans,
+    ) else {
+        return Err(AppError::too_many_requests(
+            "inflight scan limit reached; retry once running scans complete",
+        ));
+    };
 
     let mut scenario = scenario;
     if scenario.base.sink.is_some() {
@@ -196,6 +208,27 @@ mod tests {
         let resolver: Arc<dyn Resolver> =
             Arc::new(HickoryResolver::from_system().expect("system resolver"));
         AppState::new(resolver)
+    }
+
+    fn state_with_max_inflight(max: u64) -> AppState {
+        use crate::state::ReadinessConfig;
+        let resolver: Arc<dyn Resolver> =
+            Arc::new(HickoryResolver::from_system().expect("system resolver"));
+        AppState::with_readiness(
+            resolver,
+            ReadinessConfig {
+                max_inflight_scans: max,
+                ..ReadinessConfig::default()
+            },
+        )
+    }
+
+    fn readiness_with_cap(max: u64) -> Arc<ReadinessState> {
+        use crate::state::ReadinessConfig;
+        Arc::new(ReadinessState::new(ReadinessConfig {
+            max_inflight_scans: max,
+            ..ReadinessConfig::default()
+        }))
     }
 
     fn scenario(targets: Vec<Target>, probers: Vec<ProberConfig>) -> DiscoverScenarioConfig {
@@ -587,6 +620,134 @@ mod tests {
     #[test]
     fn scan_params_default_is_not_dry_run() {
         assert!(!ScanParams::default().dry_run);
+    }
+
+    #[test]
+    fn try_acquire_under_cap_admits_and_increments() {
+        let readiness = readiness_with_cap(2);
+        let guard = InflightGuard::try_acquire(readiness.clone(), 2).expect("under cap admits");
+        assert_eq!(readiness.inflight_scans.load(Ordering::Relaxed), 1);
+        drop(guard);
+        assert_eq!(readiness.inflight_scans.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn try_acquire_at_cap_returns_none_and_rolls_back_the_gauge() {
+        let readiness = readiness_with_cap(1);
+        let _held = InflightGuard::try_acquire(readiness.clone(), 1).expect("first admits");
+        assert_eq!(readiness.inflight_scans.load(Ordering::Relaxed), 1);
+
+        let rejected = InflightGuard::try_acquire(readiness.clone(), 1);
+        assert!(rejected.is_none(), "a scan over the cap must be rejected");
+        assert_eq!(
+            readiness.inflight_scans.load(Ordering::Relaxed),
+            1,
+            "a rejected acquire must roll back its increment, leaving the gauge unchanged"
+        );
+    }
+
+    #[test]
+    fn try_acquire_with_cap_zero_never_rejects() {
+        let readiness = readiness_with_cap(0);
+        let mut held = Vec::new();
+        for _ in 0..1000 {
+            held.push(
+                InflightGuard::try_acquire(readiness.clone(), 0).expect("cap 0 is unlimited"),
+            );
+        }
+        assert_eq!(readiness.inflight_scans.load(Ordering::Relaxed), 1000);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn try_acquire_admits_exactly_cap_under_concurrency() {
+        let readiness = readiness_with_cap(4);
+        let held: Arc<std::sync::Mutex<Vec<InflightGuard>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut tasks = Vec::new();
+        for _ in 0..64 {
+            let readiness = readiness.clone();
+            let held = held.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Some(guard) = InflightGuard::try_acquire(readiness, 4) {
+                    held.lock().unwrap_or_else(|e| e.into_inner()).push(guard);
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.expect("join");
+        }
+        let admitted = held.lock().unwrap_or_else(|e| e.into_inner()).len();
+        assert_eq!(admitted, 4, "cap=4 admits exactly 4 concurrent scans");
+        assert_eq!(
+            readiness.inflight_scans.load(Ordering::Relaxed),
+            4,
+            "rejected acquires rolled back; only the 4 held guards count"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_scan_at_inflight_cap_returns_429_and_leaves_gauge_unchanged() {
+        let state = state_with_max_inflight(1);
+        state
+            .readiness
+            .inflight_scans
+            .fetch_add(1, Ordering::Relaxed);
+        let s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+
+        let err = run_real(state.clone(), s)
+            .await
+            .expect_err("a scan at the inflight cap must be rejected");
+        assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            state.readiness.inflight_scans.load(Ordering::Relaxed),
+            1,
+            "a 429'd scan must not leave the inflight gauge incremented"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_scan_with_cap_zero_is_never_rejected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_max_inflight(0);
+        state
+            .readiness
+            .inflight_scans
+            .fetch_add(500, Ordering::Relaxed);
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let Json(response) = run_real(state, s)
+            .await
+            .expect("cap 0 disables admission control");
+        assert_eq!(response.summary.records_emitted, 1);
+    }
+
+    #[tokio::test]
+    async fn dry_run_is_not_subject_to_the_inflight_cap() {
+        let state = state_with_max_inflight(1);
+        state
+            .readiness
+            .inflight_scans
+            .fetch_add(1, Ordering::Relaxed);
+        let s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+
+        let response = create_scan(State(state), Query(ScanParams { dry_run: true }), Json(s))
+            .await
+            .expect("a dry-run consumes no inflight slot and is never 429'd");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

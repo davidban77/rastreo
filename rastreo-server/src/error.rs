@@ -25,6 +25,10 @@ impl AppError {
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, message)
     }
+
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, message)
+    }
 }
 
 #[derive(Serialize)]
@@ -212,6 +216,13 @@ mod tests {
         let err = AppError::unauthorized("missing or invalid bearer token");
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
         assert_eq!(err.message, "missing or invalid bearer token");
+    }
+
+    #[test]
+    fn too_many_requests_maps_to_429() {
+        let err = AppError::too_many_requests("inflight scan limit reached");
+        assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.message, "inflight scan limit reached");
     }
 
     #[tokio::test]

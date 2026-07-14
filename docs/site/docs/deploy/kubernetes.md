@@ -204,7 +204,10 @@ Without this toggle, scenarios that reference `type: arp` or `type: ndp` will fa
 
 ## Graceful shutdown and `terminationGracePeriodSeconds`
 
-`rastreo-server` handles `SIGTERM` by refusing new connections, draining inflight `POST /scans` requests against the per-request timeout, and stopping the background sink-reachability probe. The process exits only once both drains complete. Set `terminationGracePeriodSeconds` on the pod spec to cover the longest expected scan plus the probe-iteration budget — for the binary defaults (60s request timeout, 5s probe timeout) `terminationGracePeriodSeconds: 75` gives a ~10s safety margin. The chart ships this value out of the box. If the grace period expires before drain completes, the kubelet sends `SIGKILL` and any inflight scan is aborted mid-flight without landing records in the server-configured sink.
+`rastreo-server` handles `SIGTERM` by refusing new connections, draining inflight `POST /scans` requests against the per-request timeout, and stopping the background sink-reachability probe. The process exits once both drains complete. A hard timeout bounds the wait so a stuck scan cannot block shutdown forever: `RASTREO_SHUTDOWN_TIMEOUT_SECS`, default 60 seconds. When the drain runs longer, the server logs a warning and force-exits. Set `terminationGracePeriodSeconds` on the pod spec to cover the longest expected scan plus the probe-iteration budget — for the binary defaults (60s request timeout, 5s probe timeout) `terminationGracePeriodSeconds: 75` gives a ~10s safety margin. The chart ships this value out of the box. If the grace period expires before drain completes, the kubelet sends `SIGKILL` and any inflight scan is aborted mid-flight without reaching the server-configured sink.
+
+!!! note "The app timeout stays below the grace period"
+    `RASTREO_SHUTDOWN_TIMEOUT_SECS` should stay below `terminationGracePeriodSeconds` so the app force-exits on its own before the kubelet sends `SIGKILL`. The defaults already do this: the app timeout is 60 seconds and the chart grace period is 75. The app exits first and logs a clean warning.
 
 ## Security context
 
