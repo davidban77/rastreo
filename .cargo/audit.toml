@@ -4,9 +4,14 @@
 # The advisory targets RSA *decryption* with an attacker-controlled ciphertext;
 # rastreo only *verifies* the server's host-key signature during KEX and never
 # performs private-key operations with the `rsa` crate, so the sidechannel is
-# not reachable. No fixed upgrade is available upstream.
+# not reachable.
 #
-# Re-evaluate this ignore when authenticated SSH probing lands. An authenticated
-# probe with a client RSA private key would perform RSA decryption/signing and
+# The lock currently resolves `rsa` to a PRE-RELEASE (`0.10.0-rc.18`), pulled in
+# transitively via `russh` -> `ssh-key`; there is no stable `rsa` release that
+# carries the fix yet. Re-pin to a stable `rsa` (and drop this ignore if it
+# resolves the advisory) once `russh`/`ssh-key` move off the release candidate.
+#
+# Also re-evaluate when authenticated SSH probing lands. An authenticated probe
+# with a client RSA private key would perform RSA decryption/signing and
 # reactivate the Marvin sidechannel.
 ignore = ["RUSTSEC-2023-0071"]

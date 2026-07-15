@@ -6,7 +6,7 @@ resolver = "2"
 [workspace.package]
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.93"
 authors = ["David Flores <davidflores77@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/davidban77/rastreo"
