@@ -1,4 +1,5 @@
 pub mod error;
+mod metrics_defs;
 #[cfg(feature = "otlp")]
 pub mod observability;
 pub mod routes;

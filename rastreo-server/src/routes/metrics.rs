@@ -1,29 +1,30 @@
 //! GET /metrics — Prometheus text format with rastreo-server operational signals.
 
 use std::fmt::Write as _;
-use std::sync::atomic::Ordering;
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use rastreo_core::{ProbeKind, SinkErrorClass, SinkType};
 
+use crate::metrics_defs::{self, Label, MetricContext, MetricDescriptor, MetricValue};
 use crate::state::{AppState, HistogramShard};
 
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 pub async fn get_metrics(State(state): State<AppState>) -> Result<Response, Response> {
     let mut buf = String::with_capacity(2048);
+    let ctx = MetricContext {
+        metrics: &state.metrics,
+        reachability: &state.sink_reachability,
+    };
 
-    write_scans_total(&state, &mut buf).map_err(internal)?;
-    write_probes_total(&state, &mut buf).map_err(internal)?;
-    write_records_emitted_total(&state, &mut buf).map_err(internal)?;
-    write_sink_errors_total(&state, &mut buf).map_err(internal)?;
-    write_dlq_records_total(&state, &mut buf).map_err(internal)?;
-    write_sink_reachability(&state, &mut buf).map_err(internal)?;
-    write_scan_duration_seconds(&state, &mut buf).map_err(internal)?;
-    write_uptime_seconds(&state, &mut buf).map_err(internal)?;
-    write_build_info(&mut buf).map_err(internal)?;
+    for desc in metrics_defs::descriptors() {
+        // The scan-duration histogram occupies its byte-identical slot just before uptime.
+        if desc.name == HISTOGRAM_SUCCESSOR {
+            write_scan_duration_seconds(&state, &mut buf).map_err(internal)?;
+        }
+        write_metric(desc, &ctx, &mut buf).map_err(internal)?;
+    }
 
     Ok((
         StatusCode::OK,
@@ -33,6 +34,8 @@ pub async fn get_metrics(State(state): State<AppState>) -> Result<Response, Resp
         .into_response())
 }
 
+const HISTOGRAM_SUCCESSOR: &str = "rastreo_server_uptime_seconds";
+
 fn internal(_: std::fmt::Error) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -41,143 +44,52 @@ fn internal(_: std::fmt::Error) -> Response {
         .into_response()
 }
 
-fn write_scans_total(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    let success = state.metrics.scans_total_success.load(Ordering::Relaxed);
-    let error = state.metrics.scans_total_error.load(Ordering::Relaxed);
-    let cancelled = state.metrics.scans_total_cancelled.load(Ordering::Relaxed);
-    writeln!(
-        buf,
-        "# HELP rastreo_server_scans_total POST /scans requests served, partitioned by outcome."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_scans_total counter")?;
-    writeln!(
-        buf,
-        "rastreo_server_scans_total{{outcome=\"success\"}} {success}"
-    )?;
-    writeln!(
-        buf,
-        "rastreo_server_scans_total{{outcome=\"error\"}} {error}"
-    )?;
-    writeln!(
-        buf,
-        "rastreo_server_scans_total{{outcome=\"cancelled\"}} {cancelled}"
-    )?;
-    Ok(())
-}
-
-fn write_probes_total(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    writeln!(
-        buf,
-        "# HELP rastreo_server_probes_total Probes executed across all scans, partitioned by outcome and probe kind."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_probes_total counter")?;
-    for kind in ProbeKind::all() {
-        let idx = kind.index();
-        let label = kind.label();
-        let succeeded = state.metrics.probes.succeeded[idx].load(Ordering::Relaxed);
-        let errored = state.metrics.probes.errored[idx].load(Ordering::Relaxed);
-        writeln!(
-            buf,
-            "rastreo_server_probes_total{{outcome=\"success\",probe_kind=\"{label}\"}} {succeeded}"
-        )?;
-        writeln!(
-            buf,
-            "rastreo_server_probes_total{{outcome=\"error\",probe_kind=\"{label}\"}} {errored}"
-        )?;
-    }
-    Ok(())
-}
-
-fn write_records_emitted_total(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    let value = state.metrics.records_emitted_total.load(Ordering::Relaxed);
-    writeln!(
-        buf,
-        "# HELP rastreo_server_records_emitted_total DeviceRecords emitted across all scans."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_records_emitted_total counter")?;
-    writeln!(buf, "rastreo_server_records_emitted_total {value}")
-}
-
-fn write_sink_errors_total(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    writeln!(
-        buf,
-        "# HELP rastreo_server_sink_errors_total Internal sink errors surfaced via POST /scans, partitioned by error class."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_sink_errors_total counter")?;
-    for class in SinkErrorClass::all() {
-        let value = state.metrics.sink_errors[class.index()].load(Ordering::Relaxed);
-        let label = class.as_label();
-        writeln!(
-            buf,
-            "rastreo_server_sink_errors_total{{error_class=\"{label}\"}} {value}"
-        )?;
-    }
-    Ok(())
-}
-
-fn write_dlq_records_total(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    writeln!(
-        buf,
-        "# HELP rastreo_server_dlq_records_total Records delivered to a dead-letter destination, partitioned by sink type and error class."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_dlq_records_total counter")?;
-    let sink_types = [SinkType::Kafka, SinkType::Nats];
-    for sink in sink_types {
-        let bucket = match sink {
-            SinkType::Kafka => &state.metrics.dlq.kafka,
-            SinkType::Nats => &state.metrics.dlq.nats,
-            _ => continue,
-        };
-        for class in SinkErrorClass::all() {
-            let value = bucket[class.index()].load(Ordering::Relaxed);
-            let sink_label = sink.as_label();
-            let class_label = class.as_label();
-            writeln!(
-                buf,
-                "rastreo_server_dlq_records_total{{sink_type=\"{sink_label}\",error_class=\"{class_label}\"}} {value}"
-            )?;
+fn write_metric(
+    desc: &MetricDescriptor,
+    ctx: &MetricContext,
+    buf: &mut String,
+) -> std::fmt::Result {
+    let mut wrote_header = false;
+    let mut result = Ok(());
+    (desc.read)(ctx, &mut |labels, value| {
+        if result.is_err() {
+            return;
         }
-    }
-    Ok(())
+        if !wrote_header {
+            wrote_header = true;
+            if let Err(e) = write_metric_header(buf, desc) {
+                result = Err(e);
+                return;
+            }
+        }
+        result = write_sample(buf, desc.name, labels, value);
+    });
+    result
 }
 
-fn write_sink_reachability(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    let reach = state.sink_reachability.as_ref();
-    let Some(sink_label) = reach.sink_type_label() else {
-        return Ok(());
-    };
-    let success = state.metrics.sink_probe_success.load(Ordering::Relaxed);
-    let failure = state.metrics.sink_probe_failure.load(Ordering::Relaxed);
-    writeln!(
-        buf,
-        "# HELP rastreo_server_sink_reachability_probe_total Server-side sink reachability probes, partitioned by outcome and sink type."
-    )?;
-    writeln!(
-        buf,
-        "# TYPE rastreo_server_sink_reachability_probe_total counter"
-    )?;
-    writeln!(
-        buf,
-        "rastreo_server_sink_reachability_probe_total{{outcome=\"success\",sink_type=\"{sink_label}\"}} {success}"
-    )?;
-    writeln!(
-        buf,
-        "rastreo_server_sink_reachability_probe_total{{outcome=\"failure\",sink_type=\"{sink_label}\"}} {failure}"
-    )?;
-    let reachable_value: u64 = if reach.reachable.load(std::sync::atomic::Ordering::Relaxed) {
-        1
-    } else {
-        0
-    };
-    writeln!(
-        buf,
-        "# HELP rastreo_server_sink_reachable 1 when the last sink probe succeeded, 0 otherwise."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_sink_reachable gauge")?;
-    writeln!(
-        buf,
-        "rastreo_server_sink_reachable{{sink_type=\"{sink_label}\"}} {reachable_value}"
-    )
+fn write_metric_header(buf: &mut String, desc: &MetricDescriptor) -> std::fmt::Result {
+    writeln!(buf, "# HELP {} {}", desc.name, desc.help)?;
+    writeln!(buf, "# TYPE {} {}", desc.name, desc.kind.prometheus_type())
+}
+
+fn write_sample(
+    buf: &mut String,
+    name: &str,
+    labels: &[Label],
+    value: MetricValue,
+) -> std::fmt::Result {
+    buf.push_str(name);
+    if let Some((&(first_key, first_val), rest)) = labels.split_first() {
+        write!(buf, "{{{first_key}=\"{}\"", escape_label(first_val))?;
+        for &(key, val) in rest {
+            write!(buf, ",{key}=\"{}\"", escape_label(val))?;
+        }
+        buf.push('}');
+    }
+    match value {
+        MetricValue::U64(n) => writeln!(buf, " {n}"),
+        MetricValue::F64(x) => writeln!(buf, " {x}"),
+    }
 }
 
 fn write_scan_duration_seconds(state: &AppState, buf: &mut String) -> std::fmt::Result {
@@ -233,26 +145,6 @@ fn write_scan_duration_histogram(
     )
 }
 
-fn write_uptime_seconds(state: &AppState, buf: &mut String) -> std::fmt::Result {
-    let uptime = state.metrics.started_at.elapsed().as_secs_f64();
-    writeln!(
-        buf,
-        "# HELP rastreo_server_uptime_seconds Seconds since rastreo-server started."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_uptime_seconds gauge")?;
-    writeln!(buf, "rastreo_server_uptime_seconds {uptime}")
-}
-
-fn write_build_info(buf: &mut String) -> std::fmt::Result {
-    let version = escape_label(env!("CARGO_PKG_VERSION"));
-    writeln!(
-        buf,
-        "# HELP rastreo_server_build_info Build info (version label always 1)."
-    )?;
-    writeln!(buf, "# TYPE rastreo_server_build_info gauge")?;
-    writeln!(buf, "rastreo_server_build_info{{version=\"{version}\"}} 1")
-}
-
 /// Escape a Prometheus label value per the exposition format spec — backslash, double-quote, and newline.
 fn escape_label(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -275,7 +167,8 @@ mod tests {
 
     use axum::body::to_bytes;
     use rastreo_core::{
-        DiscoverySummary, HickoryResolver, ProbeKindSummary, Resolver, SinkErrorClass, SinkType,
+        DiscoverySummary, HickoryResolver, ProbeKind, ProbeKindSummary, Resolver, SinkErrorClass,
+        SinkType,
     };
 
     fn build_state() -> AppState {
@@ -617,5 +510,28 @@ mod tests {
             body.contains("rastreo_server_sink_reachable{sink_type=\"nats\"} 0"),
             "gauge must be 0 when unreachable; body was:\n{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn prometheus_help_lines_are_generated_from_the_descriptor_table() {
+        use std::sync::Arc;
+
+        use crate::state::SinkReachability;
+
+        let mut state = build_state();
+        state.sink_reachability = Arc::new(SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        let resp = get_metrics(State(state)).await.expect("ok");
+        let body = body_string(resp).await;
+        for desc in crate::metrics_defs::descriptors() {
+            let expected = format!("# HELP {} {}", desc.name, desc.help);
+            assert!(
+                body.contains(&expected),
+                "metrics body must contain `{expected}`; body was:\n{body}"
+            );
+        }
     }
 }

@@ -3,20 +3,20 @@
 
 #![cfg(feature = "otlp")]
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Context;
+use opentelemetry::metrics::Meter;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::Resource;
 use rastreo_core::observability::otlp::attach_meter;
 use rastreo_core::observability::otlp_config::http_endpoint_for_signal;
-use rastreo_core::{ProbeKind, SinkErrorClass, SinkType};
 
 pub use rastreo_core::observability::otlp::OtlpGuard;
 
+use crate::metrics_defs::{self, Label, MetricContext, MetricDescriptor, MetricKind, MetricValue};
 use crate::state::{Metrics, OtlpConfig, OtlpProtocol, SinkReachability};
 
 /// Wire up OTLP metrics (observable counters + gauges + a synchronously recorded histogram) against the running `Metrics`.
@@ -49,129 +49,13 @@ pub fn init_metrics(
         .with_resource(resource)
         .build();
     global::set_meter_provider(provider.clone());
-    register_instruments(&metrics);
-    register_sink_reachability_instruments(&metrics, &sink_reachability);
+    register_instruments(&metrics, &sink_reachability);
     Ok(provider)
 }
 
-fn register_instruments(metrics: &Arc<Metrics>) {
+fn register_instruments(metrics: &Arc<Metrics>, reachability: &Arc<SinkReachability>) {
     let meter = global::meter("rastreo-server");
-
-    let m = Arc::clone(metrics);
-    let _ = meter
-        .u64_observable_counter("rastreo_server_scans_total")
-        .with_description("POST /scans requests served, partitioned by outcome.")
-        .with_callback(move |observer| {
-            observer.observe(
-                m.scans_total_success.load(Ordering::Relaxed),
-                &[KeyValue::new("outcome", "success")],
-            );
-            observer.observe(
-                m.scans_total_error.load(Ordering::Relaxed),
-                &[KeyValue::new("outcome", "error")],
-            );
-            observer.observe(
-                m.scans_total_cancelled.load(Ordering::Relaxed),
-                &[KeyValue::new("outcome", "cancelled")],
-            );
-        })
-        .build();
-
-    let m = Arc::clone(metrics);
-    let _ = meter
-        .u64_observable_counter("rastreo_server_probes_total")
-        .with_description(
-            "Probes executed across all scans, partitioned by outcome and probe kind.",
-        )
-        .with_callback(move |observer| {
-            for kind in ProbeKind::all() {
-                let idx = kind.index();
-                let label = kind.label();
-                let succeeded = m.probes.succeeded[idx].load(Ordering::Relaxed);
-                let errored = m.probes.errored[idx].load(Ordering::Relaxed);
-                observer.observe(
-                    succeeded,
-                    &[
-                        KeyValue::new("outcome", "success"),
-                        KeyValue::new("probe_kind", label),
-                    ],
-                );
-                observer.observe(
-                    errored,
-                    &[
-                        KeyValue::new("outcome", "error"),
-                        KeyValue::new("probe_kind", label),
-                    ],
-                );
-            }
-        })
-        .build();
-
-    let m = Arc::clone(metrics);
-    let _ = meter
-        .u64_observable_counter("rastreo_server_records_emitted_total")
-        .with_description("DeviceRecords emitted across all scans.")
-        .with_callback(move |observer| {
-            observer.observe(m.records_emitted_total.load(Ordering::Relaxed), &[]);
-        })
-        .build();
-
-    let m = Arc::clone(metrics);
-    let _ = meter
-        .u64_observable_counter("rastreo_server_sink_errors_total")
-        .with_description(
-            "Internal sink errors surfaced via POST /scans, partitioned by error class.",
-        )
-        .with_callback(move |observer| {
-            for class in SinkErrorClass::all() {
-                let value = m.sink_errors[class.index()].load(Ordering::Relaxed);
-                observer.observe(value, &[KeyValue::new("error_class", class.as_label())]);
-            }
-        })
-        .build();
-
-    let m = Arc::clone(metrics);
-    let _ = meter
-        .u64_observable_counter("rastreo_server_dlq_records_total")
-        .with_description(
-            "Records delivered to a dead-letter destination, partitioned by sink type and error class.",
-        )
-        .with_callback(move |observer| {
-            let sinks = [(SinkType::Kafka, &m.dlq.kafka), (SinkType::Nats, &m.dlq.nats)];
-            for (sink, bucket) in sinks {
-                for class in SinkErrorClass::all() {
-                    let value = bucket[class.index()].load(Ordering::Relaxed);
-                    observer.observe(
-                        value,
-                        &[
-                            KeyValue::new("sink_type", sink.as_label()),
-                            KeyValue::new("error_class", class.as_label()),
-                        ],
-                    );
-                }
-            }
-        })
-        .build();
-
-    let m = Arc::clone(metrics);
-    let _ = meter
-        .f64_observable_gauge("rastreo_server_uptime_seconds")
-        .with_description("Seconds since rastreo-server started.")
-        .with_callback(move |observer| {
-            observer.observe(m.started_at.elapsed().as_secs_f64(), &[]);
-        })
-        .build();
-
-    let version = env!("CARGO_PKG_VERSION");
-    let _ = meter
-        .u64_observable_gauge("rastreo_server_build_info")
-        .with_description(
-            "Build info (value is always 1; the version attribute carries the payload).",
-        )
-        .with_callback(move |observer| {
-            observer.observe(1, &[KeyValue::new("version", version)]);
-        })
-        .build();
+    register_observables(&meter, metrics, reachability);
 
     let histogram = meter
         .f64_histogram("rastreo_server_scan_duration_seconds")
@@ -185,52 +69,101 @@ fn register_instruments(metrics: &Arc<Metrics>) {
     }
 }
 
-fn register_sink_reachability_instruments(
+fn register_observables(
+    meter: &Meter,
     metrics: &Arc<Metrics>,
     reachability: &Arc<SinkReachability>,
 ) {
-    let Some(sink_label) = reachability.sink_type_label() else {
-        return;
+    for desc in metrics_defs::descriptors() {
+        // Sink config is fixed at startup, so a reader that emits nothing now (a conditional
+        // series with no sink) never would — skip its instrument entirely to match /metrics.
+        if !reader_emits_sample(desc, metrics, reachability) {
+            continue;
+        }
+        register_observable(meter, desc, metrics, reachability);
+    }
+}
+
+fn reader_emits_sample(
+    desc: &MetricDescriptor,
+    metrics: &Arc<Metrics>,
+    reachability: &Arc<SinkReachability>,
+) -> bool {
+    let ctx = MetricContext {
+        metrics: metrics.as_ref(),
+        reachability: reachability.as_ref(),
     };
-    let meter = global::meter("rastreo-server");
+    let mut any = false;
+    (desc.read)(&ctx, &mut |_, _| any = true);
+    any
+}
 
+fn register_observable(
+    meter: &Meter,
+    desc: &MetricDescriptor,
+    metrics: &Arc<Metrics>,
+    reachability: &Arc<SinkReachability>,
+) {
+    let read = desc.read;
     let m = Arc::clone(metrics);
-    let _ = meter
-        .u64_observable_counter("rastreo_server_sink_reachability_probe_total")
-        .with_description(
-            "Server-side sink reachability probes, partitioned by outcome and sink type.",
-        )
-        .with_callback(move |observer| {
-            observer.observe(
-                m.sink_probe_success.load(Ordering::Relaxed),
-                &[
-                    KeyValue::new("outcome", "success"),
-                    KeyValue::new("sink_type", sink_label),
-                ],
-            );
-            observer.observe(
-                m.sink_probe_failure.load(Ordering::Relaxed),
-                &[
-                    KeyValue::new("outcome", "failure"),
-                    KeyValue::new("sink_type", sink_label),
-                ],
-            );
-        })
-        .build();
-
     let r = Arc::clone(reachability);
-    let _ = meter
-        .u64_observable_gauge("rastreo_server_sink_reachable")
-        .with_description("1 when the last sink probe succeeded, 0 otherwise.")
-        .with_callback(move |observer| {
-            let value: u64 = if r.reachable.load(Ordering::Relaxed) {
-                1
-            } else {
-                0
-            };
-            observer.observe(value, &[KeyValue::new("sink_type", sink_label)]);
-        })
-        .build();
+    match desc.kind {
+        MetricKind::CounterU64 => {
+            let _ = meter
+                .u64_observable_counter(desc.name)
+                .with_description(desc.help)
+                .with_callback(move |observer| {
+                    let ctx = MetricContext {
+                        metrics: m.as_ref(),
+                        reachability: r.as_ref(),
+                    };
+                    read(&ctx, &mut |labels, value| {
+                        if let MetricValue::U64(n) = value {
+                            observer.observe(n, &key_values(labels));
+                        }
+                    });
+                })
+                .build();
+        }
+        MetricKind::GaugeU64 => {
+            let _ = meter
+                .u64_observable_gauge(desc.name)
+                .with_description(desc.help)
+                .with_callback(move |observer| {
+                    let ctx = MetricContext {
+                        metrics: m.as_ref(),
+                        reachability: r.as_ref(),
+                    };
+                    read(&ctx, &mut |labels, value| {
+                        if let MetricValue::U64(n) = value {
+                            observer.observe(n, &key_values(labels));
+                        }
+                    });
+                })
+                .build();
+        }
+        MetricKind::GaugeF64 => {
+            let _ = meter
+                .f64_observable_gauge(desc.name)
+                .with_description(desc.help)
+                .with_callback(move |observer| {
+                    let ctx = MetricContext {
+                        metrics: m.as_ref(),
+                        reachability: r.as_ref(),
+                    };
+                    read(&ctx, &mut |labels, value| {
+                        if let MetricValue::F64(x) = value {
+                            observer.observe(x, &key_values(labels));
+                        }
+                    });
+                })
+                .build();
+        }
+    }
+}
+
+fn key_values(labels: &[Label]) -> Vec<KeyValue> {
+    labels.iter().map(|&(k, v)| KeyValue::new(k, v)).collect()
 }
 
 /// Build the metrics exporter when enabled, returning the RAII shutdown guard.
@@ -247,4 +180,60 @@ pub fn init_metrics_only(
         );
     }
     Ok(guard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+    use rastreo_core::SinkType;
+
+    #[test]
+    fn otlp_instrument_descriptions_come_from_the_descriptor_table() {
+        let exporter = InMemoryMetricExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("rastreo-server-test");
+
+        let metrics = Arc::new(Metrics::new());
+        let reachability = Arc::new(SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        register_observables(&meter, &metrics, &reachability);
+
+        provider.force_flush().expect("force_flush");
+        let exported = exporter.get_finished_metrics().expect("finished metrics");
+
+        let mut descriptions: HashMap<String, String> = HashMap::new();
+        for rm in &exported {
+            for scope in rm.scope_metrics() {
+                for metric in scope.metrics() {
+                    descriptions
+                        .insert(metric.name().to_string(), metric.description().to_string());
+                }
+            }
+        }
+
+        for desc in metrics_defs::descriptors() {
+            let actual = descriptions.get(desc.name).unwrap_or_else(|| {
+                panic!(
+                    "descriptor {} was not registered as an OTLP instrument",
+                    desc.name
+                )
+            });
+            assert_eq!(
+                actual, desc.help,
+                "OTLP description for {} must equal the descriptor help",
+                desc.name
+            );
+        }
+        provider.shutdown().expect("shutdown");
+    }
 }
