@@ -36,7 +36,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Open pull request
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           commit-message: 'chore(data): refresh bundled OUI snapshot'
           title: 'chore(data): refresh bundled OUI snapshot'
