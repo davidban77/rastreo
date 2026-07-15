@@ -9,7 +9,7 @@ description: Wire schema for ScenarioFile emitted by rastreo.
 Wire schema for ScenarioFile emitted by rastreo.
 
 - Schema ID: `https://davidban77.github.io/rastreo/schemas/scenario-v1.json`
-- JSON Schema draft: `http://json-schema.org/draft-07/schema#`
+- JSON Schema draft: `https://json-schema.org/draft/2020-12/schema`
 - Source of truth: `rastreo-core/src/config/mod.rs`
 
 ## Fields
@@ -59,6 +59,22 @@ Quarantine topic configuration for records the primary Kafka produce refused.
 | `include_error_metadata` | boolean | no | — |
 | `topic` | string | yes | — |
 
+### `DiscoverScenarioConfig` {#discoverscenarioconfig}
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `classifier` | [`ClassifierConfig`](#classifierconfig) \| null | no | — |
+| `encoder` | [`EncoderConfig`](#encoderconfig) \| null | no | — |
+| `fuser` | [`FuserConfig`](#fuserconfig) \| null | no | — |
+| `max_concurrent` | uint32 \| null | no | Maximum probes in flight at once. |
+| `name` | string \| null | no | — |
+| `probe_rate` | uint32 \| null | no | Maximum probes started per second; unset means no rate limit. |
+| `probers` | array<[`ProberConfig`](#proberconfig)> | no | — |
+| `retries` | uint32 \| null | no | Retransmit attempts for connectionless probers that lack native retransmission (UDP, SNMP, DNS); 0 (default) issues a single request within the same total timeout. |
+| `sink` | [`SinkConfig`](#sinkconfig) \| null | no | — |
+| `targets` | array<[`Target`](#target)> | yes | — |
+| `timeout_ms` | uint64 \| null | no | — |
+
 ### `DnsQueryType` {#dnsquerytype}
 
 Type: string
@@ -97,8 +113,20 @@ An IPv4 or IPv6 address with prefix length
 
 One of:
 
-- string
-- string
+- [`Ipv4Net`](#ipv4net)
+- [`Ipv6Net`](#ipv6net)
+
+### `Ipv4Net` {#ipv4net}
+
+An IPv4 address with prefix length
+
+Type: string
+
+### `Ipv6Net` {#ipv6net}
+
+An IPv6 address with prefix length
+
+Type: string
 
 ### `KafkaFlushMode` {#kafkaflushmode}
 

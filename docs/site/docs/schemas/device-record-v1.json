@@ -1,7 +1,5 @@
 {
-  "$id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "definitions": {
+  "$defs": {
     "AltIp": {
       "description": "Additional IP merged into a `DeviceRecord` by the identity fuser, carrying the role hint and the probe kinds that responded on that IP.",
       "properties": {
@@ -12,14 +10,14 @@
         "responded_via": {
           "description": "Probe kinds that responded on this IP before the identity fuser merged it into the primary record.",
           "items": {
-            "$ref": "#/definitions/ProbeKind"
+            "$ref": "#/$defs/ProbeKind"
           },
           "type": "array"
         },
         "role": {
           "anyOf": [
             {
-              "$ref": "#/definitions/AltIpRole"
+              "$ref": "#/$defs/AltIpRole"
             },
             {
               "type": "null"
@@ -37,58 +35,41 @@
       "description": "Role hint attached to each `AltIp`. Values map 1:1 to NetBox / Nautobot / Infrahub IP-address role models so downstream reconcilers pull the role directly instead of re-inferring it.",
       "oneOf": [
         {
+          "const": "secondary",
           "description": "Secondary interface address on the same device.",
-          "enum": [
-            "secondary"
-          ],
           "type": "string"
         },
         {
+          "const": "loopback",
           "description": "Loopback address. Not currently inferred; reserved for future SNMP `ifDescr` signal.",
-          "enum": [
-            "loopback"
-          ],
           "type": "string"
         },
         {
+          "const": "vrrp",
           "description": "VRRP virtual IP — detected from the `00:00:5e:00:01:XX` or `00:00:5e:00:02:XX` MAC prefix.",
-          "enum": [
-            "vrrp"
-          ],
           "type": "string"
         },
         {
+          "const": "hsrp",
           "description": "HSRP virtual IP — detected from the `00:00:0c:07:ac:XX` MAC prefix.",
-          "enum": [
-            "hsrp"
-          ],
           "type": "string"
         },
         {
+          "const": "carp",
           "description": "CARP virtual IP. Not currently inferred from MAC because CARP shares the VRRPv2 prefix; reserved for future signal-based detection.",
-          "enum": [
-            "carp"
-          ],
           "type": "string"
         },
         {
+          "const": "anycast",
           "description": "Anycast address. Not currently inferred; reserved.",
-          "enum": [
-            "anycast"
-          ],
           "type": "string"
         },
         {
+          "const": "vip",
           "description": "Virtual IP (VIP) fronting real IPs. Not currently inferred; reserved.",
-          "enum": [
-            "vip"
-          ],
           "type": "string"
         }
       ]
-    },
-    "IdentityKey": {
-      "type": "string"
     },
     "ProbeKind": {
       "enum": [
@@ -130,8 +111,8 @@
         }
       },
       "required": [
-        "initiated_at",
-        "scan_id"
+        "scan_id",
+        "initiated_at"
       ],
       "type": "object"
     },
@@ -142,7 +123,8 @@
           "properties": {
             "OpenPort": {
               "format": "uint16",
-              "minimum": 0.0,
+              "maximum": 65535,
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -300,7 +282,7 @@
           "properties": {
             "IcmpEchoRttMicros": {
               "format": "uint64",
-              "minimum": 0.0,
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -348,12 +330,14 @@
       ]
     }
   },
-  "description": "Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`. Legacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize; consumers should tag legacy records with an explicit v0 marker before ingest.",
+  "$id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`.\nLegacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize;\nconsumers should tag legacy records with an explicit v0 marker before ingest.",
   "properties": {
     "alt_ips": {
       "description": "Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.",
       "items": {
-        "$ref": "#/definitions/AltIp"
+        "$ref": "#/$defs/AltIp"
       },
       "type": "array"
     },
@@ -377,12 +361,8 @@
       ]
     },
     "identity_key": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/IdentityKey"
-        }
-      ],
-      "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans."
+      "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans.",
+      "type": "string"
     },
     "last_seen": {
       "description": "RFC 3339 UTC timestamp of the most recent probe that produced signals for this device.",
@@ -427,21 +407,17 @@
       ]
     },
     "possible_alias_of": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/IdentityKey"
-        },
-        {
-          "type": "null"
-        }
-      ],
       "default": null,
-      "description": "When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`."
+      "description": "When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "probe_kinds": {
       "description": "Deduplicated `ProbeKind` values whose outcomes contributed to this record. Preserves authoritative provenance from ingest through fusion so consumers do not infer prober attribution from signals.",
       "items": {
-        "$ref": "#/definitions/ProbeKind"
+        "$ref": "#/$defs/ProbeKind"
       },
       "type": "array"
     },
@@ -453,11 +429,7 @@
       ]
     },
     "scan_metadata": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/ScanMetadata"
-        }
-      ],
+      "$ref": "#/$defs/ScanMetadata",
       "default": {
         "initiated_at": "1970-01-01T00:00:00Z",
         "scan_id": "",
@@ -477,7 +449,7 @@
     "signals": {
       "description": "Deduplicated list of every observable fact collected from every prober that targeted this device.",
       "items": {
-        "$ref": "#/definitions/Signal"
+        "$ref": "#/$defs/Signal"
       },
       "type": "array"
     },
@@ -490,12 +462,12 @@
     }
   },
   "required": [
-    "confidence",
     "identity_key",
+    "confidence",
     "last_seen",
-    "schema_id",
+    "signals",
     "schema_version",
-    "signals"
+    "schema_id"
   ],
   "title": "DeviceRecord",
   "type": "object"

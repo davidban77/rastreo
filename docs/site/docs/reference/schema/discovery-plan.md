@@ -9,7 +9,7 @@ description: Structured plan of a single discovery scenario — what a dry-run w
 Structured plan of a single discovery scenario — what a dry-run would probe, without executing it.
 
 - Schema ID: `https://davidban77.github.io/rastreo/schemas/discovery-plan-v1.json`
-- JSON Schema draft: `http://json-schema.org/draft-07/schema#`
+- JSON Schema draft: `https://json-schema.org/draft/2020-12/schema`
 - Source of truth: `rastreo-core/src/plan.rs`
 
 ## Fields

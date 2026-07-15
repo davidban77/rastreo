@@ -1,19 +1,17 @@
 {
-  "$id": "https://davidban77.github.io/rastreo/schemas/discovery-plan-v1.json",
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "definitions": {
+  "$defs": {
     "PlannedTarget": {
       "properties": {
         "resolution": {
-          "$ref": "#/definitions/TargetResolution"
+          "$ref": "#/$defs/TargetResolution"
         },
         "target": {
           "type": "string"
         }
       },
       "required": [
-        "resolution",
-        "target"
+        "target",
+        "resolution"
       ],
       "type": "object"
     },
@@ -50,16 +48,18 @@
       ]
     }
   },
+  "$id": "https://davidban77.github.io/rastreo/schemas/discovery-plan-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Structured plan of a single discovery scenario — what a dry-run would probe, without executing it.",
   "properties": {
     "max_concurrent": {
       "format": "uint32",
-      "minimum": 0.0,
+      "minimum": 0,
       "type": "integer"
     },
     "probe_rate": {
       "format": "uint32",
-      "minimum": 0.0,
+      "minimum": 0,
       "type": [
         "integer",
         "null"
@@ -73,7 +73,7 @@
     },
     "retries": {
       "format": "uint32",
-      "minimum": 0.0,
+      "minimum": 0,
       "type": "integer"
     },
     "scenario": {
@@ -84,28 +84,28 @@
     },
     "targets": {
       "items": {
-        "$ref": "#/definitions/PlannedTarget"
+        "$ref": "#/$defs/PlannedTarget"
       },
       "type": "array"
     },
     "timeout_ms": {
       "format": "uint64",
-      "minimum": 0.0,
+      "minimum": 0,
       "type": "integer"
     },
     "total_probes": {
       "format": "uint",
-      "minimum": 0.0,
+      "minimum": 0,
       "type": "integer"
     }
   },
   "required": [
-    "max_concurrent",
-    "probers",
-    "retries",
     "scenario",
-    "sink",
     "targets",
+    "probers",
+    "sink",
+    "max_concurrent",
+    "retries",
     "timeout_ms",
     "total_probes"
   ],
