@@ -24,6 +24,8 @@ Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for ex
 
 ## Configuration
 
+For every environment variable both binaries read at runtime, in one table, see the [Configuration reference](../reference/configuration.md).
+
 | Flag                    | Env var                                | Default | Notes                                                  |
 |-------------------------|----------------------------------------|---------|--------------------------------------------------------|
 | `--port`                | `RASTREO_SERVER_PORT`                  | `8080`  | TCP port to bind.                                      |
