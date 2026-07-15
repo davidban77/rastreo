@@ -11,6 +11,7 @@ Topics covered here include the full `rastreo` and `rastreo-server` CLI flag ref
 ## Pages in this section
 
 - [CLI reference](cli.md) — every flag for `rastreo` and `rastreo-server`.
+- [Configuration reference](configuration.md) — every runtime environment variable both binaries read, with defaults and scope.
 - [Scenario schema](scenario.md) — the `DiscoverScenarioConfig` JSON shape.
 - [Secrets](secrets.md) — env-var and file-mount syntaxes for keeping credentials out of scenario YAML.
 - [Record schema](schema/index.md) — the emitted `DeviceRecord` JSON Schema, versioning policy, and the streaming API description.

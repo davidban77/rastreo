@@ -139,6 +139,7 @@ nav:
   - Reference:
       - reference/index.md
       - CLI: reference/cli.md
+      - Configuration: reference/configuration.md
       - Scenario: reference/scenario.md
       - Secrets: reference/secrets.md
       - Schema:
