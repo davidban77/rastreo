@@ -136,17 +136,31 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Test rastreo-core without default features
-        run: cargo test -p rastreo-core --no-default-features
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
 
-      - name: Test rastreo-core with only the ssh feature
-        run: cargo test -p rastreo-core --no-default-features --features ssh
+      - name: Test rastreo-core with each feature in isolation
+        run: cargo hack --each-feature test -p rastreo-core
 
-      - name: Test rastreo-core with only the icmp feature
-        run: cargo test -p rastreo-core --no-default-features --features icmp
+  msrv:
+    name: MSRV (rust-version) check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
-      - name: Test rastreo-core with only the tls feature
-        run: cargo test -p rastreo-core --no-default-features --features tls
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check the workspace on the declared MSRV
+        run: cargo check --workspace --all-features
 
   lint:
     name: Lint
