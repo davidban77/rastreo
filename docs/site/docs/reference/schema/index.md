@@ -70,14 +70,15 @@ For consumers running against a lab or air-gapped environment, the schema files 
 
 ## JSON Schema dialect
 
-The four schemas generated from the Rust types use JSON Schema **draft 2020-12**:
+All five published schemas use JSON Schema **draft 2020-12**:
 
 - `device-record-v1.json`
 - `scan-metadata-v1.json`
 - `scenario-v1.json`
 - `discovery-plan-v1.json`
+- `dlq-envelope-v1.json`
 
-If you previously validated against the draft-07 versions, four things differ in the schema text:
+If you previously validated against the draft-07 versions, the four schemas generated from the Rust types differ in the schema text in four ways:
 
 - The `$schema` URI is now `https://json-schema.org/draft/2020-12/schema`.
 - Reusable definitions live under `$defs` instead of `definitions`. Internal references use `#/$defs/X` instead of `#/definitions/X`.
@@ -103,8 +104,8 @@ validator_cls(schema).validate(record)
 
 A validator that only understands draft-07 may not interpret `$defs` and `const` correctly. Use one that understands 2020-12.
 
-!!! note "One exception"
-    `dlq-envelope-v1.json` is written by hand, not generated from the Rust types. It stays on draft-07. The four schemas listed above are the ones on 2020-12.
+!!! note "The hand-authored schema"
+    `dlq-envelope-v1.json` is written by hand, not generated from the Rust types. It is also on 2020-12, but its only change from draft-07 was the `$schema` declaration — it has no `$defs`, single-value `const` fields, or bounded integers, so the other three differences above do not apply to it.
 
 ## Confluent Schema Registry (future, opt-in)
 
