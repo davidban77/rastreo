@@ -16,10 +16,8 @@ pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SystemTime, D::Err
     Ok(SystemTime::from(dt.with_timezone(&Utc)))
 }
 
-pub fn date_time_schema(
-    generator: &mut schemars::gen::SchemaGenerator,
-) -> schemars::schema::Schema {
-    let mut schema: schemars::schema::SchemaObject = generator.subschema_for::<String>().into();
-    schema.format = Some("date-time".to_owned());
-    schema.into()
+pub fn date_time_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = generator.subschema_for::<String>();
+    schema.insert("format".to_owned(), "date-time".into());
+    schema
 }

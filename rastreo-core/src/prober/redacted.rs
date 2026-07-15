@@ -43,23 +43,15 @@ impl From<Community> for String {
 #[cfg(feature = "snmp")]
 impl schemars::JsonSchema for Community {
     // Wire form is a plain YAML string; the redacted `<redacted:HHHHHHHH>` shape only affects Serialize output.
-    fn schema_name() -> String {
-        "Community".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Community".into()
     }
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "SNMP community string written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output."
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "SNMP community string written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
+        })
     }
 }
 
@@ -101,23 +93,15 @@ impl Password {
 #[cfg(any(feature = "snmp", feature = "nats"))]
 impl schemars::JsonSchema for Password {
     // Wire form is a plain YAML string; the redacted `<redacted:HHHHHHHH>` shape only affects Serialize output.
-    fn schema_name() -> String {
-        "Password".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Password".into()
     }
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        schemars::schema::SchemaObject {
-            instance_type: Some(schemars::schema::InstanceType::String.into()),
-            metadata: Some(Box::new(schemars::schema::Metadata {
-                description: Some(
-                    "Credential value written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output."
-                        .to_string(),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Credential value written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
+        })
     }
 }
 
@@ -231,6 +215,34 @@ mod tests {
     fn password_default_is_empty() {
         let p = Password::default();
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn community_json_schema_is_string_with_description() {
+        let schema = schemars::schema_for!(Community);
+        let json = serde_json::to_value(&schema).expect("schema serializes");
+        assert_eq!(json["type"], "string");
+        assert!(
+            json["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("community")),
+            "expected community description, got {:?}",
+            json["description"]
+        );
+    }
+
+    #[test]
+    fn password_json_schema_is_string_with_description() {
+        let schema = schemars::schema_for!(Password);
+        let json = serde_json::to_value(&schema).expect("schema serializes");
+        assert_eq!(json["type"], "string");
+        assert!(
+            json["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("Credential")),
+            "expected credential description, got {:?}",
+            json["description"]
+        );
     }
 
     #[test]

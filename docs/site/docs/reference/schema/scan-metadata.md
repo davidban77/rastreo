@@ -9,7 +9,7 @@ description: Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_
 Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.
 
 - Schema ID: `https://davidban77.github.io/rastreo/schemas/scan-metadata-v1.json`
-- JSON Schema draft: `http://json-schema.org/draft-07/schema#`
+- JSON Schema draft: `https://json-schema.org/draft/2020-12/schema`
 - Source of truth: `rastreo-core/src/model/scan.rs`
 
 ## Fields

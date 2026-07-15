@@ -68,6 +68,44 @@ rastreo does not require a central schema registry. Each emitted record carries 
 
 For consumers running against a lab or air-gapped environment, the schema files ship in the source repo under `schemas/` — treat those as the offline copy and skip the fetch entirely.
 
+## JSON Schema dialect
+
+The four schemas generated from the Rust types use JSON Schema **draft 2020-12**:
+
+- `device-record-v1.json`
+- `scan-metadata-v1.json`
+- `scenario-v1.json`
+- `discovery-plan-v1.json`
+
+If you previously validated against the draft-07 versions, four things differ in the schema text:
+
+- The `$schema` URI is now `https://json-schema.org/draft/2020-12/schema`.
+- Reusable definitions live under `$defs` instead of `definitions`. Internal references use `#/$defs/X` instead of `#/definitions/X`.
+- A field fixed to one string value is expressed as `const` instead of a single-entry `enum`.
+- Integer fields carry `minimum` and `maximum` bounds. For example, port fields are bounded to `0` through `65535`, matching a 16-bit unsigned integer.
+
+!!! info "The data contract is unchanged"
+    `schema_version` is still `v1` and the filenames still end in `-v1`. No property, type, or required field changed. A record that validated against the draft-07 schema still validates against the 2020-12 schema. Only the dialect the schema is written in changed.
+
+**Consumer action.** Validate with a JSON-Schema-2020-12-capable validator. Python's `jsonschema` library reads the dialect from the `$schema` field and picks the right validator automatically:
+
+```python
+from jsonschema import Draft202012Validator
+from jsonschema.validators import validator_for
+
+# Explicit dialect:
+Draft202012Validator(schema).validate(record)
+
+# Or auto-detect from the schema's $schema field:
+validator_cls = validator_for(schema)
+validator_cls(schema).validate(record)
+```
+
+A validator that only understands draft-07 may not interpret `$defs` and `const` correctly. Use one that understands 2020-12.
+
+!!! note "One exception"
+    `dlq-envelope-v1.json` is written by hand, not generated from the Rust types. It stays on draft-07. The four schemas listed above are the ones on 2020-12.
+
 ## Confluent Schema Registry (future, opt-in)
 
 The `schema_id` URL is the discovery mechanism today; a future release may add opt-in publication of the same JSON Schema to a Confluent-compatible Schema Registry. That path is additive — records still carry `schema_id`, and consumers that already validate via the URL keep working unchanged. No timeline yet; track the roadmap.

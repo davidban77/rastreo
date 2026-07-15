@@ -102,7 +102,7 @@ pub fn discovery_plan_schema() -> Result<String> {
 }
 
 fn render_schema_json(
-    schema: schemars::schema::RootSchema,
+    schema: schemars::Schema,
     file_name: &str,
     type_name: &str,
 ) -> Result<String> {
@@ -284,40 +284,91 @@ fn render_definition(name: &str, def: &Value, defs: &Definitions<'_>) -> String 
 }
 
 fn format_variant(v: &Value, defs: &Definitions<'_>) -> String {
-    let props = v.get("properties").and_then(Value::as_object);
-    if let Some(props) = props {
+    let merged = merge_ref_siblings(v, defs);
+    let v = merged.as_ref().unwrap_or(v);
+    if let Some(props) = v.get("properties").and_then(Value::as_object) {
         let parts: Vec<String> = props
             .iter()
             .map(|(name, spec)| format!("`{name}`: {}", format_property_type(spec, defs)))
             .collect();
         return format!("{{ {} }}", parts.join(", "));
     }
-    if let Some(values) = v.get("enum").and_then(Value::as_array) {
-        let parts: Vec<String> = values
-            .iter()
-            .filter_map(|val| val.as_str().map(|s| format!("`{s}`")))
-            .collect();
-        if !parts.is_empty() {
-            return parts.join(" \\| ");
-        }
+    if let Some(label) = const_or_enum_label(v) {
+        return label;
     }
     format_type(v, defs)
 }
 
 fn format_property_type(spec: &Value, defs: &Definitions<'_>) -> String {
-    if let Some(values) = spec.get("enum").and_then(Value::as_array) {
-        let parts: Vec<String> = values
-            .iter()
-            .filter_map(|val| val.as_str().map(|s| format!("`{s}`")))
-            .collect();
-        if !parts.is_empty() {
-            return parts.join(" \\| ");
-        }
+    if let Some(label) = const_or_enum_label(spec) {
+        return label;
     }
     format_type(spec, defs)
 }
 
+// schemars 1.x emits `const` for single-value discriminants where 0.8 emitted `enum: [x]`.
+fn const_or_enum_label(spec: &Value) -> Option<String> {
+    if let Some(c) = spec.get("const").and_then(Value::as_str) {
+        return Some(format!("`{c}`"));
+    }
+    let values = spec.get("enum").and_then(Value::as_array)?;
+    let parts: Vec<String> = values
+        .iter()
+        .filter_map(|val| val.as_str().map(|s| format!("`{s}`")))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" \\| "))
+}
+
+// 2020-12 keeps sibling keywords alongside `$ref`; merge referenced def props/required with local (local wins).
+fn merge_ref_siblings(v: &Value, defs: &Definitions<'_>) -> Option<Value> {
+    let reference = v.get("$ref").and_then(Value::as_str)?;
+    if v.get("properties").is_none() && v.get("required").is_none() {
+        return None;
+    }
+    let name = reference.rsplit('/').next()?;
+    let target = defs.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)?;
+
+    let mut merged = v.clone();
+    let obj = merged.as_object_mut()?;
+    obj.remove("$ref");
+
+    let mut props = target
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(local) = v.get("properties").and_then(Value::as_object) {
+        for (k, val) in local {
+            props.insert(k.clone(), val.clone());
+        }
+    }
+    if !props.is_empty() {
+        obj.insert("properties".to_string(), Value::Object(props));
+    }
+
+    let mut required = target
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(local) = v.get("required").and_then(Value::as_array) {
+        for r in local {
+            if !required.contains(r) {
+                required.push(r.clone());
+            }
+        }
+    }
+    if !required.is_empty() {
+        obj.insert("required".to_string(), Value::Array(required));
+    }
+
+    Some(merged)
+}
+
 fn format_type(spec: &Value, defs: &Definitions<'_>) -> String {
+    if let Some(c) = spec.get("const").and_then(Value::as_str) {
+        return format!("`{c}`");
+    }
     if let Some(r) = spec.get("$ref").and_then(Value::as_str) {
         return format_ref(r);
     }
@@ -537,9 +588,10 @@ mod tests {
     #[test]
     fn scenario_schema_prober_config_covers_shipped_probers() {
         let value = scenario_schema_value();
-        let defs = value["definitions"]
+        let defs = value["$defs"]
             .as_object()
-            .expect("definitions is an object");
+            .or_else(|| value["definitions"].as_object())
+            .expect("definitions present");
         let prober = defs
             .get("ProberConfig")
             .expect("ProberConfig definition present");
@@ -738,9 +790,106 @@ mod tests {
     }
 
     #[test]
-    fn format_variant_renders_string_enum_as_backticked_value() {
-        let spec = json!({"type": "string", "enum": ["secondary"]});
+    fn format_variant_renders_const_as_backticked_value() {
+        let spec = json!({"type": "string", "const": "secondary"});
         assert_eq!(format_variant(&spec, &Vec::new()), "`secondary`");
+    }
+
+    #[test]
+    fn format_variant_renders_multi_value_enum_as_union() {
+        let spec = json!({"type": "string", "enum": ["a", "b"]});
+        assert_eq!(format_variant(&spec, &Vec::new()), "`a` \\| `b`");
+    }
+
+    #[test]
+    fn format_property_type_renders_const_as_backticked_value() {
+        let spec = json!({"type": "string", "const": "tcp_connect"});
+        assert_eq!(format_property_type(&spec, &Vec::new()), "`tcp_connect`");
+    }
+
+    #[test]
+    fn format_variant_merges_ref_siblings_into_field_list() {
+        let target = json!({
+            "type": "object",
+            "properties": {
+                "targets": {"type": "array", "items": {"type": "string"}},
+                "timeout_ms": {"type": "integer"}
+            },
+            "required": ["targets"]
+        });
+        let defs: Definitions = vec![("DiscoverScenarioConfig", &target)];
+        let variant = json!({
+            "type": "object",
+            "$ref": "#/$defs/DiscoverScenarioConfig",
+            "properties": {"signal_type": {"type": "string", "const": "discover"}},
+            "required": ["signal_type"]
+        });
+        let out = format_variant(&variant, &defs);
+        assert!(out.contains("`targets`"), "merged ref field missing: {out}");
+        assert!(
+            out.contains("`timeout_ms`"),
+            "merged ref field missing: {out}"
+        );
+        assert!(
+            out.contains("`signal_type`: `discover`"),
+            "local discriminant missing: {out}"
+        );
+    }
+
+    #[test]
+    fn scenario_render_shows_tagged_discriminants() {
+        let md = render_schema(&scenario_schema_value(), "rastreo-core/src/config/mod.rs");
+        for token in ["`tcp_connect`", "`http`", "`snmp`", "`discover`", "`md5`"] {
+            assert!(md.contains(token), "scenario render missing {token}");
+        }
+    }
+
+    #[test]
+    fn scenario_render_scenario_entry_lists_all_discover_fields() {
+        let md = render_schema(&scenario_schema_value(), "rastreo-core/src/config/mod.rs");
+        let header = "### `ScenarioEntry`";
+        let start = md.find(header).expect("ScenarioEntry section");
+        let after = start + header.len();
+        let end = md[after..]
+            .find("\n### ")
+            .map(|i| after + i)
+            .unwrap_or(md.len());
+        let section = &md[start..end];
+        for field in [
+            "classifier",
+            "encoder",
+            "fuser",
+            "max_concurrent",
+            "name",
+            "probe_rate",
+            "probers",
+            "retries",
+            "sink",
+            "targets",
+            "timeout_ms",
+            "signal_type",
+        ] {
+            assert!(
+                section.contains(&format!("`{field}`")),
+                "ScenarioEntry variant missing `{field}`: {section}"
+            );
+        }
+    }
+
+    #[test]
+    fn device_render_shows_alt_ip_role_values() {
+        let md = render_schema(&device_schema_value(), "rastreo-core/src/model/device.rs");
+        for token in [
+            "`secondary`",
+            "`loopback`",
+            "`vrrp`",
+            "`hsrp`",
+            "`carp`",
+            "`anycast`",
+            "`vip`",
+        ] {
+            assert!(md.contains(token), "device render missing {token}");
+        }
     }
 
     #[test]
