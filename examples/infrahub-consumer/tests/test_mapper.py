@@ -21,7 +21,7 @@ def test_minimal_record_maps_core_attributes(
     assert result["identity_key"] == "ip:10.50.0.10"
     assert result["mgmt_ip"] == "10.50.0.10"
     assert result["last_seen"] == "2026-07-05T11:22:51.423959Z"
-    assert result["confidence"] == 0.2
+    assert result["confidence"] == "0.20"
     assert result["signals"] == [{"OpenPort": 80}]
     assert result["probe_kinds"] == ["TcpConnect"]
     assert result["alt_ips"] == []
@@ -40,7 +40,7 @@ def test_full_record_maps_platform_role_and_os_version(
     assert result["role"] == "router"
     assert result["os_version"] == "15.7"
     assert result["mac"] == "aa:bb:cc:11:22:33"
-    assert result["confidence"] == 0.85
+    assert result["confidence"] == "0.85"
 
 
 def test_merged_record_carries_alt_ips_verbatim(
@@ -94,7 +94,7 @@ def test_confidence_is_rounded_to_two_decimals(
 ) -> None:
     minimal_record_payload["confidence"] = 0.847239
     result = _map(minimal_record_payload)
-    assert result["confidence"] == 0.85
+    assert result["confidence"] == "0.85"
 
 
 def test_mapper_passes_through_ssh_and_http_fields(

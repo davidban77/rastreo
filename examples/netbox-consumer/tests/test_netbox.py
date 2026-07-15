@@ -21,6 +21,10 @@ from netbox_consumer.netbox import NetBoxClient
 
 NETBOX_URL = "https://netbox.example.com"
 
+DEVICE_TYPE_ID = 1
+SITE_ID = 2
+DEFAULT_ROLE_ID = 4
+
 
 @pytest.fixture
 def rsps() -> Iterator[responses.RequestsMock]:
@@ -29,10 +33,36 @@ def rsps() -> Iterator[responses.RequestsMock]:
         yield mock
 
 
+def _register_defaults(rsps: responses.RequestsMock) -> None:
+    """Register the startup-lookup responses every client construction needs."""
+    rsps.add(
+        responses.GET,
+        f"{NETBOX_URL}/api/dcim/device-types/",
+        json=_paginated([{"id": DEVICE_TYPE_ID, "model": "generic-router"}]),
+    )
+    rsps.add(
+        responses.GET,
+        f"{NETBOX_URL}/api/dcim/sites/",
+        json=_paginated([{"id": SITE_ID, "name": "discovery"}]),
+    )
+    rsps.add(
+        responses.GET,
+        f"{NETBOX_URL}/api/dcim/device-roles/",
+        json=_paginated([{"id": DEFAULT_ROLE_ID, "slug": "discovered"}]),
+    )
+
+
 @pytest.fixture
-def client() -> NetBoxClient:
-    """A NetBoxClient pointed at the mocked base URL."""
-    return NetBoxClient(NETBOX_URL, token="test-token")
+def client(rsps: responses.RequestsMock) -> NetBoxClient:
+    """A NetBoxClient pointed at the mocked base URL, with defaults resolved."""
+    _register_defaults(rsps)
+    return NetBoxClient(
+        NETBOX_URL,
+        token="test-token",
+        default_device_type="generic-router",
+        default_site="discovery",
+        default_device_role="discovered",
+    )
 
 
 @pytest.fixture
@@ -251,7 +281,7 @@ def test_missing_platform_slug_omits_platform_from_create(
     assert any("platforms not found" in rec.message for rec in caplog.records)
 
 
-def test_missing_role_slug_omits_role_from_create(
+def test_missing_role_slug_uses_default_role(
     rsps: responses.RequestsMock,
     client: NetBoxClient,
     payload: dict[str, Any],
@@ -289,7 +319,7 @@ def test_missing_role_slug_omits_role_from_create(
 
     post = _find_call(rsps, "POST", "/api/dcim/devices/")
     body = json.loads(post.request.body)
-    assert "role" not in body
+    assert body["role"] == DEFAULT_ROLE_ID
     assert body["platform"] == 7
     assert any("device_roles not found" in rec.message for rec in caplog.records)
 

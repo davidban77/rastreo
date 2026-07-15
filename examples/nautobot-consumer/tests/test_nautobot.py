@@ -25,6 +25,7 @@ NAUTOBOT_URL = "https://nautobot.example.com"
 DEVICE_TYPE_ID = "00000000-0000-0000-0000-000000000001"
 LOCATION_ID = "00000000-0000-0000-0000-000000000002"
 STATUS_ID = "00000000-0000-0000-0000-000000000003"
+DEFAULT_ROLE_ID = "00000000-0000-0000-0000-000000000004"
 PLATFORM_ID = "00000000-0000-0000-0000-000000000010"
 ROLE_ID = "00000000-0000-0000-0000-000000000020"
 DEVICE_ID = "00000000-0000-0000-0000-000000000042"
@@ -57,6 +58,11 @@ def _register_defaults(rsps: responses.RequestsMock) -> None:
         f"{NAUTOBOT_URL}/api/extras/statuses/",
         json=_paginated([{"id": STATUS_ID, "name": "Active"}]),
     )
+    rsps.add(
+        responses.GET,
+        f"{NAUTOBOT_URL}/api/extras/roles/",
+        json=_paginated([{"id": DEFAULT_ROLE_ID, "name": "discovered"}]),
+    )
 
 
 @pytest.fixture
@@ -69,6 +75,7 @@ def client(rsps: responses.RequestsMock) -> NautobotClient:
         default_device_type="generic-router",
         default_location="discovery",
         default_device_status="Active",
+        default_device_role="discovered",
     )
 
 
@@ -132,6 +139,7 @@ def test_device_type_missing_fails_startup(rsps: responses.RequestsMock) -> None
             default_device_type="generic-router",
             default_location="discovery",
             default_device_status="Active",
+            default_device_role="discovered",
         )
 
 
@@ -149,6 +157,7 @@ def test_location_missing_fails_startup(rsps: responses.RequestsMock) -> None:
             default_device_type="generic-router",
             default_location="discovery",
             default_device_status="Active",
+            default_device_role="discovered",
         )
 
 
@@ -171,6 +180,7 @@ def test_status_missing_fails_startup(rsps: responses.RequestsMock) -> None:
             default_device_type="generic-router",
             default_location="discovery",
             default_device_status="Active",
+            default_device_role="discovered",
         )
 
 
@@ -383,7 +393,7 @@ def test_missing_platform_name_omits_platform_from_create(
     assert any("dcim.platforms not found" in rec.message for rec in caplog.records)
 
 
-def test_missing_role_name_omits_role_from_create(
+def test_missing_role_name_uses_default_role(
     rsps: responses.RequestsMock,
     client: NautobotClient,
     payload: dict[str, Any],
@@ -431,7 +441,7 @@ def test_missing_role_name_omits_role_from_create(
 
     post = _find_call(rsps, "POST", "/api/dcim/devices/")
     body = json.loads(post.request.body)
-    assert "role" not in body
+    assert body["role"] == DEFAULT_ROLE_ID
     assert body["platform"] == PLATFORM_ID
     assert any("extras.roles not found" in rec.message for rec in caplog.records)
 
