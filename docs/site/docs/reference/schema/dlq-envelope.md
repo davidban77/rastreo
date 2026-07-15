@@ -7,7 +7,7 @@ description: The dead-letter envelope wraps a DeviceRecord that failed primary d
 When a record fails primary delivery and a dead-letter destination is configured, rastreo quarantines the record there inside a dead-letter envelope. The envelope is a set of `x-rastreo-*` transport headers plus a payload that is one unmodified `DeviceRecord`. You filter and triage on the headers without parsing the payload.
 
 - Schema ID: `https://davidban77.github.io/rastreo/schemas/dlq-envelope-v1.json`
-- JSON Schema draft: `http://json-schema.org/draft-07/schema#`
+- JSON Schema draft: `https://json-schema.org/draft/2020-12/schema`
 - Source of truth: `schemas/dlq-envelope-v1.json`
 
 ## Envelope

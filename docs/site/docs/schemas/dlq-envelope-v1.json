@@ -1,6 +1,6 @@
 {
   "$id": "https://davidban77.github.io/rastreo/schemas/dlq-envelope-v1.json",
-  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "DlqEnvelope",
   "description": "Envelope for a record rastreo quarantined to a dead-letter destination after primary delivery failed. The transport carries a set of `x-rastreo-*` headers (Kafka record headers or NATS message headers) alongside the payload, which is a single unmodified `device-record-v1`. Consumers filter and triage on the headers without parsing the payload.",
   "type": "object",
