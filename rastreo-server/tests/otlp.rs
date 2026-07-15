@@ -55,6 +55,37 @@ fn init_metrics_only_with_http_protobuf_protocol_builds_exporter() {
 }
 
 #[test]
+fn init_metrics_only_registers_scan_duration_histogram() {
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+    let rt = tokio_runtime();
+    rt.block_on(async {
+        let cfg = OtlpConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            protocol: OtlpProtocol::Grpc,
+            metrics_enabled: true,
+            logs_enabled: false,
+            metrics_interval: Duration::from_secs(30),
+            service_name: "rastreo-server-test".to_string(),
+        };
+        let metrics = Arc::new(Metrics::new());
+        let reach = Arc::new(SinkReachability::not_configured());
+        let _guard = observability::init_metrics_only(&cfg, Arc::clone(&metrics), reach)
+            .expect("init_metrics_only");
+
+        let exporter = InMemoryMetricExporter::default();
+        let reader = PeriodicReader::builder(exporter).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let histogram = provider.meter("probe").f64_histogram("probe").build();
+        assert!(
+            metrics.attach_otlp_scan_duration(histogram).is_err(),
+            "init_metrics must register instruments and bind the scan-duration histogram"
+        );
+    });
+}
+
+#[test]
 fn otlp_scan_duration_emits_all_and_per_scenario_observations() {
     use std::collections::HashSet;
 
