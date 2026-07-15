@@ -9,7 +9,7 @@ pub use cli::LogFormat;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let parsed = cli::Cli::parse();
-    let otlp_config = otlp::OtlpConfig::from_env().context("failed to load OTLP config")?;
+    let otlp_config = otlp::config_from_env().context("failed to load OTLP config")?;
     init_tracing(
         parsed.verbose,
         parsed.quiet,
@@ -65,35 +65,11 @@ fn init_tracing(
     log_format: LogFormat,
     otlp_config: Option<&otlp::OtlpConfig>,
 ) -> anyhow::Result<()> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::EnvFilter;
-
-    let level = default_level(verbose, quiet);
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
-    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
-        LogFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr)),
-        LogFormat::Json => Box::new(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .json(),
-        ),
-    };
-    let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
-
-    match otlp_config {
-        Some(cfg) if cfg.logs_enabled => {
-            let (otlp_layer, provider) = otlp::logs_layer(cfg)?;
-            OTLP_LOGGER_PROVIDER
-                .set(provider)
-                .map_err(|_| anyhow::anyhow!("OTLP logger provider already initialized"))?;
-            registry.with(otlp_layer).init();
-        }
-        _ => {
-            registry.init();
-        }
-    }
-    Ok(())
+    rastreo_core::observability::otlp::init_tracing(
+        default_level(verbose, quiet),
+        matches!(log_format, LogFormat::Json),
+        otlp_config,
+    )
 }
 
 #[cfg(not(feature = "otlp"))]
@@ -137,15 +113,13 @@ fn default_level(verbose: u8, quiet: bool) -> &'static str {
 }
 
 #[cfg(feature = "otlp")]
-static OTLP_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
-    std::sync::OnceLock::new();
-
-#[cfg(feature = "otlp")]
 fn init_otlp_metrics(config: Option<&otlp::OtlpConfig>) -> anyhow::Result<Option<otlp::OtlpGuard>> {
-    let Some(cfg) = config else { return Ok(None) };
-    let mut guard = otlp::init_metrics_only(cfg)?;
-    if let Some(provider) = OTLP_LOGGER_PROVIDER.get() {
-        otlp::attach_logger(&mut guard, provider.clone());
+    if config.is_none() {
+        return Ok(None);
+    }
+    let mut guard = otlp::OtlpGuard::empty();
+    if let Some(provider) = otlp::stashed_logger_provider() {
+        otlp::attach_logger(&mut guard, provider);
     }
     Ok(Some(guard))
 }

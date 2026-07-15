@@ -59,7 +59,8 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let otlp_config = OtlpConfig::from_env().context("failed to load OTLP config")?;
+    let otlp_config =
+        OtlpConfig::from_env("rastreo-server", true).context("failed to load OTLP config")?;
     init_tracing(cli.log_format, otlp_config.as_ref())?;
 
     let guard = TargetGuardConfig::from_env().context("failed to load target-guard config")?;
@@ -166,36 +167,11 @@ async fn wait_for_shutdown_signal() {
 
 #[cfg(feature = "otlp")]
 fn init_tracing(log_format: LogFormat, otlp: Option<&OtlpConfig>) -> anyhow::Result<()> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = match log_format {
-        LogFormat::Text => Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr)),
-        LogFormat::Json => Box::new(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .json(),
-        ),
-    };
-
-    let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
-
-    match otlp {
-        Some(cfg) if cfg.logs_enabled => {
-            let (otlp_layer, provider) = rastreo_server::observability::logs_layer(cfg)?;
-            // Stash the provider on a global static so its Drop runs at process exit.
-            OTLP_LOGGER_PROVIDER
-                .set(provider)
-                .map_err(|_| anyhow::anyhow!("OTLP logger provider already initialized"))?;
-            registry.with(otlp_layer).init();
-        }
-        _ => {
-            registry.init();
-        }
-    }
-    Ok(())
+    rastreo_core::observability::otlp::init_tracing(
+        "info",
+        matches!(log_format, LogFormat::Json),
+        otlp,
+    )
 }
 
 #[cfg(not(feature = "otlp"))]
@@ -221,10 +197,6 @@ fn init_tracing(log_format: LogFormat, _otlp: Option<&OtlpConfig>) -> anyhow::Re
 }
 
 #[cfg(feature = "otlp")]
-static OTLP_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
-    std::sync::OnceLock::new();
-
-#[cfg(feature = "otlp")]
 fn init_otlp(
     config: Option<&OtlpConfig>,
     metrics: Arc<rastreo_server::state::Metrics>,
@@ -233,8 +205,8 @@ fn init_otlp(
     let Some(cfg) = config else { return Ok(None) };
     let mut guard =
         rastreo_server::observability::init_metrics_only(cfg, metrics, sink_reachability)?;
-    if let Some(provider) = OTLP_LOGGER_PROVIDER.get() {
-        rastreo_server::observability::attach_logger(&mut guard, provider.clone());
+    if let Some(provider) = rastreo_core::observability::otlp::stashed_logger_provider() {
+        rastreo_core::observability::otlp::attach_logger(&mut guard, provider);
     }
     Ok(Some(guard))
 }

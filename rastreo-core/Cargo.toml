@@ -36,6 +36,13 @@ oui = ["dep:flate2"]
 ssh = ["dep:russh"]
 icmp = ["dep:socket2", "dep:pnet_packet"]
 tls = ["dep:rustls", "dep:rustls-pki-types", "dep:tokio-rustls", "dep:x509-parser"]
+otlp = [
+    "dep:anyhow",
+    "dep:tracing-subscriber",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-appender-tracing",
+]
 
 [dependencies]
 serde = { workspace = true, features = ["rc"] }
@@ -78,6 +85,11 @@ russh = { version = "0.62", default-features = false, features = ["ring", "rsa"]
 socket2 = { version = "0.6", features = ["all"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
 x509-parser = { version = "0.16", default-features = false, optional = true }
+anyhow = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, features = ["json"], optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "logs", "metrics"], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "reqwest-client", "logs"], optional = true }
+opentelemetry-appender-tracing = { version = "0.32", optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }

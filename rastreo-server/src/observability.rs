@@ -1,4 +1,5 @@
-//! OpenTelemetry OTLP exporters for metrics and logs.
+//! OpenTelemetry OTLP metric exporters and instrument callbacks. The shared logs/tracing
+//! bootstrap and RAII shutdown guard live in `rastreo_core::observability::otlp`.
 
 #![cfg(feature = "otlp")]
 
@@ -7,78 +8,16 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use opentelemetry::{global, KeyValue};
-use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::Resource;
+use rastreo_core::observability::otlp::attach_meter;
 use rastreo_core::observability::otlp_config::http_endpoint_for_signal;
 use rastreo_core::{ProbeKind, SinkErrorClass, SinkType};
-use tracing::Subscriber;
-use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
+
+pub use rastreo_core::observability::otlp::OtlpGuard;
 
 use crate::state::{Metrics, OtlpConfig, OtlpProtocol, SinkReachability};
-
-/// RAII guard that shuts down the OTLP providers on drop so pending exports flush before exit.
-#[non_exhaustive]
-pub struct OtlpGuard {
-    meter: Option<SdkMeterProvider>,
-    logger: Option<SdkLoggerProvider>,
-}
-
-impl OtlpGuard {
-    fn empty() -> Self {
-        Self {
-            meter: None,
-            logger: None,
-        }
-    }
-}
-
-impl Drop for OtlpGuard {
-    fn drop(&mut self) {
-        if let Some(m) = self.meter.take() {
-            if let Err(err) = m.shutdown() {
-                tracing::warn!(%err, "OTLP meter provider shutdown failed");
-            }
-        }
-        if let Some(l) = self.logger.take() {
-            if let Err(err) = l.shutdown() {
-                tracing::warn!(%err, "OTLP logger provider shutdown failed");
-            }
-        }
-    }
-}
-
-/// Build a `tracing_subscriber::Layer` that ships events to the OTLP log exporter.
-pub fn logs_layer<S>(config: &OtlpConfig) -> anyhow::Result<(impl Layer<S>, SdkLoggerProvider)>
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    let exporter = match config.protocol {
-        OtlpProtocol::Grpc => opentelemetry_otlp::LogExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.endpoint)
-            .build()
-            .context("failed to build OTLP gRPC log exporter")?,
-        OtlpProtocol::HttpProtobuf => opentelemetry_otlp::LogExporter::builder()
-            .with_http()
-            .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/logs"))
-            .build()
-            .context("failed to build OTLP HTTP+protobuf log exporter")?,
-        _ => anyhow::bail!("unsupported OTLP protocol variant: {:?}", config.protocol),
-    };
-    let resource = Resource::builder()
-        .with_service_name(config.service_name.clone())
-        .build();
-    let provider = SdkLoggerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(resource)
-        .build();
-    let layer = OpenTelemetryTracingBridge::new(&provider);
-    Ok((layer, provider))
-}
 
 /// Wire up OTLP metrics (observable counters + gauges + a synchronously recorded histogram) against the running `Metrics`.
 pub fn init_metrics(
@@ -302,12 +241,10 @@ pub fn init_metrics_only(
 ) -> anyhow::Result<OtlpGuard> {
     let mut guard = OtlpGuard::empty();
     if config.metrics_enabled {
-        guard.meter = Some(init_metrics(config, metrics, sink_reachability)?);
+        attach_meter(
+            &mut guard,
+            init_metrics(config, metrics, sink_reachability)?,
+        );
     }
     Ok(guard)
-}
-
-/// Attach an already-built `SdkLoggerProvider` to the guard so it shuts down with metrics.
-pub fn attach_logger(guard: &mut OtlpGuard, logger: SdkLoggerProvider) {
-    guard.logger = Some(logger);
 }
