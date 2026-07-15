@@ -692,6 +692,8 @@ fn build_sink_config_for_kind(kind: SinkKind, args: &DiscoverArgs) -> Result<Sin
                 topic,
                 flush_mode,
                 dead_letter: None,
+                tls: None,
+                sasl: None,
             })
         }
     }

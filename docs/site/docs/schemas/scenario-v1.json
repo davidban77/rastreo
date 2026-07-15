@@ -462,6 +462,42 @@
         }
       ]
     },
+    "KafkaSasl": {
+      "description": "SASL credentials for the Kafka producer; composes independently with `KafkaTls`.",
+      "properties": {
+        "mechanism": {
+          "$ref": "#/$defs/SaslMechanism"
+        },
+        "password": {
+          "$ref": "#/$defs/Password"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mechanism",
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
+    "KafkaTls": {
+      "description": "TLS for the Kafka producer; `verify` defaults to `false` (accept any certificate), mirroring the probers' permissive default.",
+      "properties": {
+        "ca_cert": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verify": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "MergeMode": {
       "description": "How user-supplied rules combine with the baked-in default rules.",
       "oneOf": [
@@ -1015,6 +1051,14 @@
         }
       ]
     },
+    "SaslMechanism": {
+      "enum": [
+        "plain",
+        "scram_sha_256",
+        "scram_sha_512"
+      ],
+      "type": "string"
+    },
     "ScenarioEntry": {
       "oneOf": [
         {
@@ -1104,6 +1148,26 @@
                 "threshold_bytes": 65536,
                 "type": "batched"
               }
+            },
+            "sasl": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/KafkaSasl"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tls": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/KafkaTls"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "topic": {
               "type": "string"

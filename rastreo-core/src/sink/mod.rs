@@ -9,7 +9,7 @@ pub mod tee;
 
 pub use file::FileSink;
 #[cfg(feature = "kafka")]
-pub use kafka::{DeadLetterConfig, KafkaFlushMode, KafkaSink};
+pub use kafka::{DeadLetterConfig, KafkaFlushMode, KafkaSasl, KafkaSink, KafkaTls, SaslMechanism};
 pub use memory::{MemorySink, MemorySinkHandle};
 #[cfg(feature = "nats")]
 pub use nats::{NatsCredentials, NatsDeadLetterConfig, NatsFlushMode, NatsSink};
@@ -214,6 +214,10 @@ pub enum SinkConfig {
         flush_mode: KafkaFlushMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dead_letter: Option<DeadLetterConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tls: Option<KafkaTls>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sasl: Option<KafkaSasl>,
     },
     #[cfg(feature = "nats")]
     Nats {
@@ -240,8 +244,11 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             topic,
             flush_mode,
             dead_letter,
+            tls,
+            sasl,
         } => {
-            let mut sink = KafkaSink::new(brokers.clone(), topic.clone()).await?;
+            let mut sink =
+                KafkaSink::new(brokers.clone(), topic.clone(), tls.clone(), sasl.clone()).await?;
             sink = sink.with_flush_mode(flush_mode.clone());
             if let Some(dlq) = dead_letter {
                 sink = sink.with_dead_letter(dlq.clone()).await?;
@@ -600,11 +607,15 @@ mod tests {
                 topic,
                 flush_mode,
                 dead_letter,
+                tls,
+                sasl,
             } => {
                 assert_eq!(brokers, vec!["k:9092".to_string()]);
                 assert_eq!(topic, "t");
                 assert!(matches!(flush_mode, KafkaFlushMode::PerRecord));
                 assert!(dead_letter.is_none());
+                assert!(tls.is_none());
+                assert!(sasl.is_none());
             }
             other => panic!("expected Kafka, got {other:?}"),
         }

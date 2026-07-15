@@ -65,7 +65,7 @@ src/
 |----------|---------|-------------|
 | `config` | yes     | Pulls in `serde_yaml_ng` for YAML scenario-file parsing. Disable for library consumers who construct configs in code and do not need YAML deserialization. |
 | `http`   | no      | Enables the HTTP prober (`reqwest` + rustls-webpki-roots). Also pulls `rustls` directly, so a `rustls::Error` in reqwest's source chain can be recognized as proof the TCP connect completed — the port is open even when the TLS handshake fails. |
-| `kafka`  | no      | Enables `KafkaSink` (rskafka producer with rustls TLS support and embedded webpki-roots). |
+| `kafka`  | no      | Enables `KafkaSink` (rskafka producer). Optional TLS (rustls with embedded webpki-roots plus an optional custom CA; permissive `verify: false` default) and optional SASL auth (PLAIN / SCRAM-SHA-256 / SCRAM-SHA-512) each opt in independently, so PLAINTEXT, SSL, SASL_PLAINTEXT, and SASL_SSL all compose. |
 | `snmp`   | no      | Enables the SNMP prober for vendor / interface fingerprinting. |
 | `arp`    | no      | Enables the ARP prober for IPv4 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |
 | `ndp`    | no      | Enables the NDP prober for IPv6 link-layer MAC discovery (requires `CAP_NET_RAW` at runtime). |

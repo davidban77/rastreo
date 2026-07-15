@@ -135,6 +135,25 @@ One of:
 - { `type`: `per_record` }
 - { `threshold_bytes`: uint, `type`: `batched` }
 
+### `KafkaSasl` {#kafkasasl}
+
+SASL credentials for the Kafka producer; composes independently with `KafkaTls`.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `mechanism` | [`SaslMechanism`](#saslmechanism) | yes | — |
+| `password` | [`Password`](#password) | yes | — |
+| `username` | string | yes | — |
+
+### `KafkaTls` {#kafkatls}
+
+TLS for the Kafka producer; `verify` defaults to `false` (accept any certificate), mirroring the probers' permissive default.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `ca_cert` | string \| null | no | — |
+| `verify` | boolean | no | — |
+
 ### `MergeMode` {#mergemode}
 
 How user-supplied rules combine with the baked-in default rules.
@@ -221,6 +240,10 @@ One of:
 - { `prefix`: string, `role`: string, `type`: `sys_object_id_prefix` }
 - { `ports`: array<uint16>, `role`: string, `type`: `ports_open` }
 
+### `SaslMechanism` {#saslmechanism}
+
+Type: string
+
 ### `ScenarioEntry` {#scenarioentry}
 
 One of:
@@ -238,7 +261,7 @@ One of:
 - { `type`: `stdout` }
 - { `path`: string, `type`: `file` }
 - { `type`: `memory` }
-- { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `topic`: string, `type`: `kafka` }
+- { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `sasl`: [`KafkaSasl`](#kafkasasl) \| null, `tls`: [`KafkaTls`](#kafkatls) \| null, `topic`: string, `type`: `kafka` }
 - { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `flush_mode`: [`NatsFlushMode`](#natsflushmode), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
 
 ### `SnmpVersion` {#snmpversion}
