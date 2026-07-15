@@ -282,6 +282,8 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 | `topic` | string | yes | Topic name. |
 | `flush_mode` | object | no | Defaults to `batched` with a 64 KiB threshold. See below. |
 | `dead_letter` | object | no | Optional quarantine topic for records the primary produce refused. Omit to preserve the pre-existing "return error, retain buffer" behavior on produce failure. |
+| `tls` | object | no | Optional TLS for the broker connection. `verify` defaults to `false`. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
+| `sasl` | object | no | Optional SASL credentials (`plain`, `scram_sha_256`, or `scram_sha_512`). See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
 
 ```json
 {
@@ -296,6 +298,18 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 The `flush_mode` field is itself an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each Kafka message. `per_record` sends each record immediately and prioritises freshness over throughput. `batched` buffers records and sends them in one produce request when the buffer reaches `threshold_bytes` (default 65536); each record is still its own message, so batching raises throughput without changing the wire framing. Inside `batched`, `threshold_bytes` is optional and defaults to 64 KiB.
 
 The `dead_letter` field carries two properties: `topic` (required, the DLQ Kafka topic name) and `include_error_metadata` (optional, default `true`). When enabled, DLQ messages carry three headers: `x-rastreo-source-topic`, `x-rastreo-error-class` (currently always `produce_failure`), and `x-rastreo-dlq-timestamp` (RFC 3339 UTC). See [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue) for the failure model and consumer guidance.
+
+The `tls` and `sasl` fields secure the broker connection. `tls` carries `verify` (default `false`) and an optional `ca_cert` PEM string, read only when `verify: true`. `sasl` carries `mechanism` (`plain`, `scram_sha_256`, or `scram_sha_512`), `username`, and `password`. The two blocks are independent, so `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` brokers all compose. Keep `password` and `ca_cert` in `${VAR}` environment references or `!file` mounts — see [Secrets](secrets.md). See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication) for full examples.
+
+```json
+{
+  "type": "kafka",
+  "brokers": ["broker.internal:9093"],
+  "topic": "rastreo.devices",
+  "tls": {"verify": true},
+  "sasl": {"mechanism": "scram_sha_512", "username": "rastreo-writer", "password": "${KAFKA_PASSWORD}"}
+}
+```
 
 ```json
 {"type": "per_record"}

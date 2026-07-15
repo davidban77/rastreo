@@ -356,10 +356,38 @@ mod tests {
             topic: "rastreo.devices".into(),
             flush_mode: crate::sink::KafkaFlushMode::default(),
             dead_letter: None,
+            tls: None,
+            sasl: None,
         };
         assert_eq!(
             render_sink(Some(&sink)),
             "kafka: brokers=127.0.0.1:1,127.0.0.1:2 topic=rastreo.devices"
+        );
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn render_sink_kafka_never_emits_sasl_credentials() {
+        let sink = SinkConfig::Kafka {
+            brokers: vec!["127.0.0.1:1".into()],
+            topic: "rastreo.devices".into(),
+            flush_mode: crate::sink::KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: None,
+            sasl: Some(crate::sink::KafkaSasl {
+                mechanism: crate::sink::SaslMechanism::ScramSha256,
+                username: "svc-user".into(),
+                password: crate::prober::Password("PLAINTEXT-SENTINEL".into()),
+            }),
+        };
+        let rendered = render_sink(Some(&sink));
+        assert!(
+            !rendered.contains("PLAINTEXT-SENTINEL"),
+            "plan rendered the SASL password: {rendered}"
+        );
+        assert!(
+            !rendered.contains("svc-user"),
+            "plan rendered the SASL username: {rendered}"
         );
     }
 

@@ -30,7 +30,7 @@ pub use icmp::IcmpProber;
 pub use ndp::NdpProber;
 #[cfg(feature = "snmp")]
 pub use redacted::Community;
-#[cfg(any(feature = "snmp", feature = "nats"))]
+#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
 pub use redacted::Password;
 pub use reverse_dns::ReverseDnsProber;
 #[cfg(feature = "snmp")]

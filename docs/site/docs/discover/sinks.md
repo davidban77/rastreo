@@ -53,6 +53,8 @@ rastreo discover \
 
 `--sink kafka` requires both `--brokers` and `--topic`; either missing is rejected before any probe runs.
 
+Secured brokers — Confluent Cloud, Amazon MSK, any `SASL_SSL` listener — need TLS and SASL settings that the CLI flags do not cover. Configure them with `tls` and `sasl` blocks in a scenario file. The TLS `verify` field defaults to `false` (accept any certificate); set `verify: true` on production brokers. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication) for the full config surface and a Confluent Cloud example.
+
 ### Dead-letter queue
 
 The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). When the primary produce fails and a DLQ is configured, the sink publishes the same payload to the DLQ topic, logs a `WARN`, and returns success — the buffer is drained and the pipeline moves on. When no DLQ is configured, the primary failure surfaces as an error and the buffer is retained for `flush()` retry (the pre-existing behavior).

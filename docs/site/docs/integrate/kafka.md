@@ -29,6 +29,105 @@ Both modes put one `DeviceRecord` in each Kafka message. They differ only in how
 !!! info
     Batching changes throughput, not the wire framing. In both modes a consumer reads one message and gets one `DeviceRecord`.
 
+## TLS and SASL authentication
+
+Managed Kafka services — Confluent Cloud, Amazon MSK, or any broker on a `SASL_SSL` listener — require an encrypted connection and credentials. The Kafka sink accepts two optional, independent config blocks for this: `tls` for the encrypted connection and `sasl` for the credentials. Both are scenario-only. There are no CLI flags for them, so a secured broker needs a scenario file (`--file`) or a `POST /scans` request body.
+
+### TLS
+
+The `tls` block has two fields. `verify` decides whether the sink checks the broker's certificate. `ca_cert` supplies a PEM certificate for a private certificate authority, and the sink reads it only when `verify: true`.
+
+!!! warning "`verify` defaults to `false` — set `verify: true` on production brokers"
+    The `verify` field defaults to `false`, which accepts any broker certificate without checking it. This matches the permissive TLS default across rastreo's probers. rastreo is built for lab and internal networks, where self-signed broker certificates are common.
+
+    On a broker that carries SASL credentials, an unverified certificate is a man-in-the-middle risk. An attacker who intercepts the connection presents any certificate and collects the SASL username and password.
+
+    Set `verify: true` on every production broker. Add `ca_cert` when the broker's certificate comes from a private certificate authority that the system trust store does not already include.
+
+Enable verification against the standard public root certificates. They are bundled in the binary, so no system root store is needed:
+
+```yaml
+sink:
+  type: kafka
+  brokers: ["broker.internal:9093"]
+  topic: rastreo.discovery.records
+  tls:
+    verify: true
+```
+
+Verify against a private certificate authority by pointing `ca_cert` at a PEM file. Use the `!file` tag so the certificate stays out of the scenario YAML:
+
+```yaml
+sink:
+  type: kafka
+  brokers: ["broker.internal:9093"]
+  topic: rastreo.discovery.records
+  tls:
+    verify: true
+    ca_cert: !file /run/secrets/kafka-ca.pem
+```
+
+### SASL
+
+The `sasl` block has three fields. `mechanism` names the SASL mechanism. `username` is the account name. `password` is its secret. Three mechanisms are supported:
+
+| Mechanism | `mechanism` value |
+|---|---|
+| PLAIN | `plain` |
+| SCRAM-SHA-256 | `scram_sha_256` |
+| SCRAM-SHA-512 | `scram_sha_512` |
+
+Never write the `password` inline. Use a `${VAR}` environment reference or the `!file` tag so the secret stays out of the scenario file. See [Secrets](../reference/secrets.md) for both syntaxes.
+
+```yaml
+sink:
+  type: kafka
+  brokers: ["broker.internal:9092"]
+  topic: rastreo.discovery.records
+  sasl:
+    mechanism: scram_sha_512
+    username: rastreo-writer
+    password: ${KAFKA_PASSWORD}
+```
+
+### How the blocks compose
+
+The `tls` and `sasl` blocks are independent, so every Kafka security protocol is a combination of the two. Include the blocks the broker's listener requires:
+
+| Broker listener | `tls` block | `sasl` block |
+|---|---|---|
+| `PLAINTEXT` | omit | omit |
+| `SSL` | present | omit |
+| `SASL_PLAINTEXT` | omit | present |
+| `SASL_SSL` | present | present |
+
+Managed brokers are almost always `SASL_SSL`. Confluent Cloud uses SASL/PLAIN over TLS, and Amazon MSK offers SASL/SCRAM over TLS. Both need the `tls` and `sasl` blocks together.
+
+### Example: Confluent Cloud
+
+Confluent Cloud authenticates with a cluster API key as the username and an API secret as the password, over TLS. The API key and secret come from the environment so neither appears in the scenario file:
+
+```yaml
+sink:
+  type: kafka
+  brokers: ["pkc-xxxxx.us-east-1.aws.confluent.cloud:9092"]
+  topic: rastreo.discovery.records
+  tls:
+    verify: true
+  sasl:
+    mechanism: plain
+    username: ${KAFKA_API_KEY}
+    password: ${KAFKA_API_SECRET}
+```
+
+Export the two values before the run:
+
+```bash
+export KAFKA_API_KEY="your-cluster-api-key"
+export KAFKA_API_SECRET="your-cluster-api-secret"
+rastreo discover --file scenario.yaml
+```
+
 ## Consumer parsing
 
 A consumer reads each Kafka message and runs one `json.loads` on the message value. One message is one record — there is nothing to split.
@@ -80,5 +179,6 @@ For interactive scans where you want records on the topic as the scan runs, pref
 ## See also
 
 - [Sinks](../discover/sinks.md) — the CLI surface for choosing a sink and setting its flags.
+- [Secrets](../reference/secrets.md) — `${VAR}` and `!file` syntax for the SASL password and the TLS `ca_cert`.
 - [Source of truth](source-of-truth.md) — what consumers do with the records after parsing.
 - [Troubleshooting](troubleshooting.md) — common failures when records do not arrive on the topic.

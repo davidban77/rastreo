@@ -1,18 +1,26 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use rskafka::{
     client::{
         partition::{Compression, OffsetAt, PartitionClient, UnknownTopicHandling},
-        ClientBuilder,
+        ClientBuilder, Credentials, SaslConfig,
     },
     record::Record,
 };
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme,
+};
 
 use crate::error::{ConfigError, RastreoError};
+use crate::prober::Password;
 use crate::sink::{Sink, SinkError, SinkErrorClass, SinkType, SINK_ERROR_CLASS_COUNT};
 
 /// Quarantine topic configuration for records the primary Kafka produce refused.
@@ -36,6 +44,169 @@ impl DeadLetterConfig {
 
 fn default_include_error_metadata() -> bool {
     true
+}
+
+/// TLS for the Kafka producer; `verify` defaults to `false` (accept any certificate), mirroring the probers' permissive default.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[non_exhaustive]
+pub struct KafkaTls {
+    #[serde(default)]
+    pub verify: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SaslMechanism {
+    Plain,
+    #[serde(rename = "scram_sha_256")]
+    ScramSha256,
+    #[serde(rename = "scram_sha_512")]
+    ScramSha512,
+}
+
+/// SASL credentials for the Kafka producer; composes independently with `KafkaTls`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[non_exhaustive]
+pub struct KafkaSasl {
+    pub mechanism: SaslMechanism,
+    pub username: String,
+    pub password: Password,
+}
+
+impl KafkaSasl {
+    // rskafka's SaslConfig/Credentials hold the plaintext password and are NOT redacted; keep them transient (never store on KafkaSink, never Debug-log) — redaction lives on KafkaSasl.
+    fn to_sasl_config(&self) -> SaslConfig {
+        let credentials =
+            Credentials::new(self.username.clone(), self.password.expose().to_string());
+        match self.mechanism {
+            SaslMechanism::Plain => SaslConfig::Plain(credentials),
+            SaslMechanism::ScramSha256 => SaslConfig::ScramSha256(credentials),
+            SaslMechanism::ScramSha512 => SaslConfig::ScramSha512(credentials),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AcceptAnyVerifier;
+
+impl ServerCertVerifier for AcceptAnyVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
+}
+
+impl KafkaTls {
+    fn build_client_config(&self) -> Result<Arc<ClientConfig>, RastreoError> {
+        // Reject the footgun: a ca_cert with verify:false would silently accept any certificate.
+        if !self.verify && self.ca_cert.is_some() {
+            return Err(
+                ConfigError::invalid("kafka sink: tls.ca_cert requires tls.verify: true").into(),
+            );
+        }
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let builder = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports rustls default protocol versions");
+
+        let config = if self.verify {
+            let mut roots = RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
+            if let Some(ca_pem) = &self.ca_cert {
+                let (added, _ignored) = roots.add_parsable_certificates(parse_ca_certs(ca_pem)?);
+                if added == 0 {
+                    return Err(ConfigError::invalid(
+                        "kafka sink: tls.ca_cert contained no usable certificate",
+                    )
+                    .into());
+                }
+            }
+            builder.with_root_certificates(roots).with_no_client_auth()
+        } else {
+            // Accept any server certificate: reach lab / self-signed brokers the way the probers do.
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(AcceptAnyVerifier))
+                .with_no_client_auth()
+        };
+        Ok(Arc::new(config))
+    }
+}
+
+fn parse_ca_certs(pem: &str) -> Result<Vec<CertificateDer<'static>>, RastreoError> {
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            ConfigError::invalid(format!("kafka sink: tls.ca_cert is not valid PEM: {e}"))
+        })?;
+    if certs.is_empty() {
+        return Err(
+            ConfigError::invalid("kafka sink: tls.ca_cert contained no certificate").into(),
+        );
+    }
+    Ok(certs)
+}
+
+fn configure_client_builder(
+    brokers: Vec<String>,
+    tls_config: Option<&Arc<ClientConfig>>,
+    sasl: Option<&KafkaSasl>,
+) -> ClientBuilder {
+    let mut builder = ClientBuilder::new(brokers);
+    if let Some(tls) = tls_config {
+        builder = builder.tls_config(Arc::clone(tls));
+    }
+    if let Some(sasl) = sasl {
+        builder = builder.sasl_config(sasl.to_sasl_config());
+    }
+    builder
 }
 
 const HEADER_SOURCE_TOPIC: &str = "x-rastreo-source-topic";
@@ -115,6 +286,8 @@ pub struct KafkaSink {
     dlq_topic: Option<String>,
     include_error_metadata: bool,
     dlq_delivered: AtomicU64,
+    tls_config: Option<Arc<ClientConfig>>,
+    sasl: Option<KafkaSasl>,
 }
 
 impl std::fmt::Debug for KafkaSink {
@@ -169,7 +342,12 @@ fn build_dlq_headers(source_topic: &str, error_class: SinkErrorClass) -> BTreeMa
 impl KafkaSink {
     pub const DEFAULT_BUFFER_THRESHOLD: usize = 64 * 1024;
 
-    pub async fn new(brokers: Vec<String>, topic: String) -> Result<Self, RastreoError> {
+    pub async fn new(
+        brokers: Vec<String>,
+        topic: String,
+        tls: Option<KafkaTls>,
+        sasl: Option<KafkaSasl>,
+    ) -> Result<Self, RastreoError> {
         if brokers.is_empty() {
             return Err(ConfigError::invalid("kafka sink: brokers list is empty").into());
         }
@@ -182,17 +360,25 @@ impl KafkaSink {
             return Err(ConfigError::invalid("kafka sink: topic is empty").into());
         }
 
+        let tls_config = match &tls {
+            Some(tls) => Some(tls.build_client_config()?),
+            None => None,
+        };
+
         let brokers_for_err = brokers.join(",");
-        let kafka_client = ClientBuilder::new(brokers.clone())
-            .build()
-            .await
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    format!("kafka sink: failed to connect to broker(s) '{brokers_for_err}': {e}"),
-                )
-            })
-            .map_err(SinkError::other)?;
+        let kafka_client =
+            configure_client_builder(brokers.clone(), tls_config.as_ref(), sasl.as_ref())
+                .build()
+                .await
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        format!(
+                            "kafka sink: failed to connect to broker(s) '{brokers_for_err}': {e}"
+                        ),
+                    )
+                })
+                .map_err(SinkError::other)?;
 
         // Single-partition: always produces to partition 0.
         let client = kafka_client
@@ -217,6 +403,8 @@ impl KafkaSink {
             dlq_topic: None,
             include_error_metadata: false,
             dlq_delivered: AtomicU64::new(0),
+            tls_config,
+            sasl,
         })
     }
 
@@ -233,9 +421,13 @@ impl KafkaSink {
 
         let brokers_for_err = self.brokers.join(",");
         let dlq_topic = config.topic.clone();
-        let kafka_client = ClientBuilder::new(self.brokers.clone())
-            .build()
-            .await
+        let kafka_client = configure_client_builder(
+            self.brokers.clone(),
+            self.tls_config.as_ref(),
+            self.sasl.as_ref(),
+        )
+        .build()
+        .await
             .map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::ConnectionRefused,
@@ -409,7 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_with_empty_brokers_returns_config_error() {
-        let err = KafkaSink::new(vec![], "topic".into())
+        let err = KafkaSink::new(vec![], "topic".into(), None, None)
             .await
             .expect_err("empty brokers must error");
         match err {
@@ -422,9 +614,14 @@ mod tests {
 
     #[tokio::test]
     async fn new_with_blank_broker_entry_returns_config_error() {
-        let err = KafkaSink::new(vec!["localhost:9092".into(), "   ".into()], "topic".into())
-            .await
-            .expect_err("blank broker entry must error");
+        let err = KafkaSink::new(
+            vec!["localhost:9092".into(), "   ".into()],
+            "topic".into(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("blank broker entry must error");
         match err {
             RastreoError::Config(ConfigError::InvalidValue(msg)) => {
                 assert!(msg.contains("empty entry"), "msg was: {msg}");
@@ -435,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_with_empty_topic_returns_config_error() {
-        let err = KafkaSink::new(vec!["localhost:9092".into()], "  ".into())
+        let err = KafkaSink::new(vec!["localhost:9092".into()], "  ".into(), None, None)
             .await
             .expect_err("blank topic must error");
         match err {
@@ -565,10 +762,14 @@ mod tests {
                 topic,
                 flush_mode,
                 dead_letter,
+                tls,
+                sasl,
             } => {
                 assert_eq!(brokers, vec!["kafka:9092".to_string()]);
                 assert_eq!(topic, "rastreo.devices");
                 assert!(dead_letter.is_none());
+                assert!(tls.is_none());
+                assert!(sasl.is_none());
                 match flush_mode {
                     KafkaFlushMode::Batched { threshold_bytes } => {
                         assert_eq!(threshold_bytes, KafkaSink::DEFAULT_BUFFER_THRESHOLD);
@@ -739,24 +940,34 @@ mod tests {
     #[ignore = "requires a live Kafka broker; exercised in Live Infra UAT"]
     #[tokio::test]
     async fn probe_reports_reachable_against_live_broker() {
-        let sink = KafkaSink::new(vec!["localhost:9092".into()], "rastreo.probe".into())
-            .await
-            .expect("connect to live broker");
+        let sink = KafkaSink::new(
+            vec!["localhost:9092".into()],
+            "rastreo.probe".into(),
+            None,
+            None,
+        )
+        .await
+        .expect("connect to live broker");
         <KafkaSink as Sink>::probe(&sink).await.expect("probe");
     }
 
     #[ignore = "requires a live Kafka broker with primary + DLQ topics; exercised in Live Infra UAT"]
     #[tokio::test]
     async fn probe_returns_ok_when_primary_and_dlq_both_reachable() {
-        let sink = KafkaSink::new(vec!["localhost:9092".into()], "rastreo.probe".into())
-            .await
-            .expect("connect to live broker")
-            .with_dead_letter(DeadLetterConfig {
-                topic: "rastreo.probe.dlq".into(),
-                include_error_metadata: true,
-            })
-            .await
-            .expect("attach dlq");
+        let sink = KafkaSink::new(
+            vec!["localhost:9092".into()],
+            "rastreo.probe".into(),
+            None,
+            None,
+        )
+        .await
+        .expect("connect to live broker")
+        .with_dead_letter(DeadLetterConfig {
+            topic: "rastreo.probe.dlq".into(),
+            include_error_metadata: true,
+        })
+        .await
+        .expect("attach dlq");
         <KafkaSink as Sink>::probe(&sink)
             .await
             .expect("probe both sides");
@@ -765,15 +976,20 @@ mod tests {
     #[ignore = "requires a live Kafka broker where the DLQ topic partition is offline / non-existent"]
     #[tokio::test]
     async fn probe_reports_unreachable_when_dlq_partition_offline() {
-        let sink = KafkaSink::new(vec!["localhost:9092".into()], "rastreo.probe".into())
-            .await
-            .expect("connect to live broker")
-            .with_dead_letter(DeadLetterConfig {
-                topic: "rastreo.probe.dlq.does-not-exist".into(),
-                include_error_metadata: true,
-            })
-            .await
-            .expect("attach dlq");
+        let sink = KafkaSink::new(
+            vec!["localhost:9092".into()],
+            "rastreo.probe".into(),
+            None,
+            None,
+        )
+        .await
+        .expect("connect to live broker")
+        .with_dead_letter(DeadLetterConfig {
+            topic: "rastreo.probe.dlq.does-not-exist".into(),
+            include_error_metadata: true,
+        })
+        .await
+        .expect("attach dlq");
         let err = <KafkaSink as Sink>::probe(&sink)
             .await
             .expect_err("dlq partition offline must fail probe");
@@ -798,6 +1014,8 @@ mod tests {
         let sink = KafkaSink::new(
             vec!["localhost:9092".into()],
             "rastreo.probe.does-not-exist".into(),
+            None,
+            None,
         )
         .await
         .expect("connect to live broker")
@@ -859,5 +1077,256 @@ mod tests {
         );
         assert_eq!(err.sink_error_class(), Some(SinkErrorClass::ProduceFailure));
         assert!(err.to_string().contains("failed to produce"));
+    }
+
+    fn sample_ca_pem() -> String {
+        use rcgen::{CertificateParams, DnType, KeyPair};
+        let key_pair = KeyPair::generate().expect("keypair");
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "rastreo-test-ca".to_string());
+        params.self_signed(&key_pair).expect("self-sign").pem()
+    }
+
+    #[test]
+    fn tls_config_verify_false_builds_accept_any() {
+        let tls = KafkaTls {
+            verify: false,
+            ca_cert: None,
+        };
+        tls.build_client_config()
+            .expect("accept-any config must build");
+    }
+
+    #[test]
+    fn tls_config_verify_true_builds_against_webpki_roots() {
+        let tls = KafkaTls {
+            verify: true,
+            ca_cert: None,
+        };
+        tls.build_client_config()
+            .expect("webpki-roots config must build");
+    }
+
+    #[test]
+    fn tls_config_verify_true_accepts_a_custom_ca() {
+        let tls = KafkaTls {
+            verify: true,
+            ca_cert: Some(sample_ca_pem()),
+        };
+        tls.build_client_config()
+            .expect("custom CA must be added to the root store");
+    }
+
+    #[test]
+    fn tls_config_verify_true_rejects_non_pem_ca() {
+        let tls = KafkaTls {
+            verify: true,
+            ca_cert: Some("not a certificate".to_string()),
+        };
+        match tls.build_client_config() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("ca_cert"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tls_config_verify_false_with_ca_cert_is_rejected() {
+        let tls = KafkaTls {
+            verify: false,
+            ca_cert: Some(sample_ca_pem()),
+        };
+        match tls.build_client_config() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("tls.verify: true"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ca_certs_accepts_a_pem_certificate() {
+        let certs = parse_ca_certs(&sample_ca_pem()).expect("valid PEM");
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn parse_ca_certs_rejects_input_without_a_certificate() {
+        match parse_ca_certs("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n") {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("ca_cert"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sasl_plain_maps_to_plain_config_with_credentials() {
+        let sasl = KafkaSasl {
+            mechanism: SaslMechanism::Plain,
+            username: "svc".into(),
+            password: Password("pw".into()),
+        };
+        match sasl.to_sasl_config() {
+            SaslConfig::Plain(creds) => {
+                assert_eq!(creds.username, "svc");
+                assert_eq!(creds.password, "pw");
+            }
+            other => panic!("expected Plain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sasl_scram_sha_256_maps_to_scram_sha_256_config() {
+        let sasl = KafkaSasl {
+            mechanism: SaslMechanism::ScramSha256,
+            username: "svc".into(),
+            password: Password("pw".into()),
+        };
+        assert!(matches!(sasl.to_sasl_config(), SaslConfig::ScramSha256(_)));
+    }
+
+    #[test]
+    fn sasl_scram_sha_512_maps_to_scram_sha_512_config() {
+        let sasl = KafkaSasl {
+            mechanism: SaslMechanism::ScramSha512,
+            username: "svc".into(),
+            password: Password("pw".into()),
+        };
+        assert!(matches!(sasl.to_sasl_config(), SaslConfig::ScramSha512(_)));
+    }
+
+    #[test]
+    fn kafka_sasl_debug_redacts_password() {
+        let sasl = KafkaSasl {
+            mechanism: SaslMechanism::Plain,
+            username: "svc".into(),
+            password: Password("supersecret".into()),
+        };
+        let s = format!("{sasl:?}");
+        assert!(!s.contains("supersecret"), "password leaked in Debug: {s}");
+        assert!(s.contains("<redacted:"));
+    }
+
+    #[test]
+    fn kafka_sasl_serialize_redacts_password() {
+        let sasl = KafkaSasl {
+            mechanism: SaslMechanism::Plain,
+            username: "svc".into(),
+            password: Password("supersecret".into()),
+        };
+        let json = serde_json::to_string(&sasl).expect("serialize");
+        assert!(!json.contains("supersecret"), "password leaked: {json}");
+        assert!(json.contains("<redacted:"));
+    }
+
+    #[test]
+    fn sink_config_kafka_with_sasl_does_not_leak_password() {
+        use crate::sink::SinkConfig;
+
+        let config = SinkConfig::Kafka {
+            brokers: vec!["k:9092".into()],
+            topic: "t".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: None,
+            sasl: Some(KafkaSasl {
+                mechanism: SaslMechanism::ScramSha512,
+                username: "svc".into(),
+                password: Password("supersecret".into()),
+            }),
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        assert!(
+            !json.contains("supersecret"),
+            "password leaked in JSON: {json}"
+        );
+        let debug = format!("{config:?}");
+        assert!(
+            !debug.contains("supersecret"),
+            "password leaked in Debug: {debug}"
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn deserialize_kafka_sink_config_with_tls_and_sasl() {
+        use crate::sink::SinkConfig;
+
+        let yaml = "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\ntls:\n  verify: true\nsasl:\n  mechanism: scram_sha_256\n  username: svc\n  password: pw\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka { tls, sasl, .. } => {
+                let tls = tls.expect("tls present");
+                assert!(tls.verify);
+                assert!(tls.ca_cert.is_none());
+                let sasl = sasl.expect("sasl present");
+                assert!(matches!(sasl.mechanism, SaslMechanism::ScramSha256));
+                assert_eq!(sasl.username, "svc");
+                assert_eq!(sasl.password.expose(), "pw");
+            }
+            other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn kafka_tls_verify_defaults_to_false_when_omitted() {
+        let tls: KafkaTls = serde_yaml_ng::from_str("ca_cert: ~\n").expect("deserialize tls");
+        assert!(!tls.verify);
+        assert!(tls.ca_cert.is_none());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn kafka_sasl_mechanism_deserializes_snake_case() {
+        for (yaml, expected) in [
+            ("plain", SaslMechanism::Plain),
+            ("scram_sha_256", SaslMechanism::ScramSha256),
+            ("scram_sha_512", SaslMechanism::ScramSha512),
+        ] {
+            let m: SaslMechanism =
+                serde_yaml_ng::from_str(yaml).unwrap_or_else(|e| panic!("{yaml}: {e}"));
+            assert_eq!(m, expected);
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn kafka_sink_config_expands_file_ca_cert_and_env_password() {
+        use crate::config::secrets::expand;
+        use crate::sink::SinkConfig;
+        use std::io::Write;
+
+        let ca = sample_ca_pem();
+        let mut ca_file = tempfile::NamedTempFile::new().expect("tempfile");
+        ca_file.write_all(ca.as_bytes()).expect("write ca");
+        let ca_path = ca_file.path().to_str().expect("utf-8 path").to_string();
+
+        // SAFETY: env var mutation is process-global; this test uses a unique name.
+        unsafe { std::env::set_var("RASTREO_TEST_KAFKA_SASL_PW", "topsecret-scram") };
+
+        let yaml = format!(
+            "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\ntls:\n  verify: true\n  ca_cert: !file {ca_path}\nsasl:\n  mechanism: scram_sha_256\n  username: svc\n  password: ${{RASTREO_TEST_KAFKA_SASL_PW}}\n"
+        );
+        let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).expect("parse");
+        let expanded = expand(raw).expect("expand secrets");
+        let config: SinkConfig = serde_yaml_ng::from_value(expanded).expect("deserialize");
+
+        // SAFETY: see set_var above.
+        unsafe { std::env::remove_var("RASTREO_TEST_KAFKA_SASL_PW") };
+
+        match config {
+            SinkConfig::Kafka { tls, sasl, .. } => {
+                let tls = tls.expect("tls present");
+                assert_eq!(tls.ca_cert.as_deref(), Some(ca.trim_end()));
+                let sasl = sasl.expect("sasl present");
+                assert_eq!(sasl.password.expose(), "topsecret-scram");
+            }
+            other => panic!("expected Kafka, got {other:?}"),
+        }
     }
 }
