@@ -176,27 +176,13 @@ fn build_dlq_headers(source_subject: &str, error_class: SinkErrorClass) -> Heade
 impl NatsSink {
     pub const DEFAULT_BUFFER_THRESHOLD: usize = 64 * 1024;
 
+    /// Assumes a config already validated by `create_sink`; does not re-validate before connecting.
     pub async fn new(
         servers: Vec<String>,
         subject: String,
         stream: String,
         credentials: NatsCredentials,
     ) -> Result<Self, RastreoError> {
-        if servers.is_empty() {
-            return Err(ConfigError::invalid("nats sink: servers list is empty").into());
-        }
-        if servers.iter().any(|s| s.trim().is_empty()) {
-            return Err(
-                ConfigError::invalid("nats sink: servers list contains an empty entry").into(),
-            );
-        }
-        if subject.trim().is_empty() {
-            return Err(ConfigError::invalid("nats sink: subject is empty").into());
-        }
-        if stream.trim().is_empty() {
-            return Err(ConfigError::invalid("nats sink: stream is empty").into());
-        }
-
         let servers_for_err = servers.join(",");
         let client = connect_with_credentials(&servers, credentials)
             .await
@@ -755,78 +741,6 @@ mod tests {
                 assert_eq!(threshold_bytes, 64 * 1024);
             }
             other => panic!("expected Batched, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn new_with_empty_servers_returns_config_error() {
-        let err = NatsSink::new(
-            vec![],
-            "subj".into(),
-            "stream".into(),
-            NatsCredentials::Anonymous,
-        )
-        .await
-        .expect_err("empty servers must error");
-        match err {
-            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
-                assert!(msg.contains("servers"), "msg was: {msg}");
-            }
-            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn new_with_blank_server_entry_returns_config_error() {
-        let err = NatsSink::new(
-            vec!["nats://n:4222".into(), "  ".into()],
-            "subj".into(),
-            "stream".into(),
-            NatsCredentials::Anonymous,
-        )
-        .await
-        .expect_err("blank server entry must error");
-        match err {
-            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
-                assert!(msg.contains("empty entry"), "msg was: {msg}");
-            }
-            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn new_with_empty_subject_returns_config_error() {
-        let err = NatsSink::new(
-            vec!["nats://n:4222".into()],
-            "  ".into(),
-            "stream".into(),
-            NatsCredentials::Anonymous,
-        )
-        .await
-        .expect_err("blank subject must error");
-        match err {
-            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
-                assert!(msg.contains("subject"), "msg was: {msg}");
-            }
-            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn new_with_empty_stream_returns_config_error() {
-        let err = NatsSink::new(
-            vec!["nats://n:4222".into()],
-            "subj".into(),
-            "  ".into(),
-            NatsCredentials::Anonymous,
-        )
-        .await
-        .expect_err("blank stream must error");
-        match err {
-            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
-                assert!(msg.contains("stream"), "msg was: {msg}");
-            }
-            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
         }
     }
 

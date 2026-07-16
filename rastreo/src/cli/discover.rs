@@ -432,7 +432,7 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
 }
 
 #[cfg(feature = "config")]
-fn resolve_scenario_source(input: &Path) -> Result<PathBuf> {
+pub(crate) fn resolve_scenario_source(input: &Path) -> Result<PathBuf> {
     let as_str = input.to_string_lossy();
     if let Some(name) = as_str.strip_prefix('@') {
         return super::catalog::resolve_catalog_name(name);
@@ -441,7 +441,7 @@ fn resolve_scenario_source(input: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(feature = "config")]
-fn load_scenario_file(path: &Path) -> Result<ScenarioFile> {
+pub(crate) fn load_scenario_file(path: &Path) -> Result<ScenarioFile> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read scenario file '{}'", path.display()))?;
     match parse_scenario_file(&contents) {
@@ -543,7 +543,7 @@ fn enrich_feature_hint(error_msg: &str) -> Option<String> {
 }
 
 #[cfg(feature = "config")]
-fn merge_defaults(base: &mut BaseProbeConfig, defaults: &BaseProbeConfig) {
+pub(crate) fn merge_defaults(base: &mut BaseProbeConfig, defaults: &BaseProbeConfig) {
     if base.name.is_none() {
         base.name = defaults.name.clone();
     }
@@ -608,7 +608,7 @@ fn build_cli_sink_override(args: &DiscoverArgs) -> Result<Option<SinkConfig>> {
 }
 
 #[cfg(feature = "config")]
-fn scenario_label(base: &BaseProbeConfig, idx: usize, total: usize) -> String {
+pub(crate) fn scenario_label(base: &BaseProbeConfig, idx: usize, total: usize) -> String {
     match &base.name {
         Some(n) => format!("scenario '{n}' ({} of {total})", idx + 1),
         None => format!("scenario {} of {total}", idx + 1),

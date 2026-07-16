@@ -107,6 +107,7 @@ nav:
       - discover/index.md
       - CLI: discover/cli.md
       - Catalog: discover/catalog.md
+      - Validate: discover/validate.md
       - Targets: discover/targets.md
       - Sinks: discover/sinks.md
       - Enrichment: discover/enrichment.md

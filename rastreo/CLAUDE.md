@@ -22,6 +22,7 @@ src/
 └── cli/
     ├── mod.rs       ← Cli struct + Command enum + clap dispatch
     ├── catalog.rs   ← @name resolution across catalog directories (feature = "config")
+    ├── validate.rs  ← validate subcommand handler: offline config-shape + sink-config lint (feature = "config")
     └── discover.rs  ← discover subcommand handler + arg parsing
 ```
 
@@ -31,6 +32,7 @@ src/
 |-----------------|--------------------------------------------------------------------|
 | `discover`      | Probe one or more targets and emit DeviceRecord events to a sink   |
 | `catalog list`  | List every `@name` catalog scenario with its resolved path (feature = "config") |
+| `validate`      | Lint a scenario file offline: config shape + per-scenario sink config, no probing or connecting (feature = "config") |
 
 ### `rastreo discover`
 
@@ -39,6 +41,10 @@ Flags: `--target` (repeatable; IP / CIDR / range / DNS), `--port` (repeatable or
 ### `rastreo catalog list`
 
 Lists every catalog scenario reachable via `@name` across the search path (`RASTREO_CATALOG_DIR` colon-separated, else `$XDG_CONFIG_HOME/rastreo/catalog/` — fallback `$HOME/.config/rastreo/catalog/` — then `/etc/rastreo/catalog/`), one `@name` per line with the exact path a run would load. Names are deduped and sorted; the resolved path follows the same precedence as an `@name` reference (first directory wins, `.yml` before `.yaml`). An empty search path prints a `no catalog scenarios found (searched: ...)` line to stderr and exits 0. Gated behind the `config` feature.
+
+### `rastreo validate`
+
+Lints a scenario file entirely offline — no DNS resolution, no probing, no broker connection. Takes one positional `<FILE>` argument: a path or an `@name` catalog reference, resolved via the same `resolve_scenario_source` / `load_scenario_file` front-end as `discover --file` (version/kind check, secret expansion, retired-field rejection). For each scenario it merges `defaults:` and then checks a non-empty `targets` list, a non-empty `probers` list, and — when a `sink` is set — `SinkConfig::validate()` (the same offline shape check `create_sink` runs at the config boundary: kafka/nats broker-server/topic-subject/stream non-empty, `tls.ca_cert` requires `verify: true`, CA PEM parses, DLQ topic/stream non-empty). Prints `scenario '<name>' (N of M): ok` (stdout) or `... : <reason>` (stderr) per scenario, then `N scenario(s) validated: all valid` on success. Exit 0 when all scenarios are valid, exit 1 when any is invalid or the file fails to parse. Gated behind the `config` feature. A `type: kafka` / `type: nats` sink only parses when the binary carries the matching build feature.
 
 Two modes:
 

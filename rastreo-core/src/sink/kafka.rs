@@ -82,6 +82,13 @@ pub struct KafkaSasl {
 }
 
 impl KafkaSasl {
+    pub(crate) fn validate(&self) -> Result<(), RastreoError> {
+        if self.username.trim().is_empty() {
+            return Err(ConfigError::invalid("kafka sink: sasl username is empty").into());
+        }
+        Ok(())
+    }
+
     // rskafka's SaslConfig/Credentials hold the plaintext password and are NOT redacted; keep them transient (never store on KafkaSink, never Debug-log) — redaction lives on KafkaSasl.
     fn to_sasl_config(&self) -> SaslConfig {
         let credentials =
@@ -145,14 +152,20 @@ impl ServerCertVerifier for AcceptAnyVerifier {
 }
 
 impl KafkaTls {
-    fn build_client_config(&self) -> Result<Arc<ClientConfig>, RastreoError> {
+    pub(crate) fn validate(&self) -> Result<(), RastreoError> {
         // Reject the footgun: a ca_cert with verify:false would silently accept any certificate.
         if !self.verify && self.ca_cert.is_some() {
             return Err(
                 ConfigError::invalid("kafka sink: tls.ca_cert requires tls.verify: true").into(),
             );
         }
+        if let Some(ca_pem) = &self.ca_cert {
+            parse_ca_certs(ca_pem)?;
+        }
+        Ok(())
+    }
 
+    fn build_client_config(&self) -> Result<Arc<ClientConfig>, RastreoError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -347,24 +360,13 @@ fn build_dlq_headers(source_topic: &str, error_class: SinkErrorClass) -> BTreeMa
 impl KafkaSink {
     pub const DEFAULT_BUFFER_THRESHOLD: usize = 64 * 1024;
 
+    /// Assumes a config already validated by `create_sink`; does not re-validate before connecting.
     pub async fn new(
         brokers: Vec<String>,
         topic: String,
         tls: Option<KafkaTls>,
         sasl: Option<KafkaSasl>,
     ) -> Result<Self, RastreoError> {
-        if brokers.is_empty() {
-            return Err(ConfigError::invalid("kafka sink: brokers list is empty").into());
-        }
-        if brokers.iter().any(|b| b.trim().is_empty()) {
-            return Err(
-                ConfigError::invalid("kafka sink: brokers list contains an empty entry").into(),
-            );
-        }
-        if topic.trim().is_empty() {
-            return Err(ConfigError::invalid("kafka sink: topic is empty").into());
-        }
-
         let tls_config = match &tls {
             Some(tls) => Some(tls.build_client_config()?),
             None => None,
@@ -623,50 +625,6 @@ impl Sink for KafkaSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn new_with_empty_brokers_returns_config_error() {
-        let err = KafkaSink::new(vec![], "topic".into(), None, None)
-            .await
-            .expect_err("empty brokers must error");
-        match err {
-            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
-                assert!(msg.contains("brokers"), "msg was: {msg}");
-            }
-            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn new_with_blank_broker_entry_returns_config_error() {
-        let err = KafkaSink::new(
-            vec!["localhost:9092".into(), "   ".into()],
-            "topic".into(),
-            None,
-            None,
-        )
-        .await
-        .expect_err("blank broker entry must error");
-        match err {
-            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
-                assert!(msg.contains("empty entry"), "msg was: {msg}");
-            }
-            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn new_with_empty_topic_returns_config_error() {
-        let err = KafkaSink::new(vec!["localhost:9092".into()], "  ".into(), None, None)
-            .await
-            .expect_err("blank topic must error");
-        match err {
-            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
-                assert!(msg.contains("topic"), "msg was: {msg}");
-            }
-            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
-        }
-    }
 
     #[test]
     fn default_buffer_threshold_is_64_kib() {
@@ -1161,17 +1119,83 @@ mod tests {
     }
 
     #[test]
-    fn tls_config_verify_false_with_ca_cert_is_rejected() {
+    fn tls_validate_rejects_verify_false_with_ca_cert() {
         let tls = KafkaTls {
             verify: false,
             ca_cert: Some(sample_ca_pem()),
         };
-        match tls.build_client_config() {
+        match tls.validate() {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
                 assert!(msg.contains("tls.verify: true"), "msg was: {msg}");
             }
             other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tls_validate_rejects_non_pem_ca() {
+        let tls = KafkaTls {
+            verify: true,
+            ca_cert: Some("not a certificate".to_string()),
+        };
+        match tls.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("ca_cert"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tls_validate_accepts_verify_true_with_custom_ca() {
+        let tls = KafkaTls {
+            verify: true,
+            ca_cert: Some(sample_ca_pem()),
+        };
+        tls.validate().expect("valid custom CA must pass");
+    }
+
+    #[test]
+    fn tls_validate_accepts_verify_true_without_ca() {
+        let tls = KafkaTls {
+            verify: true,
+            ca_cert: None,
+        };
+        tls.validate().expect("verify without CA must pass");
+    }
+
+    #[test]
+    fn tls_validate_accepts_verify_false_without_ca() {
+        let tls = KafkaTls {
+            verify: false,
+            ca_cert: None,
+        };
+        tls.validate().expect("accept-any without CA must pass");
+    }
+
+    #[test]
+    fn sasl_validate_rejects_empty_username() {
+        let sasl = KafkaSasl {
+            mechanism: SaslMechanism::Plain,
+            username: "  ".into(),
+            password: Password("pw".into()),
+        };
+        match sasl.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("username"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sasl_validate_accepts_non_empty_username() {
+        let sasl = KafkaSasl {
+            mechanism: SaslMechanism::Plain,
+            username: "svc".into(),
+            password: Password("pw".into()),
+        };
+        sasl.validate().expect("non-empty username must pass");
     }
 
     #[test]
