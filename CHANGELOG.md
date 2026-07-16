@@ -4,6 +4,69 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0](https://github.com/davidban77/rastreo/compare/v0.6.0...v0.7.0) (2026-07-16)
+
+
+### Features
+
+* **cli,server:** kind-derived probe-fault hints ([#122](https://github.com/davidban77/rastreo/issues/122)) ([425f468](https://github.com/davidban77/rastreo/commit/425f468af499d2e47b75c321f281487636c233ac))
+* **cli:** add `catalog list` and `--dry-run-format json` ([#137](https://github.com/davidban77/rastreo/issues/137)) ([ffe3332](https://github.com/davidban77/rastreo/commit/ffe3332b700fddd017832be3e4b89904bcc2f47d))
+* **cli:** offline `rastreo validate` + pure SinkConfig::validate ([#150](https://github.com/davidban77/rastreo/issues/150)) ([8986182](https://github.com/davidban77/rastreo/commit/8986182e59e892eb71ccc17c081a4090ec7df4cf))
+* **core:** add DiscoveryPlan, the structured dry-run scan plan ([#132](https://github.com/davidban77/rastreo/issues/132)) ([56abc93](https://github.com/davidban77/rastreo/commit/56abc9376d51bfa53d087d02fcb522db365df27a))
+* **prober:** capture TLS version, cipher suite, and ALPN signals ([#153](https://github.com/davidban77/rastreo/issues/153)) ([d2aa830](https://github.com/davidban77/rastreo/commit/d2aa8302d17986eccd775051f953737cbfcbcaf3))
+* **prober:** opt-in retransmit (retries) for connectionless probers ([#128](https://github.com/davidban77/rastreo/issues/128)) ([af806cd](https://github.com/davidban77/rastreo/commit/af806cd6f18b92aa65bff4b67ce4501d950b162e))
+* **prober:** typed probe faults carried as data on the outcome ([#121](https://github.com/davidban77/rastreo/issues/121)) ([c0bd10c](https://github.com/davidban77/rastreo/commit/c0bd10cb50c84c3950a19f66bc260323ed3acb7a))
+* **scheduler:** probes-per-second pacing and honest concurrency naming ([#125](https://github.com/davidban77/rastreo/issues/125)) ([b958eda](https://github.com/davidban77/rastreo/commit/b958eda0be0c564b79b4b12745b4eedf35f03f72))
+* **server:** 429 admission at the inflight cap, shutdown hard-timeout, env trims ([#134](https://github.com/davidban77/rastreo/issues/134)) ([5ac715e](https://github.com/davidban77/rastreo/commit/5ac715ecfc41b63a9c56bb98175f8a34c80cde71))
+* **server:** bearer-token auth on POST /scans, secure by default ([#126](https://github.com/davidban77/rastreo/issues/126)) ([0c0d810](https://github.com/davidban77/rastreo/commit/0c0d8101e299eb899bc2dc9b86c51af5d4db6fc0))
+* **server:** bound the POST /scans response size to prevent OOM ([#136](https://github.com/davidban77/rastreo/issues/136)) ([71d0d3a](https://github.com/davidban77/rastreo/commit/71d0d3a7f9e8be92bb3e77771ac69e68ca4247f1))
+* **server:** POST /scans?dry_run=true returns the discovery plan ([#133](https://github.com/davidban77/rastreo/issues/133)) ([ecc4dcd](https://github.com/davidban77/rastreo/commit/ecc4dcde3d62c59ee74ef509657a3eab861f855c))
+* **server:** target allow-list, aggregate host cap, and body limit on POST /scans ([#127](https://github.com/davidban77/rastreo/issues/127)) ([eca1153](https://github.com/davidban77/rastreo/commit/eca115374fe8c572dcac9174fe0e4d36d1efa02a))
+* **sink:** Kafka TLS + SASL authentication ([#148](https://github.com/davidban77/rastreo/issues/148)) ([fa5a55f](https://github.com/davidban77/rastreo/commit/fa5a55fd133ae83242450687d08e9b3f0b80dac7))
+* **sink:** retry the primary produce/publish before the DLQ ([#149](https://github.com/davidban77/rastreo/issues/149)) ([57fd32d](https://github.com/davidban77/rastreo/commit/57fd32d9f71ae83d7dbdf4f89f19cb59c07fbbfd))
+* **sink:** typed sink errors carried at the failure site ([#124](https://github.com/davidban77/rastreo/issues/124)) ([97ad02a](https://github.com/davidban77/rastreo/commit/97ad02a559ceeb468a66bac0d965cdd33915e721))
+
+
+### Bug Fixes
+
+* **cli:** exit non-zero when any --file scenario fails ([#138](https://github.com/davidban77/rastreo/issues/138)) ([f3eca52](https://github.com/davidban77/rastreo/commit/f3eca524f4623793e66ee486c031ab2b7ce11343))
+* **prober:** SSH prober offers legacy crypto to fingerprint legacy gear ([#152](https://github.com/davidban77/rastreo/issues/152)) ([12ca76c](https://github.com/davidban77/rastreo/commit/12ca76c33b790e5937123461285517cdffebb006))
+* **prober:** unify the reachability contract across the prober fleet ([#119](https://github.com/davidban77/rastreo/issues/119)) ([5a04bba](https://github.com/davidban77/rastreo/commit/5a04bba24e44c630681788f47711cbeaedeb6bfd))
+* **server:** abort in-flight probes when a scan is dropped, record timed-out scans ([#135](https://github.com/davidban77/rastreo/issues/135)) ([3d6b2e2](https://github.com/davidban77/rastreo/commit/3d6b2e24027c3addd9b510a7c1c81b5a809fa87c))
+* **sink:** bound the Kafka broker connect + real-broker integration tests ([#151](https://github.com/davidban77/rastreo/issues/151)) ([5268def](https://github.com/davidban77/rastreo/commit/5268def246974f21acc2d431679caa77499c75eb))
+* **sink:** one transport message per DeviceRecord ([#123](https://github.com/davidban77/rastreo/issues/123)) ([616c165](https://github.com/davidban77/rastreo/commit/616c165e8f0297377076ac7afd1ee25064fafb9c))
+
+
+### Documentation
+
+* **deploy:** de-pin stale chart/image versions, auto-bump one reference ([#140](https://github.com/davidban77/rastreo/issues/140)) ([d0fe897](https://github.com/davidban77/rastreo/commit/d0fe897d81272cc6fb711d9f531be7a517f78a22))
+* **reference:** add a consolidated configuration reference page ([#143](https://github.com/davidban77/rastreo/issues/143)) ([55c6928](https://github.com/davidban77/rastreo/commit/55c6928f77d0f10b8e52b5bb4dbfe476a44a2819))
+
+
+### Miscellaneous
+
+* **deps:** adopt schemars 1.x; published schemas move to draft 2020-12 ([#145](https://github.com/davidban77/rastreo/issues/145)) ([19ad98d](https://github.com/davidban77/rastreo/commit/19ad98d4d98e6aa0dfca9e677935b0e4afb39f3f))
+* drop false CSV claim, coerce Helm numeric env, doc catalog search order ([#129](https://github.com/davidban77/rastreo/issues/129)) ([5bbd26f](https://github.com/davidban77/rastreo/commit/5bbd26fbd5fa1cc5bd4bc5eaa6faa3d74a80dac7))
+* **schema:** put dlq-envelope on draft 2020-12 for a consistent published set ([#146](https://github.com/davidban77/rastreo/issues/146)) ([bc24658](https://github.com/davidban77/rastreo/commit/bc24658cbf96aae7eb9ad886d4f6b38cb7eb488f))
+
+
+### CI/CD
+
+* bump actions/checkout from 4 to 7 ([#71](https://github.com/davidban77/rastreo/issues/71)) ([2b20158](https://github.com/davidban77/rastreo/commit/2b20158396ee4b35bdafa3d2a80e8d545db57faf))
+* bump nats from 2.11-alpine to 2.14-alpine ([#113](https://github.com/davidban77/rastreo/issues/113)) ([ebc77f3](https://github.com/davidban77/rastreo/commit/ebc77f3d3c7ec0fef840da673999d0e7f3ad335b))
+* bump peter-evans/create-pull-request from 7 to 8 ([#72](https://github.com/davidban77/rastreo/issues/72)) ([92a4c06](https://github.com/davidban77/rastreo/commit/92a4c069fe1c81a617c97b276e9ec7e37a7a7fad))
+* **consumers:** run the reference consumers in CI and validate the published schema ([#147](https://github.com/davidban77/rastreo/issues/147)) ([3286837](https://github.com/davidban77/rastreo/commit/32868378ab73aa2c8e3ec6711d3aba26f5643dea))
+* enforce feature isolation and a real MSRV ([#144](https://github.com/davidban77/rastreo/issues/144)) ([e62b77d](https://github.com/davidban77/rastreo/commit/e62b77d2781e90e27bfc579057d34eb6d5ad54fd))
+
+
+### Refactoring
+
+* **core:** share OTLP/tracing bootstrap behind a core `otlp` feature ([#141](https://github.com/davidban77/rastreo/issues/141)) ([d0527b0](https://github.com/davidban77/rastreo/commit/d0527b02a67fa49742b32bc26df27bf80b6f965e))
+* **core:** share ScanMetadata across a scan's records via Arc ([#131](https://github.com/davidban77/rastreo/issues/131)) ([9f028ff](https://github.com/davidban77/rastreo/commit/9f028ffaf33324966c61990f343668b251a94682))
+* **prober:** share one link-layer engine between ARP and NDP ([#156](https://github.com/davidban77/rastreo/issues/156)) ([5877c96](https://github.com/davidban77/rastreo/commit/5877c9696c9d3697edd73521dcc0f87110198d20))
+* **server:** generate metrics from a single descriptor table ([#142](https://github.com/davidban77/rastreo/issues/142)) ([6b2ea24](https://github.com/davidban77/rastreo/commit/6b2ea24c63b99014c67c3199d6679323d8efd811))
+* **sink:** rename NATS sink config to mirror the Kafka sink ([#130](https://github.com/davidban77/rastreo/issues/130)) ([b331e08](https://github.com/davidban77/rastreo/commit/b331e0875e6cc888beabf191fcf8c662bfc7d171))
+
 ## [0.6.0](https://github.com/davidban77/rastreo/compare/v0.5.0...v0.6.0) (2026-07-11)
 
 
