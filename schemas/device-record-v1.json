@@ -318,6 +318,42 @@
         {
           "additionalProperties": false,
           "properties": {
+            "TlsProtocolVersion": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsProtocolVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "TlsCipherSuite": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsCipherSuite"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "TlsAlpn": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsAlpn"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "ReverseDnsName": {
               "type": "string"
             }

@@ -1,10 +1,10 @@
 ---
-description: The TLS prober — opens a TCP connection to each configured port, performs a TLS handshake accepting any server certificate, and captures the certificate Subject Common Name and Subject Alternative Names as identity-fingerprint signals.
+description: The TLS prober — opens a TCP connection to each configured port, performs a TLS handshake accepting any server certificate, captures the certificate Subject Common Name and Subject Alternative Names as identity-fingerprint signals, and records the negotiated TLS version, cipher suite, and ALPN protocol.
 ---
 
 # TLS prober
 
-The TLS prober **fingerprints** a TLS server. It does not authenticate one. It opens a TCP connection to each configured port, completes a TLS handshake that accepts any server certificate, then reads the leaf certificate's Subject Common Name and Subject Alternative Names as identity signals. The result is a compact fingerprint of the device answering on that port: the name it claims, plus every alias baked into the certificate. No client data is sent, and no trust check is performed.
+The TLS prober **fingerprints** a TLS server. It does not authenticate one. It opens a TCP connection to each configured port, completes a TLS handshake that accepts any server certificate, then reads the leaf certificate's Subject Common Name and Subject Alternative Names as identity signals. It also records how the connection was negotiated: the TLS version, the cipher suite, and the application protocol the server selected. The result is a compact fingerprint of the device answering on that port: the name it claims, plus every alias baked into the certificate, plus how it agreed to speak TLS. No client data is sent, and no trust check is performed.
 
 !!! warning "Accepts any certificate — by design"
     The prober **does not** verify the certificate chain, the expiration date, or the name match. Self-signed lab appliances, expired firewall management planes, and internally-issued enterprise CAs all produce signals identically. This is intentional: rastreo probes unknown networks where a strict-verification handshake would refuse to reach the very devices that most need fingerprinting. Treat `TlsSubject` and `TlsSanName` as **unverified claims**, useful for correlation, not for authentication. See [Certificate handling](#certificate-handling) for the full rationale.
@@ -29,6 +29,9 @@ probers:
 | Signal | When produced |
 |---|---|
 | `OpenPort(<port>)` | The prober opened a TCP connection to the port. Emitted even when the subsequent TLS handshake fails — a non-TLS port that answers TCP is still an open port. Enables role heuristics via `ports_open` classifier rules without a paired `tcp_connect` prober. |
+| `TlsProtocolVersion(<value>)` | The TLS version negotiated for the connection, rendered like `TLSv1.3` or `TLSv1.2`. Captured on every completed handshake, even when the server presents no certificate. |
+| `TlsCipherSuite(<value>)` | The negotiated cipher suite, by its IANA name, such as `TLS_AES_128_GCM_SHA256`. Captured on every completed handshake, alongside the version. |
+| `TlsAlpn(<value>)` | The application protocol the server selected during the handshake, such as `h2` or `http/1.1`. The prober offers both `h2` and `http/1.1`, so this signal appears only when the server selects one. A server that does not use ALPN omits it, and the version and cipher are still captured. |
 | `TlsSubject(<value>)` | The server's leaf certificate has a non-empty Common Name (CN) attribute in its Subject Distinguished Name. `<value>` is the CN string, trimmed of surrounding whitespace. Certificates with no CN (increasingly common in modern PKIs that put the identity in the SAN extension only) produce no `TlsSubject` signal. |
 | `TlsSanName(<value>)` | Emitted once per DNS or IP entry in the leaf certificate's Subject Alternative Name (SAN) extension. DNS entries are emitted as-is. IP entries are prefixed with `ip:` so downstream consumers can differentiate `router.example.com` from `10.0.0.1`. Entries appear in the order the certificate lists them. |
 
@@ -42,11 +45,24 @@ TlsSanName("edge-fw-1")
 TlsSanName("ip:10.50.0.5")
 ```
 
-A target that refuses the TCP connection on every port, or that times out on every port, is marked unreachable and contributes no signals. A target that completes the handshake but presents a certificate with neither a CN nor a SAN extension is marked reachable with an `OpenPort` signal only.
+Example connection signals from a modern server that negotiated TLS 1.3 and HTTP/2:
+
+```
+TlsProtocolVersion("TLSv1.3")
+TlsCipherSuite("TLS_AES_128_GCM_SHA256")
+TlsAlpn("h2")
+```
+
+rastreo negotiates TLS 1.2 and TLS 1.3 only. A server that offers only older versions cannot complete the handshake, so it produces `OpenPort` alone — see [When the handshake fails](#when-the-handshake-fails).
+
+!!! note "Servers that strictly require another protocol"
+    The prober offers `h2` and `http/1.1` on every handshake. A server that strictly requires some other application protocol, and speaks neither `h2` nor `http/1.1`, rejects the handshake. The port still shows as reachable through `OpenPort`, but no TLS signals are captured. Servers that ignore ALPN, or that speak HTTP, are unaffected.
+
+A target that refuses the TCP connection on every port, or that times out on every port, is marked unreachable and contributes no signals. A target that completes the handshake always reports its negotiated version and cipher. A certificate with no CN and no SAN is still marked reachable, with `OpenPort` and those connection signals but no `TlsSubject` or `TlsSanName`.
 
 ### When the handshake fails
 
-A handshake that fails is never an error. Whatever the reason — the port speaks plain text, the peer sends a fatal alert, the protocol versions do not overlap, no cipher suite is shared — the prober keeps the `OpenPort` signal it already earned, adds no certificate signals, and emits a normal record.
+A handshake that fails is never an error. Whatever the reason — the port speaks plain text, the peer sends a fatal alert, the protocol versions do not overlap, no cipher suite is shared — the prober keeps the `OpenPort` signal it already earned and emits a normal record. It adds no other signals: not version, not cipher, not certificate.
 
 That record is the diagnostic. An open port sitting next to absent certificate signals reads as: something is listening here, and rastreo could not fingerprint it. Legacy gear pinned to an old TLS version shows up exactly this way, and it stays in your inventory instead of being dropped.
 
@@ -104,6 +120,10 @@ A record produced against a device presenting a certificate with a CN and two DN
 ```json
 {
   "signals": [
+    {"OpenPort": 443},
+    {"TlsProtocolVersion": "TLSv1.2"},
+    {"TlsCipherSuite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
+    {"TlsAlpn": "http/1.1"},
     {"TlsSubject": "edge-fw-1.lab.example.com"},
     {"TlsSanName": "edge-fw-1.lab.example.com"},
     {"TlsSanName": "edge-fw-1"},
@@ -131,5 +151,6 @@ probers:
 - [HTTP prober](http.md) — also runs over TLS on ports 443 and 8443. Emits the `Server:` header rather than the certificate identity, so the two are complementary — `http` says what software answers, `tls` says what name the certificate carries.
 - [SSH prober](ssh.md) — the same "identity fingerprint over an unauthenticated transport" philosophy applied to SSH. `TlsSubject` plays a role analogous to `SshHostKey` in tying together IPs that answer with the same claimed identity.
 - [Scenario schema](../reference/scenario.md#tls) — the `tls` prober's field table in the scenario reference.
+- [Device record schema](../reference/schema/device-record.md) — every signal variant in the emitted record, including the TLS connection signals.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.
 - [Probe index](index.md) — pointers to every prober.

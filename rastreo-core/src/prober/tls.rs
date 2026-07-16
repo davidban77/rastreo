@@ -5,7 +5,10 @@ use std::time::SystemTime;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
+use rustls::{
+    CipherSuite, ClientConfig, DigitallySignedStruct, Error as RustlsError, ProtocolVersion,
+    SignatureScheme,
+};
 use tokio::net::TcpStream;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -101,12 +104,14 @@ impl ServerCertVerifier for AcceptAnyVerifier {
 
 fn build_accept_any_config() -> ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    ClientConfig::builder_with_provider(provider)
+    let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("ring provider supports rustls default protocol versions")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyVerifier))
-        .with_no_client_auth()
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config
 }
 
 fn extract_subject_cn(der: &[u8]) -> Option<String> {
@@ -165,33 +170,68 @@ fn ip_from_bytes(bytes: &[u8]) -> Option<IpAddr> {
     }
 }
 
-/// The certificate signals a peer yielded, empty when it would not negotiate with us.
+fn render_protocol_version(version: ProtocolVersion) -> String {
+    match version.as_str() {
+        Some(name) => name.replace('_', "."),
+        None => format!("0x{:04x}", u16::from(version)),
+    }
+}
+
+fn render_cipher_suite(suite: CipherSuite) -> String {
+    // rustls tags TLS 1.3 suites `TLS13_…`; the IANA registry name drops the version.
+    match suite.as_str() {
+        Some(name) => name.replacen("TLS13_", "TLS_", 1),
+        None => format!("0x{:04x}", u16::from(suite)),
+    }
+}
+
+fn connection_signals(
+    version: Option<ProtocolVersion>,
+    cipher: Option<CipherSuite>,
+    alpn: Option<&[u8]>,
+    leaf_der: Option<&[u8]>,
+) -> Vec<Signal> {
+    let mut signals = Vec::new();
+    if let Some(version) = version {
+        signals.push(Signal::TlsProtocolVersion(render_protocol_version(version)));
+    }
+    if let Some(cipher) = cipher {
+        signals.push(Signal::TlsCipherSuite(render_cipher_suite(cipher)));
+    }
+    if let Some(proto) = alpn {
+        signals.push(Signal::TlsAlpn(String::from_utf8_lossy(proto).into_owned()));
+    }
+    if let Some(der) = leaf_der {
+        if let Some(cn) = extract_subject_cn(der) {
+            signals.push(Signal::TlsSubject(cn));
+        }
+        for entry in extract_san_entries(der) {
+            signals.push(Signal::TlsSanName(entry));
+        }
+    }
+    signals
+}
+
+/// Connection-level and certificate signals from a completed handshake; empty when the
+/// handshake never completes (plaintext, a fatal alert, or no cipher suite in common).
 async fn handshake_and_extract(
     connector: &TlsConnector,
     stream: TcpStream,
     addr: SocketAddr,
 ) -> Vec<Signal> {
     let server_name = ServerName::IpAddress(addr.ip().into());
-    // Plaintext, a fatal alert, no cipher suite in common: a device found and not fingerprinted.
     let tls_stream = match connector.connect(server_name, stream).await {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     let (_, connection) = tls_stream.get_ref();
-    let leaf = match connection.peer_certificates().and_then(<[_]>::first) {
-        Some(l) => l,
-        None => return Vec::new(),
-    };
-    let der = leaf.as_ref();
-
-    let mut signals = Vec::new();
-    if let Some(cn) = extract_subject_cn(der) {
-        signals.push(Signal::TlsSubject(cn));
-    }
-    for entry in extract_san_entries(der) {
-        signals.push(Signal::TlsSanName(entry));
-    }
-    signals
+    let leaf = connection.peer_certificates().and_then(<[_]>::first);
+    connection_signals(
+        connection.protocol_version(),
+        connection.negotiated_cipher_suite().map(|s| s.suite()),
+        connection.alpn_protocol(),
+        leaf.map(AsRef::as_ref),
+    )
 }
 
 // A refused / unreachable port is a discovery result; a local socket failure (descriptor
@@ -429,17 +469,26 @@ mod tests {
     }
 
     async fn spawn_tls_stub_server(cn: &str, sans: Vec<SanType>) -> u16 {
+        spawn_tls_stub_server_with_alpn(cn, sans, Vec::new()).await
+    }
+
+    async fn spawn_tls_stub_server_with_alpn(
+        cn: &str,
+        sans: Vec<SanType>,
+        alpn: Vec<Vec<u8>>,
+    ) -> u16 {
         let generated = generate_test_cert(cn, &sans);
         let cert_chain = vec![PkiCertificateDer::from(generated.der)];
         let key: PrivateKeyDer<'static> =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.key_pkcs8_der));
         let provider = StdArc::new(rustls::crypto::ring::default_provider());
-        let server_config = ServerConfig::builder_with_provider(provider)
+        let mut server_config = ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("ring provider")
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)
             .expect("server config");
+        server_config.alpn_protocols = alpn;
         let acceptor = TlsAcceptor::from(StdArc::new(server_config));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -489,6 +538,144 @@ mod tests {
             })
             .collect();
         assert_eq!(sans, vec!["alt.example.com", "ip:127.0.0.1"]);
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::TlsProtocolVersion(v) if v == "TLSv1.3")));
+        let cipher = outcome
+            .signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::TlsCipherSuite(v) => Some(v.as_str()),
+                _ => None,
+            })
+            .expect("cipher suite captured");
+        assert!(
+            cipher.starts_with("TLS_"),
+            "well-formed suite name: {cipher}"
+        );
+        assert!(
+            !outcome
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::TlsAlpn(_))),
+            "a stub without alpn_protocols selects none"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_captures_alpn_when_stub_negotiates_h2() {
+        let port =
+            spawn_tls_stub_server_with_alpn("router.example.com", Vec::new(), vec![b"h2".to_vec()])
+                .await;
+        let prober = TlsProber::new(vec![port]).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(5_000),
+            )
+            .await
+            .expect("probe ok");
+        let alpn = outcome
+            .signals
+            .iter()
+            .find_map(|s| match s {
+                Signal::TlsAlpn(v) => Some(v.as_str()),
+                _ => None,
+            })
+            .expect("alpn captured");
+        assert_eq!(alpn, "h2");
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::TlsProtocolVersion(v) if v == "TLSv1.3")));
+        assert!(outcome
+            .signals
+            .iter()
+            .any(|s| matches!(s, Signal::TlsCipherSuite(_))));
+    }
+
+    #[test]
+    fn render_protocol_version_dots_the_known_versions() {
+        assert_eq!(
+            render_protocol_version(ProtocolVersion::from(0x0304)),
+            "TLSv1.3"
+        );
+        assert_eq!(
+            render_protocol_version(ProtocolVersion::from(0x0303)),
+            "TLSv1.2"
+        );
+    }
+
+    #[test]
+    fn render_protocol_version_falls_back_to_hex_for_unknown() {
+        assert_eq!(
+            render_protocol_version(ProtocolVersion::from(0x9999)),
+            "0x9999"
+        );
+    }
+
+    #[test]
+    fn render_cipher_suite_yields_iana_names() {
+        assert_eq!(
+            render_cipher_suite(CipherSuite::from(0x1301)),
+            "TLS_AES_128_GCM_SHA256"
+        );
+        assert_eq!(
+            render_cipher_suite(CipherSuite::from(0x1302)),
+            "TLS_AES_256_GCM_SHA384"
+        );
+        assert_eq!(
+            render_cipher_suite(CipherSuite::from(0xc02f)),
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        );
+    }
+
+    #[test]
+    fn render_cipher_suite_falls_back_to_hex_for_unknown() {
+        assert_eq!(render_cipher_suite(CipherSuite::from(0xeeee)), "0xeeee");
+    }
+
+    #[test]
+    fn connection_signals_capture_version_and_cipher_without_a_certificate() {
+        let signals = connection_signals(
+            Some(ProtocolVersion::from(0x0304)),
+            Some(CipherSuite::from(0x1301)),
+            Some(b"h2"),
+            None,
+        );
+        assert_eq!(
+            signals,
+            vec![
+                Signal::TlsProtocolVersion("TLSv1.3".to_string()),
+                Signal::TlsCipherSuite("TLS_AES_128_GCM_SHA256".to_string()),
+                Signal::TlsAlpn("h2".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn connection_signals_omit_alpn_when_none_and_keep_cert_signals() {
+        let generated = generate_test_cert("router.example.com", &[]);
+        let signals = connection_signals(
+            Some(ProtocolVersion::from(0x0303)),
+            Some(CipherSuite::from(0xc02f)),
+            None,
+            Some(&generated.der),
+        );
+        assert_eq!(
+            signals,
+            vec![
+                Signal::TlsProtocolVersion("TLSv1.2".to_string()),
+                Signal::TlsCipherSuite("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string()),
+                Signal::TlsSubject("router.example.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn connection_signals_are_empty_when_nothing_negotiated() {
+        assert!(connection_signals(None, None, None, None).is_empty());
     }
 
     #[tokio::test]
