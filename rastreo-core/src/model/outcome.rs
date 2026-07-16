@@ -112,6 +112,9 @@ pub enum Signal {
     IcmpEchoRttMicros(u64),
     TlsSubject(String),
     TlsSanName(String),
+    TlsProtocolVersion(String),
+    TlsCipherSuite(String),
+    TlsAlpn(String),
     ReverseDnsName(String),
 }
 
@@ -324,6 +327,9 @@ mod tests {
             Signal::TlsSubject("router.example.com".into()),
             Signal::TlsSanName("router.example.com".into()),
             Signal::TlsSanName("ip:10.0.0.1".into()),
+            Signal::TlsProtocolVersion("TLSv1.3".into()),
+            Signal::TlsCipherSuite("TLS_AES_128_GCM_SHA256".into()),
+            Signal::TlsAlpn("h2".into()),
         ] {
             let s = serde_json::to_string(&signal).expect("serialize");
             let back: Signal = serde_json::from_str(&s).expect("deserialize");
