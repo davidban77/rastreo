@@ -22,6 +22,8 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 
+#[cfg(any(feature = "kafka", feature = "nats"))]
+use crate::error::ConfigError;
 use crate::error::RastreoError;
 
 /// Bounded taxonomy of sink failure classes surfaced on `sink_errors_total` and `dlq_records_total`.
@@ -239,7 +241,78 @@ pub enum SinkConfig {
     },
 }
 
+impl SinkConfig {
+    /// Validate the sink configuration offline: no network, no connect, no filesystem access.
+    pub fn validate(&self) -> Result<(), RastreoError> {
+        match self {
+            SinkConfig::Stdout | SinkConfig::File { .. } | SinkConfig::Memory => Ok(()),
+            #[cfg(feature = "kafka")]
+            SinkConfig::Kafka {
+                brokers,
+                topic,
+                dead_letter,
+                tls,
+                sasl,
+                ..
+            } => {
+                if brokers.is_empty() {
+                    return Err(ConfigError::invalid("kafka sink: brokers list is empty").into());
+                }
+                if brokers.iter().any(|b| b.trim().is_empty()) {
+                    return Err(ConfigError::invalid(
+                        "kafka sink: brokers list contains an empty entry",
+                    )
+                    .into());
+                }
+                if topic.trim().is_empty() {
+                    return Err(ConfigError::invalid("kafka sink: topic is empty").into());
+                }
+                if let Some(tls) = tls {
+                    tls.validate()?;
+                }
+                if let Some(sasl) = sasl {
+                    sasl.validate()?;
+                }
+                if let Some(dead_letter) = dead_letter {
+                    dead_letter.validate()?;
+                }
+                Ok(())
+            }
+            #[cfg(feature = "nats")]
+            SinkConfig::Nats {
+                servers,
+                subject,
+                stream,
+                dead_letter,
+                ..
+            } => {
+                if servers.is_empty() {
+                    return Err(ConfigError::invalid("nats sink: servers list is empty").into());
+                }
+                if servers.iter().any(|s| s.trim().is_empty()) {
+                    return Err(ConfigError::invalid(
+                        "nats sink: servers list contains an empty entry",
+                    )
+                    .into());
+                }
+                if subject.trim().is_empty() {
+                    return Err(ConfigError::invalid("nats sink: subject is empty").into());
+                }
+                if stream.trim().is_empty() {
+                    return Err(ConfigError::invalid("nats sink: stream is empty").into());
+                }
+                if let Some(dead_letter) = dead_letter {
+                    dead_letter.validate()?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoError> {
+    // Validate offline at the config boundary; the constructors below trust a validated config.
+    config.validate()?;
     match config {
         SinkConfig::Stdout => Ok(Box::new(StdoutSink::new())),
         SinkConfig::File { path } => Ok(Box::new(FileSink::new(path).await?)),
@@ -883,6 +956,341 @@ mod tests {
                 assert_eq!(retry.backoff_max_ms, 500);
             }
             other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_stdout_is_ok() {
+        SinkConfig::Stdout
+            .validate()
+            .expect("stdout is trivially valid");
+    }
+
+    #[test]
+    fn validate_memory_is_ok() {
+        SinkConfig::Memory
+            .validate()
+            .expect("memory is trivially valid");
+    }
+
+    #[test]
+    fn validate_file_does_not_touch_the_filesystem() {
+        let config = SinkConfig::File {
+            path: PathBuf::from("/nonexistent/rastreo/does-not-exist.ndjson"),
+        };
+        config
+            .validate()
+            .expect("file config validates without touching disk");
+    }
+
+    #[cfg(feature = "kafka")]
+    fn kafka_config(brokers: Vec<&str>, topic: &str) -> SinkConfig {
+        SinkConfig::Kafka {
+            brokers: brokers.into_iter().map(String::from).collect(),
+            topic: topic.into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: None,
+            sasl: None,
+            retry: SinkRetry::default(),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_valid_config_passes() {
+        kafka_config(vec!["kafka:9092"], "rastreo.devices")
+            .validate()
+            .expect("valid kafka config passes");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_rejects_empty_brokers() {
+        match kafka_config(vec![], "t").validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("brokers"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_rejects_blank_broker_entry() {
+        match kafka_config(vec!["kafka:9092", "   "], "t").validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("empty entry"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_rejects_empty_topic() {
+        match kafka_config(vec!["kafka:9092"], "  ").validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("topic"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_rejects_ca_cert_without_verify() {
+        let config = SinkConfig::Kafka {
+            brokers: vec!["kafka:9092".into()],
+            topic: "t".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: Some(KafkaTls {
+                verify: false,
+                ca_cert: Some("anything".into()),
+            }),
+            sasl: None,
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("tls.verify: true"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_rejects_malformed_ca_pem() {
+        let config = SinkConfig::Kafka {
+            brokers: vec!["kafka:9092".into()],
+            topic: "t".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: Some(KafkaTls {
+                verify: true,
+                ca_cert: Some("not a certificate".into()),
+            }),
+            sasl: None,
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("ca_cert"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_rejects_empty_sasl_username() {
+        let config = SinkConfig::Kafka {
+            brokers: vec!["kafka:9092".into()],
+            topic: "t".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: None,
+            sasl: Some(KafkaSasl {
+                mechanism: SaslMechanism::Plain,
+                username: "  ".into(),
+                password: crate::prober::Password("pw".into()),
+            }),
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("username"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_rejects_empty_dead_letter_topic() {
+        let config = SinkConfig::Kafka {
+            brokers: vec!["kafka:9092".into()],
+            topic: "t".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: Some(DeadLetterConfig {
+                topic: "  ".into(),
+                include_error_metadata: true,
+            }),
+            tls: None,
+            sasl: None,
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("dead-letter"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_kafka_secured_tls_and_sasl_passes_offline() {
+        let config = SinkConfig::Kafka {
+            brokers: vec!["kafka:9092".into()],
+            topic: "rastreo.devices".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: Some(KafkaTls {
+                verify: true,
+                ca_cert: None,
+            }),
+            sasl: Some(KafkaSasl {
+                mechanism: SaslMechanism::ScramSha256,
+                username: "svc".into(),
+                password: crate::prober::Password("pw".into()),
+            }),
+            retry: SinkRetry::default(),
+        };
+        config
+            .validate()
+            .expect("secured kafka config validates offline");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[tokio::test]
+    async fn create_sink_rejects_invalid_kafka_config_before_connecting() {
+        // Empty dead-letter topic: validate() rejects it offline before the unreachable broker connect.
+        let config = SinkConfig::Kafka {
+            brokers: vec!["127.0.0.1:1".into()],
+            topic: "rastreo.devices".into(),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: Some(DeadLetterConfig {
+                topic: "  ".into(),
+                include_error_metadata: true,
+            }),
+            tls: None,
+            sasl: None,
+            retry: SinkRetry::default(),
+        };
+        match create_sink(&config).await {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("dead-letter"), "msg was: {msg}");
+            }
+            Err(other) => panic!("expected offline ConfigError from validate, got {other:?}"),
+            Ok(_) => panic!("expected offline ConfigError from validate, got a sink"),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    fn nats_config(servers: Vec<&str>, subject: &str, stream: &str) -> SinkConfig {
+        SinkConfig::Nats {
+            servers: servers.into_iter().map(String::from).collect(),
+            subject: subject.into(),
+            stream: stream.into(),
+            credentials: NatsCredentials::Anonymous,
+            flush_mode: NatsFlushMode::default(),
+            dead_letter: None,
+            retry: SinkRetry::default(),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn validate_nats_valid_config_passes() {
+        nats_config(vec!["nats://n:4222"], "rastreo.records", "rastreo")
+            .validate()
+            .expect("valid nats config passes");
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn validate_nats_rejects_empty_servers() {
+        match nats_config(vec![], "s", "st").validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("servers"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn validate_nats_rejects_blank_server_entry() {
+        match nats_config(vec!["nats://n:4222", "  "], "s", "st").validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("empty entry"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn validate_nats_rejects_empty_subject() {
+        match nats_config(vec!["nats://n:4222"], "  ", "st").validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("subject"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn validate_nats_rejects_empty_stream() {
+        match nats_config(vec!["nats://n:4222"], "s", "  ").validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("stream"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn validate_nats_rejects_empty_dead_letter_stream() {
+        let config = SinkConfig::Nats {
+            servers: vec!["nats://n:4222".into()],
+            subject: "s".into(),
+            stream: "st".into(),
+            credentials: NatsCredentials::Anonymous,
+            flush_mode: NatsFlushMode::default(),
+            dead_letter: Some(NatsDeadLetterConfig {
+                stream: "  ".into(),
+                subject: "rastreo.dlq".into(),
+                include_error_metadata: true,
+            }),
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("stream"), "msg was: {msg}");
+                assert!(msg.contains("dead-letter"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn validate_nats_rejects_empty_dead_letter_subject() {
+        let config = SinkConfig::Nats {
+            servers: vec!["nats://n:4222".into()],
+            subject: "s".into(),
+            stream: "st".into(),
+            credentials: NatsCredentials::Anonymous,
+            flush_mode: NatsFlushMode::default(),
+            dead_letter: Some(NatsDeadLetterConfig {
+                stream: "dlq-stream".into(),
+                subject: "  ".into(),
+                include_error_metadata: true,
+            }),
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("subject"), "msg was: {msg}");
+                assert!(msg.contains("dead-letter"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
         }
     }
 }

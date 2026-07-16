@@ -1,6 +1,8 @@
 #[cfg(feature = "config")]
 pub mod catalog;
 pub mod discover;
+#[cfg(feature = "config")]
+pub mod validate;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -54,6 +56,9 @@ pub enum Command {
     /// Inspect the scenario catalog.
     #[cfg(feature = "config")]
     Catalog(CatalogArgs),
+    /// Validate a scenario file offline: config shape and sink config, no probing or connecting.
+    #[cfg(feature = "config")]
+    Validate(validate::ValidateArgs),
 }
 
 #[cfg(feature = "config")]
@@ -77,5 +82,7 @@ pub async fn run(cli: Cli, cancel: tokio::sync::watch::Receiver<bool>) -> Result
         Command::Catalog(args) => match args.action {
             CatalogAction::List => catalog::run_list(),
         },
+        #[cfg(feature = "config")]
+        Command::Validate(args) => validate::run(args),
     }
 }

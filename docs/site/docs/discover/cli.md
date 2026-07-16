@@ -321,6 +321,7 @@ The same hints run when the scan itself fails — a target name that does not re
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — the full YAML shape accepted by `--file`.
+- [Validate](validate.md) — lint a scenario file offline before you run it, including secured sink configs with no broker.
 - [Catalog](catalog.md) — `@name` references and the catalog directory search order.
 - [Targets](targets.md) — the four target forms and how the CLI detects each one.
 - [Sinks](sinks.md) — stdout, file, and Kafka output in depth.

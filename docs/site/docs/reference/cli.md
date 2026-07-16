@@ -43,6 +43,16 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` a
 
 The `--kafka-flush-per-record` and `--kafka-batch-threshold` flags are only present in the help output and the parser when the binary was built with `--features kafka`. The default build omits them entirely.
 
+## rastreo validate
+
+Lint a scenario file offline: check the config shape and every scenario's sink config with no DNS, no probing, and no broker connection. Takes one positional argument. Requires the `config` build feature (on by default). For a walkthrough with worked examples, see [Discover · Validate](../discover/validate.md).
+
+| Argument | Type | Default | Notes |
+|---|---|---|---|
+| `<FILE>` | path | — (required) | Scenario file to validate. Accepts a path, or an `@name` catalog reference resolved the same way as `discover --file`. See [Catalog](../discover/catalog.md). |
+
+It exits `0` when every scenario in the file is valid and `1` when any scenario is invalid or the file itself cannot be parsed. It prints one `ok` or error line per scenario plus a final summary line — see [Discover · Validate](../discover/validate.md#reading-the-output). A `type: kafka` sink is only recognized with the `kafka` build feature, and `type: nats` with the `nats` feature; validate the file with the same build you plan to run it with.
+
 ## rastreo-server
 
 Run the HTTP control plane. Every flag has both a CLI form and an environment-variable form; the CLI form overrides the environment when both are set.
