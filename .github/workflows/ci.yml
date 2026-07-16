@@ -91,6 +91,26 @@ jobs:
       - name: Test with kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls features
         run: cargo test --workspace --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls
 
+  integration:
+    name: Integration tests (Kafka + NATS via testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Kafka + NATS integration tests
+        run: cargo test -p rastreo-core --features kafka,nats --test kafka_integration --test nats_integration -- --ignored
+
   schema-drift:
     name: Schema drift check
     runs-on: ubuntu-latest
