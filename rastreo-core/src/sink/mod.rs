@@ -4,6 +4,7 @@ pub mod kafka;
 pub mod memory;
 #[cfg(feature = "nats")]
 pub mod nats;
+pub mod retry;
 pub mod stdout;
 pub mod tee;
 
@@ -13,6 +14,7 @@ pub use kafka::{DeadLetterConfig, KafkaFlushMode, KafkaSasl, KafkaSink, KafkaTls
 pub use memory::{MemorySink, MemorySinkHandle};
 #[cfg(feature = "nats")]
 pub use nats::{NatsCredentials, NatsDeadLetterConfig, NatsFlushMode, NatsSink};
+pub use retry::{retry_with_backoff, SinkRetry};
 pub use stdout::StdoutSink;
 pub use tee::{TeeChild, TeeSink};
 
@@ -218,6 +220,8 @@ pub enum SinkConfig {
         tls: Option<KafkaTls>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sasl: Option<KafkaSasl>,
+        #[serde(default)]
+        retry: SinkRetry,
     },
     #[cfg(feature = "nats")]
     Nats {
@@ -230,6 +234,8 @@ pub enum SinkConfig {
         flush_mode: NatsFlushMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dead_letter: Option<NatsDeadLetterConfig>,
+        #[serde(default)]
+        retry: SinkRetry,
     },
 }
 
@@ -246,10 +252,12 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             dead_letter,
             tls,
             sasl,
+            retry,
         } => {
             let mut sink =
                 KafkaSink::new(brokers.clone(), topic.clone(), tls.clone(), sasl.clone()).await?;
             sink = sink.with_flush_mode(flush_mode.clone());
+            sink = sink.with_retry(retry.clone());
             if let Some(dlq) = dead_letter {
                 sink = sink.with_dead_letter(dlq.clone()).await?;
             }
@@ -263,6 +271,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             credentials,
             flush_mode,
             dead_letter,
+            retry,
         } => {
             let mut sink = NatsSink::new(
                 servers.clone(),
@@ -272,6 +281,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             )
             .await?;
             sink = sink.with_flush_mode(flush_mode.clone());
+            sink = sink.with_retry(retry.clone());
             if let Some(dlq) = dead_letter {
                 sink = sink.with_dead_letter(dlq.clone()).await?;
             }
@@ -609,6 +619,7 @@ mod tests {
                 dead_letter,
                 tls,
                 sasl,
+                retry,
             } => {
                 assert_eq!(brokers, vec!["k:9092".to_string()]);
                 assert_eq!(topic, "t");
@@ -616,6 +627,7 @@ mod tests {
                 assert!(dead_letter.is_none());
                 assert!(tls.is_none());
                 assert!(sasl.is_none());
+                assert_eq!(retry, SinkRetry::default());
             }
             other => panic!("expected Kafka, got {other:?}"),
         }
@@ -634,6 +646,7 @@ mod tests {
                 credentials,
                 flush_mode,
                 dead_letter,
+                retry,
             } => {
                 assert_eq!(servers, vec!["nats://nats:4222".to_string()]);
                 assert_eq!(subject, "rastreo.discovery.records.v1");
@@ -641,6 +654,7 @@ mod tests {
                 assert!(matches!(credentials, NatsCredentials::Anonymous));
                 assert!(matches!(flush_mode, NatsFlushMode::PerRecord));
                 assert!(dead_letter.is_none());
+                assert_eq!(retry, SinkRetry::default());
             }
             other => panic!("expected Nats, got {other:?}"),
         }
@@ -800,6 +814,73 @@ mod tests {
         match config {
             SinkConfig::Nats { dead_letter, .. } => {
                 assert!(dead_letter.is_none());
+            }
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "kafka"))]
+    #[test]
+    fn sink_config_kafka_absent_retry_deserializes_as_default() {
+        let yaml = "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka { retry, .. } => assert_eq!(retry, SinkRetry::default()),
+            other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "kafka"))]
+    #[test]
+    fn sink_config_kafka_parses_explicit_retry() {
+        let yaml = "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\nretry:\n  max_attempts: 5\n  backoff_initial_ms: 50\n  backoff_max_ms: 500\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka { retry, .. } => {
+                assert_eq!(retry.max_attempts, 5);
+                assert_eq!(retry.backoff_initial_ms, 50);
+                assert_eq!(retry.backoff_max_ms, 500);
+            }
+            other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "kafka"))]
+    #[test]
+    fn sink_config_kafka_partial_retry_fills_remaining_fields_with_defaults() {
+        let yaml = "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\nretry:\n  max_attempts: 1\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize kafka");
+        match config {
+            SinkConfig::Kafka { retry, .. } => {
+                assert_eq!(retry.max_attempts, 1);
+                assert_eq!(retry.backoff_initial_ms, 100);
+                assert_eq!(retry.backoff_max_ms, 2000);
+            }
+            other => panic!("expected Kafka, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn sink_config_nats_absent_retry_deserializes_as_default() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { retry, .. } => assert_eq!(retry, SinkRetry::default()),
+            other => panic!("expected Nats, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn sink_config_nats_parses_explicit_retry() {
+        let yaml = "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: st\nretry:\n  max_attempts: 5\n  backoff_initial_ms: 50\n  backoff_max_ms: 500\n";
+        let config: SinkConfig = serde_yaml_ng::from_str(yaml).expect("deserialize nats");
+        match config {
+            SinkConfig::Nats { retry, .. } => {
+                assert_eq!(retry.max_attempts, 5);
+                assert_eq!(retry.backoff_initial_ms, 50);
+                assert_eq!(retry.backoff_max_ms, 500);
             }
             other => panic!("expected Nats, got {other:?}"),
         }

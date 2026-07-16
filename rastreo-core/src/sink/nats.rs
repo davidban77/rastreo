@@ -10,7 +10,10 @@ use chrono::Utc;
 
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
-use crate::sink::{Sink, SinkError, SinkErrorClass, SinkType, SINK_ERROR_CLASS_COUNT};
+use crate::sink::{
+    retry_with_backoff, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
+    SINK_ERROR_CLASS_COUNT,
+};
 
 const HEADER_SOURCE_SUBJECT: &str = "x-rastreo-source-subject";
 const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
@@ -118,6 +121,7 @@ pub struct NatsSink {
     dlq_subject: Option<String>,
     include_error_metadata: bool,
     dlq_delivered: [AtomicU64; SINK_ERROR_CLASS_COUNT],
+    retry: SinkRetry,
 }
 
 impl std::fmt::Debug for NatsSink {
@@ -133,6 +137,7 @@ impl std::fmt::Debug for NatsSink {
             .field("last_write_delivered", &self.last_write_delivered)
             .field("dlq_stream", &self.dlq_stream)
             .field("dlq_subject", &self.dlq_subject)
+            .field("retry", &self.retry)
             .finish_non_exhaustive()
     }
 }
@@ -227,11 +232,17 @@ impl NatsSink {
             dlq_subject: None,
             include_error_metadata: false,
             dlq_delivered: std::array::from_fn(|_| AtomicU64::new(0)),
+            retry: SinkRetry::default(),
         })
     }
 
     pub fn with_flush_mode(mut self, mode: NatsFlushMode) -> Self {
         self.buffer_threshold = mode.to_threshold();
+        self
+    }
+
+    pub fn with_retry(mut self, retry: SinkRetry) -> Self {
+        self.retry = retry;
         self
     }
 
@@ -301,7 +312,23 @@ impl NatsSink {
 
         while let Some(entry) = remaining.next() {
             let payload = Bytes::from(entry);
-            let primary_err = match self.ctx.publish(subject.clone(), payload.clone()).await {
+
+            // Retry only the primary publish: a transient connection blip self-heals within the
+            // attempt budget. The returned ack stays deferred for pipelined draining.
+            let publish_result = {
+                let ctx = &self.ctx;
+                let servers = &self.servers;
+                let subject = &subject;
+                let payload = &payload;
+                retry_with_backoff(&self.retry, || async move {
+                    ctx.publish(subject.clone(), payload.clone())
+                        .await
+                        .map_err(|e| build_publish_error(subject, servers, e))
+                })
+                .await
+            };
+
+            let primary_err = match publish_result {
                 Ok(ack) => {
                     self.pending_acks.push(PendingPublish { payload, ack });
                     continue;
@@ -311,13 +338,13 @@ impl NatsSink {
 
             if self.dlq_stream.is_none() || self.dlq_subject.is_none() {
                 self.requeue(payload, remaining);
-                return Err(build_publish_error(&subject, &self.servers, primary_err));
+                return Err(primary_err);
             }
 
             tracing::warn!(
                 subject = subject.as_str(),
                 error = %primary_err,
-                "nats sink: primary publish failed; shipping record to DLQ",
+                "nats sink: primary publish exhausted retries; shipping record to DLQ",
             );
 
             // DLQ replay is awaited synchronously: quarantined records can't be batched with
@@ -335,7 +362,7 @@ impl NatsSink {
                         "nats sink: DLQ publish also failed; retaining buffer",
                     );
                     self.requeue(payload, remaining);
-                    return Err(build_publish_error(&subject, &self.servers, primary_err));
+                    return Err(primary_err);
                 }
             };
 

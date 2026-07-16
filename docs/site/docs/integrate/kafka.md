@@ -176,6 +176,23 @@ The Kafka sink does not deduplicate. Records are emitted as the discovery pipeli
 
 For interactive scans where you want records on the topic as the scan runs, prefer `--kafka-flush-per-record` over lowering the batch threshold to 1. The flag is the clear way to say "send after every record".
 
+## Delivery retry
+
+Managed brokers — Confluent Cloud, Amazon MSK — drop and re-establish connections routinely. The sink retries the primary produce with bounded backoff so a transient reconnect does not surface as a failure. Retry is on by default: 3 attempts, 100 ms initial backoff doubling to a 2000 ms cap. Tune it with a `retry` block on the sink, or set `max_attempts: 1` to disable it.
+
+```yaml
+sink:
+  type: kafka
+  brokers: ["broker.internal:9092"]
+  topic: rastreo.discovery.records
+  retry:
+    max_attempts: 5
+    backoff_initial_ms: 100
+    backoff_max_ms: 2000
+```
+
+See [Sinks · Retrying before the dead-letter queue](../discover/sinks.md#retrying-before-the-dead-letter-queue) for the full field reference and how retry composes with the dead-letter queue.
+
 ## See also
 
 - [Sinks](../discover/sinks.md) — the CLI surface for choosing a sink and setting its flags.

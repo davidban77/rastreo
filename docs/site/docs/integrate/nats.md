@@ -117,6 +117,24 @@ sink:
 !!! info
     Batched delivery pipelines the acks; it does not combine records. In both modes a consumer reads one message and gets one `DeviceRecord`.
 
+## Delivery retry
+
+A brief broker reconnect should not surface as a publish failure. The sink retries the primary publish with bounded backoff before it reports an error. Retry is on by default: 3 attempts, 100 ms initial backoff doubling to a 2000 ms cap. Tune it with a `retry` block, or set `max_attempts: 1` to disable it.
+
+```yaml
+sink:
+  type: nats
+  servers: ["nats://nats:4222"]
+  subject: rastreo.discovery.records.v1
+  stream: rastreo
+  retry:
+    max_attempts: 5
+    backoff_initial_ms: 100
+    backoff_max_ms: 2000
+```
+
+Retry covers the synchronous publish only. A JetStream ack rejection is not retried, because the message may already be stored and re-publishing it could duplicate the record. See [Sinks · Retrying before the dead-letter queue](../discover/sinks.md#retrying-before-the-dead-letter-queue_1) for how retry composes with the dead-letter queue.
+
 ## Stream setup
 
 The JetStream stream that binds the subject must be created out of band. rastreo does not create it — the stream lifetime is typically longer than any single rastreo scan, and stream retention / storage policy is deployment-specific.

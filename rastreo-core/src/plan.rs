@@ -358,6 +358,7 @@ mod tests {
             dead_letter: None,
             tls: None,
             sasl: None,
+            retry: crate::sink::SinkRetry::default(),
         };
         assert_eq!(
             render_sink(Some(&sink)),
@@ -379,6 +380,7 @@ mod tests {
                 username: "svc-user".into(),
                 password: crate::prober::Password("PLAINTEXT-SENTINEL".into()),
             }),
+            retry: crate::sink::SinkRetry::default(),
         };
         let rendered = render_sink(Some(&sink));
         assert!(
@@ -401,6 +403,7 @@ mod tests {
             credentials: crate::sink::NatsCredentials::default(),
             flush_mode: crate::sink::NatsFlushMode::default(),
             dead_letter: None,
+            retry: crate::sink::SinkRetry::default(),
         };
         assert_eq!(
             render_sink(Some(&sink)),
@@ -418,6 +421,7 @@ mod tests {
             credentials: crate::sink::NatsCredentials::default(),
             flush_mode: crate::sink::NatsFlushMode::default(),
             dead_letter: None,
+            retry: crate::sink::SinkRetry::default(),
         };
         let rendered = render_sink(Some(&sink));
         assert_eq!(

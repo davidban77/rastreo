@@ -261,8 +261,21 @@ One of:
 - { `type`: `stdout` }
 - { `path`: string, `type`: `file` }
 - { `type`: `memory` }
-- { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `sasl`: [`KafkaSasl`](#kafkasasl) \| null, `tls`: [`KafkaTls`](#kafkatls) \| null, `topic`: string, `type`: `kafka` }
-- { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `flush_mode`: [`NatsFlushMode`](#natsflushmode), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
+- { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `retry`: [`SinkRetry`](#sinkretry), `sasl`: [`KafkaSasl`](#kafkasasl) \| null, `tls`: [`KafkaTls`](#kafkatls) \| null, `topic`: string, `type`: `kafka` }
+- { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `flush_mode`: [`NatsFlushMode`](#natsflushmode), `retry`: [`SinkRetry`](#sinkretry), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
+
+### `SinkRetry` {#sinkretry}
+
+Bounded exponential-backoff retry policy for a sink's primary delivery.
+
+`max_attempts` counts total primary attempts: `1` disables retry (today's
+immediate-DLQ behavior), `3` (the default) is the initial attempt plus two retries.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `backoff_initial_ms` | uint64 | no | — |
+| `backoff_max_ms` | uint64 | no | — |
+| `max_attempts` | uint32 | no | — |
 
 ### `SnmpVersion` {#snmpversion}
 
