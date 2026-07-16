@@ -28,6 +28,7 @@ src/
 │   ├── snmp/            ← SnmpProber v1/v2c/v3-USM (feature: snmp)
 │   ├── arp.rs           ← ArpProber (feature: arp)
 │   ├── ndp.rs           ← NdpProber (feature: ndp)
+│   ├── link_layer.rs    ← LinkLayerProtocol trait + shared ARP/NDP resolution engine (feature: arp or ndp)
 │   ├── ssh.rs           ← SshProber (feature: ssh)
 │   ├── icmp.rs          ← IcmpProber (feature: icmp)
 │   ├── tls.rs           ← TlsProber (feature: tls)

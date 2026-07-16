@@ -1,20 +1,20 @@
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::{Duration, Instant, SystemTime};
 
 use ipnetwork::IpNetwork;
-use pnet_datalink::{Channel, Config, MacAddr, NetworkInterface};
+use pnet_datalink::{MacAddr, NetworkInterface};
 use pnet_packet::arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket};
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet_packet::Packet;
 
-use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
-use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, RastreoError};
+use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
+use crate::prober::link_layer::{
+    lookup_interface, probe_link_layer, LinkLayerProtocol, ETH_HEADER_LEN,
+};
 use crate::prober::Prober;
 
-const ETH_HEADER_LEN: usize = 14;
 const ARP_PACKET_LEN: usize = 28;
 const ARP_FRAME_LEN: usize = ETH_HEADER_LEN + ARP_PACKET_LEN;
-const RECV_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn default_interface() -> String {
     String::new()
@@ -40,187 +40,93 @@ impl ArpProber {
     }
 }
 
-fn lookup_interface(name: &str) -> Option<NetworkInterface> {
-    pnet_datalink::interfaces()
-        .into_iter()
-        .find(|iface| iface.name == name)
-}
+pub(crate) struct Arp;
 
-fn select_interface_for(target: Ipv4Addr) -> Option<NetworkInterface> {
-    let mut best: Option<(NetworkInterface, u8)> = None;
-    for iface in pnet_datalink::interfaces() {
-        for net in &iface.ips {
-            if let IpNetwork::V4(v4) = net {
-                if v4.contains(target) {
-                    let prefix = v4.prefix();
-                    match &best {
-                        Some((_, best_prefix)) if *best_prefix >= prefix => {}
-                        _ => best = Some((iface.clone(), prefix)),
+impl LinkLayerProtocol for Arp {
+    type Addr = Ipv4Addr;
+
+    const NAME: &'static str = "arp";
+    const NAME_UPPER: &'static str = "ARP";
+    const ADDRESS_FAMILY: &'static str = "ipv4";
+
+    fn kind() -> ProbeKind {
+        ProbeKind::Arp
+    }
+
+    fn extract_target(ip: IpAddr) -> Option<Ipv4Addr> {
+        match ip {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    fn wrong_family_detail() -> &'static str {
+        "arp prober requires an IPv4 target; use ndp for IPv6"
+    }
+
+    fn select_interface(target: Ipv4Addr) -> Option<NetworkInterface> {
+        let mut best: Option<(NetworkInterface, u8)> = None;
+        for iface in pnet_datalink::interfaces() {
+            for net in &iface.ips {
+                if let IpNetwork::V4(v4) = net {
+                    if v4.contains(target) {
+                        let prefix = v4.prefix();
+                        match &best {
+                            Some((_, best_prefix)) if *best_prefix >= prefix => {}
+                            _ => best = Some((iface.clone(), prefix)),
+                        }
                     }
                 }
             }
         }
+        best.map(|(iface, _)| iface)
     }
-    best.map(|(iface, _)| iface)
-}
 
-fn first_ipv4(iface: &NetworkInterface) -> Option<Ipv4Addr> {
-    iface.ips.iter().find_map(|net| match net {
-        IpNetwork::V4(v4) => Some(v4.ip()),
-        _ => None,
-    })
-}
-
-pub(crate) fn format_mac(mac: MacAddr) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac.0, mac.1, mac.2, mac.3, mac.4, mac.5
-    )
-}
-
-pub(crate) fn build_arp_request(
-    src_mac: MacAddr,
-    src_ip: Ipv4Addr,
-    target_ip: Ipv4Addr,
-) -> [u8; ARP_FRAME_LEN] {
-    let mut frame = [0u8; ARP_FRAME_LEN];
-    {
-        let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN])
-            .expect("ethernet buffer sized to header length");
-        eth.set_destination(MacAddr::broadcast());
-        eth.set_source(src_mac);
-        eth.set_ethertype(EtherTypes::Arp);
+    fn source_address(iface: &NetworkInterface, _target: Ipv4Addr) -> Option<Ipv4Addr> {
+        iface.ips.iter().find_map(|net| match net {
+            IpNetwork::V4(v4) => Some(v4.ip()),
+            _ => None,
+        })
     }
-    {
-        let mut arp = MutableArpPacket::new(&mut frame[ETH_HEADER_LEN..])
-            .expect("arp buffer sized to packet length");
-        arp.set_hardware_type(ArpHardwareTypes::Ethernet);
-        arp.set_protocol_type(EtherTypes::Ipv4);
-        arp.set_hw_addr_len(6);
-        arp.set_proto_addr_len(4);
-        arp.set_operation(ArpOperations::Request);
-        arp.set_sender_hw_addr(src_mac);
-        arp.set_sender_proto_addr(src_ip);
-        arp.set_target_hw_addr(MacAddr::zero());
-        arp.set_target_proto_addr(target_ip);
-    }
-    frame
-}
 
-pub(crate) fn parse_arp_reply(frame: &[u8], target_ip: Ipv4Addr) -> Option<MacAddr> {
-    let eth = EthernetPacket::new(frame)?;
-    if eth.get_ethertype() != EtherTypes::Arp {
-        return None;
-    }
-    let arp = ArpPacket::new(eth.payload())?;
-    if arp.get_operation() != ArpOperations::Reply {
-        return None;
-    }
-    if arp.get_sender_proto_addr() != target_ip {
-        return None;
-    }
-    Some(arp.get_sender_hw_addr())
-}
-
-fn build_channel_config() -> Config {
-    Config {
-        read_timeout: Some(RECV_POLL_INTERVAL),
-        promiscuous: false,
-        ..Default::default()
-    }
-}
-
-enum ProbeResolution {
-    Reached(Signal),
-    Timeout,
-    Failed(String),
-}
-
-fn run_probe_blocking(
-    iface: NetworkInterface,
-    src_mac: MacAddr,
-    src_ip: Ipv4Addr,
-    target: Ipv4Addr,
-    timeout: Duration,
-) -> ProbeResolution {
-    let (mut tx, mut rx) = match pnet_datalink::channel(&iface, build_channel_config()) {
-        Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => {
-            return ProbeResolution::Failed(
-                "arp channel returned an unsupported backend".to_string(),
-            )
+    fn build_request(src_mac: MacAddr, src_ip: Ipv4Addr, target: Ipv4Addr) -> Vec<u8> {
+        let mut frame = vec![0u8; ARP_FRAME_LEN];
+        {
+            let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN])
+                .expect("ethernet buffer sized to header length");
+            eth.set_destination(MacAddr::broadcast());
+            eth.set_source(src_mac);
+            eth.set_ethertype(EtherTypes::Arp);
         }
-        Err(err) => {
-            let msg = if err.kind() == std::io::ErrorKind::PermissionDenied {
-                "raw socket permission denied; ARP requires CAP_NET_RAW".to_string()
-            } else {
-                format!("arp channel open failed: {err}")
-            };
-            return ProbeResolution::Failed(msg);
+        {
+            let mut arp = MutableArpPacket::new(&mut frame[ETH_HEADER_LEN..])
+                .expect("arp buffer sized to packet length");
+            arp.set_hardware_type(ArpHardwareTypes::Ethernet);
+            arp.set_protocol_type(EtherTypes::Ipv4);
+            arp.set_hw_addr_len(6);
+            arp.set_proto_addr_len(4);
+            arp.set_operation(ArpOperations::Request);
+            arp.set_sender_hw_addr(src_mac);
+            arp.set_sender_proto_addr(src_ip);
+            arp.set_target_hw_addr(MacAddr::zero());
+            arp.set_target_proto_addr(target);
         }
-    };
-
-    let frame = build_arp_request(src_mac, src_ip, target);
-    match tx.send_to(&frame, None) {
-        Some(Ok(())) => {}
-        Some(Err(err)) => return ProbeResolution::Failed(format!("arp send failed: {err}")),
-        None => {
-            return ProbeResolution::Failed(
-                "arp send returned None (packet too large for send buffer)".to_string(),
-            )
-        }
+        frame
     }
 
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        match rx.next() {
-            Ok(bytes) => {
-                if let Some(mac) = parse_arp_reply(bytes, target) {
-                    return ProbeResolution::Reached(Signal::Mac(format_mac(mac)));
-                }
-            }
-            Err(err) => match err.kind() {
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => continue,
-                _ => return ProbeResolution::Failed(format!("arp receive failed: {err}")),
-            },
+    fn parse_reply(frame: &[u8], target: Ipv4Addr) -> Option<MacAddr> {
+        let eth = EthernetPacket::new(frame)?;
+        if eth.get_ethertype() != EtherTypes::Arp {
+            return None;
         }
-    }
-    ProbeResolution::Timeout
-}
-
-// A local resolution failure (privileged socket denied, no usable interface) is a broken probe,
-// carried as a fault on an unreachable outcome — never discarded.
-fn arp_fault(target_ip: IpAddr, detail: String) -> ProbeOutcome {
-    ProbeOutcome {
-        kind: ProbeKind::Arp,
-        target_ip,
-        timestamp: SystemTime::now(),
-        reachable: false,
-        signals: Vec::new(),
-        fault: Some(ProbeFault::new(ProbeErrorKind::Other, detail)),
-    }
-}
-
-fn resolution_to_outcome(resolution: ProbeResolution, target_ip: IpAddr) -> ProbeOutcome {
-    match resolution {
-        ProbeResolution::Reached(signal) => ProbeOutcome {
-            kind: ProbeKind::Arp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: true,
-            signals: vec![signal],
-            fault: None,
-        },
-        // A silent host is a negative discovery result, not a probe fault.
-        ProbeResolution::Timeout => ProbeOutcome {
-            kind: ProbeKind::Arp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: false,
-            signals: Vec::new(),
-            fault: None,
-        },
-        ProbeResolution::Failed(msg) => arp_fault(target_ip, msg),
+        let arp = ArpPacket::new(eth.payload())?;
+        if arp.get_operation() != ArpOperations::Reply {
+            return None;
+        }
+        if arp.get_sender_proto_addr() != target {
+            return None;
+        }
+        Some(arp.get_sender_hw_addr())
     }
 }
 
@@ -235,84 +141,19 @@ impl Prober for ArpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
-        let target_v4 = match target.ip {
-            IpAddr::V4(ip) => ip,
-            IpAddr::V6(_) => {
-                return Ok(arp_fault(
-                    target.ip,
-                    "arp prober requires an IPv4 target; use ndp for IPv6".to_string(),
-                ));
-            }
-        };
-
-        let iface = if self.interface.is_empty() {
-            match select_interface_for(target_v4) {
-                Some(iface) => iface,
-                None => {
-                    return Ok(arp_fault(
-                        target.ip,
-                        format!("no local interface reaches {target_v4}"),
-                    ))
-                }
-            }
-        } else {
-            match lookup_interface(&self.interface) {
-                Some(iface) => iface,
-                None => {
-                    return Ok(arp_fault(
-                        target.ip,
-                        format!("network interface '{}' not found", self.interface),
-                    ))
-                }
-            }
-        };
-
-        let Some(src_mac) = iface.mac else {
-            return Ok(arp_fault(
-                target.ip,
-                format!("interface {} has no MAC address", iface.name),
-            ));
-        };
-        let Some(src_ip) = first_ipv4(&iface) else {
-            return Ok(arp_fault(
-                target.ip,
-                format!("interface {} has no ipv4 address", iface.name),
-            ));
-        };
-
-        if src_ip == target_v4 {
-            return Ok(arp_fault(
-                target.ip,
-                format!("arp target {target_v4} is a local interface address"),
-            ));
-        }
-
-        let iface_for_task = iface.clone();
-        let timeout = ctx.timeout;
-        let result = tokio::task::spawn_blocking(move || {
-            run_probe_blocking(iface_for_task, src_mac, src_ip, target_v4, timeout)
-        })
-        .await
-        .map_err(|err| {
-            RastreoError::Runtime(crate::error::RuntimeError::TaskPanicked(err.to_string()))
-        })?;
-
-        Ok(resolution_to_outcome(result, target.ip))
+        probe_link_layer::<Arp>(&self.interface, target, ctx).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProbeErrorKind;
+    use crate::model::Target;
+    use std::time::{Duration, SystemTime};
 
     fn sample_mac() -> MacAddr {
         MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x01)
-    }
-
-    #[test]
-    fn format_mac_is_lower_hex_colon_separated() {
-        let mac = MacAddr::new(0x00, 0x11, 0x22, 0xaa, 0xbb, 0xcc);
-        assert_eq!(format_mac(mac), "00:11:22:aa:bb:cc");
     }
 
     #[test]
@@ -320,7 +161,7 @@ mod tests {
         let src_mac = sample_mac();
         let src_ip = Ipv4Addr::new(10, 0, 0, 5);
         let target_ip = Ipv4Addr::new(10, 0, 0, 42);
-        let frame = build_arp_request(src_mac, src_ip, target_ip);
+        let frame = Arp::build_request(src_mac, src_ip, target_ip);
         let eth = EthernetPacket::new(&frame).expect("ethernet header parses");
         assert_eq!(eth.get_ethertype(), EtherTypes::Arp);
         assert_eq!(eth.get_destination(), MacAddr::broadcast());
@@ -335,7 +176,7 @@ mod tests {
 
     #[test]
     fn arp_request_frame_target_ip_bytes_are_big_endian() {
-        let frame = build_arp_request(
+        let frame = Arp::build_request(
             sample_mac(),
             Ipv4Addr::new(10, 0, 0, 5),
             Ipv4Addr::new(192, 0, 2, 42),
@@ -348,7 +189,7 @@ mod tests {
 
     #[test]
     fn arp_request_target_hw_addr_is_zero() {
-        let frame = build_arp_request(
+        let frame = Arp::build_request(
             sample_mac(),
             Ipv4Addr::new(10, 0, 0, 5),
             Ipv4Addr::new(10, 0, 0, 42),
@@ -385,24 +226,24 @@ mod tests {
         let expected = MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
         let target = Ipv4Addr::new(10, 0, 0, 42);
         let frame = build_reply_frame(expected, target);
-        let parsed = parse_arp_reply(&frame, target).expect("reply parsed");
+        let parsed = Arp::parse_reply(&frame, target).expect("reply parsed");
         assert_eq!(parsed, expected);
     }
 
     #[test]
     fn arp_reply_parser_rejects_request_opcode() {
-        let frame = build_arp_request(
+        let frame = Arp::build_request(
             sample_mac(),
             Ipv4Addr::new(10, 0, 0, 5),
             Ipv4Addr::new(10, 0, 0, 42),
         );
-        assert!(parse_arp_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
+        assert!(Arp::parse_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
     }
 
     #[test]
     fn arp_reply_parser_rejects_mismatched_sender_ip() {
         let frame = build_reply_frame(sample_mac(), Ipv4Addr::new(10, 0, 0, 99));
-        assert!(parse_arp_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
+        assert!(Arp::parse_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
     }
 
     #[test]
@@ -410,7 +251,7 @@ mod tests {
         let mut frame = vec![0u8; ARP_FRAME_LEN];
         let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN]).expect("eth");
         eth.set_ethertype(EtherTypes::Ipv4);
-        assert!(parse_arp_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
+        assert!(Arp::parse_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
     }
 
     #[test]
@@ -448,6 +289,31 @@ mod tests {
     #[test]
     fn default_interface_is_empty_string() {
         assert!(default_interface().is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_ipv6_target_as_wrong_family_fault() {
+        let prober = ArpProber::new(String::new()).expect("valid");
+        let ip = IpAddr::V6("2001:db8::1".parse().unwrap());
+        let target = ResolvedTarget {
+            ip,
+            original: Target::Ip(ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let ctx = ProbeCtx::new(Duration::from_millis(100), 0);
+        let outcome = prober
+            .probe(&target, &ctx)
+            .await
+            .expect("returns an Ok outcome, not Err");
+        assert_eq!(outcome.kind, ProbeKind::Arp);
+        assert!(!outcome.reachable);
+        let fault = outcome.fault.expect("wrong-family is a fault");
+        assert_eq!(fault.kind, ProbeErrorKind::Other);
+        assert!(
+            fault.detail.contains("requires an IPv4 target"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     fn synthesize_interface(name: &str, mac: MacAddr, ips: Vec<IpNetwork>) -> NetworkInterface {
@@ -501,59 +367,9 @@ mod tests {
                 IpNetwork::V4("10.0.0.5/24".parse().unwrap()),
             ],
         );
-        assert_eq!(first_ipv4(&iface), Some(Ipv4Addr::new(10, 0, 0, 5)));
-    }
-
-    #[test]
-    fn promiscuous_mode_is_disabled() {
-        let config = build_channel_config();
-        assert!(
-            !config.promiscuous,
-            "ARP prober must not put the interface in promiscuous mode"
-        );
-        assert_eq!(config.read_timeout, Some(RECV_POLL_INTERVAL));
-    }
-
-    #[test]
-    fn timeout_resolution_is_an_unreachable_outcome_not_an_error() {
-        let target_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
-        let outcome = resolution_to_outcome(ProbeResolution::Timeout, target_ip);
-        assert_eq!(outcome.kind, ProbeKind::Arp);
-        assert_eq!(outcome.target_ip, target_ip);
-        assert!(!outcome.reachable);
-        assert!(outcome.signals.is_empty());
-        assert!(
-            outcome.fault.is_none(),
-            "a silent host is absence, not a fault"
-        );
-    }
-
-    #[test]
-    fn reached_resolution_is_a_reachable_outcome_with_the_mac_signal() {
-        let target_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42));
-        let signal = Signal::Mac("aa:bb:cc:dd:ee:ff".to_string());
-        let outcome = resolution_to_outcome(ProbeResolution::Reached(signal), target_ip);
-        assert!(outcome.reachable);
-        assert!(matches!(&outcome.signals[0], Signal::Mac(m) if m == "aa:bb:cc:dd:ee:ff"));
-        assert!(outcome.fault.is_none());
-    }
-
-    #[test]
-    fn failed_resolution_is_a_kinded_fault_outcome() {
-        let outcome = resolution_to_outcome(
-            ProbeResolution::Failed("raw socket permission denied".to_string()),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)),
-        );
-        assert!(!outcome.reachable);
-        assert!(outcome.signals.is_empty());
-        let fault = outcome
-            .fault
-            .expect("a probe fault is recorded on the outcome");
-        assert_eq!(fault.kind, ProbeErrorKind::Other);
-        assert!(
-            fault.detail.contains("permission denied"),
-            "got: {}",
-            fault.detail
+        assert_eq!(
+            Arp::source_address(&iface, Ipv4Addr::new(10, 0, 0, 42)),
+            Some(Ipv4Addr::new(10, 0, 0, 5))
         );
     }
 
@@ -564,6 +380,6 @@ mod tests {
             MacAddr::new(0x02, 0, 0, 0, 0, 1),
             vec![IpNetwork::V6("fe80::1/64".parse().unwrap())],
         );
-        assert!(first_ipv4(&iface).is_none());
+        assert!(Arp::source_address(&iface, Ipv4Addr::new(10, 0, 0, 42)).is_none());
     }
 }

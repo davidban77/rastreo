@@ -1,8 +1,7 @@
 use std::net::{IpAddr, Ipv6Addr};
-use std::time::{Duration, Instant, SystemTime};
 
 use ipnetwork::IpNetwork;
-use pnet_datalink::{Channel, Config, MacAddr, NetworkInterface};
+use pnet_datalink::{MacAddr, NetworkInterface};
 use pnet_packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet_packet::icmpv6::ndp::{
     MutableNeighborSolicitPacket, NdpOption, NdpOptionTypes, NeighborAdvertPacket,
@@ -12,16 +11,17 @@ use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::ipv6::{Ipv6Packet, MutableIpv6Packet};
 use pnet_packet::Packet;
 
-use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
-use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::error::{ConfigError, RastreoError};
+use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
+use crate::prober::link_layer::{
+    lookup_interface, probe_link_layer, LinkLayerProtocol, ETH_HEADER_LEN,
+};
 use crate::prober::Prober;
 
-const ETH_HEADER_LEN: usize = 14;
 const IPV6_HEADER_LEN: usize = 40;
 const NS_ICMPV6_LEN: usize = 32;
 const NS_FRAME_LEN: usize = ETH_HEADER_LEN + IPV6_HEADER_LEN + NS_ICMPV6_LEN;
 const NDP_HOP_LIMIT: u8 = 255;
-const RECV_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn default_interface() -> String {
     String::new()
@@ -45,63 +45,6 @@ impl NdpProber {
     pub fn interface(&self) -> &str {
         &self.interface
     }
-}
-
-fn lookup_interface(name: &str) -> Option<NetworkInterface> {
-    pnet_datalink::interfaces()
-        .into_iter()
-        .find(|iface| iface.name == name)
-}
-
-fn select_interface_for(target: Ipv6Addr) -> Option<NetworkInterface> {
-    let want_link_local = is_link_local(target);
-    let mut best: Option<(NetworkInterface, u8, bool)> = None;
-    for iface in pnet_datalink::interfaces() {
-        for net in &iface.ips {
-            if let IpNetwork::V6(v6) = net {
-                if v6.contains(target) {
-                    let prefix = v6.prefix();
-                    let has_link_local = iface
-                        .ips
-                        .iter()
-                        .any(|n| matches!(n, IpNetwork::V6(v) if is_link_local(v.ip())));
-                    let is_candidate = if want_link_local {
-                        has_link_local
-                    } else {
-                        !iface.is_loopback()
-                    };
-                    if !is_candidate {
-                        continue;
-                    }
-                    match &best {
-                        Some((_, best_prefix, _)) if *best_prefix >= prefix => {}
-                        _ => best = Some((iface.clone(), prefix, has_link_local)),
-                    }
-                }
-            }
-        }
-    }
-    best.map(|(iface, _, _)| iface)
-}
-
-fn first_ipv6_source(iface: &NetworkInterface, target: Ipv6Addr) -> Option<Ipv6Addr> {
-    let target_link_local = is_link_local(target);
-    let mut chosen: Option<Ipv6Addr> = None;
-    for net in &iface.ips {
-        if let IpNetwork::V6(v6) = net {
-            let ip = v6.ip();
-            if target_link_local {
-                if is_link_local(ip) {
-                    return Some(ip);
-                }
-            } else if !is_link_local(ip) {
-                return Some(ip);
-            } else if chosen.is_none() {
-                chosen = Some(ip);
-            }
-        }
-    }
-    chosen
 }
 
 fn is_link_local(ip: Ipv6Addr) -> bool {
@@ -128,199 +71,163 @@ pub(crate) fn solicited_node_multicast_mac(target: Ipv6Addr) -> MacAddr {
     MacAddr::new(0x33, 0x33, 0xff, octets[13], octets[14], octets[15])
 }
 
-pub(crate) fn format_mac(mac: MacAddr) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac.0, mac.1, mac.2, mac.3, mac.4, mac.5
-    )
-}
+pub(crate) struct Ndp;
 
-pub(crate) fn build_neighbor_solicitation(
-    src_mac: MacAddr,
-    src_ip: Ipv6Addr,
-    target: Ipv6Addr,
-) -> [u8; NS_FRAME_LEN] {
-    let mut frame = [0u8; NS_FRAME_LEN];
-    let dst_ip = solicited_node_multicast(target);
-    let dst_mac = solicited_node_multicast_mac(target);
-    {
-        let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN])
-            .expect("ethernet buffer sized to header length");
-        eth.set_destination(dst_mac);
-        eth.set_source(src_mac);
-        eth.set_ethertype(EtherTypes::Ipv6);
-    }
-    {
-        let mut ipv6 =
-            MutableIpv6Packet::new(&mut frame[ETH_HEADER_LEN..ETH_HEADER_LEN + IPV6_HEADER_LEN])
-                .expect("ipv6 buffer sized to header length");
-        ipv6.set_version(6);
-        ipv6.set_traffic_class(0);
-        ipv6.set_flow_label(0);
-        ipv6.set_payload_length(NS_ICMPV6_LEN as u16);
-        ipv6.set_next_header(IpNextHeaderProtocols::Icmpv6);
-        ipv6.set_hop_limit(NDP_HOP_LIMIT);
-        ipv6.set_source(src_ip);
-        ipv6.set_destination(dst_ip);
-    }
-    {
-        let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
-        let mut ns = MutableNeighborSolicitPacket::new(&mut frame[ns_start..])
-            .expect("neighbor solicit buffer sized");
-        ns.set_icmpv6_type(Icmpv6Types::NeighborSolicit);
-        ns.set_icmpv6_code(Icmpv6Code(0));
-        ns.set_reserved(0);
-        ns.set_target_addr(target);
-        ns.set_options(&[NdpOption {
-            option_type: NdpOptionTypes::SourceLLAddr,
-            length: 1,
-            data: vec![
-                src_mac.0, src_mac.1, src_mac.2, src_mac.3, src_mac.4, src_mac.5,
-            ],
-        }]);
-    }
-    let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
-    let checksum = {
-        let icmp = Icmpv6Packet::new(&frame[ns_start..]).expect("icmpv6 view");
-        icmpv6_checksum(&icmp, &src_ip, &dst_ip)
-    };
-    let cksum_bytes = checksum.to_be_bytes();
-    frame[ns_start + 2] = cksum_bytes[0];
-    frame[ns_start + 3] = cksum_bytes[1];
-    frame
-}
+impl LinkLayerProtocol for Ndp {
+    type Addr = Ipv6Addr;
 
-pub(crate) fn parse_neighbor_advertisement(frame: &[u8], target: Ipv6Addr) -> Option<MacAddr> {
-    let eth = EthernetPacket::new(frame)?;
-    if eth.get_ethertype() != EtherTypes::Ipv6 {
-        return None;
-    }
-    let ipv6 = Ipv6Packet::new(eth.payload())?;
-    if ipv6.get_next_header() != IpNextHeaderProtocols::Icmpv6 {
-        return None;
-    }
-    let icmp = Icmpv6Packet::new(ipv6.payload())?;
-    if icmp.get_icmpv6_type() != Icmpv6Types::NeighborAdvert {
-        return None;
-    }
-    let na = NeighborAdvertPacket::new(ipv6.payload())?;
-    if na.get_target_addr() != target {
-        return None;
-    }
-    for option in na.get_options() {
-        if option.option_type == NdpOptionTypes::TargetLLAddr && option.data.len() >= 6 {
-            return Some(MacAddr::new(
-                option.data[0],
-                option.data[1],
-                option.data[2],
-                option.data[3],
-                option.data[4],
-                option.data[5],
-            ));
-        }
-    }
-    None
-}
+    const NAME: &'static str = "ndp";
+    const NAME_UPPER: &'static str = "NDP";
+    const ADDRESS_FAMILY: &'static str = "ipv6";
 
-fn build_channel_config() -> Config {
-    Config {
-        read_timeout: Some(RECV_POLL_INTERVAL),
-        promiscuous: false,
-        ..Default::default()
+    fn kind() -> ProbeKind {
+        ProbeKind::Ndp
     }
-}
 
-enum ProbeResolution {
-    Reached(Signal),
-    Timeout,
-    Failed(String),
-}
-
-fn run_probe_blocking(
-    iface: NetworkInterface,
-    src_mac: MacAddr,
-    src_ip: Ipv6Addr,
-    target: Ipv6Addr,
-    timeout: Duration,
-) -> ProbeResolution {
-    let (mut tx, mut rx) = match pnet_datalink::channel(&iface, build_channel_config()) {
-        Ok(Channel::Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => {
-            return ProbeResolution::Failed(
-                "ndp channel returned an unsupported backend".to_string(),
-            )
-        }
-        Err(err) => {
-            let msg = if err.kind() == std::io::ErrorKind::PermissionDenied {
-                "raw socket permission denied; NDP requires CAP_NET_RAW".to_string()
-            } else {
-                format!("ndp channel open failed: {err}")
-            };
-            return ProbeResolution::Failed(msg);
-        }
-    };
-
-    let frame = build_neighbor_solicitation(src_mac, src_ip, target);
-    match tx.send_to(&frame, None) {
-        Some(Ok(())) => {}
-        Some(Err(err)) => return ProbeResolution::Failed(format!("ndp send failed: {err}")),
-        None => {
-            return ProbeResolution::Failed(
-                "ndp send returned None (packet too large for send buffer)".to_string(),
-            )
+    fn extract_target(ip: IpAddr) -> Option<Ipv6Addr> {
+        match ip {
+            IpAddr::V6(ip) => Some(ip),
+            IpAddr::V4(_) => None,
         }
     }
 
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        match rx.next() {
-            Ok(bytes) => {
-                if let Some(mac) = parse_neighbor_advertisement(bytes, target) {
-                    return ProbeResolution::Reached(Signal::Mac(format_mac(mac)));
+    fn wrong_family_detail() -> &'static str {
+        "ndp prober requires an IPv6 target; use arp for IPv4"
+    }
+
+    fn select_interface(target: Ipv6Addr) -> Option<NetworkInterface> {
+        let want_link_local = is_link_local(target);
+        let mut best: Option<(NetworkInterface, u8, bool)> = None;
+        for iface in pnet_datalink::interfaces() {
+            for net in &iface.ips {
+                if let IpNetwork::V6(v6) = net {
+                    if v6.contains(target) {
+                        let prefix = v6.prefix();
+                        let has_link_local = iface
+                            .ips
+                            .iter()
+                            .any(|n| matches!(n, IpNetwork::V6(v) if is_link_local(v.ip())));
+                        let is_candidate = if want_link_local {
+                            has_link_local
+                        } else {
+                            !iface.is_loopback()
+                        };
+                        if !is_candidate {
+                            continue;
+                        }
+                        match &best {
+                            Some((_, best_prefix, _)) if *best_prefix >= prefix => {}
+                            _ => best = Some((iface.clone(), prefix, has_link_local)),
+                        }
+                    }
                 }
             }
-            Err(err) => match err.kind() {
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => continue,
-                _ => return ProbeResolution::Failed(format!("ndp receive failed: {err}")),
-            },
         }
+        best.map(|(iface, _, _)| iface)
     }
-    ProbeResolution::Timeout
-}
 
-// A local resolution failure (privileged socket denied, no usable interface) is a broken probe,
-// carried as a fault on an unreachable outcome — never discarded.
-fn ndp_fault(target_ip: IpAddr, detail: String) -> ProbeOutcome {
-    ProbeOutcome {
-        kind: ProbeKind::Ndp,
-        target_ip,
-        timestamp: SystemTime::now(),
-        reachable: false,
-        signals: Vec::new(),
-        fault: Some(ProbeFault::new(ProbeErrorKind::Other, detail)),
+    fn source_address(iface: &NetworkInterface, target: Ipv6Addr) -> Option<Ipv6Addr> {
+        let target_link_local = is_link_local(target);
+        let mut chosen: Option<Ipv6Addr> = None;
+        for net in &iface.ips {
+            if let IpNetwork::V6(v6) = net {
+                let ip = v6.ip();
+                if target_link_local {
+                    if is_link_local(ip) {
+                        return Some(ip);
+                    }
+                } else if !is_link_local(ip) {
+                    return Some(ip);
+                } else if chosen.is_none() {
+                    chosen = Some(ip);
+                }
+            }
+        }
+        chosen
     }
-}
 
-fn resolution_to_outcome(resolution: ProbeResolution, target_ip: IpAddr) -> ProbeOutcome {
-    match resolution {
-        ProbeResolution::Reached(signal) => ProbeOutcome {
-            kind: ProbeKind::Ndp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: true,
-            signals: vec![signal],
-            fault: None,
-        },
-        // A silent host is a negative discovery result, not a probe fault.
-        ProbeResolution::Timeout => ProbeOutcome {
-            kind: ProbeKind::Ndp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: false,
-            signals: Vec::new(),
-            fault: None,
-        },
-        ProbeResolution::Failed(msg) => ndp_fault(target_ip, msg),
+    fn build_request(src_mac: MacAddr, src_ip: Ipv6Addr, target: Ipv6Addr) -> Vec<u8> {
+        let mut frame = vec![0u8; NS_FRAME_LEN];
+        let dst_ip = solicited_node_multicast(target);
+        let dst_mac = solicited_node_multicast_mac(target);
+        {
+            let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN])
+                .expect("ethernet buffer sized to header length");
+            eth.set_destination(dst_mac);
+            eth.set_source(src_mac);
+            eth.set_ethertype(EtherTypes::Ipv6);
+        }
+        {
+            let mut ipv6 = MutableIpv6Packet::new(
+                &mut frame[ETH_HEADER_LEN..ETH_HEADER_LEN + IPV6_HEADER_LEN],
+            )
+            .expect("ipv6 buffer sized to header length");
+            ipv6.set_version(6);
+            ipv6.set_traffic_class(0);
+            ipv6.set_flow_label(0);
+            ipv6.set_payload_length(NS_ICMPV6_LEN as u16);
+            ipv6.set_next_header(IpNextHeaderProtocols::Icmpv6);
+            ipv6.set_hop_limit(NDP_HOP_LIMIT);
+            ipv6.set_source(src_ip);
+            ipv6.set_destination(dst_ip);
+        }
+        {
+            let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
+            let mut ns = MutableNeighborSolicitPacket::new(&mut frame[ns_start..])
+                .expect("neighbor solicit buffer sized");
+            ns.set_icmpv6_type(Icmpv6Types::NeighborSolicit);
+            ns.set_icmpv6_code(Icmpv6Code(0));
+            ns.set_reserved(0);
+            ns.set_target_addr(target);
+            ns.set_options(&[NdpOption {
+                option_type: NdpOptionTypes::SourceLLAddr,
+                length: 1,
+                data: vec![
+                    src_mac.0, src_mac.1, src_mac.2, src_mac.3, src_mac.4, src_mac.5,
+                ],
+            }]);
+        }
+        let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
+        let checksum = {
+            let icmp = Icmpv6Packet::new(&frame[ns_start..]).expect("icmpv6 view");
+            icmpv6_checksum(&icmp, &src_ip, &dst_ip)
+        };
+        let cksum_bytes = checksum.to_be_bytes();
+        frame[ns_start + 2] = cksum_bytes[0];
+        frame[ns_start + 3] = cksum_bytes[1];
+        frame
+    }
+
+    fn parse_reply(frame: &[u8], target: Ipv6Addr) -> Option<MacAddr> {
+        let eth = EthernetPacket::new(frame)?;
+        if eth.get_ethertype() != EtherTypes::Ipv6 {
+            return None;
+        }
+        let ipv6 = Ipv6Packet::new(eth.payload())?;
+        if ipv6.get_next_header() != IpNextHeaderProtocols::Icmpv6 {
+            return None;
+        }
+        let icmp = Icmpv6Packet::new(ipv6.payload())?;
+        if icmp.get_icmpv6_type() != Icmpv6Types::NeighborAdvert {
+            return None;
+        }
+        let na = NeighborAdvertPacket::new(ipv6.payload())?;
+        if na.get_target_addr() != target {
+            return None;
+        }
+        for option in na.get_options() {
+            if option.option_type == NdpOptionTypes::TargetLLAddr && option.data.len() >= 6 {
+                return Some(MacAddr::new(
+                    option.data[0],
+                    option.data[1],
+                    option.data[2],
+                    option.data[3],
+                    option.data[4],
+                    option.data[5],
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -335,76 +242,18 @@ impl Prober for NdpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
-        let target_v6 = match target.ip {
-            IpAddr::V6(ip) => ip,
-            IpAddr::V4(_) => {
-                return Ok(ndp_fault(
-                    target.ip,
-                    "ndp prober requires an IPv6 target; use arp for IPv4".to_string(),
-                ));
-            }
-        };
-
-        let iface = if self.interface.is_empty() {
-            match select_interface_for(target_v6) {
-                Some(iface) => iface,
-                None => {
-                    return Ok(ndp_fault(
-                        target.ip,
-                        format!("no local interface reaches {target_v6}"),
-                    ))
-                }
-            }
-        } else {
-            match lookup_interface(&self.interface) {
-                Some(iface) => iface,
-                None => {
-                    return Ok(ndp_fault(
-                        target.ip,
-                        format!("network interface '{}' not found", self.interface),
-                    ))
-                }
-            }
-        };
-
-        let Some(src_mac) = iface.mac else {
-            return Ok(ndp_fault(
-                target.ip,
-                format!("interface {} has no MAC address", iface.name),
-            ));
-        };
-        let Some(src_ip) = first_ipv6_source(&iface, target_v6) else {
-            return Ok(ndp_fault(
-                target.ip,
-                format!("interface {} has no ipv6 address", iface.name),
-            ));
-        };
-
-        if src_ip == target_v6 {
-            return Ok(ndp_fault(
-                target.ip,
-                format!("ndp target {target_v6} is a local interface address"),
-            ));
-        }
-
-        let iface_for_task = iface.clone();
-        let timeout = ctx.timeout;
-        let result = tokio::task::spawn_blocking(move || {
-            run_probe_blocking(iface_for_task, src_mac, src_ip, target_v6, timeout)
-        })
-        .await
-        .map_err(|err| {
-            RastreoError::Runtime(crate::error::RuntimeError::TaskPanicked(err.to_string()))
-        })?;
-
-        Ok(resolution_to_outcome(result, target.ip))
+        probe_link_layer::<Ndp>(&self.interface, target, ctx).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ProbeErrorKind;
+    use crate::model::Target;
     use pnet_packet::icmpv6::ndp::MutableNeighborAdvertPacket;
+    use std::net::Ipv4Addr;
+    use std::time::{Duration, SystemTime};
 
     fn sample_src_mac() -> MacAddr {
         MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x01)
@@ -448,7 +297,7 @@ mod tests {
 
     #[test]
     fn ndp_neighbor_solicitation_has_type_135() {
-        let frame = build_neighbor_solicitation(sample_src_mac(), sample_src_ip(), sample_target());
+        let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), sample_target());
         let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
         assert_eq!(frame[ns_start], 135);
         assert_eq!(frame[ns_start + 1], 0);
@@ -456,7 +305,7 @@ mod tests {
 
     #[test]
     fn ndp_neighbor_solicitation_includes_source_link_layer_option() {
-        let frame = build_neighbor_solicitation(sample_src_mac(), sample_src_ip(), sample_target());
+        let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), sample_target());
         let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
         let options_start = ns_start + 24;
         assert_eq!(frame[options_start], 1);
@@ -469,7 +318,7 @@ mod tests {
     #[test]
     fn ndp_neighbor_solicitation_target_address_in_header() {
         let target = sample_target();
-        let frame = build_neighbor_solicitation(sample_src_mac(), sample_src_ip(), target);
+        let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), target);
         let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
         let target_bytes = &frame[ns_start + 8..ns_start + 24];
         assert_eq!(target_bytes, &target.octets());
@@ -477,7 +326,7 @@ mod tests {
 
     #[test]
     fn ndp_ipv6_header_uses_hop_limit_255() {
-        let frame = build_neighbor_solicitation(sample_src_mac(), sample_src_ip(), sample_target());
+        let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), sample_target());
         let hop_limit_byte = frame[ETH_HEADER_LEN + 7];
         assert_eq!(hop_limit_byte, 255);
     }
@@ -485,7 +334,7 @@ mod tests {
     #[test]
     fn ndp_ethernet_destination_is_solicited_node_multicast_mac() {
         let target = sample_target();
-        let frame = build_neighbor_solicitation(sample_src_mac(), sample_src_ip(), target);
+        let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), target);
         let dst_mac = &frame[..6];
         let expected = solicited_node_multicast_mac(target);
         assert_eq!(
@@ -496,7 +345,7 @@ mod tests {
 
     #[test]
     fn ndp_icmpv6_checksum_matches_rfc_4443_pseudo_header_expectation() {
-        let frame = build_neighbor_solicitation(sample_src_mac(), sample_src_ip(), sample_target());
+        let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), sample_target());
         let ns_start = ETH_HEADER_LEN + IPV6_HEADER_LEN;
         let cksum_from_frame = u16::from_be_bytes([frame[ns_start + 2], frame[ns_start + 3]]);
         let mut recomputed = frame[ns_start..].to_vec();
@@ -559,7 +408,7 @@ mod tests {
         let target = sample_target();
         let mac = MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
         let frame = build_advertisement_frame(target, mac);
-        let parsed = parse_neighbor_advertisement(&frame, target).expect("parsed");
+        let parsed = Ndp::parse_reply(&frame, target).expect("parsed");
         assert_eq!(parsed, mac);
     }
 
@@ -569,7 +418,7 @@ mod tests {
         let other: Ipv6Addr = "2001:db8::9999".parse().unwrap();
         let frame =
             build_advertisement_frame(other, MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff));
-        assert!(parse_neighbor_advertisement(&frame, target).is_none());
+        assert!(Ndp::parse_reply(&frame, target).is_none());
     }
 
     #[test]
@@ -577,14 +426,14 @@ mod tests {
         let mut frame = vec![0u8; 64];
         let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN]).expect("eth");
         eth.set_ethertype(EtherTypes::Ipv4);
-        assert!(parse_neighbor_advertisement(&frame, sample_target()).is_none());
+        assert!(Ndp::parse_reply(&frame, sample_target()).is_none());
     }
 
     #[test]
     fn ndp_advertisement_parser_rejects_solicitation_type() {
         let target = sample_target();
-        let frame = build_neighbor_solicitation(sample_src_mac(), sample_src_ip(), target);
-        assert!(parse_neighbor_advertisement(&frame, target).is_none());
+        let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), target);
+        assert!(Ndp::parse_reply(&frame, target).is_none());
     }
 
     #[test]
@@ -623,10 +472,29 @@ mod tests {
         assert!(default_interface().is_empty());
     }
 
-    #[test]
-    fn format_mac_is_lower_hex_colon_separated() {
-        let mac = MacAddr::new(0x00, 0x11, 0x22, 0xaa, 0xbb, 0xcc);
-        assert_eq!(format_mac(mac), "00:11:22:aa:bb:cc");
+    #[tokio::test]
+    async fn probe_rejects_ipv4_target_as_wrong_family_fault() {
+        let prober = NdpProber::new(String::new()).expect("valid");
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let target = ResolvedTarget {
+            ip,
+            original: Target::Ip(ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let ctx = ProbeCtx::new(Duration::from_millis(100), 0);
+        let outcome = prober
+            .probe(&target, &ctx)
+            .await
+            .expect("returns an Ok outcome, not Err");
+        assert_eq!(outcome.kind, ProbeKind::Ndp);
+        assert!(!outcome.reachable);
+        let fault = outcome.fault.expect("wrong-family is a fault");
+        assert_eq!(fault.kind, ProbeErrorKind::Other);
+        assert!(
+            fault.detail.contains("requires an IPv6 target"),
+            "got: {}",
+            fault.detail
+        );
     }
 
     fn synthesize_interface(name: &str, mac: MacAddr, ips: Vec<IpNetwork>) -> NetworkInterface {
@@ -652,7 +520,7 @@ mod tests {
         );
         let target: Ipv6Addr = "fe80::abcd".parse().unwrap();
         assert_eq!(
-            first_ipv6_source(&iface, target),
+            Ndp::source_address(&iface, target),
             Some("fe80::1".parse().unwrap())
         );
     }
@@ -669,61 +537,8 @@ mod tests {
         );
         let target: Ipv6Addr = "2001:db8::abcd".parse().unwrap();
         assert_eq!(
-            first_ipv6_source(&iface, target),
+            Ndp::source_address(&iface, target),
             Some("2001:db8::1".parse().unwrap())
-        );
-    }
-
-    #[test]
-    fn promiscuous_mode_is_disabled() {
-        let config = build_channel_config();
-        assert!(
-            !config.promiscuous,
-            "NDP prober must not put the interface in promiscuous mode"
-        );
-        assert_eq!(config.read_timeout, Some(RECV_POLL_INTERVAL));
-    }
-
-    #[test]
-    fn timeout_resolution_is_an_unreachable_outcome_not_an_error() {
-        let target_ip = IpAddr::V6(sample_target());
-        let outcome = resolution_to_outcome(ProbeResolution::Timeout, target_ip);
-        assert_eq!(outcome.kind, ProbeKind::Ndp);
-        assert_eq!(outcome.target_ip, target_ip);
-        assert!(!outcome.reachable);
-        assert!(outcome.signals.is_empty());
-        assert!(
-            outcome.fault.is_none(),
-            "a silent host is absence, not a fault"
-        );
-    }
-
-    #[test]
-    fn reached_resolution_is_a_reachable_outcome_with_the_mac_signal() {
-        let target_ip = IpAddr::V6(sample_target());
-        let signal = Signal::Mac("aa:bb:cc:dd:ee:ff".to_string());
-        let outcome = resolution_to_outcome(ProbeResolution::Reached(signal), target_ip);
-        assert!(outcome.reachable);
-        assert!(matches!(&outcome.signals[0], Signal::Mac(m) if m == "aa:bb:cc:dd:ee:ff"));
-        assert!(outcome.fault.is_none());
-    }
-
-    #[test]
-    fn failed_resolution_is_a_kinded_fault_outcome() {
-        let outcome = resolution_to_outcome(
-            ProbeResolution::Failed("raw socket permission denied".to_string()),
-            IpAddr::V6(sample_target()),
-        );
-        assert!(!outcome.reachable);
-        assert!(outcome.signals.is_empty());
-        let fault = outcome
-            .fault
-            .expect("a probe fault is recorded on the outcome");
-        assert_eq!(fault.kind, ProbeErrorKind::Other);
-        assert!(
-            fault.detail.contains("permission denied"),
-            "got: {}",
-            fault.detail
         );
     }
 
