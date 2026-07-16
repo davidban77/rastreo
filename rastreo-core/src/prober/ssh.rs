@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -5,6 +6,7 @@ use std::time::SystemTime;
 
 use russh::client::{Config, Handler};
 use russh::keys::ssh_key::PublicKey;
+use russh::{cipher, kex, mac, Preferred};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::time::error::Elapsed;
@@ -93,11 +95,44 @@ fn find_line_terminator(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+fn extend_offer<T: Copy + PartialEq>(base: Cow<'static, [T]>, legacy: &[T]) -> Cow<'static, [T]> {
+    let mut offered = base.into_owned();
+    for &name in legacy {
+        if !offered.contains(&name) {
+            offered.push(name);
+        }
+    }
+    Cow::Owned(offered)
+}
+
+// Legacy KEX/cipher/MAC are offered last so a legacy-only SSH server completes this read-only, unauthenticated host-key handshake.
+fn fingerprinting_preferred() -> Preferred {
+    let base = Preferred::DEFAULT;
+    Preferred {
+        kex: extend_offer(
+            base.kex,
+            &[kex::DH_G14_SHA1, kex::DH_G1_SHA1, kex::DH_GEX_SHA1],
+        ),
+        cipher: extend_offer(
+            base.cipher,
+            &[
+                cipher::AES_256_CBC,
+                cipher::AES_192_CBC,
+                cipher::AES_128_CBC,
+            ],
+        ),
+        mac: extend_offer(base.mac, &[mac::HMAC_SHA1_ETM, mac::HMAC_SHA1]),
+        key: base.key,
+        compression: base.compression,
+    }
+}
+
 async fn read_host_key(addr: SocketAddr) -> Option<String> {
     let config = Arc::new(Config {
         client_id: russh::SshId::Standard(
             concat!("SSH-2.0-rastreo_", env!("CARGO_PKG_VERSION")).into(),
         ),
+        preferred: fingerprinting_preferred(),
         ..Config::default()
     });
     let slot: Arc<Mutex<Option<String>>> = Arc::default();
@@ -253,6 +288,38 @@ mod tests {
     fn probe_kind_returns_ssh() {
         let p = SshProber::new(vec![22]).expect("valid");
         assert_eq!(p.kind(), ProbeKind::Ssh);
+    }
+
+    #[test]
+    fn fingerprinting_offer_appends_legacy_algorithms_after_modern() {
+        let offer = fingerprinting_preferred();
+        let kex: Vec<&str> = offer.kex.iter().map(|n| n.as_ref()).collect();
+        let cipher: Vec<&str> = offer.cipher.iter().map(|n| n.as_ref()).collect();
+        let mac: Vec<&str> = offer.mac.iter().map(|n| n.as_ref()).collect();
+
+        assert!(kex.contains(&"diffie-hellman-group14-sha1"), "kex: {kex:?}");
+        assert!(cipher.contains(&"aes128-cbc"), "cipher: {cipher:?}");
+        assert!(cipher.contains(&"aes256-cbc"), "cipher: {cipher:?}");
+        assert!(mac.contains(&"hmac-sha1"), "mac: {mac:?}");
+
+        let pos = |offer: &[&str], name: &str| {
+            offer
+                .iter()
+                .position(|n| *n == name)
+                .unwrap_or_else(|| panic!("{name} missing from {offer:?}"))
+        };
+        assert!(
+            pos(&kex, "curve25519-sha256") < pos(&kex, "diffie-hellman-group14-sha1"),
+            "modern KEX must be offered before legacy: {kex:?}"
+        );
+        assert!(
+            pos(&cipher, "chacha20-poly1305@openssh.com") < pos(&cipher, "aes128-cbc"),
+            "modern cipher must be offered before legacy: {cipher:?}"
+        );
+        assert!(
+            pos(&mac, "hmac-sha2-256") < pos(&mac, "hmac-sha1"),
+            "modern MAC must be offered before legacy: {mac:?}"
+        );
     }
 
     #[test]

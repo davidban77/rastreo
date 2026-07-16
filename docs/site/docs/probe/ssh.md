@@ -6,6 +6,9 @@ description: The SSH prober — opens a TCP connection to each configured port, 
 
 The SSH prober captures two observable facts from every SSH server it can reach. The first is the pre-negotiation identification banner, for example `SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3`. The second is the server's host public key in OpenSSH single-line format, for example `ssh-ed25519 AAAAC3Nz…`. The banner tells you which SSH implementation and version answers on that port. The host key is a stable per-device identifier. The [identity fuser](../discover/identity.md#signals-used-for-identity-fusion) consumes it as a high-weight correlation signal: two IPs that present the same host key auto-merge into a single record. The prober never attempts authentication. It disconnects immediately after the key exchange completes.
 
+!!! note "Offers legacy SSH crypto — by design"
+    The prober also offers legacy key-exchange, cipher, and MAC algorithms. This lets it capture host keys from legacy gear — older Cisco IOS, NX-OS, and JunOS that support only old SSH crypto. It offers them after the modern ones, so a modern server still negotiates modern crypto. The prober only reads a public host key and never authenticates, so accepting weak crypto to finish the handshake exposes no secret. See [Legacy algorithms](#legacy-algorithms) for the full list and the rationale.
+
 ## Configuration
 
 Add an `ssh` entry to a scenario's `probers` array. `ports` has a default, so the minimum shape is `{"type": "ssh"}`.
@@ -58,6 +61,22 @@ The prober does not authenticate. It runs the SSH transport layer as far as key 
 
 Authenticated probes are a planned extension. They would let the prober run scripted commands over an SSH session and parse the output. They are not implemented today. A scenario that configures an `ssh` prober will produce banner and host-key signals only.
 
+## Legacy algorithms
+
+Some network gear supports only old SSH crypto. Older Cisco IOS, NX-OS, and JunOS devices often support only legacy key exchange, ciphers, and MACs. Against those devices a modern-only handshake fails, and the host key — a high-weight identity signal — is never captured. To reach them, the prober offers legacy algorithms in addition to the modern defaults.
+
+The prober offers the legacy algorithms after the modern ones. A modern server negotiates modern crypto, and only a legacy-only server uses the older algorithms. The prober offers these legacy algorithms:
+
+| Category | Legacy algorithms offered |
+|---|---|
+| Key exchange | `diffie-hellman-group14-sha1`, `diffie-hellman-group1-sha1`, `diffie-hellman-group-exchange-sha1` |
+| Cipher | `aes256-cbc`, `aes192-cbc`, `aes128-cbc` |
+| MAC | `hmac-sha1-etm@openssh.com`, `hmac-sha1` |
+
+The older `3des-cbc` cipher is not offered.
+
+Offering weak crypto here is safe because the prober fingerprints — it does not authenticate. It reads a public host key over a read-only handshake and never sends or accepts a secret. No credential is ever at risk, whatever algorithms the two sides agree on. This matches rastreo's permissive-by-default posture for discovery, the same reasoning behind the TLS prober's [accept-any-certificate handling](tls.md#certificate-handling).
+
 ## Example scenario
 
 The following scenario probes an SSH target on port 22. Load it via `rastreo discover --file scan.yml` on the CLI, or send the equivalent JSON as the `POST /scans` body to `rastreo-server`:
@@ -86,6 +105,7 @@ A record produced against a stock OpenSSH server contains the banner and the hos
 
 - [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [Identity fuser](../discover/identity.md#signals-used-for-identity-fusion) — how `SshHostKey` participates as a high-weight correlation signal (0.8, enough to auto-merge alone).
+- [TLS prober](tls.md#certificate-handling) — the same fingerprint-not-authenticate posture applied to TLS certificates.
 - [Scenario schema](../reference/scenario.md#ssh) — the full `ProberConfig::Ssh` field table.
 - [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the SSH prober from the CLI via `--file`.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.
