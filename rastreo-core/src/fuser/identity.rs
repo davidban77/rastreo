@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use schemars::JsonSchema;
@@ -105,16 +105,67 @@ impl IdentityFuser {
     }
 
     fn compute_pair_weights(&self, records: &[DeviceRecord]) -> Vec<(usize, usize, f64)> {
-        let mut out = Vec::new();
-        for i in 0..records.len() {
-            for j in (i + 1)..records.len() {
-                let w = self.pair_weight(&records[i], &records[j]);
-                if w > 0.0 {
-                    out.push((i, j, w));
+        let mut buckets: HashMap<BucketKey, Vec<usize>> = HashMap::new();
+        for (idx, record) in records.iter().enumerate() {
+            for key in self.bucket_keys(record) {
+                buckets.entry(key).or_default().push(idx);
+            }
+        }
+
+        let mut candidates: HashSet<(usize, usize)> = HashSet::new();
+        for indices in buckets.values() {
+            for a in 0..indices.len() {
+                for b in (a + 1)..indices.len() {
+                    candidates.insert((indices[a], indices[b]));
                 }
             }
         }
+
+        let mut out = Vec::new();
+        for (i, j) in candidates {
+            let w = self.pair_weight(&records[i], &records[j]);
+            if w > 0.0 {
+                out.push((i, j, w));
+            }
+        }
         out
+    }
+
+    fn bucket_keys(&self, record: &DeviceRecord) -> HashSet<BucketKey> {
+        let mut keys = HashSet::new();
+        if let Some(mac) = record.mac.as_deref() {
+            // Virtual/VRRP MACs are shared by every group member: bucketing on one would
+            // collapse the whole group into a single O(n²) bucket and diverge from contribute_mac.
+            if !is_virtual_mac(mac) && !hint_says_virtual(&self.hints, mac) {
+                keys.insert(BucketKey::Mac(normalize_mac(mac)));
+            }
+        }
+        if let Some(name) = find_sysname(&record.signals) {
+            if !name.is_empty() {
+                keys.insert(BucketKey::SysName(name.to_ascii_lowercase()));
+            }
+        }
+        if let Some(host_key) = find_ssh_host_key(&record.signals) {
+            if !host_key.is_empty() {
+                keys.insert(BucketKey::SshHostKey(host_key.to_string()));
+            }
+        }
+        if let Some(subject) = find_tls_subject(&record.signals) {
+            if !subject.is_empty() {
+                keys.insert(BucketKey::TlsSubject(subject.to_string()));
+            }
+        }
+        for name in collect_tls_san_names(&record.signals) {
+            if !name.is_empty() {
+                keys.insert(BucketKey::TlsSanName(name.to_string()));
+            }
+        }
+        for name in collect_reverse_dns_names(&record.signals) {
+            if !name.is_empty() {
+                keys.insert(BucketKey::ReverseDnsName(name.to_ascii_lowercase()));
+            }
+        }
+        keys
     }
 
     fn pair_weight(&self, a: &DeviceRecord, b: &DeviceRecord) -> f64 {
@@ -149,6 +200,42 @@ impl IdentityFuser {
     }
 }
 
+#[cfg(test)]
+impl IdentityFuser {
+    fn compute_pair_weights_bruteforce(
+        &self,
+        records: &[DeviceRecord],
+    ) -> Vec<(usize, usize, f64)> {
+        let mut out = Vec::new();
+        for i in 0..records.len() {
+            for j in (i + 1)..records.len() {
+                let w = self.pair_weight(&records[i], &records[j]);
+                if w > 0.0 {
+                    out.push((i, j, w));
+                }
+            }
+        }
+        out
+    }
+
+    fn correlate_bruteforce(&self, records: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
+        if records.len() <= 1 {
+            return records;
+        }
+        let n = records.len();
+        let weights = self.compute_pair_weights_bruteforce(&records);
+        let mut uf = UnionFind::new(n);
+        for (i, j, w) in weights.iter().copied() {
+            if w >= HIGH_BAND_THRESHOLD {
+                uf.union(i, j);
+            }
+        }
+        let medium_peers = collect_medium_peers(n, &weights, &uf);
+        let components = uf.components();
+        merge_components(records, &components, &medium_peers)
+    }
+}
+
 impl Fuser for IdentityFuser {
     /// Delegates to the inner fuser. Cross-record identity fusion happens in `fuse_many`.
     fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
@@ -159,6 +246,16 @@ impl Fuser for IdentityFuser {
         let per_ip = self.inner.fuse_many(outcomes)?;
         Ok(self.correlate(per_ip))
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum BucketKey {
+    Mac(String),
+    SysName(String),
+    SshHostKey(String),
+    TlsSubject(String),
+    TlsSanName(String),
+    ReverseDnsName(String),
 }
 
 type ContributionFn = fn(&IdentityHints, &DeviceRecord, &DeviceRecord) -> f64;
@@ -682,18 +779,15 @@ fn parse_mac_prefix(mac: &str) -> Option<[u8; 5]> {
     Some(bytes)
 }
 
+fn normalize_mac(mac: &str) -> String {
+    mac.chars()
+        .filter(|c| *c != ':' && *c != '-')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 fn mac_equal(a: &str, b: &str) -> bool {
-    let na: String = a
-        .chars()
-        .filter(|c| *c != ':' && *c != '-')
-        .flat_map(|c| c.to_lowercase())
-        .collect();
-    let nb: String = b
-        .chars()
-        .filter(|c| *c != ':' && *c != '-')
-        .flat_map(|c| c.to_lowercase())
-        .collect();
-    na == nb
+    normalize_mac(a) == normalize_mac(b)
 }
 
 #[cfg(test)]
@@ -2060,5 +2154,234 @@ mod tests {
         let a = base_record(1, None, vec![Signal::SnmpSysName(String::new())], 0.3);
         let b = base_record(2, None, vec![Signal::SnmpSysName(String::new())], 0.3);
         assert_eq!(contribute_sysname(&IdentityHints::default(), &a, &b), 0.0);
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() >> 33) as usize % n
+        }
+
+        fn chance(&mut self, num: u64, den: u64) -> bool {
+            self.next() % den < num
+        }
+    }
+
+    const MAC_POOL: &[Option<&str>] = &[
+        Some("aa:bb:cc:11:22:33"),
+        Some("AA-BB-CC-11-22-33"),
+        Some("dd:ee:ff:44:55:66"),
+        Some("00:00:5e:00:01:0a"),
+        Some("00:00:0c:07:ac:01"),
+        Some("de:ad:be:ef:00:01"),
+        None,
+        None,
+    ];
+    const SYSNAME_POOL: &[&str] = &["core-sw01", "CORE-SW01", "edge-rtr02", "", "leaf-03"];
+    const SSH_POOL: &[&str] = &["ssh-ed25519 AAAAKEY1", "ssh-rsa AAAAKEY2", ""];
+    const TLS_SUBJECT_POOL: &[&str] = &["router.example.com", "sw.example.com", ""];
+    const TLS_SAN_POOL: &[&str] = &["router.example.com", "vip.example.com", "ip:10.0.0.1", ""];
+    const RDNS_POOL: &[&str] = &[
+        "router.example.com",
+        "Router.Example.Com",
+        "host-a.example.com",
+        "",
+    ];
+    const MFR_POOL: &[Option<&str>] = &[
+        Some("Cisco Systems, Inc"),
+        Some("Juniper Networks"),
+        Some("cisco systems, inc"),
+        None,
+        None,
+    ];
+
+    fn random_record(lcg: &mut Lcg, octet: u8) -> DeviceRecord {
+        let mac = MAC_POOL[lcg.below(MAC_POOL.len())];
+        let mut signals = Vec::new();
+        if let Some(m) = mac {
+            signals.push(Signal::Mac(m.to_string()));
+        }
+        if lcg.chance(3, 4) {
+            signals.push(Signal::SnmpSysName(
+                SYSNAME_POOL[lcg.below(SYSNAME_POOL.len())].to_string(),
+            ));
+        }
+        if lcg.chance(1, 2) {
+            signals.push(Signal::SshHostKey(
+                SSH_POOL[lcg.below(SSH_POOL.len())].to_string(),
+            ));
+        }
+        if lcg.chance(1, 2) {
+            signals.push(Signal::TlsSubject(
+                TLS_SUBJECT_POOL[lcg.below(TLS_SUBJECT_POOL.len())].to_string(),
+            ));
+        }
+        for _ in 0..lcg.below(3) {
+            signals.push(Signal::TlsSanName(
+                TLS_SAN_POOL[lcg.below(TLS_SAN_POOL.len())].to_string(),
+            ));
+        }
+        for _ in 0..lcg.below(3) {
+            signals.push(Signal::ReverseDnsName(
+                RDNS_POOL[lcg.below(RDNS_POOL.len())].to_string(),
+            ));
+        }
+        if lcg.chance(1, 2) {
+            signals.push(Signal::OpenPort(22));
+        }
+        let confidence = 0.1 + (lcg.below(8) as f64) * 0.1;
+        let mut record = base_record(octet, mac, signals, confidence);
+        record.manufacturer = MFR_POOL[lcg.below(MFR_POOL.len())].map(str::to_string);
+        record
+    }
+
+    fn hinted_fuser() -> IdentityFuser {
+        make_fuser(IdentityHints {
+            vrrp_groups: vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 250)),
+                virtual_mac: "de:ad:be:ef:00:01".into(),
+                members: vec![
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
+                ],
+            }],
+        })
+    }
+
+    fn assert_bucketed_matches_bruteforce(
+        f: &IdentityFuser,
+        records: &[DeviceRecord],
+        label: &str,
+    ) {
+        let mut got = f.compute_pair_weights(records);
+        let mut want = f.compute_pair_weights_bruteforce(records);
+        got.sort_by_key(|t| (t.0, t.1));
+        want.sort_by_key(|t| (t.0, t.1));
+        assert_eq!(got, want, "{label}: pair-weight set diverged");
+
+        let bucketed = f.correlate(records.to_vec());
+        let brute = f.correlate_bruteforce(records.to_vec());
+        assert_eq!(
+            serde_json::to_string(&bucketed).expect("serialize bucketed"),
+            serde_json::to_string(&brute).expect("serialize bruteforce"),
+            "{label}: correlate output diverged",
+        );
+    }
+
+    fn single_signal_corpus() -> Vec<DeviceRecord> {
+        vec![
+            base_record(
+                1,
+                Some("aa:bb:cc:11:22:33"),
+                vec![Signal::Mac("aa:bb:cc:11:22:33".into())],
+                0.3,
+            ),
+            base_record(
+                2,
+                Some("AA-BB-CC-11-22-33"),
+                vec![Signal::Mac("AA-BB-CC-11-22-33".into())],
+                0.3,
+            ),
+            base_record(3, None, vec![Signal::SnmpSysName("Core-SW01".into())], 0.3),
+            base_record(4, None, vec![Signal::SnmpSysName("core-sw01".into())], 0.3),
+            base_record(
+                5,
+                None,
+                vec![Signal::SshHostKey("ssh-ed25519 AAAAKEY".into())],
+                0.3,
+            ),
+            base_record(
+                6,
+                None,
+                vec![Signal::SshHostKey("ssh-ed25519 AAAAKEY".into())],
+                0.3,
+            ),
+            base_record(
+                7,
+                None,
+                vec![Signal::TlsSubject("router.example.com".into())],
+                0.3,
+            ),
+            base_record(
+                8,
+                None,
+                vec![Signal::TlsSubject("router.example.com".into())],
+                0.3,
+            ),
+            base_record(
+                9,
+                None,
+                vec![Signal::TlsSanName("vip.example.com".into())],
+                0.3,
+            ),
+            base_record(
+                10,
+                None,
+                vec![Signal::TlsSanName("vip.example.com".into())],
+                0.3,
+            ),
+            base_record(
+                11,
+                None,
+                vec![Signal::ReverseDnsName("Host-A.example.com".into())],
+                0.3,
+            ),
+            base_record(
+                12,
+                None,
+                vec![Signal::ReverseDnsName("host-a.example.com".into())],
+                0.3,
+            ),
+            base_record(13, None, vec![Signal::OpenPort(22)], 0.3),
+            base_record(
+                14,
+                Some("99:99:99:99:99:99"),
+                vec![Signal::Mac("99:99:99:99:99:99".into())],
+                0.3,
+            ),
+        ]
+    }
+
+    #[test]
+    fn bucketed_pair_weights_match_bruteforce_on_single_signal_corpus() {
+        let records = single_signal_corpus();
+        assert_bucketed_matches_bruteforce(
+            &make_fuser(IdentityHints::default()),
+            &records,
+            "single-signal corpus",
+        );
+    }
+
+    #[test]
+    fn bucketed_pair_weights_match_bruteforce_over_random_corpora() {
+        for seed in 0..300u64 {
+            let mut lcg = Lcg(seed
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(0xD1B5_4A32_D192_ED03));
+            let n = 12 + lcg.below(30);
+            let records: Vec<DeviceRecord> = (0..n)
+                .map(|idx| random_record(&mut lcg, (idx + 1) as u8))
+                .collect();
+            assert_bucketed_matches_bruteforce(
+                &make_fuser(IdentityHints::default()),
+                &records,
+                &format!("seed {seed} (default hints)"),
+            );
+            assert_bucketed_matches_bruteforce(
+                &hinted_fuser(),
+                &records,
+                &format!("seed {seed} (vrrp hints)"),
+            );
+        }
     }
 }

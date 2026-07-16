@@ -141,6 +141,11 @@ The SSH prober follows the same permissive posture without a toggle: it offers l
 - Pre-build invariant content (label prefixes, validated names) at construction time.
 - Use `BufWriter` for any file or socket sink.
 - Benchmark before optimizing. Do not optimize speculatively.
+- `IdentityFuser` correlation is bucketed, not a full pair scan: records are indexed by their correlation values (MAC, sysName, SSH host key, TLS subject, TLS SAN, reverse DNS) and only intra-bucket pairs are weighed. Any new correlation contribution must add a matching bucket key derived from the *same* helper and normalization the contribution's equality test uses, or the bucketed candidate set silently drops a merge. The differential test in `fuser/identity.rs` pins bucketed output against a `#[cfg(test)]` brute-force reference and must stay green.
+
+## Trait Shape
+
+The batch-shaped contracts `Fuser::fuse_many(Vec) -> Result<Vec>` and `Scheduler::run -> Vec<Result>` collect the whole result set before returning; a future streaming rearchitecture is where those shapes change. No new external caller of either may be added without recording it here first, so the streaming migration has a single, complete list of call sites to convert.
 
 ## Testing
 
