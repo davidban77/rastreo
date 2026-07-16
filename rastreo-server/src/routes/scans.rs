@@ -1082,6 +1082,7 @@ mod tests {
             credentials: rastreo_core::NatsCredentials::default(),
             flush_mode: rastreo_core::NatsFlushMode::default(),
             dead_letter: None,
+            retry: rastreo_core::SinkRetry::default(),
         });
 
         let plan = dry_run_plan(&state, &s, "nats-plan".to_string()).await;

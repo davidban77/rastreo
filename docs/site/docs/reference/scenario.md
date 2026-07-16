@@ -284,6 +284,7 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 | `dead_letter` | object | no | Optional quarantine topic for records the primary produce refused. Omit to preserve the pre-existing "return error, retain buffer" behavior on produce failure. |
 | `tls` | object | no | Optional TLS for the broker connection. `verify` defaults to `false`. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
 | `sasl` | object | no | Optional SASL credentials (`plain`, `scram_sha_256`, or `scram_sha_512`). See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
+| `retry` | object | no | Bounded backoff on the primary produce before the DLQ. Defaults to 3 attempts, 100 ms initial / 2000 ms max backoff. Set `max_attempts: 1` to disable. See below. |
 
 ```json
 {
@@ -298,6 +299,14 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 The `flush_mode` field is itself an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each Kafka message. `per_record` sends each record immediately and prioritises freshness over throughput. `batched` buffers records and sends them in one produce request when the buffer reaches `threshold_bytes` (default 65536); each record is still its own message, so batching raises throughput without changing the wire framing. Inside `batched`, `threshold_bytes` is optional and defaults to 64 KiB.
 
 The `dead_letter` field carries two properties: `topic` (required, the DLQ Kafka topic name) and `include_error_metadata` (optional, default `true`). When enabled, DLQ messages carry three headers: `x-rastreo-source-topic`, `x-rastreo-error-class` (currently always `produce_failure`), and `x-rastreo-dlq-timestamp` (RFC 3339 UTC). See [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue) for the failure model and consumer guidance.
+
+The `retry` field tunes how the sink handles a transient primary-produce failure before it falls back to the DLQ. It carries three optional integer fields:
+
+- `max_attempts` — total primary produce attempts including the first. Default `3`. Set `1` to disable retry, sending the record to the DLQ on the first failure.
+- `backoff_initial_ms` — milliseconds to wait before the first retry. Default `100`.
+- `backoff_max_ms` — the largest wait between attempts, in milliseconds. Default `2000`.
+
+The wait doubles after each failed attempt, capped at `backoff_max_ms`. Retry is on by default; omit the block to get these defaults. The same `retry` shape and defaults apply to the `nats` sink. See [Sinks · Retrying before the dead-letter queue](../discover/sinks.md#retrying-before-the-dead-letter-queue).
 
 The `tls` and `sasl` fields secure the broker connection. `tls` carries `verify` (default `false`) and an optional `ca_cert` PEM string, read only when `verify: true`. `sasl` carries `mechanism` (`plain`, `scram_sha_256`, or `scram_sha_512`), `username`, and `password`. The two blocks are independent, so `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL` brokers all compose. Keep `password` and `ca_cert` in `${VAR}` environment references or `!file` mounts — see [Secrets](secrets.md). See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication) for full examples.
 
@@ -329,6 +338,7 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
 | `credentials` | object | no | Auth details. Defaults to anonymous. See below. |
 | `flush_mode` | object | no | Flush mode. Defaults to `per_record`. See below. |
 | `dead_letter` | object | no | Optional quarantine subject for records the primary publish or JetStream ack refused. Omit to preserve the pre-existing "return error, retain buffer/pending" behavior on failure. |
+| `retry` | object | no | Bounded backoff on the primary publish before the DLQ. Same shape and defaults as the `kafka` sink. Set `max_attempts: 1` to disable. See below. |
 
 ```json
 {
@@ -370,6 +380,8 @@ The `flush_mode` field is an internally-tagged object with two variants. Both pu
 ```
 
 The `dead_letter` field carries three properties: `stream` (required, the DLQ JetStream stream name), `subject` (required, the DLQ subject), and `include_error_metadata` (optional, default `true`). When enabled, DLQ messages carry three headers: `x-rastreo-source-subject`, `x-rastreo-error-class` (either `publish_failure` for a synchronous `publish()` failure or `ack_rejection` when JetStream refused durable storage), and `x-rastreo-dlq-timestamp` (RFC 3339 UTC). The DLQ stream must exist on the same NATS cluster as the primary stream; construction fails fast if it is missing. See [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue_1) for the failure model, error-class taxonomy, and consumer guidance.
+
+The `retry` field has the same three integer fields and defaults as the `kafka` sink (`max_attempts: 3`, `backoff_initial_ms: 100`, `backoff_max_ms: 2000`). It retries the synchronous publish only. A JetStream ack rejection is not retried, because the message may already be stored; it goes straight to the DLQ as `ack_rejection`. See [Sinks · Retrying before the dead-letter queue](../discover/sinks.md#retrying-before-the-dead-letter-queue_1).
 
 ```json
 {"stream": "rastreo-dlq", "subject": "rastreo.discovery.dlq", "include_error_metadata": true}

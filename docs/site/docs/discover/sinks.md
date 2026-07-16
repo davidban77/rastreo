@@ -55,6 +55,36 @@ rastreo discover \
 
 Secured brokers — Confluent Cloud, Amazon MSK, any `SASL_SSL` listener — need TLS and SASL settings that the CLI flags do not cover. Configure them with `tls` and `sasl` blocks in a scenario file. The TLS `verify` field defaults to `false` (accept any certificate); set `verify: true` on production brokers. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication) for the full config surface and a Confluent Cloud example.
 
+### Retrying before the dead-letter queue
+
+A brief broker reconnect should not fill the dead-letter queue. The Kafka sink retries the primary produce with bounded backoff before it falls back to the DLQ. A short outage that clears within the retry budget reaches the primary topic and is never quarantined.
+
+Retry is on by default. Every Kafka sink retries even with no `retry` block. Add the block to change the limits. It has three fields:
+
+- `max_attempts` — the total number of primary produce attempts, including the first. The default `3` is the first attempt plus two retries. Set `1` to disable retry: the record goes to the DLQ on the first failure.
+- `backoff_initial_ms` — the wait before the first retry, in milliseconds. Default `100`.
+- `backoff_max_ms` — the largest wait between attempts, in milliseconds. Default `2000`.
+
+The wait doubles after each failed attempt and stops growing at `backoff_max_ms`. With the defaults, the sink waits 100 ms, then 200 ms.
+
+```yaml
+sink:
+  type: kafka
+  brokers: [kafka-0.internal:9092]
+  topic: rastreo.discovery.records
+  retry:
+    max_attempts: 5
+    backoff_initial_ms: 100
+    backoff_max_ms: 2000
+  dead_letter:
+    topic: rastreo.discovery.dlq
+```
+
+Only the primary produce is retried. The DLQ produce is never retried. The total time is bounded: worst case is `max_attempts` produce attempts plus the capped waits between them. A failing sink cannot hang.
+
+!!! tip "Disabling retry"
+    Set `max_attempts: 1` to keep the earlier behavior: the record goes to the DLQ on the first primary failure, with no retry in between.
+
 ### Dead-letter queue
 
 The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). When the primary produce fails and a DLQ is configured, the sink publishes the same payload to the DLQ topic, logs a `WARN`, and returns success — the buffer is drained and the pipeline moves on. When no DLQ is configured, the primary failure surfaces as an error and the buffer is retained for `flush()` retry (the pre-existing behavior).
@@ -118,6 +148,36 @@ sink:
 ```bash
 rastreo discover --file scenario.yaml
 ```
+
+### Retrying before the dead-letter queue
+
+The NATS sink retries the primary publish with bounded backoff before it falls back to the DLQ. A short broker outage that clears within the retry budget reaches the primary subject and is never quarantined. Retry works the same way as the Kafka sink, with the same `retry` block and defaults.
+
+The block has three fields:
+
+- `max_attempts` — the total number of primary publish attempts, including the first. The default `3` is the first attempt plus two retries. Set `1` to disable retry.
+- `backoff_initial_ms` — the wait before the first retry, in milliseconds. Default `100`.
+- `backoff_max_ms` — the largest wait between attempts, in milliseconds. Default `2000`.
+
+```yaml
+sink:
+  type: nats
+  servers: ["nats://nats-0.internal:4222"]
+  subject: rastreo.discovery.records.v1
+  stream: rastreo
+  retry:
+    max_attempts: 5
+    backoff_initial_ms: 100
+    backoff_max_ms: 2000
+  dead_letter:
+    stream: rastreo-dlq
+    subject: rastreo.discovery.dlq
+```
+
+Retry covers the synchronous publish only. A JetStream ack rejection is not retried, because the message may already be stored and re-publishing it could duplicate the record. An ack rejection goes straight to the DLQ with error class `ack_rejection`. The DLQ publish is never retried either.
+
+!!! tip "Disabling retry"
+    Set `max_attempts: 1` to keep the earlier behavior: the record goes to the DLQ on the first primary publish failure, with no retry in between.
 
 ### Dead-letter queue
 

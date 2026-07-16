@@ -694,6 +694,7 @@ fn build_sink_config_for_kind(kind: SinkKind, args: &DiscoverArgs) -> Result<Sin
                 dead_letter: None,
                 tls: None,
                 sasl: None,
+                retry: rastreo_core::SinkRetry::default(),
             })
         }
     }

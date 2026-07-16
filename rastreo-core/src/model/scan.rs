@@ -253,6 +253,7 @@ mod tests {
                     },
                     flush_mode: Default::default(),
                     dead_letter: None,
+                    retry: Default::default(),
                 }),
                 ..Default::default()
             },

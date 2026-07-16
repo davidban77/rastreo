@@ -21,7 +21,10 @@ use rustls::{
 
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
-use crate::sink::{Sink, SinkError, SinkErrorClass, SinkType, SINK_ERROR_CLASS_COUNT};
+use crate::sink::{
+    retry_with_backoff, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
+    SINK_ERROR_CLASS_COUNT,
+};
 
 /// Quarantine topic configuration for records the primary Kafka produce refused.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -288,6 +291,7 @@ pub struct KafkaSink {
     dlq_delivered: AtomicU64,
     tls_config: Option<Arc<ClientConfig>>,
     sasl: Option<KafkaSasl>,
+    retry: SinkRetry,
 }
 
 impl std::fmt::Debug for KafkaSink {
@@ -301,6 +305,7 @@ impl std::fmt::Debug for KafkaSink {
             .field("last_write_delivered", &self.last_write_delivered)
             .field("dlq_topic", &self.dlq_topic)
             .field("include_error_metadata", &self.include_error_metadata)
+            .field("retry", &self.retry)
             .finish_non_exhaustive()
     }
 }
@@ -405,11 +410,17 @@ impl KafkaSink {
             dlq_delivered: AtomicU64::new(0),
             tls_config,
             sasl,
+            retry: SinkRetry::default(),
         })
     }
 
     pub fn with_flush_mode(mut self, mode: KafkaFlushMode) -> Self {
         self.buffer_threshold = mode.to_threshold();
+        self
+    }
+
+    pub fn with_retry(mut self, retry: SinkRetry) -> Self {
+        self.retry = retry;
         self
     }
 
@@ -462,15 +473,29 @@ impl KafkaSink {
             return Ok(());
         }
         let record_count = self.buffer.len() as u64;
-        // One Record per entry: N entries produce N individually-consumable messages in one round-trip.
-        let primary_records = build_records(&self.buffer, &BTreeMap::new(), Utc::now());
+        let timestamp = Utc::now();
 
-        let primary_err = match self
-            .client
-            .produce(primary_records, Compression::NoCompression)
+        // Retry the primary produce before the DLQ: a transient blip that clears within
+        // the attempt budget is delivered to the primary and never quarantined.
+        let primary_result = {
+            let client = &self.client;
+            let buffer = &self.buffer;
+            let topic = &self.topic;
+            let brokers = &self.brokers;
+            retry_with_backoff(&self.retry, || async move {
+                // One Record per entry: N entries produce N individually-consumable messages in one round-trip.
+                let records = build_records(buffer, &BTreeMap::new(), timestamp);
+                client
+                    .produce(records, Compression::NoCompression)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| build_produce_error(topic, brokers, e))
+            })
             .await
-        {
-            Ok(_) => {
+        };
+
+        let primary_err = match primary_result {
+            Ok(()) => {
                 self.clear_buffer();
                 return Ok(());
             }
@@ -480,7 +505,7 @@ impl KafkaSink {
         let (Some(dlq_client), Some(dlq_topic)) =
             (self.dlq_client.as_ref(), self.dlq_topic.as_ref())
         else {
-            return Err(build_produce_error(&self.topic, &self.brokers, primary_err));
+            return Err(primary_err);
         };
 
         tracing::warn!(
@@ -516,7 +541,7 @@ impl KafkaSink {
                     dlq_error = %dlq_err,
                     "kafka sink: DLQ produce also failed; retaining buffer",
                 );
-                Err(build_produce_error(&self.topic, &self.brokers, primary_err))
+                Err(primary_err)
             }
         }
     }
@@ -764,12 +789,14 @@ mod tests {
                 dead_letter,
                 tls,
                 sasl,
+                retry,
             } => {
                 assert_eq!(brokers, vec!["kafka:9092".to_string()]);
                 assert_eq!(topic, "rastreo.devices");
                 assert!(dead_letter.is_none());
                 assert!(tls.is_none());
                 assert!(sasl.is_none());
+                assert_eq!(retry, SinkRetry::default());
                 match flush_mode {
                     KafkaFlushMode::Batched { threshold_bytes } => {
                         assert_eq!(threshold_bytes, KafkaSink::DEFAULT_BUFFER_THRESHOLD);
@@ -1238,6 +1265,7 @@ mod tests {
                 username: "svc".into(),
                 password: Password("supersecret".into()),
             }),
+            retry: SinkRetry::default(),
         };
         let json = serde_json::to_string(&config).expect("serialize");
         assert!(

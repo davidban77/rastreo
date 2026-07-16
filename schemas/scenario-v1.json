@@ -1149,6 +1149,14 @@
                 "type": "batched"
               }
             },
+            "retry": {
+              "$ref": "#/$defs/SinkRetry",
+              "default": {
+                "backoff_initial_ms": 100,
+                "backoff_max_ms": 2000,
+                "max_attempts": 3
+              }
+            },
             "sasl": {
               "anyOf": [
                 {
@@ -1208,6 +1216,14 @@
                 "type": "per_record"
               }
             },
+            "retry": {
+              "$ref": "#/$defs/SinkRetry",
+              "default": {
+                "backoff_initial_ms": 100,
+                "backoff_max_ms": 2000,
+                "max_attempts": 3
+              }
+            },
             "servers": {
               "items": {
                 "type": "string"
@@ -1234,6 +1250,30 @@
           "type": "object"
         }
       ]
+    },
+    "SinkRetry": {
+      "description": "Bounded exponential-backoff retry policy for a sink's primary delivery.\n\n`max_attempts` counts total primary attempts: `1` disables retry (today's\nimmediate-DLQ behavior), `3` (the default) is the initial attempt plus two retries.",
+      "properties": {
+        "backoff_initial_ms": {
+          "default": 100,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "backoff_max_ms": {
+          "default": 2000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
     },
     "SnmpVersion": {
       "enum": [
