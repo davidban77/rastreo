@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -225,6 +226,37 @@ fn configure_client_builder(
     builder
 }
 
+async fn connect_partition_client(
+    brokers: &[String],
+    topic: &str,
+    tls_config: Option<&Arc<ClientConfig>>,
+    sasl: Option<&KafkaSasl>,
+) -> Result<PartitionClient, RastreoError> {
+    let brokers_for_err = brokers.join(",");
+    let kafka_client = configure_client_builder(brokers.to_vec(), tls_config, sasl)
+        .build()
+        .await
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("kafka sink: failed to connect to broker(s) '{brokers_for_err}': {e}"),
+            )
+        })
+        .map_err(SinkError::other)?;
+
+    // Single-partition: always produces to partition 0.
+    let client = kafka_client
+        .partition_client(topic.to_string(), 0, UnknownTopicHandling::Retry)
+        .await
+        .map_err(|e| {
+            io::Error::other(format!(
+                "kafka sink: failed to get partition client for topic '{topic}' at broker(s) '{brokers_for_err}': {e}"
+            ))
+        })
+        .map_err(SinkError::other)?;
+    Ok(client)
+}
+
 const HEADER_SOURCE_TOPIC: &str = "x-rastreo-source-topic";
 const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
 const HEADER_DLQ_TIMESTAMP: &str = "x-rastreo-dlq-timestamp";
@@ -360,6 +392,8 @@ fn build_dlq_headers(source_topic: &str, error_class: SinkErrorClass) -> BTreeMa
 impl KafkaSink {
     pub const DEFAULT_BUFFER_THRESHOLD: usize = 64 * 1024;
 
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// Assumes a config already validated by `create_sink`; does not re-validate before connecting.
     pub async fn new(
         brokers: Vec<String>,
@@ -367,36 +401,37 @@ impl KafkaSink {
         tls: Option<KafkaTls>,
         sasl: Option<KafkaSasl>,
     ) -> Result<Self, RastreoError> {
+        Self::new_with_connect_timeout(brokers, topic, tls, sasl, Self::CONNECT_TIMEOUT).await
+    }
+
+    async fn new_with_connect_timeout(
+        brokers: Vec<String>,
+        topic: String,
+        tls: Option<KafkaTls>,
+        sasl: Option<KafkaSasl>,
+        connect_timeout: Duration,
+    ) -> Result<Self, RastreoError> {
         let tls_config = match &tls {
             Some(tls) => Some(tls.build_client_config()?),
             None => None,
         };
 
         let brokers_for_err = brokers.join(",");
-        let kafka_client =
-            configure_client_builder(brokers.clone(), tls_config.as_ref(), sasl.as_ref())
-                .build()
-                .await
-                .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::ConnectionRefused,
-                        format!(
-                            "kafka sink: failed to connect to broker(s) '{brokers_for_err}': {e}"
-                        ),
-                    )
-                })
-                .map_err(SinkError::other)?;
 
-        // Single-partition: always produces to partition 0.
-        let client = kafka_client
-            .partition_client(topic.clone(), 0, UnknownTopicHandling::Retry)
+        // Bound the whole connect: a black-hole broker never completes the handshake and would hang forever.
+        let connect =
+            connect_partition_client(&brokers, &topic, tls_config.as_ref(), sasl.as_ref());
+        let client = tokio::time::timeout(connect_timeout, connect)
             .await
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "kafka sink: failed to get partition client for topic '{topic}' at broker(s) '{brokers_for_err}': {e}"
+            .map_err(|_elapsed| {
+                SinkError::other(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "kafka sink: connecting to broker(s) '{brokers_for_err}' timed out after {}s",
+                        connect_timeout.as_secs()
+                    ),
                 ))
-            })
-            .map_err(SinkError::other)?;
+            })??;
 
         Ok(Self {
             topic,
@@ -434,30 +469,24 @@ impl KafkaSink {
 
         let brokers_for_err = self.brokers.join(",");
         let dlq_topic = config.topic.clone();
-        let kafka_client = configure_client_builder(
-            self.brokers.clone(),
+
+        let connect = connect_partition_client(
+            &self.brokers,
+            &dlq_topic,
             self.tls_config.as_ref(),
             self.sasl.as_ref(),
-        )
-        .build()
-        .await
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    format!("kafka sink: failed to connect to broker(s) '{brokers_for_err}' for dead-letter topic '{dlq_topic}': {e}"),
-                )
-            })
-            .map_err(SinkError::other)?;
-
-        let dlq_client = kafka_client
-            .partition_client(dlq_topic.clone(), 0, UnknownTopicHandling::Retry)
+        );
+        let dlq_client = tokio::time::timeout(Self::CONNECT_TIMEOUT, connect)
             .await
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "kafka sink: failed to get partition client for dead-letter topic '{dlq_topic}' at broker(s) '{brokers_for_err}': {e}"
+            .map_err(|_elapsed| {
+                SinkError::other(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "kafka sink: connecting to broker(s) '{brokers_for_err}' for dead-letter topic '{dlq_topic}' timed out after {}s",
+                        Self::CONNECT_TIMEOUT.as_secs()
+                    ),
                 ))
-            })
-            .map_err(SinkError::other)?;
+            })??;
 
         self.dlq_client = Some(dlq_client);
         self.dlq_topic = Some(dlq_topic);
@@ -629,6 +658,40 @@ mod tests {
     #[test]
     fn default_buffer_threshold_is_64_kib() {
         assert_eq!(KafkaSink::DEFAULT_BUFFER_THRESHOLD, 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn new_with_connect_timeout_bounds_a_black_hole_broker() {
+        use std::time::Instant;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+
+        // Accept the TCP connection but never speak Kafka: the handshake read hangs forever.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let start = Instant::now();
+        let result = KafkaSink::new_with_connect_timeout(
+            vec![addr],
+            "t".into(),
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "black-hole broker must fail, not hang");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect must be bounded; took {elapsed:?}"
+        );
     }
 
     #[test]
