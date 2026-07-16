@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tokio::task::{Id, JoinSet};
 use tokio::time::Instant;
 
@@ -61,7 +61,7 @@ pub struct BoundedScheduler {
 impl BoundedScheduler {
     pub const DEFAULT_MAX_CONCURRENT: usize = 64;
 
-    // A cap of 0 would deadlock the semaphore; coerce to 1 (serial) instead of panicking.
+    // A cap of 0 would prime no probes and leave every slot unfilled; coerce to 1 (serial).
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             max_concurrent: max_concurrent.max(1),
@@ -84,6 +84,28 @@ impl BoundedScheduler {
     }
 }
 
+fn spawn_probe(
+    set: &mut JoinSet<Result<ProbeOutcome, RastreoError>>,
+    index_by_id: &mut HashMap<Id, usize>,
+    index: usize,
+    target: ResolvedTarget,
+    prober: &Arc<dyn Prober>,
+    ctx: &ProbeCtx,
+    pacer: &Option<Arc<Pacer>>,
+) {
+    let prober_for_task = Arc::clone(prober);
+    let ctx_for_task = ctx.clone();
+    let pacer_for_task = pacer.clone();
+
+    let handle = set.spawn(async move {
+        if let Some(pacer) = pacer_for_task {
+            pacer.wait_for_slot().await;
+        }
+        prober_for_task.probe(&target, &ctx_for_task).await
+    });
+    index_by_id.insert(handle.id(), index);
+}
+
 #[async_trait::async_trait]
 impl Scheduler for BoundedScheduler {
     async fn run(
@@ -96,34 +118,32 @@ impl Scheduler for BoundedScheduler {
             return Vec::new();
         }
 
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
         let len = targets.len();
 
         // JoinSet aborts every spawned probe on drop, bounding an abandoned scan to the request-timeout instead of leaking detached tasks.
         let mut set: JoinSet<Result<ProbeOutcome, RastreoError>> = JoinSet::new();
         let mut index_by_id: HashMap<Id, usize> = HashMap::with_capacity(len);
-
-        for (index, target) in targets.into_iter().enumerate() {
-            let permit_source = Arc::clone(&semaphore);
-            let prober_for_task = Arc::clone(&prober);
-            let ctx_for_task = ctx.clone();
-            let pacer_for_task = self.pacer.clone();
-
-            let handle = set.spawn(async move {
-                if let Some(pacer) = pacer_for_task {
-                    pacer.wait_for_slot().await;
-                }
-                let _permit = permit_source
-                    .acquire_owned()
-                    .await
-                    .expect("scheduler semaphore is never closed");
-                prober_for_task.probe(&target, &ctx_for_task).await
-            });
-            index_by_id.insert(handle.id(), index);
-        }
-
         let mut slots: Vec<Option<Result<ProbeOutcome, RastreoError>>> =
             (0..len).map(|_| None).collect();
+
+        let mut pending = targets.into_iter().enumerate();
+        for _ in 0..self.max_concurrent {
+            match pending.next() {
+                Some((index, target)) => {
+                    spawn_probe(
+                        &mut set,
+                        &mut index_by_id,
+                        index,
+                        target,
+                        &prober,
+                        &ctx,
+                        &self.pacer,
+                    );
+                }
+                None => break,
+            }
+        }
+
         while let Some(joined) = set.join_next_with_id().await {
             let (id, outcome) = match joined {
                 Ok((id, probe_result)) => (id, probe_result),
@@ -143,6 +163,17 @@ impl Scheduler for BoundedScheduler {
             };
             if let Some(&index) = index_by_id.get(&id) {
                 slots[index] = Some(outcome);
+            }
+            if let Some((index, target)) = pending.next() {
+                spawn_probe(
+                    &mut set,
+                    &mut index_by_id,
+                    index,
+                    target,
+                    &prober,
+                    &ctx,
+                    &self.pacer,
+                );
             }
         }
 
@@ -269,6 +300,40 @@ mod tests {
         ) -> Result<ProbeOutcome, RastreoError> {
             let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(current, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(ProbeOutcome {
+                kind: ProbeKind::TcpConnect,
+                target_ip: target.ip,
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable: true,
+                signals: Vec::new(),
+                fault: None,
+            })
+        }
+    }
+
+    struct SaturationProber {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        probed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Prober for SaturationProber {
+        fn kind(&self) -> ProbeKind {
+            ProbeKind::TcpConnect
+        }
+
+        async fn probe(
+            &self,
+            target: &ResolvedTarget,
+            _ctx: &ProbeCtx,
+        ) -> Result<ProbeOutcome, RastreoError> {
+            self.probed.fetch_add(1, Ordering::SeqCst);
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(current, Ordering::SeqCst);
+            tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
@@ -557,6 +622,46 @@ mod tests {
             "peak in-flight {observed_peak} exceeded cap of 2"
         );
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn feed_loop_saturates_caps_refills_and_orders() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let probed = Arc::new(AtomicUsize::new(0));
+        let prober: Arc<dyn Prober> = Arc::new(SaturationProber {
+            in_flight: Arc::clone(&in_flight),
+            peak: Arc::clone(&peak),
+            probed: Arc::clone(&probed),
+        });
+        let cap = 16;
+        let s = BoundedScheduler::new(cap);
+        let targets: Vec<ResolvedTarget> = (0..500u32)
+            .map(|i| {
+                let ip = IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8));
+                ResolvedTarget {
+                    ip,
+                    original: Target::Ip(ip),
+                    resolved_at: SystemTime::UNIX_EPOCH,
+                }
+            })
+            .collect();
+
+        let out = s.run(prober, targets, ctx()).await;
+
+        assert_eq!(out.len(), 500);
+        assert_eq!(probed.load(Ordering::SeqCst), 500);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            cap,
+            "feed-loop must saturate to and never exceed the cap"
+        );
+        for (i, result) in out.iter().enumerate() {
+            let i = i as u32;
+            let expected = IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8));
+            assert_eq!(result.as_ref().expect("ok").target_ip, expected);
+        }
     }
 
     #[tokio::test]
