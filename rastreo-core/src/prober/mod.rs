@@ -6,6 +6,8 @@ pub mod dns;
 pub mod http;
 #[cfg(feature = "icmp")]
 pub mod icmp;
+#[cfg(any(feature = "arp", feature = "ndp"))]
+mod link_layer;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 mod redacted;
