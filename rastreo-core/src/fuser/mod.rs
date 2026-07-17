@@ -1,4 +1,6 @@
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -28,7 +30,9 @@ pub trait Fuser: Send + Sync {
     fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError>;
 }
 
-/// Groups outcomes by target IP, preserving first-occurrence order.
+/// Groups outcomes by target IP, preserving first-occurrence order. Batch buffer-then-emit helper,
+/// retained as the differential reference for the streaming pipeline and fuser tests.
+#[cfg(test)]
 pub(crate) fn group_outcomes_by_ip(outcomes: Vec<ProbeOutcome>) -> Vec<Vec<ProbeOutcome>> {
     let mut index: HashMap<IpAddr, usize> = HashMap::new();
     let mut groups: Vec<Vec<ProbeOutcome>> = Vec::new();
@@ -45,7 +49,8 @@ pub(crate) fn group_outcomes_by_ip(outcomes: Vec<ProbeOutcome>) -> Vec<Vec<Probe
 }
 
 /// Drives a streaming fuser in batch: groups outcomes by target, ingests each group, then flushes
-/// correlated records at finish.
+/// correlated records at finish. Retained as the differential reference for the streaming pipeline.
+#[cfg(test)]
 pub(crate) fn drive_fuser(
     fuser: &mut dyn Fuser,
     outcomes: Vec<ProbeOutcome>,

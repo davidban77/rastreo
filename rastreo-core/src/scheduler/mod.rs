@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::{Id, JoinSet};
 use tokio::time::Instant;
 
@@ -22,14 +22,18 @@ pub struct TargetScan {
 #[async_trait::async_trait]
 pub trait Scheduler: Send + Sync {
     /// Runs every prober against every target — in-flight probes bounded by the concurrency cap,
-    /// starts paced by the probe rate — and returns each fully-scanned target in target order.
+    /// starts paced by the probe rate — sending each fully-scanned target on `results` the moment
+    /// its last prober completes (completion order). The bounded channel backpressures the scan to
+    /// the consumer's pace, so in-flight state stays bounded by the concurrency window when the sink
+    /// paces the scan.
     async fn run_scan(
         &self,
         probers: Vec<Arc<dyn Prober>>,
         targets: Vec<ResolvedTarget>,
         ctx: ProbeCtx,
         cancel: watch::Receiver<bool>,
-    ) -> Vec<TargetScan>;
+        results: mpsc::Sender<TargetScan>,
+    );
 }
 
 /// Steady min-interval pacer: hands each probe start a monotonically increasing slot spaced `1/rate` apart, so starts never burst.
@@ -129,11 +133,12 @@ impl Scheduler for BoundedScheduler {
         targets: Vec<ResolvedTarget>,
         ctx: ProbeCtx,
         cancel: watch::Receiver<bool>,
-    ) -> Vec<TargetScan> {
+        results: mpsc::Sender<TargetScan>,
+    ) {
         let num_targets = targets.len();
         let num_probers = probers.len();
         if num_targets == 0 || num_probers == 0 {
-            return Vec::new();
+            return;
         }
         let targets = Arc::new(targets);
 
@@ -186,9 +191,13 @@ impl Scheduler for BoundedScheduler {
                     )
                 }
             };
-            if let Some(&(pass_index, target_index)) = coord_by_id.get(&id) {
+            let mut ready_target: Option<usize> = None;
+            if let Some((pass_index, target_index)) = coord_by_id.remove(&id) {
                 slots[target_index][pass_index] = Some(outcome);
                 completed[target_index] += 1;
+                if completed[target_index] == num_probers {
+                    ready_target = Some(target_index);
+                }
             }
             // A live cancel stops new probe starts but lets in-flight probes drain, so a target that
             // already started still reports every prober's outcome instead of a partial record.
@@ -206,29 +215,32 @@ impl Scheduler for BoundedScheduler {
                     );
                 }
             }
-        }
-
-        let mut out = Vec::new();
-        for (target_index, target_slots) in slots.into_iter().enumerate() {
-            if completed[target_index] != num_probers {
-                continue;
+            // Refill happens before the send so an in-flight backpressure block never drops the
+            // window below the cap. `send` awaits when the channel is full, pacing the scan to the
+            // consumer; a receiver-dropped error means the consumer gave up, so stop scanning.
+            if let Some(target_index) = ready_target {
+                let outcomes = std::mem::take(&mut slots[target_index])
+                    .into_iter()
+                    .enumerate()
+                    .map(|(pass_index, slot)| {
+                        (
+                            pass_index,
+                            slot.expect("a fully-scanned target has every prober's outcome"),
+                        )
+                    })
+                    .collect();
+                if results
+                    .send(TargetScan {
+                        target_index,
+                        outcomes,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
-            let outcomes = target_slots
-                .into_iter()
-                .enumerate()
-                .map(|(pass_index, slot)| {
-                    (
-                        pass_index,
-                        slot.expect("a fully-scanned target has every prober's outcome"),
-                    )
-                })
-                .collect();
-            out.push(TargetScan {
-                target_index,
-                outcomes,
-            });
         }
-        out
     }
 }
 
@@ -520,6 +532,37 @@ mod tests {
         vec![prober]
     }
 
+    // Drives the streaming scan to completion, draining every sent target, and returns them sorted
+    // by input-target index so the order/count assertions read against the input ordering.
+    async fn collect(
+        s: &BoundedScheduler,
+        probers: Vec<Arc<dyn Prober>>,
+        targets: Vec<ResolvedTarget>,
+        ctx: ProbeCtx,
+        cancel: watch::Receiver<bool>,
+    ) -> Vec<TargetScan> {
+        let cap = s.max_concurrent().max(1);
+        let (tx, mut rx) = mpsc::channel(cap);
+        let scan = s.run_scan(probers, targets, ctx, cancel, tx);
+        tokio::pin!(scan);
+        let mut out = Vec::new();
+        let mut done = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut scan, if !done => { done = true; }
+                maybe = rx.recv() => {
+                    match maybe {
+                        Some(sc) => out.push(sc),
+                        None => break,
+                    }
+                }
+            }
+        }
+        out.sort_by_key(|s| s.target_index);
+        out
+    }
+
     // Flattens a single-prober scan back to target-ordered results for the order/error assertions.
     fn single_prober_results(scans: Vec<TargetScan>) -> Vec<Result<ProbeOutcome, RastreoError>> {
         scans
@@ -557,7 +600,7 @@ mod tests {
         let s = BoundedScheduler::new(64).with_probe_rate(Some(10));
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let start = Instant::now();
-        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
+        let out = collect(&s, one(prober), targets, ctx(), open_cancel()).await;
         let elapsed = start.elapsed();
         assert_eq!(out.len(), 5);
         assert_eq!(calls.load(Ordering::SeqCst), 5);
@@ -575,7 +618,7 @@ mod tests {
         let s = BoundedScheduler::new(64);
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let start = Instant::now();
-        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
+        let out = collect(&s, one(prober), targets, ctx(), open_cancel()).await;
         let elapsed = start.elapsed();
         assert_eq!(out.len(), 5);
         assert!(
@@ -592,7 +635,7 @@ mod tests {
         let s = BoundedScheduler::new(64).with_probe_rate(Some(0));
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let start = Instant::now();
-        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
+        let out = collect(&s, one(prober), targets, ctx(), open_cancel()).await;
         let elapsed = start.elapsed();
         assert_eq!(out.len(), 5);
         assert!(
@@ -609,7 +652,7 @@ mod tests {
         let s = BoundedScheduler::new(64).with_probe_rate(Some(50));
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let out =
-            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
+            single_prober_results(collect(&s, one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 5);
         for (i, result) in out.iter().enumerate() {
             let octet = (i as u8) + 1;
@@ -625,9 +668,7 @@ mod tests {
             calls: Arc::clone(&calls),
         });
         let s = BoundedScheduler::with_default_concurrency();
-        let out = s
-            .run_scan(one(prober), Vec::new(), ctx(), open_cancel())
-            .await;
+        let out = collect(&s, one(prober), Vec::new(), ctx(), open_cancel()).await;
         assert!(out.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
@@ -636,7 +677,7 @@ mod tests {
     async fn run_scan_with_zero_probers_returns_empty() {
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=3).map(target).collect();
-        let out = s.run_scan(Vec::new(), targets, ctx(), open_cancel()).await;
+        let out = collect(&s, Vec::new(), targets, ctx(), open_cancel()).await;
         assert!(out.is_empty());
     }
 
@@ -649,7 +690,7 @@ mod tests {
         let s = BoundedScheduler::with_default_concurrency();
         let t = target(1);
         let out =
-            single_prober_results(s.run_scan(one(prober), vec![t], ctx(), open_cancel()).await);
+            single_prober_results(collect(&s, one(prober), vec![t], ctx(), open_cancel()).await);
         assert_eq!(out.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let outcome = out[0].as_ref().expect("ok");
@@ -665,7 +706,7 @@ mod tests {
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let out =
-            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
+            single_prober_results(collect(&s, one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 5);
         assert_eq!(calls.load(Ordering::SeqCst), 5);
         for (i, result) in out.iter().enumerate() {
@@ -676,15 +717,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_scan_preserves_input_order_under_variable_latency() {
-        // Higher-octet targets finish first; result order must still follow input order.
+    async fn run_scan_surfaces_every_target_under_variable_latency() {
+        // Higher-octet targets finish first; the drain sorts by target_index, so every target is
+        // surfaced with its own outcome regardless of completion order.
         let prober: Arc<dyn Prober> = Arc::new(DelayProber {
             delays_us: vec![50_000, 40_000, 30_000, 20_000, 10_000],
         });
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (0u8..5).map(target).collect();
         let out =
-            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
+            single_prober_results(collect(&s, one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 5);
         for (i, result) in out.iter().enumerate() {
             let expected = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8));
@@ -711,7 +753,7 @@ mod tests {
         let targets: Vec<ResolvedTarget> = (0u8..4).map(target).collect();
         let s = BoundedScheduler::with_default_concurrency();
 
-        let scans = s.run_scan(probers, targets, ctx(), open_cancel()).await;
+        let scans = collect(&s, probers, targets, ctx(), open_cancel()).await;
 
         assert_eq!(scans.len(), 4, "every target fully scanned");
         assert_eq!(probed.load(Ordering::SeqCst), 12, "3 probers x 4 targets");
@@ -742,7 +784,7 @@ mod tests {
         let targets = vec![target(7)];
         let s = BoundedScheduler::with_default_concurrency();
 
-        let scans = s.run_scan(probers, targets, ctx(), open_cancel()).await;
+        let scans = collect(&s, probers, targets, ctx(), open_cancel()).await;
         assert_eq!(scans.len(), 1);
         for (pass_index, (tagged, result)) in scans[0].outcomes.iter().enumerate() {
             assert_eq!(*tagged, pass_index);
@@ -760,9 +802,10 @@ mod tests {
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=8).map(target).collect();
 
+        let (tx, _rx) = mpsc::channel(64);
         let dropped = tokio::time::timeout(
             Duration::from_millis(50),
-            s.run_scan(one(prober), targets, ctx(), open_cancel()),
+            s.run_scan(one(prober), targets, ctx(), open_cancel(), tx),
         )
         .await;
         assert!(
@@ -792,7 +835,7 @@ mod tests {
         let (tx, rx) = watch::channel(false);
         tx.send(true).expect("send cancel");
 
-        let out = s.run_scan(one(prober), targets, ctx(), rx).await;
+        let out = collect(&s, one(prober), targets, ctx(), rx).await;
         assert!(out.is_empty(), "a pre-cancelled scan primes no probes");
         assert_eq!(started.load(Ordering::SeqCst), 0);
     }
@@ -810,7 +853,7 @@ mod tests {
         let targets: Vec<ResolvedTarget> = (0u8..5).map(target).collect();
 
         let (tx, rx) = watch::channel(false);
-        let (out, _) = tokio::join!(s.run_scan(one(prober), targets, ctx(), rx), async {
+        let (out, _) = tokio::join!(collect(&s, one(prober), targets, ctx(), rx), async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             tx.send(true).expect("send cancel");
         });
@@ -838,7 +881,7 @@ mod tests {
         });
         let s = BoundedScheduler::new(2);
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
-        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
+        let out = collect(&s, one(prober), targets, ctx(), open_cancel()).await;
         assert_eq!(out.len(), 5);
         let observed_peak = peak.load(Ordering::SeqCst);
         assert!(
@@ -873,7 +916,7 @@ mod tests {
             .collect();
 
         let out =
-            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
+            single_prober_results(collect(&s, one(prober), targets, ctx(), open_cancel()).await);
 
         assert_eq!(out.len(), 500);
         assert_eq!(probed.load(Ordering::SeqCst), 500);
@@ -922,7 +965,7 @@ mod tests {
             })
             .collect();
 
-        let scans = s.run_scan(probers, targets, ctx(), open_cancel()).await;
+        let scans = collect(&s, probers, targets, ctx(), open_cancel()).await;
 
         assert_eq!(scans.len(), 100);
         assert_eq!(
@@ -944,7 +987,7 @@ mod tests {
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=4).map(target).collect();
         let out =
-            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
+            single_prober_results(collect(&s, one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 4);
         assert!(out[0].is_ok());
         assert!(out[1].is_ok());
@@ -961,7 +1004,7 @@ mod tests {
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=3).map(target).collect();
         let out =
-            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
+            single_prober_results(collect(&s, one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 3);
         assert!(out[0].is_ok());
         assert!(matches!(
@@ -983,9 +1026,7 @@ mod tests {
         });
         let scheduler = BoundedScheduler::with_default_concurrency();
         let out = single_prober_results(
-            scheduler
-                .run_scan(one(prober), resolved, ctx(), open_cancel())
-                .await,
+            collect(&scheduler, one(prober), resolved, ctx(), open_cancel()).await,
         );
         assert_eq!(out.len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
