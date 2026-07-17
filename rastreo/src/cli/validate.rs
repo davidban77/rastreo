@@ -77,6 +77,9 @@ fn validate_scenario(cfg: &DiscoverScenarioConfig) -> Result<(), String> {
     if let Some(sink) = &cfg.base.sink {
         sink.validate().map_err(|e| e.to_string())?;
     }
+    if let Some(fuser) = &cfg.base.fuser {
+        fuser.validate().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -84,7 +87,7 @@ fn validate_scenario(cfg: &DiscoverScenarioConfig) -> Result<(), String> {
 mod tests {
     use super::*;
     use rastreo_core::config::BaseProbeConfig;
-    use rastreo_core::{ProberConfig, SinkConfig, Target};
+    use rastreo_core::{FuserConfig, IdentityHints, ProberConfig, SinkConfig, Target};
     use std::io::Write;
 
     fn scenario(
@@ -95,6 +98,20 @@ mod tests {
         let mut base = BaseProbeConfig::new();
         base.sink = sink;
         DiscoverScenarioConfig::new(base, targets, probers)
+    }
+
+    fn scenario_with_fuser(fuser: FuserConfig) -> DiscoverScenarioConfig {
+        let mut cfg = scenario(one_ip(), vec![tcp_prober()], None);
+        cfg.base.fuser = Some(fuser);
+        cfg
+    }
+
+    fn direct(baseline: Option<f64>, per_signal: Option<f64>) -> FuserConfig {
+        FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: baseline,
+            confidence_per_signal: per_signal,
+        }
     }
 
     fn tcp_prober() -> ProberConfig {
@@ -152,6 +169,55 @@ mod tests {
         let cfg = scenario(one_ip(), vec![tcp_prober()], Some(sink));
         let err = validate_scenario(&cfg).expect_err("invalid sink must be invalid");
         assert!(err.contains("brokers"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_scenario_rejects_confidence_baseline_out_of_range() {
+        let cfg = scenario_with_fuser(direct(Some(5.0), None));
+        let err = validate_scenario(&cfg).expect_err("out-of-range confidence must be invalid");
+        assert!(err.contains("confidence_baseline"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_scenario_rejects_nested_identity_fuser() {
+        let cfg = scenario_with_fuser(FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(FuserConfig::Identity {
+                identity_hints: IdentityHints::default(),
+                inner: Box::new(direct(None, None)),
+            }),
+        });
+        let err = validate_scenario(&cfg).expect_err("nested identity must be invalid");
+        assert!(err.contains("outermost"), "err was: {err}");
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn validate_scenario_rejects_identity_nested_in_oui() {
+        let cfg = scenario_with_fuser(FuserConfig::OuiEnrichment {
+            data_path: "data/manuf.gz".to_string(),
+            inner: Box::new(FuserConfig::Identity {
+                identity_hints: IdentityHints::default(),
+                inner: Box::new(direct(None, None)),
+            }),
+        });
+        let err = validate_scenario(&cfg).expect_err("identity nested in oui must be invalid");
+        assert!(err.contains("outermost"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_scenario_accepts_identity_over_direct() {
+        let cfg = scenario_with_fuser(FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(direct(Some(0.5), Some(0.1))),
+        });
+        assert!(validate_scenario(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_scenario_accepts_direct_with_in_range_confidence() {
+        let cfg = scenario_with_fuser(direct(Some(0.2), Some(0.05)));
+        assert!(validate_scenario(&cfg).is_ok());
     }
 
     #[test]
@@ -220,6 +286,28 @@ mod tests {
             file: f.path().to_path_buf(),
         };
         run(args).expect("secured kafka scenario must validate offline");
+    }
+
+    #[test]
+    fn run_returns_err_for_bad_fuser_without_probing() {
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    fuser:\n      type: direct\n      confidence_baseline: 5.0\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let f = write_scenario(yaml);
+        let args = ValidateArgs {
+            file: f.path().to_path_buf(),
+        };
+        let err = run(args).expect_err("bad-fuser scenario must be invalid");
+        assert!(err.to_string().contains("invalid"), "err was: {err}");
+    }
+
+    #[test]
+    fn run_returns_err_for_identity_fuser_with_bad_virtual_mac_without_probing() {
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    fuser:\n      type: identity\n      identity_hints:\n        vrrp_groups:\n          - virtual_ip: 10.0.0.1\n            virtual_mac: not-a-real-mac\n            members: []\n      inner:\n        type: direct\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let f = write_scenario(yaml);
+        let args = ValidateArgs {
+            file: f.path().to_path_buf(),
+        };
+        let err = run(args).expect_err("bad identity virtual_mac must be invalid");
+        assert!(err.to_string().contains("invalid"), "err was: {err}");
     }
 
     #[test]

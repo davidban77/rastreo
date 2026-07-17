@@ -1,10 +1,10 @@
 ---
-description: Lint a scenario file offline with `rastreo validate` — check the config shape and sink config with no DNS, no probing, and no broker connection.
+description: Lint a scenario file offline with `rastreo validate` — check the config shape, sink config, and fuser config with no DNS, no probing, and no broker connection.
 ---
 
 # Validate
 
-`rastreo validate <scenario.yml>` checks a scenario file offline. It parses the file, then checks every scenario's sink config and flags empty `probers` or empty `targets`. It never resolves DNS, never probes a host, and never connects to a broker. Use it as the pre-flight check before `rastreo discover` opens a real connection.
+`rastreo validate <scenario.yml>` checks a scenario file offline. It parses the file, checks each scenario's sink and fuser config, then flags empty `probers` or empty `targets`. It never resolves DNS, never probes a host, and never connects to a broker. Use it as the pre-flight check before `rastreo discover` opens a real connection.
 
 The main benefit: you can lint a production sink config with **no broker running**. A Kafka sink with TLS and SASL, or a NATS JetStream sink, is checked for shape only — empty topic, empty broker list, a CA certificate that would be silently ignored. The check runs in milliseconds and needs nothing but the file.
 
@@ -19,6 +19,7 @@ The main benefit: you can lint a production sink config with **no broker running
 `validate` runs the same file front-end as `discover --file`: it reads the file, checks `version: 1` and `kind: discovery`, expands `${VAR}` secret references, and rejects retired fields. Then, for every scenario, it checks:
 
 - **The sink config shape.** For a Kafka sink: a non-empty broker list, a non-empty topic, a well-formed TLS block, a well-formed SASL block, and a non-empty dead-letter topic when one is set. For a NATS sink: non-empty servers, subject, and stream. The `stdout` and `file` sinks are always valid — they need no network.
+- **The fuser configuration.** When a scenario sets a `fuser`, `validate` checks it too. The `direct` fuser has two confidence scores: `confidence_baseline` must be a number from `0.0` to `1.0`, and `confidence_per_signal` must be zero or greater. The `identity` fuser must be the outermost fuser. It cannot be nested inside `oui_enrichment` or another `identity`. Each `vrrp_groups` entry on an `identity` fuser needs a valid MAC address in `virtual_mac`.
 - **A non-empty `probers` list.** A scenario with `probers: []` has nothing to run.
 - **A non-empty `targets` list.** A scenario with `targets: []` has nothing to probe.
 
@@ -142,6 +143,64 @@ Error: 1 of 1 scenario(s) invalid
 ```
 
 A structurally empty scenario is flagged the same way. `probers: []` gives `no probers configured`; `targets: []` gives `no targets configured`. Both exit `1`.
+
+## Catching an invalid fuser
+
+`validate` checks a scenario's `fuser` block offline. It catches several common mistakes without connecting to anything.
+
+One is a confidence score out of range. A `direct` fuser with `confidence_baseline: 5.0` is rejected, because the value must be between `0.0` and `1.0`:
+
+```yaml
+    fuser:
+      type: direct
+      confidence_baseline: 5.0
+```
+
+```text
+scenario 'office' (1 of 1): confidence_baseline must be finite and in [0.0, 1.0], got 5
+Error: 1 of 1 scenario(s) invalid
+```
+
+Another is a mis-nested `identity` fuser. The `identity` fuser runs last, so it must wrap the other fusers. This file has the order backwards — `identity` nested inside `oui_enrichment` — and is rejected:
+
+```yaml
+    fuser:
+      type: oui_enrichment
+      inner:
+        type: identity
+        inner:
+          type: direct
+```
+
+```text
+scenario 'office' (1 of 1): identity fuser must be the outermost fuser; it cannot be nested inside another fuser
+Error: 1 of 1 scenario(s) invalid
+```
+
+The correct order is `direct` innermost, then `oui_enrichment`, then `identity` outermost. See [Identity](identity.md#composition) for the recommended stack.
+
+`validate` also checks the `identity` fuser's `vrrp_groups`. Each entry gives a virtual router's IP in `virtual_ip` and its shared MAC in `virtual_mac`. That MAC must be a real address, and this one is not:
+
+```yaml
+    fuser:
+      type: identity
+      identity_hints:
+        vrrp_groups:
+          - virtual_ip: "10.0.0.1"
+            virtual_mac: "not-a-real-mac"
+      inner:
+        type: direct
+```
+
+```text
+scenario 'office' (1 of 1): vrrp_groups virtual_mac 'not-a-real-mac' is not a valid MAC address
+Error: 1 of 1 scenario(s) invalid
+```
+
+See [Identity · User-declared VRRP hints](identity.md#user-declared-vrrp-hints) for the full `vrrp_groups` entry shape.
+
+!!! note "`oui_enrichment` needs the `oui` build feature"
+    A `type: oui_enrichment` fuser is only recognized when the binary is built with the `oui` feature — see [Enrichment · Build feature](enrichment.md#build-feature). A default build does not recognize it and rejects the file while parsing.
 
 ## Validating a secured sink offline
 
