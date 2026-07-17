@@ -71,6 +71,7 @@ impl VrrpGroup {
 pub struct IdentityFuser {
     inner: Box<dyn Fuser>,
     hints: IdentityHints,
+    buffer: Vec<DeviceRecord>,
 }
 
 impl IdentityFuser {
@@ -84,7 +85,11 @@ impl IdentityFuser {
                 .into());
             }
         }
-        Ok(Self { inner, hints })
+        Ok(Self {
+            inner,
+            hints,
+            buffer: Vec::new(),
+        })
     }
 
     fn correlate(&self, records: Vec<DeviceRecord>) -> Vec<DeviceRecord> {
@@ -237,14 +242,18 @@ impl IdentityFuser {
 }
 
 impl Fuser for IdentityFuser {
-    /// Delegates to the inner fuser. Cross-record identity fusion happens in `fuse_many`.
-    fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
-        self.inner.fuse(outcomes)
+    // Correlation needs the whole record set, so hold inner records until finish.
+    fn ingest(&mut self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError> {
+        let records = self.inner.ingest(outcomes)?;
+        self.buffer.extend(records);
+        Ok(Vec::new())
     }
 
-    fn fuse_many(&self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError> {
-        let per_ip = self.inner.fuse_many(outcomes)?;
-        Ok(self.correlate(per_ip))
+    fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+        let tail = self.inner.finish()?;
+        self.buffer.extend(tail);
+        let buffered = std::mem::take(&mut self.buffer);
+        Ok(self.correlate(buffered))
     }
 }
 
@@ -1752,7 +1761,7 @@ mod tests {
                 signals,
                 fault: None,
             };
-        let f = make_fuser(IdentityHints::default());
+        let mut f = make_fuser(IdentityHints::default());
         let outcomes = vec![
             outcome(1, ProbeKind::Arp, true, vec![Signal::Mac(mac.into())]),
             outcome(
@@ -1770,7 +1779,7 @@ mod tests {
             ),
             outcome(2, ProbeKind::Snmp, false, vec![]),
         ];
-        let records = f.fuse_many(outcomes).expect("fuse_many");
+        let records = crate::fuser::drive_fuser(&mut f, outcomes).expect("drive");
         assert_eq!(records.len(), 1, "shared MAC + host key merges both IPs");
         assert_eq!(records[0].alt_ips.len(), 1);
         assert_eq!(
@@ -2382,6 +2391,389 @@ mod tests {
                 &records,
                 &format!("seed {seed} (vrrp hints)"),
             );
+        }
+    }
+
+    mod differential {
+        use super::*;
+        use crate::error::ProbeErrorKind;
+        use crate::fuser::{create_fuser, drive_fuser, group_outcomes_by_ip, FuserConfig};
+        use crate::model::outcome::ProbeFault;
+
+        fn fuse_many_batch(
+            config: &FuserConfig,
+            outcomes: Vec<ProbeOutcome>,
+        ) -> Result<Vec<DeviceRecord>, RastreoError> {
+            config.validate()?;
+            match config {
+                FuserConfig::Direct {
+                    include_unreachable,
+                    confidence_baseline,
+                    confidence_per_signal,
+                } => {
+                    let mut f = DirectFuser::new();
+                    if let Some(v) = include_unreachable {
+                        f = f.with_include_unreachable(*v);
+                    }
+                    if let Some(v) = confidence_baseline {
+                        f = f.with_confidence_baseline(*v);
+                    }
+                    if let Some(v) = confidence_per_signal {
+                        f = f.with_confidence_per_signal(*v);
+                    }
+                    let mut out = Vec::new();
+                    for group in group_outcomes_by_ip(outcomes) {
+                        if let Some(record) = f.fuse_one(&group)? {
+                            out.push(record);
+                        }
+                    }
+                    Ok(out)
+                }
+                #[cfg(feature = "oui")]
+                FuserConfig::OuiEnrichment { data_path, inner } => {
+                    let mut records = fuse_many_batch(inner, outcomes)?;
+                    let table = if data_path.is_empty() {
+                        crate::fuser::OuiTable::from_bundled()?
+                    } else {
+                        crate::fuser::OuiTable::from_path(data_path)?
+                    };
+                    for record in &mut records {
+                        if record.manufacturer.is_none() {
+                            if let Some(mac) = &record.mac {
+                                if let Some(vendor) = table.lookup(mac) {
+                                    record.manufacturer = Some(vendor.to_string());
+                                }
+                            }
+                        }
+                    }
+                    Ok(records)
+                }
+                FuserConfig::Identity {
+                    identity_hints,
+                    inner,
+                } => {
+                    let inner_records = fuse_many_batch(inner, outcomes)?;
+                    let f = IdentityFuser::new(create_fuser(inner)?, identity_hints.clone())?;
+                    Ok(f.correlate(inner_records))
+                }
+            }
+        }
+
+        fn assert_matches_batch(config: &FuserConfig, outcomes: Vec<ProbeOutcome>, label: &str) {
+            let mut fuser = create_fuser(config).expect("create fuser");
+            let streamed = drive_fuser(fuser.as_mut(), outcomes.clone()).expect("drive");
+            let batched = fuse_many_batch(config, outcomes).expect("batch reference");
+            assert_eq!(
+                serde_json::to_string(&streamed).expect("serialize streamed"),
+                serde_json::to_string(&batched).expect("serialize batched"),
+                "{label}: ingest/finish output diverged from batch reference",
+            );
+        }
+
+        fn oc(
+            octet: u8,
+            kind: ProbeKind,
+            reachable: bool,
+            signals: Vec<Signal>,
+            fault: Option<ProbeFault>,
+        ) -> ProbeOutcome {
+            ProbeOutcome {
+                kind,
+                target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable,
+                signals,
+                fault,
+            }
+        }
+
+        fn named_corpora() -> Vec<(&'static str, Vec<ProbeOutcome>)> {
+            let mac_a = "aa:bb:cc:11:22:33";
+            let mac_b = "dd:ee:ff:44:55:66";
+            let oui_mac = "00:04:AC:11:22:33";
+            let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+            let sysname = Signal::SnmpSysName("core-sw01".into());
+            let fault = || Some(ProbeFault::new(ProbeErrorKind::Other, "boom"));
+            vec![
+                ("empty", vec![]),
+                (
+                    "single_reachable",
+                    vec![oc(
+                        1,
+                        ProbeKind::TcpConnect,
+                        true,
+                        vec![Signal::Mac(mac_a.into()), Signal::OpenPort(22)],
+                        None,
+                    )],
+                ),
+                (
+                    "single_unreachable",
+                    vec![oc(1, ProbeKind::TcpConnect, false, vec![], None)],
+                ),
+                (
+                    "single_faulted_plus_reachable",
+                    vec![
+                        oc(1, ProbeKind::Snmp, false, vec![], fault()),
+                        oc(
+                            1,
+                            ProbeKind::TcpConnect,
+                            true,
+                            vec![Signal::OpenPort(22)],
+                            None,
+                        ),
+                    ],
+                ),
+                (
+                    "multi_distinct_targets",
+                    vec![
+                        oc(
+                            1,
+                            ProbeKind::TcpConnect,
+                            true,
+                            vec![Signal::Mac(mac_a.into()), Signal::OpenPort(22)],
+                            None,
+                        ),
+                        oc(
+                            2,
+                            ProbeKind::TcpConnect,
+                            true,
+                            vec![Signal::Mac(mac_b.into()), Signal::OpenPort(80)],
+                            None,
+                        ),
+                        oc(
+                            3,
+                            ProbeKind::TcpConnect,
+                            true,
+                            vec![Signal::OpenPort(443)],
+                            None,
+                        ),
+                    ],
+                ),
+                (
+                    "multi_ip_shared_mac_and_sysname_high_band",
+                    vec![
+                        oc(
+                            2,
+                            ProbeKind::Snmp,
+                            true,
+                            vec![Signal::Mac(mac_a.into()), sysname.clone()],
+                            None,
+                        ),
+                        oc(
+                            1,
+                            ProbeKind::Snmp,
+                            true,
+                            vec![Signal::Mac(mac_a.into()), sysname.clone()],
+                            None,
+                        ),
+                        oc(
+                            3,
+                            ProbeKind::Snmp,
+                            true,
+                            vec![Signal::Mac(mac_a.into()), sysname.clone()],
+                            None,
+                        ),
+                    ],
+                ),
+                (
+                    "shared_ssh_host_key_high_band",
+                    vec![
+                        oc(
+                            1,
+                            ProbeKind::Ssh,
+                            true,
+                            vec![Signal::SshHostKey(host_key.into())],
+                            None,
+                        ),
+                        oc(
+                            2,
+                            ProbeKind::Ssh,
+                            true,
+                            vec![Signal::SshHostKey(host_key.into())],
+                            None,
+                        ),
+                    ],
+                ),
+                (
+                    "shared_mac_only_medium_band",
+                    vec![
+                        oc(
+                            1,
+                            ProbeKind::Arp,
+                            true,
+                            vec![Signal::Mac(mac_a.into())],
+                            None,
+                        ),
+                        oc(
+                            2,
+                            ProbeKind::Arp,
+                            true,
+                            vec![Signal::Mac(mac_a.into())],
+                            None,
+                        ),
+                    ],
+                ),
+                (
+                    "mixed_reachable_unreachable_faulted_and_correlated",
+                    vec![
+                        oc(
+                            1,
+                            ProbeKind::Snmp,
+                            true,
+                            vec![Signal::Mac(mac_a.into()), sysname.clone()],
+                            None,
+                        ),
+                        oc(
+                            1,
+                            ProbeKind::TcpConnect,
+                            true,
+                            vec![Signal::OpenPort(22)],
+                            None,
+                        ),
+                        oc(
+                            2,
+                            ProbeKind::Snmp,
+                            true,
+                            vec![Signal::Mac(mac_a.into()), sysname.clone()],
+                            None,
+                        ),
+                        oc(3, ProbeKind::TcpConnect, false, vec![], fault()),
+                        oc(4, ProbeKind::TcpConnect, false, vec![], None),
+                    ],
+                ),
+                (
+                    "oui_enrichable_mac",
+                    vec![oc(
+                        1,
+                        ProbeKind::TcpConnect,
+                        true,
+                        vec![Signal::Mac(oui_mac.into()), Signal::OpenPort(22)],
+                        None,
+                    )],
+                ),
+            ]
+        }
+
+        fn direct_config() -> FuserConfig {
+            FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            }
+        }
+
+        // OUI-free configs; the random test avoids reloading the bundled OUI table per seed.
+        fn core_matrix() -> Vec<(String, FuserConfig)> {
+            vec![
+                ("direct".to_string(), direct_config()),
+                (
+                    "direct_include_unreachable".to_string(),
+                    FuserConfig::Direct {
+                        include_unreachable: Some(true),
+                        confidence_baseline: None,
+                        confidence_per_signal: None,
+                    },
+                ),
+                (
+                    "identity(direct)".to_string(),
+                    FuserConfig::Identity {
+                        identity_hints: IdentityHints::default(),
+                        inner: Box::new(direct_config()),
+                    },
+                ),
+            ]
+        }
+
+        fn matrix() -> Vec<(String, FuserConfig)> {
+            #[allow(unused_mut)]
+            let mut out = core_matrix();
+            #[cfg(feature = "oui")]
+            {
+                out.push((
+                    "oui(direct)".to_string(),
+                    FuserConfig::OuiEnrichment {
+                        data_path: String::new(),
+                        inner: Box::new(direct_config()),
+                    },
+                ));
+                out.push((
+                    "identity(oui(direct))".to_string(),
+                    FuserConfig::Identity {
+                        identity_hints: IdentityHints::default(),
+                        inner: Box::new(FuserConfig::OuiEnrichment {
+                            data_path: String::new(),
+                            inner: Box::new(direct_config()),
+                        }),
+                    },
+                ));
+            }
+            out
+        }
+
+        #[test]
+        fn ingest_finish_matches_batch_over_named_corpora() {
+            for (cfg_label, config) in matrix() {
+                for (corpus_label, outcomes) in named_corpora() {
+                    assert_matches_batch(
+                        &config,
+                        outcomes,
+                        &format!("{cfg_label} / {corpus_label}"),
+                    );
+                }
+            }
+        }
+
+        fn random_outcomes(lcg: &mut Lcg) -> Vec<ProbeOutcome> {
+            let count = lcg.below(14);
+            let mut out = Vec::new();
+            for _ in 0..count {
+                let octet = (1 + lcg.below(5)) as u8;
+                let reachable = lcg.chance(3, 4);
+                let mut signals = Vec::new();
+                if reachable {
+                    if let Some(m) = MAC_POOL[lcg.below(MAC_POOL.len())] {
+                        signals.push(Signal::Mac(m.to_string()));
+                    }
+                    if lcg.chance(1, 2) {
+                        signals.push(Signal::SnmpSysName(
+                            SYSNAME_POOL[lcg.below(SYSNAME_POOL.len())].to_string(),
+                        ));
+                    }
+                    if lcg.chance(1, 3) {
+                        signals.push(Signal::SshHostKey(
+                            SSH_POOL[lcg.below(SSH_POOL.len())].to_string(),
+                        ));
+                    }
+                    if lcg.chance(1, 2) {
+                        signals.push(Signal::OpenPort(22));
+                    }
+                }
+                let fault = if !reachable && lcg.chance(1, 3) {
+                    Some(ProbeFault::new(ProbeErrorKind::Other, "boom"))
+                } else {
+                    None
+                };
+                out.push(oc(octet, ProbeKind::TcpConnect, reachable, signals, fault));
+            }
+            out
+        }
+
+        #[test]
+        fn ingest_finish_matches_batch_over_random_corpora() {
+            let configs = core_matrix();
+            for seed in 0..200u64 {
+                let mut lcg = Lcg(seed
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add(0xD1B5_4A32_D192_ED03));
+                let outcomes = random_outcomes(&mut lcg);
+                for (cfg_label, config) in &configs {
+                    assert_matches_batch(
+                        config,
+                        outcomes.clone(),
+                        &format!("seed {seed} / {cfg_label}"),
+                    );
+                }
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::classifier::{create_classifier, ClassifierConfig};
 use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, EncoderConfig};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
-use crate::fuser::{create_fuser, FuserConfig};
+use crate::fuser::{create_fuser, drive_fuser, FuserConfig};
 use crate::model::{
     DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ScanMetadata, Target,
     PROBE_KIND_COUNT,
@@ -169,7 +169,7 @@ pub async fn run_discovery_with_components_cancellable(
         confidence_baseline: None,
         confidence_per_signal: None,
     });
-    let fuser = create_fuser(&fuser_config)?;
+    let mut fuser = create_fuser(&fuser_config)?;
 
     let classifier_config = scenario
         .base
@@ -231,7 +231,7 @@ pub async fn run_discovery_with_components_cancellable(
         cancelled = true;
     }
 
-    let mut records = fuser.fuse_many(all_outcomes)?;
+    let mut records = drive_fuser(fuser.as_mut(), all_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
         stamp_scan_metadata(record, &scan_metadata);
@@ -1462,8 +1462,8 @@ mod tests {
                 confidence_per_signal: None,
             }),
         };
-        let f = create_fuser(&fuser_cfg).expect("create");
-        let records = f.fuse_many(outcomes).expect("fuse_many");
+        let mut f = create_fuser(&fuser_cfg).expect("create");
+        let records = drive_fuser(f.as_mut(), outcomes).expect("drive");
         assert_eq!(records.len(), 1, "three IPs share sysName+MAC, one record");
         let r = &records[0];
         assert_eq!(r.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
