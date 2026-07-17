@@ -5,16 +5,16 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use crate::classifier::{create_classifier, ClassifierConfig};
+use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
 use crate::config::DiscoverScenarioConfig;
-use crate::encoder::{create_encoder, EncoderConfig};
+use crate::encoder::{create_encoder, Encoder, EncoderConfig};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
-use crate::fuser::{create_fuser, drive_fuser, FuserConfig};
+use crate::fuser::{create_fuser, drive_fuser, Fuser, FuserConfig};
 use crate::model::{
-    DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ScanMetadata, Target,
-    PROBE_KIND_COUNT,
+    DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, ScanMetadata,
+    Target, PROBE_KIND_COUNT,
 };
-use crate::prober::create_prober;
+use crate::prober::{create_prober, Prober};
 use crate::resolver::{HickoryResolver, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler};
 use crate::sink::{create_sink, Sink, SinkConfig, SinkErrorClass, SinkType};
@@ -114,7 +114,7 @@ pub async fn run_discovery_with_components(
     run_discovery_with_components_cancellable(scenario, resolver, sink, rx).await
 }
 
-/// Same as [`run_discovery`], but aborts between probers and between record emissions when `cancel` flips to true. The sink is closed on every exit path.
+/// Same as [`run_discovery`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
 pub async fn run_discovery_cancellable(
     scenario: &DiscoverScenarioConfig,
     cancel: watch::Receiver<bool>,
@@ -125,12 +125,12 @@ pub async fn run_discovery_cancellable(
     run_discovery_with_components_cancellable(scenario, resolver, sink, cancel).await
 }
 
-/// Same as [`run_discovery_with_components`], but aborts between probers and between record emissions when `cancel` flips to true. The sink is closed on every exit path.
+/// Same as [`run_discovery_with_components`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
 pub async fn run_discovery_with_components_cancellable(
     scenario: &DiscoverScenarioConfig,
     resolver: Arc<dyn Resolver>,
     mut sink: Box<dyn Sink>,
-    mut cancel: watch::Receiver<bool>,
+    cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
     scenario.base.ensure_no_retired_fields()?;
     scenario.base.ensure_retries_within_bound()?;
@@ -178,48 +178,91 @@ pub async fn run_discovery_with_components_cancellable(
         .unwrap_or(ClassifierConfig::Noop);
     let classifier = create_classifier(&classifier_config)?;
 
-    let mut all_outcomes: Vec<ProbeOutcome> = Vec::new();
-    let mut probe_attempts: usize = 0;
-    let mut error_counts: BTreeMap<ProbeErrorKind, usize> = BTreeMap::new();
-    let mut first_probe_error: Option<ProbeFault> = None;
-    let mut cancelled = false;
-    let mut attempts_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
-    let mut errors_by_kind: [usize; PROBE_KIND_COUNT] = [0; PROBE_KIND_COUNT];
-
-    let sink_type = sink.kind();
-
+    let mut probers: Vec<Arc<dyn Prober>> = Vec::with_capacity(scenario.probers.len());
     for prober_config in &scenario.probers {
-        if *cancel.borrow_and_update() {
-            cancelled = true;
-            break;
-        }
-        let prober: Arc<dyn crate::prober::Prober> = Arc::from(create_prober(prober_config)?);
-        let prober_kind = prober.kind();
-        let results = scheduler.run(prober, resolved.clone(), ctx.clone()).await;
-        probe_attempts += results.len();
-        attempts_by_kind[prober_kind.index()] += results.len();
-        for result in results {
+        probers.push(Arc::from(create_prober(prober_config)?));
+    }
+
+    let acc = scan_and_accumulate(&scheduler, probers, resolved, ctx, cancel).await;
+
+    finish_discovery(
+        acc,
+        fuser.as_mut(),
+        classifier.as_ref(),
+        encoder.as_ref(),
+        sink.as_mut(),
+        &scan_metadata,
+        targets_resolved,
+        start,
+    )
+    .await
+}
+
+#[derive(Default)]
+struct ScanAccumulation {
+    all_outcomes: Vec<ProbeOutcome>,
+    probe_attempts: usize,
+    error_counts: BTreeMap<ProbeErrorKind, usize>,
+    first_probe_error: Option<ProbeFault>,
+    attempts_by_kind: [usize; PROBE_KIND_COUNT],
+    errors_by_kind: [usize; PROBE_KIND_COUNT],
+    cancelled: bool,
+}
+
+async fn scan_and_accumulate(
+    scheduler: &BoundedScheduler,
+    probers: Vec<Arc<dyn Prober>>,
+    resolved: Vec<ResolvedTarget>,
+    ctx: ProbeCtx,
+    cancel: watch::Receiver<bool>,
+) -> ScanAccumulation {
+    let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
+    let scans = scheduler
+        .run_scan(probers, resolved, ctx, cancel.clone())
+        .await;
+    let cancelled = *cancel.borrow();
+
+    let mut acc = ScanAccumulation {
+        cancelled,
+        ..Default::default()
+    };
+    // Target-outer iteration sees faults in a different order than the batch prober-outer loop, so
+    // `first_probe_error` tracks the smallest `(prober_pass_index, target_index)` key to keep the
+    // batch's choice — the first fault a prober-outer scan would have latched.
+    let mut best_key: Option<(usize, usize)> = None;
+
+    for scan in scans {
+        let target_index = scan.target_index;
+        for (pass_index, result) in scan.outcomes {
+            acc.probe_attempts += 1;
+            let kind = prober_kinds[pass_index];
+            acc.attempts_by_kind[kind.index()] += 1;
             match result {
                 Ok(outcome) => {
                     if let Some(fault) = &outcome.fault {
-                        errors_by_kind[prober_kind.index()] += 1;
-                        *error_counts.entry(fault.kind).or_insert(0) += 1;
-                        if first_probe_error.is_none() {
-                            first_probe_error = Some(fault.clone());
+                        acc.errors_by_kind[kind.index()] += 1;
+                        *acc.error_counts.entry(fault.kind).or_insert(0) += 1;
+                        let key = (pass_index, target_index);
+                        if best_key.is_none_or(|bk| key < bk) {
+                            best_key = Some(key);
+                            acc.first_probe_error = Some(fault.clone());
                         }
                     }
-                    all_outcomes.push(outcome);
+                    acc.all_outcomes.push(outcome);
                 }
-                // A prober now carries every fault as data on the outcome; a stray `Err` means it
-                // could not attempt at all. Keep the contract total by counting it as `Other`.
+                // A prober carries every fault as data on the outcome; a stray `Err` means it could
+                // not attempt at all. Keep the contract total by counting it as `Other`.
                 Err(err) => {
-                    errors_by_kind[prober_kind.index()] += 1;
-                    *error_counts.entry(ProbeErrorKind::Other).or_insert(0) += 1;
+                    acc.errors_by_kind[kind.index()] += 1;
+                    *acc.error_counts.entry(ProbeErrorKind::Other).or_insert(0) += 1;
                     tracing::debug!(error = %err, "probe failed");
-                    if first_probe_error.is_none() {
-                        let msg = err.to_string();
-                        if !msg.is_empty() {
-                            first_probe_error = Some(ProbeFault::new(ProbeErrorKind::Other, msg));
+                    let msg = err.to_string();
+                    if !msg.is_empty() {
+                        let key = (pass_index, target_index);
+                        if best_key.is_none_or(|bk| key < bk) {
+                            best_key = Some(key);
+                            acc.first_probe_error =
+                                Some(ProbeFault::new(ProbeErrorKind::Other, msg));
                         }
                     }
                 }
@@ -227,14 +270,26 @@ pub async fn run_discovery_with_components_cancellable(
         }
     }
 
-    if !cancelled && *cancel.borrow_and_update() {
-        cancelled = true;
-    }
+    acc
+}
 
-    let mut records = drive_fuser(fuser.as_mut(), all_outcomes)?;
+#[allow(clippy::too_many_arguments)]
+async fn finish_discovery(
+    acc: ScanAccumulation,
+    fuser: &mut dyn Fuser,
+    classifier: &dyn Classifier,
+    encoder: &dyn Encoder,
+    sink: &mut dyn Sink,
+    scan_metadata: &Arc<ScanMetadata>,
+    targets_resolved: usize,
+    start: Instant,
+) -> Result<DiscoverySummary, RastreoError> {
+    let sink_type = sink.kind();
+
+    let mut records = drive_fuser(fuser, acc.all_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
-        stamp_scan_metadata(record, &scan_metadata);
+        stamp_scan_metadata(record, scan_metadata);
     }
 
     let mut buf: Vec<u8> = Vec::new();
@@ -256,15 +311,15 @@ pub async fn run_discovery_with_components_cancellable(
 
     let close_err = sink.close().await.err();
 
-    if cancelled {
+    if acc.cancelled {
         tracing::info!(records_emitted, "discovery cancelled; sink closed");
     }
 
     let dlq_records_by_type_and_class = sink.dlq_records_by_type_and_class();
     let dlq_records = dlq_records_by_type_and_class
         .iter()
-        .fold(0u64, |acc, (_, _, c)| acc.saturating_add(*c)) as usize;
-    let probes_by_kind = build_probes_by_kind(&attempts_by_kind, &errors_by_kind);
+        .fold(0u64, |sum, (_, _, c)| sum.saturating_add(*c)) as usize;
+    let probes_by_kind = build_probes_by_kind(&acc.attempts_by_kind, &acc.errors_by_kind);
 
     if let Some(e) = emit_err {
         return Err(e);
@@ -275,15 +330,15 @@ pub async fn run_discovery_with_components_cancellable(
 
     Ok(DiscoverySummary {
         targets_resolved,
-        probe_attempts,
+        probe_attempts: acc.probe_attempts,
         records_emitted,
-        error_counts,
+        error_counts: acc.error_counts,
         probes_by_kind,
         dlq_records,
         dlq_records_by_type_and_class,
         sink_type: Some(sink_type),
-        cancelled,
-        first_probe_error,
+        cancelled: acc.cancelled,
+        first_probe_error: acc.first_probe_error,
         elapsed: start.elapsed(),
     })
 }
@@ -1146,9 +1201,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_discovery_cancel_between_probers_emits_records_from_completed_probers() {
+    async fn run_discovery_cancel_emits_completed_targets_atomically() {
         let port = open_loopback_port().await;
 
+        // 198.51.100.x is TEST-NET-2: connects there time out, so the scan is still priming new
+        // targets when the 50ms cancel lands. Loopback target 0 finishes fast and reaches the sink.
         let scenario = DiscoverScenarioConfig {
             base: BaseProbeConfig {
                 timeout_ms: Some(400),
@@ -1183,16 +1240,17 @@ mod tests {
 
         assert!(summary.cancelled, "cancelled flag must be true");
         assert_eq!(
-            summary.probe_attempts, 4,
-            "first prober ran against all four targets; second prober was skipped"
+            summary.probe_attempts % 2,
+            0,
+            "target-outer cancellation is atomic per target: a returned target carries every prober's outcome, so attempts is a multiple of the prober count"
         );
         assert!(
             summary.records_emitted >= 1,
-            "records from prober 1 outcomes must reach the sink even though the run was cancelled"
+            "the completed loopback target's record must reach the sink even though the run was cancelled"
         );
         assert!(
             !mem_handle.ndjson_lines().is_empty(),
-            "sink received at least one NDJSON line from the completed prober"
+            "sink received at least one NDJSON line from a completed target"
         );
     }
 
@@ -1698,6 +1756,401 @@ mod tests {
         for entry in &out {
             let ips = entry.result.as_ref().expect("resolves");
             assert_eq!(ips, &vec![ip]);
+        }
+    }
+
+    mod inversion_differential {
+        use super::*;
+
+        use std::time::SystemTime;
+
+        use crate::model::Signal;
+
+        const FAULT_P1_T2: &str = "fault-pass1-target2";
+        const FAULT_P2_T0: &str = "fault-pass2-target0";
+
+        type ProbeSetup = (Vec<Arc<dyn Prober>>, Vec<ResolvedTarget>);
+        type MatrixSetup = (&'static str, Vec<Arc<dyn Prober>>, Vec<ResolvedTarget>);
+
+        #[derive(Clone)]
+        enum Resp {
+            Reachable(Vec<Signal>),
+            Dark,
+            Fault(ProbeErrorKind, &'static str),
+            Err(&'static str),
+        }
+
+        struct ScriptedProber {
+            kind: ProbeKind,
+            responses: Vec<Resp>,
+        }
+
+        #[async_trait::async_trait]
+        impl Prober for ScriptedProber {
+            fn kind(&self) -> ProbeKind {
+                self.kind
+            }
+
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                let idx = match target.ip {
+                    IpAddr::V4(v4) => v4.octets()[3] as usize,
+                    IpAddr::V6(_) => 0,
+                };
+                match &self.responses[idx] {
+                    Resp::Reachable(signals) => Ok(ProbeOutcome {
+                        kind: self.kind,
+                        target_ip: target.ip,
+                        timestamp: SystemTime::UNIX_EPOCH,
+                        reachable: true,
+                        signals: signals.clone(),
+                        fault: None,
+                    }),
+                    Resp::Dark => Ok(ProbeOutcome {
+                        kind: self.kind,
+                        target_ip: target.ip,
+                        timestamp: SystemTime::UNIX_EPOCH,
+                        reachable: false,
+                        signals: Vec::new(),
+                        fault: None,
+                    }),
+                    Resp::Fault(kind, detail) => Ok(ProbeOutcome {
+                        kind: self.kind,
+                        target_ip: target.ip,
+                        timestamp: SystemTime::UNIX_EPOCH,
+                        reachable: true,
+                        signals: Vec::new(),
+                        fault: Some(ProbeFault::new(*kind, *detail)),
+                    }),
+                    Resp::Err(msg) => Err(RastreoError::Probe(crate::error::ProbeError::Other(
+                        (*msg).to_string(),
+                    ))),
+                }
+            }
+        }
+
+        fn scripted(kind: ProbeKind, responses: Vec<Resp>) -> Arc<dyn Prober> {
+            Arc::new(ScriptedProber { kind, responses })
+        }
+
+        fn resolved_n(n: u8) -> Vec<ResolvedTarget> {
+            (0..n)
+                .map(|i| {
+                    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i));
+                    ResolvedTarget {
+                        ip,
+                        original: Target::Ip(ip),
+                        resolved_at: SystemTime::UNIX_EPOCH,
+                    }
+                })
+                .collect()
+        }
+
+        fn direct_cfg() -> FuserConfig {
+            FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            }
+        }
+
+        fn identity_cfg() -> FuserConfig {
+            FuserConfig::Identity {
+                identity_hints: crate::fuser::IdentityHints::default(),
+                inner: Box::new(direct_cfg()),
+            }
+        }
+
+        // Prober-outer reference: the pre-inversion pipeline body, frozen. A deterministic mock
+        // makes serial probing equivalent to the concurrent scheduler, so this pins the exact
+        // outcome order and first-seen fault the batch loop produced.
+        async fn scan_and_accumulate_batch(
+            probers: Vec<Arc<dyn Prober>>,
+            resolved: Vec<ResolvedTarget>,
+            ctx: ProbeCtx,
+        ) -> ScanAccumulation {
+            let mut acc = ScanAccumulation::default();
+            for prober in &probers {
+                let kind = prober.kind();
+                for target in &resolved {
+                    let result = prober.probe(target, &ctx).await;
+                    acc.probe_attempts += 1;
+                    acc.attempts_by_kind[kind.index()] += 1;
+                    match result {
+                        Ok(outcome) => {
+                            if let Some(fault) = &outcome.fault {
+                                acc.errors_by_kind[kind.index()] += 1;
+                                *acc.error_counts.entry(fault.kind).or_insert(0) += 1;
+                                if acc.first_probe_error.is_none() {
+                                    acc.first_probe_error = Some(fault.clone());
+                                }
+                            }
+                            acc.all_outcomes.push(outcome);
+                        }
+                        Err(err) => {
+                            acc.errors_by_kind[kind.index()] += 1;
+                            *acc.error_counts.entry(ProbeErrorKind::Other).or_insert(0) += 1;
+                            if acc.first_probe_error.is_none() {
+                                let msg = err.to_string();
+                                if !msg.is_empty() {
+                                    acc.first_probe_error =
+                                        Some(ProbeFault::new(ProbeErrorKind::Other, msg));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            acc
+        }
+
+        async fn run_case(
+            probers: Vec<Arc<dyn Prober>>,
+            resolved: Vec<ResolvedTarget>,
+            fuser_cfg: &FuserConfig,
+            scan_metadata: &Arc<ScanMetadata>,
+            inverted: bool,
+        ) -> (DiscoverySummary, Vec<String>) {
+            let ctx = ProbeCtx {
+                timeout: Duration::from_millis(100),
+                retries: 0,
+            };
+            let mut fuser = create_fuser(fuser_cfg).expect("fuser");
+            let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
+            let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+            let mem = crate::sink::MemorySink::new();
+            let handle = mem.handle();
+            let mut sink: Box<dyn Sink> = Box::new(mem);
+            let targets_resolved = resolved.len();
+            let start = Instant::now();
+
+            let acc = if inverted {
+                let scheduler = BoundedScheduler::new(8);
+                scan_and_accumulate(&scheduler, probers, resolved, ctx, watch::channel(false).1)
+                    .await
+            } else {
+                scan_and_accumulate_batch(probers, resolved, ctx).await
+            };
+
+            let summary = finish_discovery(
+                acc,
+                fuser.as_mut(),
+                classifier.as_ref(),
+                encoder.as_ref(),
+                sink.as_mut(),
+                scan_metadata,
+                targets_resolved,
+                start,
+            )
+            .await
+            .expect("finish_discovery");
+
+            (summary, handle.ndjson_lines())
+        }
+
+        fn assert_summaries_match(new: &DiscoverySummary, batch: &DiscoverySummary, label: &str) {
+            assert_eq!(
+                new.targets_resolved, batch.targets_resolved,
+                "{label}: targets_resolved"
+            );
+            assert_eq!(
+                new.probe_attempts, batch.probe_attempts,
+                "{label}: probe_attempts"
+            );
+            assert_eq!(
+                new.records_emitted, batch.records_emitted,
+                "{label}: records_emitted"
+            );
+            assert_eq!(
+                new.error_counts, batch.error_counts,
+                "{label}: error_counts"
+            );
+            assert_eq!(
+                new.probes_by_kind, batch.probes_by_kind,
+                "{label}: probes_by_kind"
+            );
+            assert_eq!(new.dlq_records, batch.dlq_records, "{label}: dlq_records");
+            assert_eq!(
+                new.dlq_records_by_type_and_class, batch.dlq_records_by_type_and_class,
+                "{label}: dlq_records_by_type_and_class"
+            );
+            assert_eq!(new.sink_type, batch.sink_type, "{label}: sink_type");
+            assert_eq!(new.cancelled, batch.cancelled, "{label}: cancelled");
+            assert_eq!(
+                new.first_probe_error, batch.first_probe_error,
+                "{label}: first_probe_error"
+            );
+            // elapsed intentionally excluded — wall-clock differs between the two runs.
+        }
+
+        fn first_probe_error_stress_setup() -> ProbeSetup {
+            let probers = vec![
+                scripted(
+                    ProbeKind::TcpConnect,
+                    vec![
+                        Resp::Reachable(vec![Signal::OpenPort(22)]),
+                        Resp::Reachable(vec![Signal::OpenPort(22)]),
+                        Resp::Reachable(vec![Signal::OpenPort(22)]),
+                    ],
+                ),
+                scripted(
+                    ProbeKind::Http,
+                    vec![
+                        Resp::Reachable(vec![Signal::HttpBanner("nginx".into())]),
+                        Resp::Reachable(vec![Signal::HttpBanner("nginx".into())]),
+                        Resp::Fault(ProbeErrorKind::PermissionDenied, FAULT_P1_T2),
+                    ],
+                ),
+                scripted(
+                    ProbeKind::Snmp,
+                    vec![
+                        Resp::Fault(ProbeErrorKind::DecodeFailed, FAULT_P2_T0),
+                        Resp::Reachable(vec![Signal::SnmpSysName("sw".into())]),
+                        Resp::Reachable(vec![Signal::SnmpSysName("sw".into())]),
+                    ],
+                ),
+            ];
+            (probers, resolved_n(3))
+        }
+
+        fn matrix_setups() -> Vec<MatrixSetup> {
+            let (stress_probers, stress_targets) = first_probe_error_stress_setup();
+            vec![
+                (
+                    "empty",
+                    vec![scripted(ProbeKind::TcpConnect, vec![Resp::Dark])],
+                    resolved_n(0),
+                ),
+                (
+                    "single_reachable",
+                    vec![scripted(
+                        ProbeKind::TcpConnect,
+                        vec![Resp::Reachable(vec![Signal::OpenPort(22)])],
+                    )],
+                    resolved_n(1),
+                ),
+                (
+                    "single_dark",
+                    vec![scripted(ProbeKind::TcpConnect, vec![Resp::Dark])],
+                    resolved_n(1),
+                ),
+                (
+                    "multi_mixed_three_probers",
+                    vec![
+                        scripted(
+                            ProbeKind::TcpConnect,
+                            vec![
+                                Resp::Reachable(vec![Signal::OpenPort(22)]),
+                                Resp::Dark,
+                                Resp::Reachable(vec![Signal::OpenPort(22)]),
+                            ],
+                        ),
+                        scripted(
+                            ProbeKind::Http,
+                            vec![
+                                Resp::Reachable(vec![Signal::HttpBanner("nginx".into())]),
+                                Resp::Reachable(vec![Signal::HttpBanner("nginx".into())]),
+                                Resp::Dark,
+                            ],
+                        ),
+                        scripted(
+                            ProbeKind::Snmp,
+                            vec![
+                                Resp::Dark,
+                                Resp::Reachable(vec![Signal::SnmpSysName("sw".into())]),
+                                Resp::Reachable(vec![Signal::SnmpSysName("sw".into())]),
+                            ],
+                        ),
+                    ],
+                    resolved_n(3),
+                ),
+                (
+                    "faulted",
+                    vec![scripted(
+                        ProbeKind::TcpConnect,
+                        vec![
+                            Resp::Fault(ProbeErrorKind::DecodeFailed, "decode-t0"),
+                            Resp::Reachable(vec![Signal::OpenPort(22)]),
+                        ],
+                    )],
+                    resolved_n(2),
+                ),
+                (
+                    "stray_err",
+                    vec![scripted(
+                        ProbeKind::TcpConnect,
+                        vec![
+                            Resp::Err("could not attempt"),
+                            Resp::Reachable(vec![Signal::OpenPort(22)]),
+                        ],
+                    )],
+                    resolved_n(2),
+                ),
+                (
+                    "all_dark",
+                    vec![scripted(
+                        ProbeKind::TcpConnect,
+                        vec![Resp::Dark, Resp::Dark, Resp::Dark],
+                    )],
+                    resolved_n(3),
+                ),
+                ("first_probe_error_stress", stress_probers, stress_targets),
+            ]
+        }
+
+        #[tokio::test]
+        async fn inverted_pipeline_matches_batch_reference_across_matrix() {
+            #[allow(unused_mut)]
+            let mut fusers = vec![direct_cfg(), identity_cfg()];
+            #[cfg(feature = "oui")]
+            fusers.push(FuserConfig::OuiEnrichment {
+                data_path: String::new(),
+                inner: Box::new(direct_cfg()),
+            });
+
+            for (label, probers, resolved) in matrix_setups() {
+                for fuser_cfg in &fusers {
+                    let scan_metadata = Arc::new(ScanMetadata::default());
+                    let (summary_new, records_new) = run_case(
+                        probers.clone(),
+                        resolved.clone(),
+                        fuser_cfg,
+                        &scan_metadata,
+                        true,
+                    )
+                    .await;
+                    let (summary_batch, records_batch) = run_case(
+                        probers.clone(),
+                        resolved.clone(),
+                        fuser_cfg,
+                        &scan_metadata,
+                        false,
+                    )
+                    .await;
+                    assert_summaries_match(&summary_new, &summary_batch, label);
+                    assert_eq!(
+                        records_new, records_batch,
+                        "{label}: inverted and batch pipelines must emit byte-identical records"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn inverted_first_probe_error_uses_batch_prober_outer_choice() {
+            let (probers, resolved) = first_probe_error_stress_setup();
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let (summary, _) =
+                run_case(probers, resolved, &direct_cfg(), &scan_metadata, true).await;
+            let fault = summary.first_probe_error.expect("a fault must be latched");
+            assert_eq!(
+                fault.detail, FAULT_P1_T2,
+                "first_probe_error must be the batch's prober-outer first fault (pass 1, target 2), \
+                 not the target-outer first-seen fault (pass 2, target 0)"
+            );
         }
     }
 }

@@ -43,7 +43,7 @@ pub use prober::SshProber;
 pub use prober::TlsProber;
 pub use prober::{Prober, ProberConfig, ReverseDnsProber, TcpConnectProber};
 pub use resolver::{GuardedResolver, HickoryResolver, Resolver};
-pub use scheduler::{BoundedScheduler, Scheduler};
+pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{
     FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, SinkError, SinkErrorClass, SinkRetry,
     SinkType, StdoutSink, TeeChild, TeeSink, SINK_ERROR_CLASS_COUNT,

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::task::{Id, JoinSet};
 use tokio::time::Instant;
@@ -10,14 +11,25 @@ use crate::error::{RastreoError, RuntimeError};
 use crate::model::{ProbeCtx, ProbeOutcome, ResolvedTarget};
 use crate::prober::Prober;
 
+/// One target's complete probe results: every prober's outcome paired with its pass index
+/// (the prober's position in `scenario.probers`), collected once the target is fully scanned.
+#[derive(Debug)]
+pub struct TargetScan {
+    pub target_index: usize,
+    pub outcomes: Vec<(usize, Result<ProbeOutcome, RastreoError>)>,
+}
+
 #[async_trait::async_trait]
 pub trait Scheduler: Send + Sync {
-    async fn run(
+    /// Runs every prober against every target — in-flight probes bounded by the concurrency cap,
+    /// starts paced by the probe rate — and returns each fully-scanned target in target order.
+    async fn run_scan(
         &self,
-        prober: Arc<dyn Prober>,
+        probers: Vec<Arc<dyn Prober>>,
         targets: Vec<ResolvedTarget>,
         ctx: ProbeCtx,
-    ) -> Vec<Result<ProbeOutcome, RastreoError>>;
+        cancel: watch::Receiver<bool>,
+    ) -> Vec<TargetScan>;
 }
 
 /// Steady min-interval pacer: hands each probe start a monotonically increasing slot spaced `1/rate` apart, so starts never burst.
@@ -84,62 +96,75 @@ impl BoundedScheduler {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_probe(
     set: &mut JoinSet<Result<ProbeOutcome, RastreoError>>,
-    index_by_id: &mut HashMap<Id, usize>,
-    index: usize,
-    target: ResolvedTarget,
+    coord_by_id: &mut HashMap<Id, (usize, usize)>,
+    pass_index: usize,
+    target_index: usize,
     prober: &Arc<dyn Prober>,
+    targets: &Arc<Vec<ResolvedTarget>>,
     ctx: &ProbeCtx,
     pacer: &Option<Arc<Pacer>>,
 ) {
-    let prober_for_task = Arc::clone(prober);
-    let ctx_for_task = ctx.clone();
-    let pacer_for_task = pacer.clone();
+    let prober = Arc::clone(prober);
+    let targets = Arc::clone(targets);
+    let ctx = ctx.clone();
+    let pacer = pacer.clone();
 
     let handle = set.spawn(async move {
-        if let Some(pacer) = pacer_for_task {
+        if let Some(pacer) = pacer {
             pacer.wait_for_slot().await;
         }
-        prober_for_task.probe(&target, &ctx_for_task).await
+        prober.probe(&targets[target_index], &ctx).await
     });
-    index_by_id.insert(handle.id(), index);
+    coord_by_id.insert(handle.id(), (pass_index, target_index));
 }
 
 #[async_trait::async_trait]
 impl Scheduler for BoundedScheduler {
-    async fn run(
+    async fn run_scan(
         &self,
-        prober: Arc<dyn Prober>,
+        probers: Vec<Arc<dyn Prober>>,
         targets: Vec<ResolvedTarget>,
         ctx: ProbeCtx,
-    ) -> Vec<Result<ProbeOutcome, RastreoError>> {
-        if targets.is_empty() {
+        cancel: watch::Receiver<bool>,
+    ) -> Vec<TargetScan> {
+        let num_targets = targets.len();
+        let num_probers = probers.len();
+        if num_targets == 0 || num_probers == 0 {
             return Vec::new();
         }
-
-        let len = targets.len();
+        let targets = Arc::new(targets);
 
         // JoinSet aborts every spawned probe on drop, bounding an abandoned scan to the request-timeout instead of leaking detached tasks.
         let mut set: JoinSet<Result<ProbeOutcome, RastreoError>> = JoinSet::new();
-        let mut index_by_id: HashMap<Id, usize> = HashMap::with_capacity(len);
-        let mut slots: Vec<Option<Result<ProbeOutcome, RastreoError>>> =
-            (0..len).map(|_| None).collect();
+        let mut coord_by_id: HashMap<Id, (usize, usize)> =
+            HashMap::with_capacity(self.max_concurrent);
+        let mut slots: Vec<Vec<Option<Result<ProbeOutcome, RastreoError>>>> = (0..num_targets)
+            .map(|_| (0..num_probers).map(|_| None).collect())
+            .collect();
+        let mut completed = vec![0usize; num_targets];
 
-        let mut pending = targets.into_iter().enumerate();
+        // Target-outer feed order: a target's whole probe set is scheduled before the next target's,
+        // so a cancelled scan leaves the earliest targets fully scanned rather than all targets torn.
+        let mut work = (0..num_targets).flat_map(move |t| (0..num_probers).map(move |p| (p, t)));
+
         for _ in 0..self.max_concurrent {
-            match pending.next() {
-                Some((index, target)) => {
-                    spawn_probe(
-                        &mut set,
-                        &mut index_by_id,
-                        index,
-                        target,
-                        &prober,
-                        &ctx,
-                        &self.pacer,
-                    );
-                }
+            if *cancel.borrow() {
+                break;
+            }
+            match work.next() {
+                Some((pass_index, target_index)) => spawn_probe(
+                    &mut set,
+                    &mut coord_by_id,
+                    pass_index,
+                    target_index,
+                    &probers[pass_index],
+                    &targets,
+                    &ctx,
+                    &self.pacer,
+                ),
                 None => break,
             }
         }
@@ -161,26 +186,49 @@ impl Scheduler for BoundedScheduler {
                     )
                 }
             };
-            if let Some(&index) = index_by_id.get(&id) {
-                slots[index] = Some(outcome);
+            if let Some(&(pass_index, target_index)) = coord_by_id.get(&id) {
+                slots[target_index][pass_index] = Some(outcome);
+                completed[target_index] += 1;
             }
-            if let Some((index, target)) = pending.next() {
-                spawn_probe(
-                    &mut set,
-                    &mut index_by_id,
-                    index,
-                    target,
-                    &prober,
-                    &ctx,
-                    &self.pacer,
-                );
+            // A live cancel stops new probe starts but lets in-flight probes drain, so a target that
+            // already started still reports every prober's outcome instead of a partial record.
+            if !*cancel.borrow() {
+                if let Some((pass_index, target_index)) = work.next() {
+                    spawn_probe(
+                        &mut set,
+                        &mut coord_by_id,
+                        pass_index,
+                        target_index,
+                        &probers[pass_index],
+                        &targets,
+                        &ctx,
+                        &self.pacer,
+                    );
+                }
             }
         }
 
-        slots
-            .into_iter()
-            .map(|slot| slot.expect("every spawned probe reports its index exactly once"))
-            .collect()
+        let mut out = Vec::new();
+        for (target_index, target_slots) in slots.into_iter().enumerate() {
+            if completed[target_index] != num_probers {
+                continue;
+            }
+            let outcomes = target_slots
+                .into_iter()
+                .enumerate()
+                .map(|(pass_index, slot)| {
+                    (
+                        pass_index,
+                        slot.expect("a fully-scanned target has every prober's outcome"),
+                    )
+                })
+                .collect();
+            out.push(TargetScan {
+                target_index,
+                outcomes,
+            });
+        }
+        out
     }
 }
 
@@ -240,6 +288,35 @@ mod tests {
         ) -> Result<ProbeOutcome, RastreoError> {
             tokio::time::sleep(self.delay).await;
             self.completed.fetch_add(1, Ordering::SeqCst);
+            Ok(ProbeOutcome {
+                kind: ProbeKind::TcpConnect,
+                target_ip: target.ip,
+                timestamp: SystemTime::UNIX_EPOCH,
+                reachable: true,
+                signals: Vec::new(),
+                fault: None,
+            })
+        }
+    }
+
+    struct StartCountingProber {
+        delay: Duration,
+        started: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Prober for StartCountingProber {
+        fn kind(&self) -> ProbeKind {
+            ProbeKind::TcpConnect
+        }
+
+        async fn probe(
+            &self,
+            target: &ResolvedTarget,
+            _ctx: &ProbeCtx,
+        ) -> Result<ProbeOutcome, RastreoError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
             Ok(ProbeOutcome {
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
@@ -314,6 +391,7 @@ mod tests {
     }
 
     struct SaturationProber {
+        kind: ProbeKind,
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
         probed: Arc<AtomicUsize>,
@@ -322,7 +400,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Prober for SaturationProber {
         fn kind(&self) -> ProbeKind {
-            ProbeKind::TcpConnect
+            self.kind
         }
 
         async fn probe(
@@ -337,7 +415,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
-                kind: ProbeKind::TcpConnect,
+                kind: self.kind,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
                 reachable: true,
@@ -434,6 +512,28 @@ mod tests {
         }
     }
 
+    fn open_cancel() -> watch::Receiver<bool> {
+        watch::channel(false).1
+    }
+
+    fn one(prober: Arc<dyn Prober>) -> Vec<Arc<dyn Prober>> {
+        vec![prober]
+    }
+
+    // Flattens a single-prober scan back to target-ordered results for the order/error assertions.
+    fn single_prober_results(scans: Vec<TargetScan>) -> Vec<Result<ProbeOutcome, RastreoError>> {
+        scans
+            .into_iter()
+            .map(|s| {
+                s.outcomes
+                    .into_iter()
+                    .next()
+                    .expect("single-prober scan has one outcome")
+                    .1
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn new_normalizes_zero_to_one() {
         let s = BoundedScheduler::new(0);
@@ -457,7 +557,7 @@ mod tests {
         let s = BoundedScheduler::new(64).with_probe_rate(Some(10));
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let start = Instant::now();
-        let out = s.run(prober, targets, ctx()).await;
+        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
         let elapsed = start.elapsed();
         assert_eq!(out.len(), 5);
         assert_eq!(calls.load(Ordering::SeqCst), 5);
@@ -475,7 +575,7 @@ mod tests {
         let s = BoundedScheduler::new(64);
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let start = Instant::now();
-        let out = s.run(prober, targets, ctx()).await;
+        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
         let elapsed = start.elapsed();
         assert_eq!(out.len(), 5);
         assert!(
@@ -492,7 +592,7 @@ mod tests {
         let s = BoundedScheduler::new(64).with_probe_rate(Some(0));
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
         let start = Instant::now();
-        let out = s.run(prober, targets, ctx()).await;
+        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
         let elapsed = start.elapsed();
         assert_eq!(out.len(), 5);
         assert!(
@@ -508,7 +608,8 @@ mod tests {
         });
         let s = BoundedScheduler::new(64).with_probe_rate(Some(50));
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
-        let out = s.run(prober, targets, ctx()).await;
+        let out =
+            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 5);
         for (i, result) in out.iter().enumerate() {
             let octet = (i as u8) + 1;
@@ -518,26 +619,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_zero_targets_returns_empty_and_skips_prober() {
+    async fn run_scan_with_zero_targets_returns_empty_and_skips_prober() {
         let calls = Arc::new(AtomicUsize::new(0));
         let prober: Arc<dyn Prober> = Arc::new(CountingProber {
             calls: Arc::clone(&calls),
         });
         let s = BoundedScheduler::with_default_concurrency();
-        let out = s.run(prober, Vec::new(), ctx()).await;
+        let out = s
+            .run_scan(one(prober), Vec::new(), ctx(), open_cancel())
+            .await;
         assert!(out.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn run_with_single_target_invokes_prober_once() {
+    async fn run_scan_with_zero_probers_returns_empty() {
+        let s = BoundedScheduler::with_default_concurrency();
+        let targets: Vec<ResolvedTarget> = (1u8..=3).map(target).collect();
+        let out = s.run_scan(Vec::new(), targets, ctx(), open_cancel()).await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_scan_with_single_target_invokes_prober_once() {
         let calls = Arc::new(AtomicUsize::new(0));
         let prober: Arc<dyn Prober> = Arc::new(CountingProber {
             calls: Arc::clone(&calls),
         });
         let s = BoundedScheduler::with_default_concurrency();
         let t = target(1);
-        let out = s.run(prober, vec![t], ctx()).await;
+        let out =
+            single_prober_results(s.run_scan(one(prober), vec![t], ctx(), open_cancel()).await);
         assert_eq!(out.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let outcome = out[0].as_ref().expect("ok");
@@ -545,14 +657,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_preserves_input_order_for_many_targets() {
+    async fn run_scan_preserves_input_order_for_many_targets() {
         let calls = Arc::new(AtomicUsize::new(0));
         let prober: Arc<dyn Prober> = Arc::new(CountingProber {
             calls: Arc::clone(&calls),
         });
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
-        let out = s.run(prober, targets, ctx()).await;
+        let out =
+            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 5);
         assert_eq!(calls.load(Ordering::SeqCst), 5);
         for (i, result) in out.iter().enumerate() {
@@ -563,14 +676,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_preserves_input_order_under_variable_latency() {
+    async fn run_scan_preserves_input_order_under_variable_latency() {
         // Higher-octet targets finish first; result order must still follow input order.
         let prober: Arc<dyn Prober> = Arc::new(DelayProber {
             delays_us: vec![50_000, 40_000, 30_000, 20_000, 10_000],
         });
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (0u8..5).map(target).collect();
-        let out = s.run(prober, targets, ctx()).await;
+        let out =
+            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 5);
         for (i, result) in out.iter().enumerate() {
             let expected = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i as u8));
@@ -578,8 +692,66 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn run_scan_runs_every_prober_against_every_target_once() {
+        let probed = Arc::new(AtomicUsize::new(0));
+        let mk = |kind: ProbeKind| -> Arc<dyn Prober> {
+            Arc::new(SaturationProber {
+                kind,
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                probed: Arc::clone(&probed),
+            })
+        };
+        let probers = vec![
+            mk(ProbeKind::TcpConnect),
+            mk(ProbeKind::Http),
+            mk(ProbeKind::Snmp),
+        ];
+        let targets: Vec<ResolvedTarget> = (0u8..4).map(target).collect();
+        let s = BoundedScheduler::with_default_concurrency();
+
+        let scans = s.run_scan(probers, targets, ctx(), open_cancel()).await;
+
+        assert_eq!(scans.len(), 4, "every target fully scanned");
+        assert_eq!(probed.load(Ordering::SeqCst), 12, "3 probers x 4 targets");
+        for (t, scan) in scans.iter().enumerate() {
+            assert_eq!(scan.target_index, t, "targets returned in input order");
+            assert_eq!(scan.outcomes.len(), 3, "one outcome per prober");
+            let expected = IpAddr::V4(Ipv4Addr::new(10, 0, 0, t as u8));
+            for (pass_index, (tagged, result)) in scan.outcomes.iter().enumerate() {
+                assert_eq!(*tagged, pass_index, "outcome tagged with its pass index");
+                let outcome = result.as_ref().expect("ok");
+                assert_eq!(outcome.target_ip, expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_scan_tags_outcomes_with_prober_kind_by_pass() {
+        let mk = |kind: ProbeKind| -> Arc<dyn Prober> {
+            Arc::new(SaturationProber {
+                kind,
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                probed: Arc::new(AtomicUsize::new(0)),
+            })
+        };
+        let kinds = [ProbeKind::Snmp, ProbeKind::TcpConnect, ProbeKind::Dns];
+        let probers = vec![mk(kinds[0]), mk(kinds[1]), mk(kinds[2])];
+        let targets = vec![target(7)];
+        let s = BoundedScheduler::with_default_concurrency();
+
+        let scans = s.run_scan(probers, targets, ctx(), open_cancel()).await;
+        assert_eq!(scans.len(), 1);
+        for (pass_index, (tagged, result)) in scans[0].outcomes.iter().enumerate() {
+            assert_eq!(*tagged, pass_index);
+            assert_eq!(result.as_ref().expect("ok").kind, kinds[pass_index]);
+        }
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn dropping_run_future_aborts_in_flight_probes() {
+    async fn dropping_run_scan_future_aborts_in_flight_probes() {
         let completed = Arc::new(AtomicUsize::new(0));
         let prober: Arc<dyn Prober> = Arc::new(SlowCountingProber {
             delay: Duration::from_millis(200),
@@ -588,11 +760,14 @@ mod tests {
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=8).map(target).collect();
 
-        let dropped =
-            tokio::time::timeout(Duration::from_millis(50), s.run(prober, targets, ctx())).await;
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(50),
+            s.run_scan(one(prober), targets, ctx(), open_cancel()),
+        )
+        .await;
         assert!(
             dropped.is_err(),
-            "the timeout must drop the run future mid-scan"
+            "the timeout must drop the run_scan future mid-scan"
         );
 
         // Advance past every probe's 200ms completion; aborted tasks never increment, detached ones would.
@@ -600,12 +775,61 @@ mod tests {
         assert_eq!(
             completed.load(Ordering::SeqCst),
             0,
-            "dropping the run future must abort in-flight probes, not detach them"
+            "dropping the run_scan future must abort in-flight probes, not detach them"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_scan_cancel_before_start_primes_nothing() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let prober: Arc<dyn Prober> = Arc::new(StartCountingProber {
+            delay: Duration::from_millis(10),
+            started: Arc::clone(&started),
+        });
+        let s = BoundedScheduler::new(4);
+        let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
+
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).expect("send cancel");
+
+        let out = s.run_scan(one(prober), targets, ctx(), rx).await;
+        assert!(out.is_empty(), "a pre-cancelled scan primes no probes");
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_scan_cancel_stops_priming_and_returns_completed_targets() {
+        // cap=2 primes only target 0's + target 1's probe (single prober). Cancel lands before the
+        // in-flight probes finish, so targets 2..5 are never scheduled and the finished ones return.
+        let started = Arc::new(AtomicUsize::new(0));
+        let prober: Arc<dyn Prober> = Arc::new(StartCountingProber {
+            delay: Duration::from_millis(100),
+            started: Arc::clone(&started),
+        });
+        let s = BoundedScheduler::new(2);
+        let targets: Vec<ResolvedTarget> = (0u8..5).map(target).collect();
+
+        let (tx, rx) = watch::channel(false);
+        let (out, _) = tokio::join!(s.run_scan(one(prober), targets, ctx(), rx), async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tx.send(true).expect("send cancel");
+        });
+
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            2,
+            "only the primed probes started"
+        );
+        let indices: Vec<usize> = out.iter().map(|s| s.target_index).collect();
+        assert_eq!(
+            indices,
+            vec![0, 1],
+            "the two primed targets returned in order"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn run_respects_concurrency_cap() {
+    async fn run_scan_respects_concurrency_cap() {
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let prober: Arc<dyn Prober> = Arc::new(PeakProber {
@@ -614,7 +838,7 @@ mod tests {
         });
         let s = BoundedScheduler::new(2);
         let targets: Vec<ResolvedTarget> = (1u8..=5).map(target).collect();
-        let out = s.run(prober, targets, ctx()).await;
+        let out = s.run_scan(one(prober), targets, ctx(), open_cancel()).await;
         assert_eq!(out.len(), 5);
         let observed_peak = peak.load(Ordering::SeqCst);
         assert!(
@@ -630,6 +854,7 @@ mod tests {
         let peak = Arc::new(AtomicUsize::new(0));
         let probed = Arc::new(AtomicUsize::new(0));
         let prober: Arc<dyn Prober> = Arc::new(SaturationProber {
+            kind: ProbeKind::TcpConnect,
             in_flight: Arc::clone(&in_flight),
             peak: Arc::clone(&peak),
             probed: Arc::clone(&probed),
@@ -647,7 +872,8 @@ mod tests {
             })
             .collect();
 
-        let out = s.run(prober, targets, ctx()).await;
+        let out =
+            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
 
         assert_eq!(out.len(), 500);
         assert_eq!(probed.load(Ordering::SeqCst), 500);
@@ -664,12 +890,61 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn feed_loop_saturates_to_cap_across_the_whole_prober_set() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let probed = Arc::new(AtomicUsize::new(0));
+        let mk = |kind: ProbeKind| -> Arc<dyn Prober> {
+            Arc::new(SaturationProber {
+                kind,
+                in_flight: Arc::clone(&in_flight),
+                peak: Arc::clone(&peak),
+                probed: Arc::clone(&probed),
+            })
+        };
+        let probers = vec![
+            mk(ProbeKind::TcpConnect),
+            mk(ProbeKind::Http),
+            mk(ProbeKind::Snmp),
+            mk(ProbeKind::Dns),
+        ];
+        let cap = 16;
+        let s = BoundedScheduler::new(cap);
+        let targets: Vec<ResolvedTarget> = (0..100u32)
+            .map(|i| {
+                let ip = IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8));
+                ResolvedTarget {
+                    ip,
+                    original: Target::Ip(ip),
+                    resolved_at: SystemTime::UNIX_EPOCH,
+                }
+            })
+            .collect();
+
+        let scans = s.run_scan(probers, targets, ctx(), open_cancel()).await;
+
+        assert_eq!(scans.len(), 100);
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            400,
+            "4 probers x 100 targets"
+        );
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            cap,
+            "in-flight probes across every prober must saturate to and never exceed the cap"
+        );
+    }
+
     #[tokio::test]
-    async fn run_propagates_prober_error_at_failing_index() {
+    async fn run_scan_propagates_prober_error_at_failing_index() {
         let prober: Arc<dyn Prober> = Arc::new(FailAtIndexProber { fail_octet: 3 });
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=4).map(target).collect();
-        let out = s.run(prober, targets, ctx()).await;
+        let out =
+            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 4);
         assert!(out[0].is_ok());
         assert!(out[1].is_ok());
@@ -681,11 +956,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_maps_prober_panic_to_runtime_task_panicked() {
+    async fn run_scan_maps_prober_panic_to_runtime_task_panicked() {
         let prober: Arc<dyn Prober> = Arc::new(PanicAtIndexProber { panic_octet: 2 });
         let s = BoundedScheduler::with_default_concurrency();
         let targets: Vec<ResolvedTarget> = (1u8..=3).map(target).collect();
-        let out = s.run(prober, targets, ctx()).await;
+        let out =
+            single_prober_results(s.run_scan(one(prober), targets, ctx(), open_cancel()).await);
         assert_eq!(out.len(), 3);
         assert!(out[0].is_ok());
         assert!(matches!(
@@ -706,7 +982,11 @@ mod tests {
             calls: Arc::clone(&calls),
         });
         let scheduler = BoundedScheduler::with_default_concurrency();
-        let out = scheduler.run(prober, resolved, ctx()).await;
+        let out = single_prober_results(
+            scheduler
+                .run_scan(one(prober), resolved, ctx(), open_cancel())
+                .await,
+        );
         assert_eq!(out.len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         for result in &out {
