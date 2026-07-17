@@ -1092,6 +1092,89 @@ inner:
         );
     }
 
+    fn direct_cfg(baseline: Option<f64>, per_signal: Option<f64>) -> FuserConfig {
+        FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: baseline,
+            confidence_per_signal: per_signal,
+        }
+    }
+
+    #[test]
+    fn validate_and_create_fuser_agree_on_reject_accept_decision() {
+        let base: Vec<(&str, FuserConfig)> = vec![
+            ("direct_valid", direct_cfg(Some(0.4), Some(0.05))),
+            ("direct_baseline_above_one", direct_cfg(Some(5.0), None)),
+            ("direct_baseline_negative", direct_cfg(Some(-0.1), None)),
+            ("direct_baseline_nan", direct_cfg(Some(f64::NAN), None)),
+            ("direct_per_signal_negative", direct_cfg(None, Some(-0.2))),
+            (
+                "identity_over_direct_valid",
+                FuserConfig::Identity {
+                    identity_hints: IdentityHints::default(),
+                    inner: direct(),
+                },
+            ),
+            (
+                "identity_over_direct_bad_confidence",
+                FuserConfig::Identity {
+                    identity_hints: IdentityHints::default(),
+                    inner: Box::new(direct_cfg(Some(5.0), None)),
+                },
+            ),
+            (
+                "identity_vrrp_valid_mac",
+                identity_with_vrrp_mac("00:00:5e:00:01:2a"),
+            ),
+            (
+                "identity_vrrp_invalid_mac",
+                identity_with_vrrp_mac("not-a-real-mac"),
+            ),
+            (
+                "identity_nested_in_identity",
+                FuserConfig::Identity {
+                    identity_hints: IdentityHints::default(),
+                    inner: Box::new(FuserConfig::Identity {
+                        identity_hints: IdentityHints::default(),
+                        inner: direct(),
+                    }),
+                },
+            ),
+        ];
+
+        // Empty data_path is offline-decidable; a non-empty path does file IO that validate() skips.
+        #[cfg(feature = "oui")]
+        let oui: Vec<(&str, FuserConfig)> = vec![
+            (
+                "oui_over_direct_bundled",
+                FuserConfig::OuiEnrichment {
+                    data_path: String::new(),
+                    inner: direct(),
+                },
+            ),
+            (
+                "oui_over_identity_nested",
+                FuserConfig::OuiEnrichment {
+                    data_path: String::new(),
+                    inner: Box::new(FuserConfig::Identity {
+                        identity_hints: IdentityHints::default(),
+                        inner: direct(),
+                    }),
+                },
+            ),
+        ];
+        #[cfg(not(feature = "oui"))]
+        let oui: Vec<(&str, FuserConfig)> = Vec::new();
+
+        for (label, cfg) in base.iter().chain(oui.iter()) {
+            assert_eq!(
+                cfg.validate().is_err(),
+                create_fuser(cfg).is_err(),
+                "reject/accept parity broke for `{label}`"
+            );
+        }
+    }
+
     #[cfg(feature = "oui")]
     #[test]
     fn validate_rejects_identity_nested_in_oui() {
