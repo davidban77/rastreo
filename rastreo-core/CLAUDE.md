@@ -146,7 +146,9 @@ The SSH prober follows the same permissive posture without a toggle: it offers l
 
 ## Trait Shape
 
-The batch-shaped contracts `Fuser::fuse_many(Vec) -> Result<Vec>` and `Scheduler::run -> Vec<Result>` collect the whole result set before returning; a future streaming rearchitecture is where those shapes change. No new external caller of either may be added without recording it here first, so the streaming migration has a single, complete list of call sites to convert.
+The `Fuser` trait is streaming-native: `ingest(Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>>` takes one target's outcomes at a time and returns records ready to emit, while `finish() -> Result<Vec<DeviceRecord>>` flushes records held back for cross-target correlation. `IdentityFuser` buffers its inner records across `ingest` calls and emits the correlated set on `finish`; `DirectFuser`/`OuiEnrichmentFuser` emit per `ingest` and return nothing from `finish`. The pipeline still drives this in batch — it buffers all outcomes, then `fuser::group_outcomes_by_ip` + `drive_fuser` group by target IP and run ingest-per-group followed by a single finish (identical record set and order to the old `fuse_many`). A `#[cfg(test)]` batch reference in `fuser/identity.rs` differential-tests the ingest/finish path against the old `fuse_many` semantics and must stay green. `Identity` is enforced as the outermost fuser — `FuserConfig::validate` rejects nesting it inside `OuiEnrichment` or another `Identity` — so this equivalence holds for every representable config (the one shape that diverged under streaming is now invalid).
+
+`Scheduler::run -> Vec<Result>` remains the batch-shaped contract that collects the whole result set before returning; the streaming migration converts it next. No new external caller of `Scheduler::run` may be added without recording it here first, so the migration has a single, complete list of call sites to convert.
 
 ## Testing
 

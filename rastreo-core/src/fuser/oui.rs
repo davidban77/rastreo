@@ -21,14 +21,8 @@ impl OuiEnrichmentFuser {
     pub fn new(inner: Box<dyn Fuser>, table: OuiTable) -> Self {
         Self { inner, table }
     }
-}
 
-impl Fuser for OuiEnrichmentFuser {
-    fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
-        let mut record = match self.inner.fuse(outcomes)? {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+    fn enrich(&self, record: &mut DeviceRecord) {
         if record.manufacturer.is_none() {
             if let Some(mac) = &record.mac {
                 if let Some(vendor) = self.table.lookup(mac) {
@@ -36,7 +30,24 @@ impl Fuser for OuiEnrichmentFuser {
                 }
             }
         }
-        Ok(Some(record))
+    }
+}
+
+impl Fuser for OuiEnrichmentFuser {
+    fn ingest(&mut self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError> {
+        let mut records = self.inner.ingest(outcomes)?;
+        for record in &mut records {
+            self.enrich(record);
+        }
+        Ok(records)
+    }
+
+    fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+        let mut records = self.inner.finish()?;
+        for record in &mut records {
+            self.enrich(record);
+        }
+        Ok(records)
     }
 }
 
@@ -553,50 +564,50 @@ mod tests {
     #[test]
     fn oui_enrichment_populates_manufacturer_from_bundled_data() {
         let table = OuiTable::from_bundled().expect("bundled loads");
-        let fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
+        let mut fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
         let outcomes = vec![outcome_with_mac("00:04:AC:11:22:33")];
-        let record = fuser.fuse(&outcomes).expect("ok").expect("some");
-        assert_eq!(record.manufacturer.as_deref(), Some("IBM Corp"));
+        let records = fuser.ingest(outcomes).expect("ok");
+        assert_eq!(records[0].manufacturer.as_deref(), Some("IBM Corp"));
     }
 
     #[test]
     fn oui_enrichment_leaves_manufacturer_none_when_no_mac_in_record() {
         let table = OuiTable::from_bundled().expect("bundled loads");
-        let fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
+        let mut fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
         let outcomes = vec![outcome_no_mac()];
-        let record = fuser.fuse(&outcomes).expect("ok").expect("some");
-        assert!(record.mac.is_none());
-        assert!(record.manufacturer.is_none());
+        let records = fuser.ingest(outcomes).expect("ok");
+        assert!(records[0].mac.is_none());
+        assert!(records[0].manufacturer.is_none());
     }
 
     #[test]
     fn oui_enrichment_leaves_manufacturer_none_when_oui_unknown() {
         let table = parse_str("00:04:AC\tIBM\tIBM Corp\n");
-        let fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
+        let mut fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
         let outcomes = vec![outcome_with_mac("FE:DC:BA:11:22:33")];
-        let record = fuser.fuse(&outcomes).expect("ok").expect("some");
-        assert!(record.manufacturer.is_none());
+        let records = fuser.ingest(outcomes).expect("ok");
+        assert!(records[0].manufacturer.is_none());
     }
 
     #[test]
     fn oui_enrichment_delegates_to_inner_fuser() {
         let table = OuiTable::from_bundled().expect("bundled loads");
-        let fuser = OuiEnrichmentFuser::new(
+        let mut fuser = OuiEnrichmentFuser::new(
             Box::new(DirectFuser::new().with_confidence_baseline(0.5)),
             table,
         );
         let outcomes = vec![outcome_with_mac("00:04:AC:11:22:33")];
-        let record = fuser.fuse(&outcomes).expect("ok").expect("some");
+        let records = fuser.ingest(outcomes).expect("ok");
         // Baseline 0.5 + 2 signals * 0.1 = 0.7
-        assert!((record.confidence.value() - 0.7).abs() < 1e-9);
+        assert!((records[0].confidence.value() - 0.7).abs() < 1e-9);
     }
 
     #[test]
-    fn oui_enrichment_returns_none_when_inner_returns_none() {
+    fn oui_enrichment_returns_empty_when_inner_returns_empty() {
         let table = OuiTable::from_bundled().expect("bundled loads");
-        let fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
-        let out = fuser.fuse(&[]).expect("ok");
-        assert!(out.is_none());
+        let mut fuser = OuiEnrichmentFuser::new(Box::new(DirectFuser::new()), table);
+        let records = fuser.ingest(Vec::new()).expect("ok");
+        assert!(records.is_empty());
     }
 
     #[test]

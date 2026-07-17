@@ -20,32 +20,42 @@ pub use identity::{IdentityFuser, IdentityHints, VrrpGroup};
 #[cfg(feature = "oui")]
 pub use oui::{OuiEnrichmentFuser, OuiTable};
 
+/// Streaming fusion: `ingest` receives one target's outcomes at a time and returns any records
+/// ready to emit; `finish` flushes records held back for cross-target correlation. The pipeline
+/// stamps `scan_metadata` on every returned record, so implementers leave it at its default.
 pub trait Fuser: Send + Sync {
-    fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError>;
+    fn ingest(&mut self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError>;
+    fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError>;
+}
 
-    /// The pipeline stamps `scan_metadata` on every returned record after fusion;
-    /// values set by the fuser are silently overwritten. Fuser implementers should
-    /// leave `scan_metadata` at its default; provenance is the pipeline's concern.
-    fn fuse_many(&self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError> {
-        // Preserve first-occurrence IP order so consumers see deterministic record order.
-        let mut groups: HashMap<IpAddr, Vec<ProbeOutcome>> = HashMap::new();
-        let mut order: Vec<IpAddr> = Vec::new();
-        for outcome in outcomes {
-            let ip = outcome.target_ip;
-            if !groups.contains_key(&ip) {
-                order.push(ip);
-            }
-            groups.entry(ip).or_default().push(outcome);
-        }
-        let mut out = Vec::with_capacity(order.len());
-        for ip in order {
-            let group = groups.remove(&ip).expect("ip in order is in groups");
-            if let Some(record) = self.fuse(&group)? {
-                out.push(record);
+/// Groups outcomes by target IP, preserving first-occurrence order.
+pub(crate) fn group_outcomes_by_ip(outcomes: Vec<ProbeOutcome>) -> Vec<Vec<ProbeOutcome>> {
+    let mut index: HashMap<IpAddr, usize> = HashMap::new();
+    let mut groups: Vec<Vec<ProbeOutcome>> = Vec::new();
+    for outcome in outcomes {
+        match index.get(&outcome.target_ip) {
+            Some(&i) => groups[i].push(outcome),
+            None => {
+                index.insert(outcome.target_ip, groups.len());
+                groups.push(vec![outcome]);
             }
         }
-        Ok(out)
     }
+    groups
+}
+
+/// Drives a streaming fuser in batch: groups outcomes by target, ingests each group, then flushes
+/// correlated records at finish.
+pub(crate) fn drive_fuser(
+    fuser: &mut dyn Fuser,
+    outcomes: Vec<ProbeOutcome>,
+) -> Result<Vec<DeviceRecord>, RastreoError> {
+    let mut records = Vec::new();
+    for group in group_outcomes_by_ip(outcomes) {
+        records.extend(fuser.ingest(group)?);
+    }
+    records.extend(fuser.finish()?);
+    Ok(records)
 }
 
 pub struct DirectFuser {
@@ -88,8 +98,8 @@ impl Default for DirectFuser {
     }
 }
 
-impl Fuser for DirectFuser {
-    fn fuse(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
+impl DirectFuser {
+    fn fuse_one(&self, outcomes: &[ProbeOutcome]) -> Result<Option<DeviceRecord>, RastreoError> {
         if outcomes.is_empty() {
             return Ok(None);
         }
@@ -171,6 +181,19 @@ impl Fuser for DirectFuser {
     }
 }
 
+impl Fuser for DirectFuser {
+    fn ingest(&mut self, outcomes: Vec<ProbeOutcome>) -> Result<Vec<DeviceRecord>, RastreoError> {
+        match self.fuse_one(&outcomes)? {
+            Some(record) => Ok(vec![record]),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+        Ok(Vec::new())
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -221,9 +244,33 @@ impl FuserConfig {
                 Ok(())
             }
             #[cfg(feature = "oui")]
-            FuserConfig::OuiEnrichment { inner, .. } => inner.validate(),
-            FuserConfig::Identity { inner, .. } => inner.validate(),
+            FuserConfig::OuiEnrichment { inner, .. } => {
+                reject_nested_identity(inner)?;
+                inner.validate()
+            }
+            FuserConfig::Identity { inner, .. } => {
+                reject_nested_identity(inner)?;
+                inner.validate()
+            }
         }
+    }
+}
+
+fn reject_nested_identity(inner: &FuserConfig) -> Result<(), ConfigError> {
+    if subtree_contains_identity(inner) {
+        return Err(ConfigError::invalid(
+            "identity fuser must be the outermost fuser; it cannot be nested inside another fuser",
+        ));
+    }
+    Ok(())
+}
+
+fn subtree_contains_identity(config: &FuserConfig) -> bool {
+    match config {
+        FuserConfig::Direct { .. } => false,
+        #[cfg(feature = "oui")]
+        FuserConfig::OuiEnrichment { inner, .. } => subtree_contains_identity(inner),
+        FuserConfig::Identity { .. } => true,
     }
 }
 
@@ -319,7 +366,7 @@ mod tests {
     #[test]
     fn fuse_empty_outcomes_returns_none() {
         let f = DirectFuser::new();
-        let out = f.fuse(&[]).expect("ok");
+        let out = f.fuse_one(&[]).expect("ok");
         assert!(out.is_none());
     }
 
@@ -327,7 +374,7 @@ mod tests {
     fn fuse_all_unreachable_default_returns_none() {
         let f = DirectFuser::new();
         let outcomes = vec![outcome(1, false, vec![]), outcome(1, false, vec![])];
-        let out = f.fuse(&outcomes).expect("ok");
+        let out = f.fuse_one(&outcomes).expect("ok");
         assert!(out.is_none());
     }
 
@@ -335,7 +382,7 @@ mod tests {
     fn fuse_all_unreachable_with_include_returns_record() {
         let f = DirectFuser::new().with_include_unreachable(true);
         let outcomes = vec![outcome(1, false, vec![])];
-        let out = f.fuse(&outcomes).expect("ok");
+        let out = f.fuse_one(&outcomes).expect("ok");
         assert!(out.is_some());
     }
 
@@ -343,7 +390,7 @@ mod tests {
     fn fuse_one_reachable_with_one_port_signal_uses_ip_identity() {
         let f = DirectFuser::new();
         let outcomes = vec![outcome(1, true, vec![Signal::OpenPort(80)])];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
         assert_eq!(record.identity_key.as_str(), "ip:10.0.0.1");
         assert!(record.mac.is_none());
@@ -361,7 +408,7 @@ mod tests {
                 Signal::Mac("AA:BB:CC:DD:EE:FF".into()),
             ],
         )];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.identity_key.as_str(), "mac:aa:bb:cc:dd:ee:ff");
         assert_eq!(record.mac.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
     }
@@ -380,7 +427,7 @@ mod tests {
                 ],
             ),
         ];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.signals.len(), 3);
     }
 
@@ -392,7 +439,7 @@ mod tests {
             true,
             vec![Signal::OpenPort(80), Signal::OpenPort(80)],
         )];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.signals.len(), 1);
     }
 
@@ -408,7 +455,7 @@ mod tests {
                 Signal::OpenPort(443),
             ],
         )];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert!((record.confidence.value() - 0.4).abs() < 1e-9);
     }
 
@@ -420,7 +467,7 @@ mod tests {
             sigs.push(Signal::OpenPort(port));
         }
         let outcomes = vec![outcome(1, true, sigs)];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.confidence.value(), 1.0);
     }
 
@@ -434,7 +481,7 @@ mod tests {
             true,
             vec![Signal::OpenPort(22), Signal::OpenPort(80)],
         )];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert!((record.confidence.value() - 0.6).abs() < 1e-9);
     }
 
@@ -448,7 +495,7 @@ mod tests {
             outcome_at(1, true, vec![Signal::OpenPort(22)], t1),
             outcome_at(1, true, vec![Signal::OpenPort(80)], t2),
         ];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.last_seen, t1);
     }
 
@@ -469,7 +516,7 @@ mod tests {
                 vec![Signal::SnmpSysName("core-sw01".into())],
             ),
         ];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.probe_kinds, vec![ProbeKind::Http, ProbeKind::Snmp]);
     }
 
@@ -480,7 +527,7 @@ mod tests {
             outcome_with_kind(1, ProbeKind::TcpConnect, true, vec![Signal::OpenPort(22)]),
             outcome_with_kind(1, ProbeKind::Snmp, false, vec![]),
         ];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(
             record.probe_kinds,
             vec![ProbeKind::TcpConnect],
@@ -495,7 +542,7 @@ mod tests {
             outcome_with_kind(1, ProbeKind::TcpConnect, false, vec![]),
             outcome_with_kind(1, ProbeKind::Snmp, false, vec![]),
         ];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert!(
             record.probe_kinds.is_empty(),
             "nothing responded, so nothing is provenance: {:?}",
@@ -515,7 +562,7 @@ mod tests {
                 vec![Signal::HttpBanner("nginx/1.27".into())],
             ),
         ];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(record.probe_kinds, vec![ProbeKind::Http]);
     }
 
@@ -527,7 +574,7 @@ mod tests {
             outcome_with_kind(1, ProbeKind::Http, true, vec![Signal::OpenPort(80)]),
             outcome_with_kind(1, ProbeKind::TcpConnect, true, vec![Signal::OpenPort(22)]),
         ];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
+        let record = f.fuse_one(&outcomes).expect("ok").expect("some");
         assert_eq!(
             record.probe_kinds,
             vec![ProbeKind::Snmp, ProbeKind::Http, ProbeKind::TcpConnect],
@@ -535,15 +582,15 @@ mod tests {
     }
 
     #[test]
-    fn fuse_many_groups_by_ip_preserving_first_occurrence_order() {
-        let f = DirectFuser::new();
+    fn drive_groups_by_ip_preserving_first_occurrence_order() {
+        let mut f = DirectFuser::new();
         let outcomes = vec![
             outcome(2, true, vec![Signal::OpenPort(22)]),
             outcome(1, true, vec![Signal::OpenPort(80)]),
             outcome(2, true, vec![Signal::OpenPort(443)]),
             outcome(3, true, vec![Signal::OpenPort(53)]),
         ];
-        let records = f.fuse_many(outcomes).expect("ok");
+        let records = drive_fuser(&mut f, outcomes).expect("ok");
         let ips: Vec<IpAddr> = records.iter().filter_map(|r| r.mgmt_ip).collect();
         assert_eq!(
             ips,
@@ -556,14 +603,14 @@ mod tests {
     }
 
     #[test]
-    fn fuse_many_skips_groups_with_no_reachable_outcomes() {
-        let f = DirectFuser::new();
+    fn drive_skips_groups_with_no_reachable_outcomes() {
+        let mut f = DirectFuser::new();
         let outcomes = vec![
             outcome(1, false, vec![]),
             outcome(1, false, vec![]),
             outcome(2, true, vec![Signal::OpenPort(22)]),
         ];
-        let records = f.fuse_many(outcomes).expect("ok");
+        let records = drive_fuser(&mut f, outcomes).expect("ok");
         assert_eq!(records.len(), 1);
         assert_eq!(
             records[0].mgmt_ip,
@@ -578,10 +625,10 @@ mod tests {
             confidence_baseline: Some(0.3),
             confidence_per_signal: None,
         };
-        let f = create_fuser(&cfg).expect("create");
+        let mut f = create_fuser(&cfg).expect("create");
         let outcomes = vec![outcome(1, true, vec![Signal::OpenPort(22)])];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
-        assert!((record.confidence.value() - 0.4).abs() < 1e-9);
+        let records = drive_fuser(f.as_mut(), outcomes).expect("ok");
+        assert!((records[0].confidence.value() - 0.4).abs() < 1e-9);
     }
 
     #[test]
@@ -591,10 +638,10 @@ mod tests {
             confidence_baseline: None,
             confidence_per_signal: None,
         };
-        let f = create_fuser(&cfg).expect("create");
+        let mut f = create_fuser(&cfg).expect("create");
         let outcomes = vec![outcome(1, true, vec![Signal::OpenPort(22)])];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
-        assert!((record.confidence.value() - 0.2).abs() < 1e-9);
+        let records = drive_fuser(f.as_mut(), outcomes).expect("ok");
+        assert!((records[0].confidence.value() - 0.2).abs() < 1e-9);
     }
 
     #[test]
@@ -604,10 +651,10 @@ mod tests {
             confidence_baseline: None,
             confidence_per_signal: None,
         };
-        let f = create_fuser(&cfg).expect("create");
+        let mut f = create_fuser(&cfg).expect("create");
         let outcomes = vec![outcome(1, false, vec![])];
-        let record = f.fuse(&outcomes).expect("ok");
-        assert!(record.is_some());
+        let records = drive_fuser(f.as_mut(), outcomes).expect("ok");
+        assert_eq!(records.len(), 1);
     }
 
     fn err_msg(cfg: &FuserConfig) -> String {
@@ -815,7 +862,7 @@ mod tests {
                 confidence_per_signal: None,
             }),
         };
-        let f = create_fuser(&cfg).expect("create");
+        let mut f = create_fuser(&cfg).expect("create");
         let outcomes = vec![outcome(
             1,
             true,
@@ -824,8 +871,8 @@ mod tests {
                 Signal::OpenPort(22),
             ],
         )];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
-        assert_eq!(record.manufacturer.as_deref(), Some("IBM Corp"));
+        let records = drive_fuser(f.as_mut(), outcomes).expect("ok");
+        assert_eq!(records[0].manufacturer.as_deref(), Some("IBM Corp"));
     }
 
     #[cfg(feature = "oui")]
@@ -933,10 +980,120 @@ inner:
                 confidence_per_signal: None,
             }),
         };
-        let f = create_fuser(&cfg).expect("create");
+        let mut f = create_fuser(&cfg).expect("create");
         let outcomes = vec![outcome(1, true, vec![Signal::OpenPort(22)])];
-        let record = f.fuse(&outcomes).expect("ok").expect("some");
-        assert_eq!(record.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        let records = drive_fuser(f.as_mut(), outcomes).expect("ok");
+        assert_eq!(
+            records[0].mgmt_ip,
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+        );
+    }
+
+    fn direct() -> Box<FuserConfig> {
+        Box::new(FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: None,
+            confidence_per_signal: None,
+        })
+    }
+
+    #[test]
+    fn validate_rejects_identity_nested_in_identity() {
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(FuserConfig::Identity {
+                identity_hints: IdentityHints::default(),
+                inner: direct(),
+            }),
+        };
+        let err = cfg
+            .validate()
+            .expect_err("nested identity must be rejected");
+        assert!(err.to_string().contains("outermost fuser"), "got: {err}");
+    }
+
+    #[test]
+    fn create_fuser_rejects_identity_nested_in_identity() {
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(FuserConfig::Identity {
+                identity_hints: IdentityHints::default(),
+                inner: direct(),
+            }),
+        };
+        assert!(create_fuser(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_accepts_identity_at_root_over_direct() {
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: direct(),
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn validate_rejects_identity_nested_in_oui() {
+        let cfg = FuserConfig::OuiEnrichment {
+            data_path: String::new(),
+            inner: Box::new(FuserConfig::Identity {
+                identity_hints: IdentityHints::default(),
+                inner: direct(),
+            }),
+        };
+        let err = cfg
+            .validate()
+            .expect_err("identity below oui must be rejected");
+        assert!(err.to_string().contains("outermost fuser"), "got: {err}");
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn validate_rejects_identity_buried_below_oui() {
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(FuserConfig::OuiEnrichment {
+                data_path: String::new(),
+                inner: Box::new(FuserConfig::Identity {
+                    identity_hints: IdentityHints::default(),
+                    inner: direct(),
+                }),
+            }),
+        };
+        let err = cfg
+            .validate()
+            .expect_err("deeply nested identity must be rejected");
+        assert!(err.to_string().contains("outermost fuser"), "got: {err}");
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn validate_accepts_identity_over_oui_over_direct() {
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(FuserConfig::OuiEnrichment {
+                data_path: String::new(),
+                inner: direct(),
+            }),
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[cfg(feature = "oui")]
+    #[test]
+    fn validate_accepts_oui_over_direct() {
+        let cfg = FuserConfig::OuiEnrichment {
+            data_path: String::new(),
+            inner: direct(),
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_direct_alone() {
+        assert!(direct().validate().is_ok());
     }
 
     #[cfg(feature = "oui")]
