@@ -1,22 +1,23 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
 use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, Encoder, EncoderConfig};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
-use crate::fuser::{create_fuser, drive_fuser, Fuser, FuserConfig};
+use crate::fuser::{create_fuser, Fuser, FuserConfig};
 use crate::model::{
     DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, ScanMetadata,
     Target, PROBE_KIND_COUNT,
 };
 use crate::prober::{create_prober, Prober};
 use crate::resolver::{HickoryResolver, Resolver};
-use crate::scheduler::{BoundedScheduler, Scheduler};
+use crate::scheduler::{BoundedScheduler, Scheduler, TargetScan};
 use crate::sink::{create_sink, Sink, SinkConfig, SinkErrorClass, SinkType};
 
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
@@ -183,10 +184,13 @@ pub async fn run_discovery_with_components_cancellable(
         probers.push(Arc::from(create_prober(prober_config)?));
     }
 
-    let acc = scan_and_accumulate(&scheduler, probers, resolved, ctx, cancel).await;
-
-    finish_discovery(
-        acc,
+    let reorder_peak = AtomicUsize::new(0);
+    stream_discovery(
+        &scheduler,
+        probers,
+        resolved,
+        ctx,
+        cancel,
         fuser.as_mut(),
         classifier.as_ref(),
         encoder.as_ref(),
@@ -194,12 +198,16 @@ pub async fn run_discovery_with_components_cancellable(
         &scan_metadata,
         targets_resolved,
         start,
+        &reorder_peak,
     )
     .await
 }
 
 #[derive(Default)]
 struct ScanAccumulation {
+    // Only the batch reference collects raw outcomes for `drive_fuser`; the streaming path fuses
+    // each target as it arrives and never buffers the whole scan.
+    #[cfg(test)]
     all_outcomes: Vec<ProbeOutcome>,
     probe_attempts: usize,
     error_counts: BTreeMap<ProbeErrorKind, usize>,
@@ -209,72 +217,295 @@ struct ScanAccumulation {
     cancelled: bool,
 }
 
-async fn scan_and_accumulate(
-    scheduler: &BoundedScheduler,
-    probers: Vec<Arc<dyn Prober>>,
-    resolved: Vec<ResolvedTarget>,
-    ctx: ProbeCtx,
-    cancel: watch::Receiver<bool>,
-) -> ScanAccumulation {
-    let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
-    let scans = scheduler
-        .run_scan(probers, resolved, ctx, cancel.clone())
-        .await;
-    let cancelled = *cancel.borrow();
-
-    let mut acc = ScanAccumulation {
-        cancelled,
-        ..Default::default()
-    };
-    // Target-outer iteration sees faults in a different order than the batch prober-outer loop, so
-    // `first_probe_error` tracks the smallest `(prober_pass_index, target_index)` key to keep the
-    // batch's choice — the first fault a prober-outer scan would have latched.
-    let mut best_key: Option<(usize, usize)> = None;
-
-    for scan in scans {
-        let target_index = scan.target_index;
-        for (pass_index, result) in scan.outcomes {
-            acc.probe_attempts += 1;
-            let kind = prober_kinds[pass_index];
-            acc.attempts_by_kind[kind.index()] += 1;
-            match result {
-                Ok(outcome) => {
-                    if let Some(fault) = &outcome.fault {
-                        acc.errors_by_kind[kind.index()] += 1;
-                        *acc.error_counts.entry(fault.kind).or_insert(0) += 1;
-                        let key = (pass_index, target_index);
-                        if best_key.is_none_or(|bk| key < bk) {
-                            best_key = Some(key);
-                            acc.first_probe_error = Some(fault.clone());
-                        }
-                    }
-                    acc.all_outcomes.push(outcome);
-                }
-                // A prober carries every fault as data on the outcome; a stray `Err` means it could
-                // not attempt at all. Keep the contract total by counting it as `Other`.
-                Err(err) => {
+// Target-outer iteration sees faults in a different order than a prober-outer loop, so
+// `first_probe_error` tracks the smallest `(prober_pass_index, target_index)` key — the first
+// fault a prober-outer scan would have latched. The key is order-independent, so accumulating in
+// input-target order yields the same value.
+fn accumulate_target(
+    acc: &mut ScanAccumulation,
+    prober_kinds: &[ProbeKind],
+    scan: &TargetScan,
+    best_key: &mut Option<(usize, usize)>,
+) {
+    let target_index = scan.target_index;
+    for (pass_index, result) in &scan.outcomes {
+        acc.probe_attempts += 1;
+        let kind = prober_kinds[*pass_index];
+        acc.attempts_by_kind[kind.index()] += 1;
+        match result {
+            Ok(outcome) => {
+                if let Some(fault) = &outcome.fault {
                     acc.errors_by_kind[kind.index()] += 1;
-                    *acc.error_counts.entry(ProbeErrorKind::Other).or_insert(0) += 1;
-                    tracing::debug!(error = %err, "probe failed");
-                    let msg = err.to_string();
-                    if !msg.is_empty() {
-                        let key = (pass_index, target_index);
-                        if best_key.is_none_or(|bk| key < bk) {
-                            best_key = Some(key);
-                            acc.first_probe_error =
-                                Some(ProbeFault::new(ProbeErrorKind::Other, msg));
-                        }
+                    *acc.error_counts.entry(fault.kind).or_insert(0) += 1;
+                    let key = (*pass_index, target_index);
+                    if best_key.is_none_or(|bk| key < bk) {
+                        *best_key = Some(key);
+                        acc.first_probe_error = Some(fault.clone());
+                    }
+                }
+            }
+            // A prober carries every fault as data on the outcome; a stray `Err` means it could
+            // not attempt at all. Keep the contract total by counting it as `Other`.
+            Err(err) => {
+                acc.errors_by_kind[kind.index()] += 1;
+                *acc.error_counts.entry(ProbeErrorKind::Other).or_insert(0) += 1;
+                tracing::debug!(error = %err, "probe failed");
+                let msg = err.to_string();
+                if !msg.is_empty() {
+                    let key = (*pass_index, target_index);
+                    if best_key.is_none_or(|bk| key < bk) {
+                        *best_key = Some(key);
+                        acc.first_probe_error = Some(ProbeFault::new(ProbeErrorKind::Other, msg));
                     }
                 }
             }
         }
     }
-
-    acc
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn finish_discovery(
+async fn emit_target_records(
+    outcomes: Vec<(usize, Result<ProbeOutcome, RastreoError>)>,
+    fuser: &mut dyn Fuser,
+    classifier: &dyn Classifier,
+    encoder: &dyn Encoder,
+    sink: &mut dyn Sink,
+    scan_metadata: &Arc<ScanMetadata>,
+    buf: &mut Vec<u8>,
+    records_emitted: &mut usize,
+    emit_err: &mut Option<RastreoError>,
+) -> Result<(), RastreoError> {
+    // Only Ok outcomes fuse into a record; a stray Err is tallied as a fault by metric
+    // accumulation and carries nothing to emit.
+    let probe_outcomes: Vec<ProbeOutcome> =
+        outcomes.into_iter().filter_map(|(_, r)| r.ok()).collect();
+    let mut records = fuser.ingest(probe_outcomes)?;
+    for record in &mut records {
+        classifier.classify(record)?;
+        stamp_scan_metadata(record, scan_metadata);
+    }
+    for record in &records {
+        buf.clear();
+        if let Err(e) = encoder.encode_record(record, buf) {
+            *emit_err = Some(e);
+            break;
+        }
+        if let Err(e) = sink.write(buf).await {
+            *emit_err = Some(e);
+            break;
+        }
+        *records_emitted += 1;
+    }
+    Ok(())
+}
+
+/// Streams each target's record the moment its scan completes: consumes `TargetScan`s in completion
+/// order, reorders them by `target_index`, and emits each in input-target order. A bounded channel
+/// backpressures the scan to the sink's pace, so the pipeline never holds the whole scan.
+#[allow(clippy::too_many_arguments)]
+async fn stream_discovery(
+    scheduler: &BoundedScheduler,
+    probers: Vec<Arc<dyn Prober>>,
+    resolved: Vec<ResolvedTarget>,
+    ctx: ProbeCtx,
+    cancel: watch::Receiver<bool>,
+    fuser: &mut dyn Fuser,
+    classifier: &dyn Classifier,
+    encoder: &dyn Encoder,
+    sink: &mut dyn Sink,
+    scan_metadata: &Arc<ScanMetadata>,
+    targets_resolved: usize,
+    start: Instant,
+    // Test instrumentation: records the reorder buffer's peak size for the bound assertions.
+    reorder_peak: &AtomicUsize,
+) -> Result<DiscoverySummary, RastreoError> {
+    let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
+    let sink_type = sink.kind();
+    let capacity = scheduler.max_concurrent().max(1);
+    let (tx, mut rx) = mpsc::channel::<TargetScan>(capacity);
+
+    let scan = scheduler.run_scan(probers, resolved, ctx, cancel.clone(), tx);
+    tokio::pin!(scan);
+
+    let mut acc = ScanAccumulation::default();
+    let mut best_key: Option<(usize, usize)> = None;
+    let mut reorder: BTreeMap<usize, TargetScan> = BTreeMap::new();
+    let mut next_expected: usize = 0;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut records_emitted: usize = 0;
+    let mut emit_err: Option<RastreoError> = None;
+    let mut scan_done = false;
+
+    loop {
+        tokio::select! {
+            // `biased` polls the scan branch first so its completion is observed before the channel
+            // closes, latching `cancelled` at the same point the batch pipeline would.
+            biased;
+            _ = &mut scan, if !scan_done => {
+                acc.cancelled = *cancel.borrow();
+                scan_done = true;
+            }
+            maybe = rx.recv() => {
+                let Some(target_scan) = maybe else { break };
+                reorder.insert(target_scan.target_index, target_scan);
+                reorder_peak.fetch_max(reorder.len(), Ordering::Relaxed);
+                while let Some(ready) = reorder.remove(&next_expected) {
+                    accumulate_target(&mut acc, &prober_kinds, &ready, &mut best_key);
+                    // On an emit error, stop emitting but keep draining so remaining targets still
+                    // probe and their metrics still accumulate — the summary metrics stay complete.
+                    if emit_err.is_none() {
+                        emit_target_records(
+                            ready.outcomes,
+                            fuser,
+                            classifier,
+                            encoder,
+                            sink,
+                            scan_metadata,
+                            &mut buf,
+                            &mut records_emitted,
+                            &mut emit_err,
+                        )
+                        .await?;
+                    }
+                    next_expected += 1;
+                }
+            }
+        }
+    }
+
+    // A cancelled scan sends only fully-completed targets as a contiguous prefix, so the buffer is
+    // normally empty here. Drain any straggler in ascending index order to match the batch order.
+    for (_, ready) in std::mem::take(&mut reorder) {
+        accumulate_target(&mut acc, &prober_kinds, &ready, &mut best_key);
+        if emit_err.is_none() {
+            emit_target_records(
+                ready.outcomes,
+                fuser,
+                classifier,
+                encoder,
+                sink,
+                scan_metadata,
+                &mut buf,
+                &mut records_emitted,
+                &mut emit_err,
+            )
+            .await?;
+        }
+    }
+
+    let mut tail = fuser.finish()?;
+    for record in &mut tail {
+        classifier.classify(record)?;
+        stamp_scan_metadata(record, scan_metadata);
+    }
+    for record in &tail {
+        if emit_err.is_some() {
+            break;
+        }
+        buf.clear();
+        if let Err(e) = encoder.encode_record(record, &mut buf) {
+            emit_err = Some(e);
+            break;
+        }
+        if let Err(e) = sink.write(&buf).await {
+            emit_err = Some(e);
+            break;
+        }
+        records_emitted += 1;
+    }
+
+    let close_err = sink.close().await.err();
+
+    if acc.cancelled {
+        tracing::info!(records_emitted, "discovery cancelled; sink closed");
+    }
+
+    let dlq_records_by_type_and_class = sink.dlq_records_by_type_and_class();
+    let dlq_records = dlq_records_by_type_and_class
+        .iter()
+        .fold(0u64, |sum, (_, _, c)| sum.saturating_add(*c)) as usize;
+    let probes_by_kind = build_probes_by_kind(&acc.attempts_by_kind, &acc.errors_by_kind);
+
+    if let Some(e) = emit_err {
+        return Err(e);
+    }
+    if let Some(e) = close_err {
+        return Err(e);
+    }
+
+    Ok(DiscoverySummary {
+        targets_resolved,
+        probe_attempts: acc.probe_attempts,
+        records_emitted,
+        error_counts: acc.error_counts,
+        probes_by_kind,
+        dlq_records,
+        dlq_records_by_type_and_class,
+        sink_type: Some(sink_type),
+        cancelled: acc.cancelled,
+        first_probe_error: acc.first_probe_error,
+        elapsed: start.elapsed(),
+    })
+}
+
+/// Batch (buffer-then-emit) reference retained as the differential guard for [`stream_discovery`]:
+/// drains the whole scan, accumulates metrics, then fuses and emits in one pass.
+#[cfg(test)]
+async fn collect_scans_sorted(
+    scheduler: &BoundedScheduler,
+    probers: Vec<Arc<dyn Prober>>,
+    resolved: Vec<ResolvedTarget>,
+    ctx: ProbeCtx,
+    cancel: watch::Receiver<bool>,
+) -> (Vec<TargetScan>, bool) {
+    let capacity = scheduler.max_concurrent().max(1);
+    let (tx, mut rx) = mpsc::channel::<TargetScan>(capacity);
+    let scan = scheduler.run_scan(probers, resolved, ctx, cancel.clone(), tx);
+    tokio::pin!(scan);
+    let mut out = Vec::new();
+    let mut cancelled = false;
+    let mut done = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut scan, if !done => { cancelled = *cancel.borrow(); done = true; }
+            maybe = rx.recv() => {
+                match maybe {
+                    Some(s) => out.push(s),
+                    None => break,
+                }
+            }
+        }
+    }
+    out.sort_by_key(|s| s.target_index);
+    (out, cancelled)
+}
+
+#[cfg(test)]
+fn accumulate_scans(
+    scans: Vec<TargetScan>,
+    prober_kinds: &[ProbeKind],
+    cancelled: bool,
+) -> ScanAccumulation {
+    let mut acc = ScanAccumulation {
+        cancelled,
+        ..Default::default()
+    };
+    let mut best_key: Option<(usize, usize)> = None;
+    for scan in scans {
+        accumulate_target(&mut acc, prober_kinds, &scan, &mut best_key);
+        for (_, result) in scan.outcomes {
+            if let Ok(outcome) = result {
+                acc.all_outcomes.push(outcome);
+            }
+        }
+    }
+    acc
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn finish_discovery_ref(
     acc: ScanAccumulation,
     fuser: &mut dyn Fuser,
     classifier: &dyn Classifier,
@@ -286,7 +517,7 @@ async fn finish_discovery(
 ) -> Result<DiscoverySummary, RastreoError> {
     let sink_type = sink.kind();
 
-    let mut records = drive_fuser(fuser, acc.all_outcomes)?;
+    let mut records = crate::fuser::drive_fuser(fuser, acc.all_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
         stamp_scan_metadata(record, scan_metadata);
@@ -310,10 +541,6 @@ async fn finish_discovery(
     }
 
     let close_err = sink.close().await.err();
-
-    if acc.cancelled {
-        tracing::info!(records_emitted, "discovery cancelled; sink closed");
-    }
 
     let dlq_records_by_type_and_class = sink.dlq_records_by_type_and_class();
     let dlq_records = dlq_records_by_type_and_class
@@ -1521,7 +1748,7 @@ mod tests {
             }),
         };
         let mut f = create_fuser(&fuser_cfg).expect("create");
-        let records = drive_fuser(f.as_mut(), outcomes).expect("drive");
+        let records = crate::fuser::drive_fuser(f.as_mut(), outcomes).expect("drive");
         assert_eq!(records.len(), 1, "three IPs share sysName+MAC, one record");
         let r = &records[0];
         assert_eq!(r.mgmt_ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
@@ -1759,7 +1986,7 @@ mod tests {
         }
     }
 
-    mod inversion_differential {
+    mod streaming_differential {
         use super::*;
 
         use std::time::SystemTime;
@@ -1849,6 +2076,19 @@ mod tests {
                 .collect()
         }
 
+        fn resolved_many(n: usize) -> Vec<ResolvedTarget> {
+            (0..n as u32)
+                .map(|i| {
+                    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8));
+                    ResolvedTarget {
+                        ip,
+                        original: Target::Ip(ip),
+                        resolved_at: SystemTime::UNIX_EPOCH,
+                    }
+                })
+                .collect()
+        }
+
         fn direct_cfg() -> FuserConfig {
             FuserConfig::Direct {
                 include_unreachable: None,
@@ -1864,60 +2104,17 @@ mod tests {
             }
         }
 
-        // Prober-outer reference: the pre-inversion pipeline body, frozen. A deterministic mock
-        // makes serial probing equivalent to the concurrent scheduler, so this pins the exact
-        // outcome order and first-seen fault the batch loop produced.
-        async fn scan_and_accumulate_batch(
-            probers: Vec<Arc<dyn Prober>>,
-            resolved: Vec<ResolvedTarget>,
-            ctx: ProbeCtx,
-        ) -> ScanAccumulation {
-            let mut acc = ScanAccumulation::default();
-            for prober in &probers {
-                let kind = prober.kind();
-                for target in &resolved {
-                    let result = prober.probe(target, &ctx).await;
-                    acc.probe_attempts += 1;
-                    acc.attempts_by_kind[kind.index()] += 1;
-                    match result {
-                        Ok(outcome) => {
-                            if let Some(fault) = &outcome.fault {
-                                acc.errors_by_kind[kind.index()] += 1;
-                                *acc.error_counts.entry(fault.kind).or_insert(0) += 1;
-                                if acc.first_probe_error.is_none() {
-                                    acc.first_probe_error = Some(fault.clone());
-                                }
-                            }
-                            acc.all_outcomes.push(outcome);
-                        }
-                        Err(err) => {
-                            acc.errors_by_kind[kind.index()] += 1;
-                            *acc.error_counts.entry(ProbeErrorKind::Other).or_insert(0) += 1;
-                            if acc.first_probe_error.is_none() {
-                                let msg = err.to_string();
-                                if !msg.is_empty() {
-                                    acc.first_probe_error =
-                                        Some(ProbeFault::new(ProbeErrorKind::Other, msg));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            acc
-        }
-
-        async fn run_case(
+        async fn run_streaming(
             probers: Vec<Arc<dyn Prober>>,
             resolved: Vec<ResolvedTarget>,
             fuser_cfg: &FuserConfig,
             scan_metadata: &Arc<ScanMetadata>,
-            inverted: bool,
-        ) -> (DiscoverySummary, Vec<String>) {
+        ) -> (Result<DiscoverySummary, RastreoError>, Vec<String>) {
             let ctx = ProbeCtx {
                 timeout: Duration::from_millis(100),
                 retries: 0,
             };
+            let scheduler = BoundedScheduler::new(8);
             let mut fuser = create_fuser(fuser_cfg).expect("fuser");
             let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
             let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
@@ -1926,16 +2123,125 @@ mod tests {
             let mut sink: Box<dyn Sink> = Box::new(mem);
             let targets_resolved = resolved.len();
             let start = Instant::now();
+            let peak = AtomicUsize::new(0);
+            let result = stream_discovery(
+                &scheduler,
+                probers,
+                resolved,
+                ctx,
+                watch::channel(false).1,
+                fuser.as_mut(),
+                classifier.as_ref(),
+                encoder.as_ref(),
+                sink.as_mut(),
+                scan_metadata,
+                targets_resolved,
+                start,
+                &peak,
+            )
+            .await;
+            (result, handle.ndjson_lines())
+        }
 
-            let acc = if inverted {
-                let scheduler = BoundedScheduler::new(8);
-                scan_and_accumulate(&scheduler, probers, resolved, ctx, watch::channel(false).1)
-                    .await
-            } else {
-                scan_and_accumulate_batch(probers, resolved, ctx).await
+        async fn run_batch(
+            probers: Vec<Arc<dyn Prober>>,
+            resolved: Vec<ResolvedTarget>,
+            fuser_cfg: &FuserConfig,
+            scan_metadata: &Arc<ScanMetadata>,
+        ) -> (Result<DiscoverySummary, RastreoError>, Vec<String>) {
+            let ctx = ProbeCtx {
+                timeout: Duration::from_millis(100),
+                retries: 0,
             };
+            let scheduler = BoundedScheduler::new(8);
+            let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
+            let mut fuser = create_fuser(fuser_cfg).expect("fuser");
+            let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
+            let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+            let mem = crate::sink::MemorySink::new();
+            let handle = mem.handle();
+            let mut sink: Box<dyn Sink> = Box::new(mem);
+            let targets_resolved = resolved.len();
+            let start = Instant::now();
+            let (scans, cancelled) =
+                collect_scans_sorted(&scheduler, probers, resolved, ctx, watch::channel(false).1)
+                    .await;
+            let acc = accumulate_scans(scans, &prober_kinds, cancelled);
+            let result = finish_discovery_ref(
+                acc,
+                fuser.as_mut(),
+                classifier.as_ref(),
+                encoder.as_ref(),
+                sink.as_mut(),
+                scan_metadata,
+                targets_resolved,
+                start,
+            )
+            .await;
+            (result, handle.ndjson_lines())
+        }
 
-            let summary = finish_discovery(
+        async fn run_streaming_with(
+            probers: Vec<Arc<dyn Prober>>,
+            resolved: Vec<ResolvedTarget>,
+            sink: Box<dyn Sink>,
+            max_concurrent: usize,
+            scan_metadata: &Arc<ScanMetadata>,
+            peak: &AtomicUsize,
+        ) -> Result<DiscoverySummary, RastreoError> {
+            let ctx = ProbeCtx {
+                timeout: Duration::from_millis(500),
+                retries: 0,
+            };
+            let scheduler = BoundedScheduler::new(max_concurrent);
+            let mut fuser = create_fuser(&direct_cfg()).expect("fuser");
+            let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
+            let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+            let mut sink = sink;
+            let targets_resolved = resolved.len();
+            let start = Instant::now();
+            stream_discovery(
+                &scheduler,
+                probers,
+                resolved,
+                ctx,
+                watch::channel(false).1,
+                fuser.as_mut(),
+                classifier.as_ref(),
+                encoder.as_ref(),
+                sink.as_mut(),
+                scan_metadata,
+                targets_resolved,
+                start,
+                peak,
+            )
+            .await
+        }
+
+        async fn run_batch_with(
+            probers: Vec<Arc<dyn Prober>>,
+            resolved: Vec<ResolvedTarget>,
+            sink: Box<dyn Sink>,
+            max_concurrent: usize,
+            scan_metadata: &Arc<ScanMetadata>,
+        ) -> Result<DiscoverySummary, RastreoError> {
+            let ctx = ProbeCtx {
+                timeout: Duration::from_millis(500),
+                retries: 0,
+            };
+            let scheduler = BoundedScheduler::new(max_concurrent);
+            let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
+            let mut fuser = create_fuser(&direct_cfg()).expect("fuser");
+            let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
+            let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+            let mut sink = sink;
+            let targets_resolved = resolved.len();
+            let start = Instant::now();
+            let (scans, cancelled) =
+                collect_scans_sorted(&scheduler, probers, resolved, ctx, watch::channel(false).1)
+                    .await;
+            let acc = accumulate_scans(scans, &prober_kinds, cancelled);
+            finish_discovery_ref(
                 acc,
                 fuser.as_mut(),
                 classifier.as_ref(),
@@ -1946,9 +2252,6 @@ mod tests {
                 start,
             )
             .await
-            .expect("finish_discovery");
-
-            (summary, handle.ndjson_lines())
         }
 
         fn assert_summaries_match(new: &DiscoverySummary, batch: &DiscoverySummary, label: &str) {
@@ -2102,7 +2405,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn inverted_pipeline_matches_batch_reference_across_matrix() {
+        async fn streaming_matches_batch_across_matrix() {
             #[allow(unused_mut)]
             let mut fusers = vec![direct_cfg(), identity_cfg()];
             #[cfg(feature = "oui")]
@@ -2114,42 +2417,433 @@ mod tests {
             for (label, probers, resolved) in matrix_setups() {
                 for fuser_cfg in &fusers {
                     let scan_metadata = Arc::new(ScanMetadata::default());
-                    let (summary_new, records_new) = run_case(
-                        probers.clone(),
-                        resolved.clone(),
-                        fuser_cfg,
-                        &scan_metadata,
-                        true,
-                    )
-                    .await;
-                    let (summary_batch, records_batch) = run_case(
-                        probers.clone(),
-                        resolved.clone(),
-                        fuser_cfg,
-                        &scan_metadata,
-                        false,
-                    )
-                    .await;
-                    assert_summaries_match(&summary_new, &summary_batch, label);
+                    let (summary_stream, records_stream) =
+                        run_streaming(probers.clone(), resolved.clone(), fuser_cfg, &scan_metadata)
+                            .await;
+                    let (summary_batch, records_batch) =
+                        run_batch(probers.clone(), resolved.clone(), fuser_cfg, &scan_metadata)
+                            .await;
+                    let summary_stream = summary_stream.expect("streaming summary");
+                    let summary_batch = summary_batch.expect("batch summary");
+                    assert_summaries_match(&summary_stream, &summary_batch, label);
                     assert_eq!(
-                        records_new, records_batch,
-                        "{label}: inverted and batch pipelines must emit byte-identical records"
+                        records_stream, records_batch,
+                        "{label}: streaming and batch pipelines must emit byte-identical records"
                     );
                 }
             }
         }
 
+        // Inverted latency: target `idx` sleeps `n - idx` ms, so completion order is the exact
+        // reverse of input order — the reorder buffer must hold the whole scan until target 0.
+        struct InvertedLatencyProber {
+            n: u8,
+            mac: &'static str,
+            sysname: &'static str,
+        }
+
+        #[async_trait::async_trait]
+        impl Prober for InvertedLatencyProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::Snmp
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                let idx = match target.ip {
+                    IpAddr::V4(v4) => v4.octets()[3],
+                    IpAddr::V6(_) => 0,
+                };
+                tokio::time::sleep(Duration::from_millis((self.n - idx) as u64)).await;
+                Ok(ProbeOutcome {
+                    kind: ProbeKind::Snmp,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![
+                        Signal::Mac(self.mac.into()),
+                        Signal::SnmpSysName(self.sysname.into()),
+                    ],
+                    fault: None,
+                })
+            }
+        }
+
+        // `start_paused` auto-advances virtual time, so the distinct per-target sleeps resolve in a
+        // fixed reverse order — deterministic, no wall-clock flake. direct catches a line-order
+        // reorder bug; identity (all targets merge on shared MAC + sysName) catches a corrupted
+        // merge — wrong mgmt_ip / alt_ips order — that a line-order-only check would miss.
+        #[tokio::test(start_paused = true)]
+        async fn streaming_matches_batch_under_out_of_order_completion() {
+            const N: u8 = 6;
+            let mac = "aa:bb:cc:00:11:22";
+            let sysname = "core-sw";
+
+            for fuser_cfg in [direct_cfg(), identity_cfg()] {
+                let scan_metadata = Arc::new(ScanMetadata::default());
+                let probers: Vec<Arc<dyn Prober>> =
+                    vec![Arc::new(InvertedLatencyProber { n: N, mac, sysname })];
+                let targets = resolved_n(N);
+
+                let (summary_stream, records_stream) =
+                    run_streaming(probers.clone(), targets.clone(), &fuser_cfg, &scan_metadata)
+                        .await;
+                let (summary_batch, records_batch) =
+                    run_batch(probers, targets, &fuser_cfg, &scan_metadata).await;
+
+                let summary_stream = summary_stream.expect("streaming summary");
+                let summary_batch = summary_batch.expect("batch summary");
+                assert_summaries_match(&summary_stream, &summary_batch, "out_of_order");
+                assert!(
+                    !records_stream.is_empty(),
+                    "the scan must emit records so the byte-identical comparison is not vacuous"
+                );
+                assert_eq!(
+                    records_stream, records_batch,
+                    "completion order is the reverse of input order; streaming must reassemble input \
+                     order and emit records byte-identical to the batch reference"
+                );
+            }
+        }
+
         #[tokio::test]
-        async fn inverted_first_probe_error_uses_batch_prober_outer_choice() {
+        async fn streaming_first_probe_error_uses_prober_outer_min_key() {
             let (probers, resolved) = first_probe_error_stress_setup();
             let scan_metadata = Arc::new(ScanMetadata::default());
             let (summary, _) =
-                run_case(probers, resolved, &direct_cfg(), &scan_metadata, true).await;
-            let fault = summary.first_probe_error.expect("a fault must be latched");
+                run_streaming(probers, resolved, &direct_cfg(), &scan_metadata).await;
+            let fault = summary
+                .expect("summary")
+                .first_probe_error
+                .expect("a fault must be latched");
             assert_eq!(
                 fault.detail, FAULT_P1_T2,
-                "first_probe_error must be the batch's prober-outer first fault (pass 1, target 2), \
+                "first_probe_error must be the prober-outer first fault (pass 1, target 2), \
                  not the target-outer first-seen fault (pass 2, target 0)"
+            );
+        }
+
+        struct CountingReachableProber {
+            probed: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Prober for CountingReachableProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::TcpConnect
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                self.probed.fetch_add(1, Ordering::SeqCst);
+                Ok(ProbeOutcome {
+                    kind: ProbeKind::TcpConnect,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![Signal::OpenPort(22)],
+                    fault: None,
+                })
+            }
+        }
+
+        fn counting_prober(probed: Arc<AtomicUsize>) -> Vec<Arc<dyn Prober>> {
+            vec![Arc::new(CountingReachableProber { probed })]
+        }
+
+        #[derive(Default)]
+        struct RecordingFailSinkInner {
+            written: std::sync::Mutex<Vec<Vec<u8>>>,
+            write_attempts: AtomicUsize,
+        }
+
+        struct RecordingFailSink {
+            inner: Arc<RecordingFailSinkInner>,
+            fail_on: usize,
+        }
+
+        impl RecordingFailSink {
+            fn new(fail_on: usize) -> Self {
+                Self {
+                    inner: Arc::new(RecordingFailSinkInner::default()),
+                    fail_on,
+                }
+            }
+            fn handle(&self) -> Arc<RecordingFailSinkInner> {
+                Arc::clone(&self.inner)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for RecordingFailSink {
+            async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+                let n = self.inner.write_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == self.fail_on {
+                    return Err(RastreoError::Sink(crate::sink::SinkError::new(
+                        SinkErrorClass::WriteFailure,
+                        std::io::Error::other("simulated write failure"),
+                    )));
+                }
+                self.inner
+                    .written
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(data.to_vec());
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+        }
+
+        // An emit error must not truncate the scan: streaming stops emitting but keeps draining, so
+        // every target still probes and the metrics stay as complete as the batch pipeline's. The
+        // probe-count assertion is the mutation guard — a stop-on-emit-error loop leaves the scan
+        // partial and this test goes red.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn streaming_matches_batch_with_failing_sink() {
+            const N: usize = 50;
+            const FAIL_ON: usize = 5;
+            const CAP: usize = 8;
+            let targets = resolved_many(N);
+            let scan_metadata = Arc::new(ScanMetadata::default());
+
+            let probed_stream = Arc::new(AtomicUsize::new(0));
+            let sink_stream = RecordingFailSink::new(FAIL_ON);
+            let handle_stream = sink_stream.handle();
+            let peak = AtomicUsize::new(0);
+            let err_stream = run_streaming_with(
+                counting_prober(Arc::clone(&probed_stream)),
+                targets.clone(),
+                Box::new(sink_stream),
+                CAP,
+                &scan_metadata,
+                &peak,
+            )
+            .await
+            .expect_err("failing sink must surface an error");
+
+            let probed_batch = Arc::new(AtomicUsize::new(0));
+            let sink_batch = RecordingFailSink::new(FAIL_ON);
+            let handle_batch = sink_batch.handle();
+            let err_batch = run_batch_with(
+                counting_prober(Arc::clone(&probed_batch)),
+                targets.clone(),
+                Box::new(sink_batch),
+                CAP,
+                &scan_metadata,
+            )
+            .await
+            .expect_err("failing sink must surface an error");
+
+            assert_eq!(
+                err_stream.sink_error_class(),
+                Some(SinkErrorClass::WriteFailure)
+            );
+            assert_eq!(
+                err_batch.sink_error_class(),
+                Some(SinkErrorClass::WriteFailure)
+            );
+
+            assert_eq!(
+                probed_batch.load(Ordering::SeqCst),
+                N,
+                "batch drains the whole scan before emit"
+            );
+            assert_eq!(
+                probed_stream.load(Ordering::SeqCst),
+                N,
+                "streaming must keep draining after the emit error so metrics stay complete; \
+                 a stop-on-error loop probes only ~cap+window of the {N} targets"
+            );
+
+            let written_stream = handle_stream
+                .written
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let written_batch = handle_batch
+                .written
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            assert_eq!(
+                written_stream.len(),
+                FAIL_ON - 1,
+                "records_emitted equals the successful writes before the failure"
+            );
+            assert_eq!(
+                written_stream, written_batch,
+                "streaming and batch write byte-identical records up to the failure"
+            );
+        }
+
+        struct JitterProber;
+
+        #[async_trait::async_trait]
+        impl Prober for JitterProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::TcpConnect
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                let last = match target.ip {
+                    IpAddr::V4(v4) => v4.octets()[3] as u64,
+                    IpAddr::V6(_) => 0,
+                };
+                // Small per-target jitter so completions interleave within the concurrency window.
+                tokio::time::sleep(Duration::from_micros((last % 4) * 50)).await;
+                Ok(ProbeOutcome {
+                    kind: ProbeKind::TcpConnect,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![Signal::OpenPort(22)],
+                    fault: None,
+                })
+            }
+        }
+
+        struct SlowSink {
+            delegate: crate::sink::MemorySink,
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for SlowSink {
+            async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+                tokio::time::sleep(Duration::from_micros(200)).await;
+                self.delegate.write(data).await
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                self.delegate.flush().await
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn streaming_bounds_reorder_and_channel_under_slow_sink() {
+            const N: usize = 500;
+            const CAP: usize = 8;
+            let targets = resolved_many(N);
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let peak = AtomicUsize::new(0);
+            let sink = SlowSink {
+                delegate: crate::sink::MemorySink::new(),
+            };
+            let summary = run_streaming_with(
+                vec![Arc::new(JitterProber)],
+                targets,
+                Box::new(sink),
+                CAP,
+                &scan_metadata,
+                &peak,
+            )
+            .await
+            .expect("streaming summary");
+
+            assert_eq!(summary.records_emitted, N, "every target emitted");
+            let observed = peak.load(Ordering::SeqCst);
+            assert!(
+                observed <= 3 * CAP,
+                "reorder buffer peak {observed} must stay within the concurrency window (channel is \
+                 separately bounded by cap = {CAP}), never the {N} targets"
+            );
+        }
+
+        struct FirstTargetFastProber {
+            probes_done: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Prober for FirstTargetFastProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::TcpConnect
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                let last = match target.ip {
+                    IpAddr::V4(v4) => v4.octets()[3],
+                    IpAddr::V6(_) => 0,
+                };
+                if last != 0 {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                self.probes_done.fetch_add(1, Ordering::SeqCst);
+                Ok(ProbeOutcome {
+                    kind: ProbeKind::TcpConnect,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![Signal::OpenPort(22)],
+                    fault: None,
+                })
+            }
+        }
+
+        struct FirstWriteProbeSink {
+            delegate: crate::sink::MemorySink,
+            probes_done: Arc<AtomicUsize>,
+            probes_at_first_write: Arc<AtomicUsize>,
+            seen_first: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for FirstWriteProbeSink {
+            async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+                if !self.seen_first {
+                    self.seen_first = true;
+                    self.probes_at_first_write
+                        .store(self.probes_done.load(Ordering::SeqCst), Ordering::SeqCst);
+                }
+                self.delegate.write(data).await
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                self.delegate.flush().await
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn streaming_emits_first_record_before_scan_completes() {
+            const N: u8 = 6;
+            let targets = resolved_n(N);
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let probes_done = Arc::new(AtomicUsize::new(0));
+            let probes_at_first_write = Arc::new(AtomicUsize::new(usize::MAX));
+            let sink = FirstWriteProbeSink {
+                delegate: crate::sink::MemorySink::new(),
+                probes_done: Arc::clone(&probes_done),
+                probes_at_first_write: Arc::clone(&probes_at_first_write),
+                seen_first: false,
+            };
+            let peak = AtomicUsize::new(0);
+            let summary = run_streaming_with(
+                vec![Arc::new(FirstTargetFastProber {
+                    probes_done: Arc::clone(&probes_done),
+                })],
+                targets,
+                Box::new(sink),
+                8,
+                &scan_metadata,
+                &peak,
+            )
+            .await
+            .expect("streaming summary");
+
+            assert_eq!(summary.records_emitted, N as usize);
+            let observed = probes_at_first_write.load(Ordering::SeqCst);
+            assert!(
+                observed < N as usize,
+                "the first record ({observed} probes complete) must be written before the scan of \
+                 all {N} targets finishes; a buffer-then-emit pipeline would write it only at the end"
             );
         }
     }
