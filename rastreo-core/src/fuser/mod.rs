@@ -253,9 +253,21 @@ impl FuserConfig {
                 reject_nested_identity(inner)?;
                 inner.validate()
             }
-            FuserConfig::Identity { inner, .. } => {
+            FuserConfig::Identity {
+                identity_hints,
+                inner,
+            } => {
                 reject_nested_identity(inner)?;
-                inner.validate()
+                inner.validate()?;
+                for group in &identity_hints.vrrp_groups {
+                    if identity::parse_mac_prefix(&group.virtual_mac).is_none() {
+                        return Err(ConfigError::invalid(format!(
+                            "vrrp_groups virtual_mac '{}' is not a valid MAC address",
+                            group.virtual_mac
+                        )));
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -1036,6 +1048,48 @@ inner:
             inner: direct(),
         };
         assert!(cfg.validate().is_ok());
+    }
+
+    fn identity_with_vrrp_mac(virtual_mac: &str) -> FuserConfig {
+        FuserConfig::Identity {
+            identity_hints: IdentityHints::new(vec![VrrpGroup {
+                virtual_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+                virtual_mac: virtual_mac.to_string(),
+                members: Vec::new(),
+            }]),
+            inner: direct(),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_identity_vrrp_group_with_invalid_virtual_mac() {
+        let cfg = identity_with_vrrp_mac("not-a-real-mac");
+        let err = cfg
+            .validate()
+            .expect_err("invalid virtual_mac must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("virtual_mac") && msg.contains("not a valid MAC"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_identity_vrrp_group_with_valid_virtual_mac() {
+        let cfg = identity_with_vrrp_mac("00:00:5e:00:01:2a");
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_and_create_fuser_agree_rejecting_identity_bad_vrrp_mac() {
+        assert!(
+            identity_with_vrrp_mac("not-a-real-mac").validate().is_err(),
+            "validate() must reject the bad vrrp virtual_mac"
+        );
+        assert!(
+            create_fuser(&identity_with_vrrp_mac("not-a-real-mac")).is_err(),
+            "create_fuser must reject the bad vrrp virtual_mac"
+        );
     }
 
     #[cfg(feature = "oui")]

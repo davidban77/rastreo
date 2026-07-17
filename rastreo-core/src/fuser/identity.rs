@@ -757,7 +757,7 @@ fn altip_role_from_mac(mac: Option<&str>) -> Option<AltIpRole> {
     }
 }
 
-fn parse_mac_prefix(mac: &str) -> Option<[u8; 5]> {
+pub(crate) fn parse_mac_prefix(mac: &str) -> Option<[u8; 5]> {
     let hex_count = mac.chars().filter(|ch| *ch != ':' && *ch != '-').count();
     if hex_count != 12 {
         return None;
