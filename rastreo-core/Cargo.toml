@@ -29,8 +29,8 @@ snmp = [
     "dep:cfb-mode",
     "dep:des",
 ]
-arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
-ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork"]
+arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2"]
+ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2"]
 nats = ["dep:async-nats", "dep:bytes", "chrono/clock"]
 oui = ["dep:flate2"]
 ssh = ["dep:russh"]

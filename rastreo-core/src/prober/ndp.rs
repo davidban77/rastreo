@@ -14,7 +14,7 @@ use pnet_packet::Packet;
 use crate::error::{ConfigError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
 use crate::prober::link_layer::{
-    lookup_interface, probe_link_layer, LinkLayerProtocol, ETH_HEADER_LEN,
+    lookup_interface, probe_link_layer, LinkLayerEngines, LinkLayerProtocol, ETH_HEADER_LEN,
 };
 use crate::prober::Prober;
 
@@ -30,6 +30,7 @@ pub fn default_interface() -> String {
 #[derive(Debug)]
 pub struct NdpProber {
     interface: String,
+    engines: LinkLayerEngines<Ndp>,
 }
 
 impl NdpProber {
@@ -39,7 +40,10 @@ impl NdpProber {
                 ConfigError::invalid(format!("network interface '{interface}' not found")).into(),
             );
         }
-        Ok(Self { interface })
+        Ok(Self {
+            interface,
+            engines: LinkLayerEngines::new(),
+        })
     }
 
     pub fn interface(&self) -> &str {
@@ -198,7 +202,7 @@ impl LinkLayerProtocol for Ndp {
         frame
     }
 
-    fn parse_reply(frame: &[u8], target: Ipv6Addr) -> Option<MacAddr> {
+    fn parse_reply_source(frame: &[u8]) -> Option<(Ipv6Addr, MacAddr)> {
         let eth = EthernetPacket::new(frame)?;
         if eth.get_ethertype() != EtherTypes::Ipv6 {
             return None;
@@ -212,19 +216,18 @@ impl LinkLayerProtocol for Ndp {
             return None;
         }
         let na = NeighborAdvertPacket::new(ipv6.payload())?;
-        if na.get_target_addr() != target {
-            return None;
-        }
+        let target = na.get_target_addr();
         for option in na.get_options() {
             if option.option_type == NdpOptionTypes::TargetLLAddr && option.data.len() >= 6 {
-                return Some(MacAddr::new(
+                let mac = MacAddr::new(
                     option.data[0],
                     option.data[1],
                     option.data[2],
                     option.data[3],
                     option.data[4],
                     option.data[5],
-                ));
+                );
+                return Some((target, mac));
             }
         }
         None
@@ -242,7 +245,7 @@ impl Prober for NdpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
-        probe_link_layer::<Ndp>(&self.interface, target, ctx).await
+        probe_link_layer::<Ndp>(&self.engines, &self.interface, target, ctx).await
     }
 }
 
@@ -404,21 +407,13 @@ mod tests {
     }
 
     #[test]
-    fn ndp_advertisement_parser_extracts_target_link_layer_address() {
+    fn ndp_advertisement_parser_extracts_target_address_and_link_layer_address() {
         let target = sample_target();
         let mac = MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
         let frame = build_advertisement_frame(target, mac);
-        let parsed = Ndp::parse_reply(&frame, target).expect("parsed");
-        assert_eq!(parsed, mac);
-    }
-
-    #[test]
-    fn ndp_advertisement_parser_rejects_wrong_target_address() {
-        let target = sample_target();
-        let other: Ipv6Addr = "2001:db8::9999".parse().unwrap();
-        let frame =
-            build_advertisement_frame(other, MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff));
-        assert!(Ndp::parse_reply(&frame, target).is_none());
+        let (addr, parsed_mac) = Ndp::parse_reply_source(&frame).expect("parsed");
+        assert_eq!(addr, target);
+        assert_eq!(parsed_mac, mac);
     }
 
     #[test]
@@ -426,14 +421,14 @@ mod tests {
         let mut frame = vec![0u8; 64];
         let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN]).expect("eth");
         eth.set_ethertype(EtherTypes::Ipv4);
-        assert!(Ndp::parse_reply(&frame, sample_target()).is_none());
+        assert!(Ndp::parse_reply_source(&frame).is_none());
     }
 
     #[test]
     fn ndp_advertisement_parser_rejects_solicitation_type() {
         let target = sample_target();
         let frame = Ndp::build_request(sample_src_mac(), sample_src_ip(), target);
-        assert!(Ndp::parse_reply(&frame, target).is_none());
+        assert!(Ndp::parse_reply_source(&frame).is_none());
     }
 
     #[test]

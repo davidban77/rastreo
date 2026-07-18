@@ -9,7 +9,7 @@ use pnet_packet::Packet;
 use crate::error::{ConfigError, RastreoError};
 use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
 use crate::prober::link_layer::{
-    lookup_interface, probe_link_layer, LinkLayerProtocol, ETH_HEADER_LEN,
+    lookup_interface, probe_link_layer, LinkLayerEngines, LinkLayerProtocol, ETH_HEADER_LEN,
 };
 use crate::prober::Prober;
 
@@ -23,6 +23,7 @@ pub fn default_interface() -> String {
 #[derive(Debug)]
 pub struct ArpProber {
     interface: String,
+    engines: LinkLayerEngines<Arp>,
 }
 
 impl ArpProber {
@@ -32,7 +33,10 @@ impl ArpProber {
                 ConfigError::invalid(format!("network interface '{interface}' not found")).into(),
             );
         }
-        Ok(Self { interface })
+        Ok(Self {
+            interface,
+            engines: LinkLayerEngines::new(),
+        })
     }
 
     pub fn interface(&self) -> &str {
@@ -114,7 +118,7 @@ impl LinkLayerProtocol for Arp {
         frame
     }
 
-    fn parse_reply(frame: &[u8], target: Ipv4Addr) -> Option<MacAddr> {
+    fn parse_reply_source(frame: &[u8]) -> Option<(Ipv4Addr, MacAddr)> {
         let eth = EthernetPacket::new(frame)?;
         if eth.get_ethertype() != EtherTypes::Arp {
             return None;
@@ -123,10 +127,7 @@ impl LinkLayerProtocol for Arp {
         if arp.get_operation() != ArpOperations::Reply {
             return None;
         }
-        if arp.get_sender_proto_addr() != target {
-            return None;
-        }
-        Some(arp.get_sender_hw_addr())
+        Some((arp.get_sender_proto_addr(), arp.get_sender_hw_addr()))
     }
 }
 
@@ -141,7 +142,7 @@ impl Prober for ArpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
-        probe_link_layer::<Arp>(&self.interface, target, ctx).await
+        probe_link_layer::<Arp>(&self.engines, &self.interface, target, ctx).await
     }
 }
 
@@ -222,12 +223,13 @@ mod tests {
     }
 
     #[test]
-    fn arp_reply_parser_extracts_sender_mac() {
-        let expected = MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
-        let target = Ipv4Addr::new(10, 0, 0, 42);
-        let frame = build_reply_frame(expected, target);
-        let parsed = Arp::parse_reply(&frame, target).expect("reply parsed");
-        assert_eq!(parsed, expected);
+    fn arp_reply_parser_extracts_sender_ip_and_mac() {
+        let expected_mac = MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
+        let sender_ip = Ipv4Addr::new(10, 0, 0, 42);
+        let frame = build_reply_frame(expected_mac, sender_ip);
+        let (ip, mac) = Arp::parse_reply_source(&frame).expect("reply parsed");
+        assert_eq!(ip, sender_ip);
+        assert_eq!(mac, expected_mac);
     }
 
     #[test]
@@ -237,13 +239,7 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 5),
             Ipv4Addr::new(10, 0, 0, 42),
         );
-        assert!(Arp::parse_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
-    }
-
-    #[test]
-    fn arp_reply_parser_rejects_mismatched_sender_ip() {
-        let frame = build_reply_frame(sample_mac(), Ipv4Addr::new(10, 0, 0, 99));
-        assert!(Arp::parse_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
+        assert!(Arp::parse_reply_source(&frame).is_none());
     }
 
     #[test]
@@ -251,7 +247,7 @@ mod tests {
         let mut frame = vec![0u8; ARP_FRAME_LEN];
         let mut eth = MutableEthernetPacket::new(&mut frame[..ETH_HEADER_LEN]).expect("eth");
         eth.set_ethertype(EtherTypes::Ipv4);
-        assert!(Arp::parse_reply(&frame, Ipv4Addr::new(10, 0, 0, 42)).is_none());
+        assert!(Arp::parse_reply_source(&frame).is_none());
     }
 
     #[test]
