@@ -52,6 +52,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hickory-resolver = { workspace = true }
 ipnet = { workspace = true }
 schemars = { workspace = true }

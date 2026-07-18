@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
 
 const BANNER_MAX_BYTES: usize = 256;
@@ -173,49 +174,67 @@ impl Prober for HttpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
-        let mut signals = Vec::new();
-        let mut last_fault: Option<ProbeFault> = None;
+        let per_port = probe_ports(
+            &self.ports,
+            MAX_PORTS_IN_FLIGHT,
+            ctx.port_budget.as_ref(),
+            |port| async move {
+                let mut port_signals = Vec::new();
+                let mut port_fault: Option<ProbeFault> = None;
 
-        for &port in &self.ports {
-            let scheme = scheme_for_port(port, self.scheme);
-            let host = if target.ip.is_ipv6() {
-                format!("[{}]", target.ip)
-            } else {
-                target.ip.to_string()
-            };
-            let url = format!("{}://{}:{}{}", scheme, host, port, self.path);
-            let request = self
-                .client
-                .get(&url)
-                .header("User-Agent", &self.user_agent)
-                .send();
+                let scheme = scheme_for_port(port, self.scheme);
+                let host = if target.ip.is_ipv6() {
+                    format!("[{}]", target.ip)
+                } else {
+                    target.ip.to_string()
+                };
+                let url = format!("{}://{}:{}{}", scheme, host, port, self.path);
+                let request = self
+                    .client
+                    .get(&url)
+                    .header("User-Agent", &self.user_agent)
+                    .send();
 
-            match tokio::time::timeout(ctx.timeout, request).await {
-                Ok(Ok(response)) => {
-                    signals.push(Signal::OpenPort(port));
-                    if let Some(server) = response
-                        .headers()
-                        .get(reqwest::header::SERVER)
-                        .and_then(|v| v.to_str().ok())
-                    {
-                        let banner = truncate_banner(server);
-                        if !banner.is_empty() {
-                            signals.push(Signal::HttpBanner(banner));
+                match tokio::time::timeout(ctx.timeout, request).await {
+                    Ok(Ok(response)) => {
+                        port_signals.push(Signal::OpenPort(port));
+                        if let Some(server) = response
+                            .headers()
+                            .get(reqwest::header::SERVER)
+                            .and_then(|v| v.to_str().ok())
+                        {
+                            let banner = truncate_banner(server);
+                            if !banner.is_empty() {
+                                port_signals.push(Signal::HttpBanner(banner));
+                            }
                         }
                     }
-                }
-                Ok(Err(reqwest_err)) => {
-                    // A rustls error is only reachable once the connect completed: the port is open.
-                    if classify::rustls_error_in_chain(&reqwest_err).is_some() {
-                        signals.push(Signal::OpenPort(port));
-                    } else if let Disposition::Fault(kind) = classify_request_error(&reqwest_err) {
-                        last_fault = Some(ProbeFault::new(
-                            kind,
-                            format!("http probe failed on port {port}: {reqwest_err}"),
-                        ));
+                    Ok(Err(reqwest_err)) => {
+                        // A rustls error is only reachable once the connect completed: the port is open.
+                        if classify::rustls_error_in_chain(&reqwest_err).is_some() {
+                            port_signals.push(Signal::OpenPort(port));
+                        } else if let Disposition::Fault(kind) =
+                            classify_request_error(&reqwest_err)
+                        {
+                            port_fault = Some(ProbeFault::new(
+                                kind,
+                                format!("http probe failed on port {port}: {reqwest_err}"),
+                            ));
+                        }
                     }
+                    Err(_) => {}
                 }
-                Err(_) => {}
+                (port_signals, port_fault)
+            },
+        )
+        .await;
+
+        let mut signals = Vec::new();
+        let mut last_fault: Option<ProbeFault> = None;
+        for (port_signals, port_fault) in per_port {
+            signals.extend(port_signals);
+            if port_fault.is_some() {
+                last_fault = port_fault;
             }
         }
 
@@ -250,10 +269,7 @@ mod tests {
     }
 
     fn ctx_with_timeout(ms: u64) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), 0)
     }
 
     type Responder = Arc<
@@ -1076,5 +1092,70 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<HttpProber>();
         assert_send_sync::<Box<dyn Prober>>();
+    }
+
+    #[tokio::test]
+    async fn probe_collects_open_ports_in_ascending_port_order() {
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            ports.push(
+                spawn_server(Arc::new(|_req| {
+                    Response::builder()
+                        .status(200)
+                        .body(Full::new(Bytes::from("ok")))
+                        .expect("response")
+                }))
+                .await,
+            );
+        }
+        let prober = HttpProber::new(
+            ports.clone(),
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect("probe ok");
+        let open: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(open, ports, "OpenPort signals must follow port order");
+    }
+
+    #[tokio::test]
+    async fn probe_multiple_hanging_ports_finish_near_one_timeout() {
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            ports.push(spawn_hanging_server().await);
+        }
+        let prober = HttpProber::new(
+            ports,
+            HttpScheme::Http,
+            default_path(),
+            default_tls_verify(),
+            default_user_agent(),
+        )
+        .expect("valid");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(150))
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "four hanging ports serially would be ~600ms; concurrent stays near 1x: {elapsed:?}"
+        );
     }
 }

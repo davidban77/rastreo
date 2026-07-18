@@ -18,6 +18,7 @@ use tokio::net::UdpSocket;
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
 
 const RECV_BUF_LEN: usize = 8192;
@@ -203,14 +204,24 @@ impl Prober for SnmpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
+        let per_port = probe_ports(
+            &self.ports,
+            MAX_PORTS_IN_FLIGHT,
+            ctx.port_budget.as_ref(),
+            |port| {
+                let addr = SocketAddr::new(target.ip, port);
+                async move { (port, probe_port(addr, self, ctx).await) }
+            },
+        )
+        .await;
+
         let mut signals = Vec::new();
         let mut any_reachable = false;
         let mut decode_failed_port: Option<u16> = None;
         let mut last_fault: Option<ProbeFault> = None;
 
-        for &port in &self.ports {
-            let addr = SocketAddr::new(target.ip, port);
-            match probe_port(addr, self, ctx).await {
+        for (port, outcome) in per_port {
+            match outcome {
                 PortOutcome::Reached(mut new_signals) => {
                     any_reachable = true;
                     signals.append(&mut new_signals);
@@ -339,10 +350,7 @@ mod tests {
     }
 
     fn ctx_with_timeout(ms: u64) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), 0)
     }
 
     #[test]
@@ -705,5 +713,58 @@ mod tests {
         };
         let hint = crate::hint_for_error_kind(kind).expect("permission denied has a hint");
         assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
+    }
+
+    #[tokio::test]
+    async fn snmp_records_the_lowest_port_when_multiple_ports_decode_fail() {
+        let a = spawn_undecodable_agent().await;
+        let b = spawn_undecodable_agent().await;
+        let prober = SnmpProber::new(
+            vec![a, b],
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(500))
+            .await
+            .expect("probe ok");
+        assert!(outcome.reachable);
+        let fault = outcome.fault.expect("decode fault recorded");
+        assert_eq!(fault.kind, ProbeErrorKind::DecodeFailed);
+        // get_or_insert keeps the first decode-failing port in port order — the lower number.
+        assert!(
+            fault.detail.contains(&a.min(b).to_string()),
+            "want lowest port {}, got: {}",
+            a.min(b),
+            fault.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn snmp_multiple_silent_ports_finish_near_one_timeout() {
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            ports.push(dark_port().await);
+        }
+        let prober = SnmpProber::new(
+            ports,
+            SnmpVersion::V2c,
+            "public".into(),
+            UsmCredentials::default(),
+        )
+        .expect("valid");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(200))
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "four silent ports serially would be ~800ms; concurrent stays near 1x: {elapsed:?}"
+        );
     }
 }

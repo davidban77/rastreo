@@ -15,6 +15,7 @@ use tokio::time::timeout;
 use crate::error::{ConfigError, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
 
 const BANNER_MAX_BYTES: usize = 256;
@@ -209,29 +210,46 @@ impl Prober for SshProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
+        let per_port = probe_ports(
+            &self.ports,
+            MAX_PORTS_IN_FLIGHT,
+            ctx.port_budget.as_ref(),
+            |port| {
+                let addr = SocketAddr::new(target.ip, port);
+                async move {
+                    let mut port_signals = Vec::new();
+                    let mut port_fault: Option<ProbeFault> = None;
+
+                    let outcome = timeout(ctx.timeout, TcpStream::connect(addr)).await;
+                    if let Some(mut stream) =
+                        fold_connect(port, outcome, &mut port_signals, &mut port_fault)
+                    {
+                        if let Ok(Some(banner)) =
+                            timeout(ctx.timeout, read_banner_from_stream(&mut stream)).await
+                        {
+                            port_signals.push(Signal::SshBanner(banner));
+                        }
+                        // russh opens its own stream: once we've consumed the peer SSH-ID
+                        // above, this one cannot be reused for the key-exchange handshake.
+                        drop(stream);
+
+                        if let Ok(Some(host_key)) = timeout(ctx.timeout, read_host_key(addr)).await
+                        {
+                            port_signals.push(Signal::SshHostKey(host_key));
+                        }
+                    }
+                    (port_signals, port_fault)
+                }
+            },
+        )
+        .await;
+
         let mut signals = Vec::new();
         let mut last_fault: Option<ProbeFault> = None;
-
-        for &port in &self.ports {
-            let addr = SocketAddr::new(target.ip, port);
-
-            let outcome = timeout(ctx.timeout, TcpStream::connect(addr)).await;
-            let Some(mut stream) = fold_connect(port, outcome, &mut signals, &mut last_fault)
-            else {
-                continue;
-            };
-
-            if let Ok(Some(banner)) =
-                timeout(ctx.timeout, read_banner_from_stream(&mut stream)).await
-            {
-                signals.push(Signal::SshBanner(banner));
-            }
-            // russh opens its own stream: once we've consumed the peer SSH-ID
-            // above, this one cannot be reused for the key-exchange handshake.
-            drop(stream);
-
-            if let Ok(Some(host_key)) = timeout(ctx.timeout, read_host_key(addr)).await {
-                signals.push(Signal::SshHostKey(host_key));
+        for (port_signals, port_fault) in per_port {
+            signals.extend(port_signals);
+            if port_fault.is_some() {
+                last_fault = port_fault;
             }
         }
 
@@ -337,10 +355,7 @@ mod tests {
         let port = listener.local_addr().expect("addr").port();
         drop(listener);
         let prober = SshProber::new(vec![port]).expect("valid");
-        let ctx = ProbeCtx {
-            timeout: std::time::Duration::from_millis(500),
-            retries: 0,
-        };
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
         let outcome = prober
             .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
             .await
@@ -370,10 +385,7 @@ mod tests {
             }
         });
         let prober = SshProber::new(vec![port]).expect("valid");
-        let ctx = ProbeCtx {
-            timeout: std::time::Duration::from_millis(500),
-            retries: 0,
-        };
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
         let outcome = prober
             .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
             .await
@@ -415,10 +427,7 @@ mod tests {
     async fn ssh_probe_emits_open_port_on_successful_connect() {
         let port = spawn_ssh_banner_stub().await;
         let prober = SshProber::new(vec![port]).expect("valid");
-        let ctx = ProbeCtx {
-            timeout: std::time::Duration::from_millis(500),
-            retries: 0,
-        };
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
         let outcome = prober
             .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
             .await
@@ -439,10 +448,7 @@ mod tests {
     async fn ssh_probe_emits_open_port_before_protocol_signals() {
         let port = spawn_ssh_banner_stub().await;
         let prober = SshProber::new(vec![port]).expect("valid");
-        let ctx = ProbeCtx {
-            timeout: std::time::Duration::from_millis(500),
-            retries: 0,
-        };
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
         let outcome = prober
             .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
             .await
@@ -469,10 +475,7 @@ mod tests {
         let port = listener.local_addr().expect("addr").port();
         drop(listener);
         let prober = SshProber::new(vec![port]).expect("valid");
-        let ctx = ProbeCtx {
-            timeout: std::time::Duration::from_millis(500),
-            retries: 0,
-        };
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
         let outcome = prober
             .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
             .await
@@ -666,10 +669,7 @@ mod tests {
             }
         });
         let prober = SshProber::new(vec![port]).expect("valid");
-        let ctx = ProbeCtx {
-            timeout: std::time::Duration::from_millis(500),
-            retries: 0,
-        };
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
         let _ = prober
             .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
             .await
@@ -680,6 +680,97 @@ mod tests {
             n <= 2,
             "SSH probe opened {n} TCP connections per port; contract is at most 2 \
              (one for banner, one for russh host-key exchange)"
+        );
+    }
+
+    async fn spawn_hanging_ssh_stub() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        tokio::spawn(async move {
+                            let _hold = stream;
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        });
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn probe_reports_open_and_closed_ports_in_a_mix() {
+        let open_port = spawn_ssh_banner_stub().await;
+        let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let closed_port = closed_listener.local_addr().expect("addr").port();
+        drop(closed_listener);
+        let prober = SshProber::new(vec![open_port, closed_port]).expect("valid");
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
+        let outcome = prober
+            .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
+            .await
+            .expect("probe ok");
+        assert!(outcome.reachable);
+        let open: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(open, vec![open_port]);
+    }
+
+    #[tokio::test]
+    async fn probe_collects_open_ports_in_ascending_port_order() {
+        let mut ports = Vec::new();
+        for _ in 0..3 {
+            ports.push(spawn_ssh_banner_stub().await);
+        }
+        let prober = SshProber::new(ports.clone()).expect("valid");
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(500), 0);
+        let outcome = prober
+            .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
+            .await
+            .expect("probe ok");
+        let open: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(open, ports, "OpenPort signals must follow port order");
+    }
+
+    #[tokio::test]
+    async fn probe_multiple_hanging_ports_finish_near_one_timeout() {
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            ports.push(spawn_hanging_ssh_stub().await);
+        }
+        let prober = SshProber::new(ports).expect("valid");
+        let ctx = ProbeCtx::new(std::time::Duration::from_millis(100), 0);
+        let start = std::time::Instant::now();
+        let _ = prober
+            .probe(&loopback_target(Ipv4Addr::LOCALHOST), &ctx)
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "four hanging ports serially would be ~800ms; concurrent stays near 1x: {elapsed:?}"
         );
     }
 }

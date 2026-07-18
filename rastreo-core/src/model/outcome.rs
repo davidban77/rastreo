@@ -1,7 +1,9 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use schemars::JsonSchema;
+use tokio::sync::Semaphore;
 
 use crate::error::ProbeErrorKind;
 
@@ -123,11 +125,22 @@ pub enum Signal {
 pub struct ProbeCtx {
     pub timeout: Duration,
     pub retries: u32,
+    /// Shared socket-op permit pool bounding total in-flight file descriptors across every target; `None` bounds only per target.
+    pub port_budget: Option<Arc<Semaphore>>,
 }
 
 impl ProbeCtx {
     pub fn new(timeout: Duration, retries: u32) -> Self {
-        Self { timeout, retries }
+        Self {
+            timeout,
+            retries,
+            port_budget: None,
+        }
+    }
+
+    pub fn with_port_budget(mut self, port_budget: Option<Arc<Semaphore>>) -> Self {
+        self.port_budget = port_budget;
+        self
     }
 }
 
@@ -252,9 +265,29 @@ mod tests {
         let ctx = ProbeCtx {
             timeout: Duration::from_millis(500),
             retries: 3,
+            port_budget: None,
         };
         assert_eq!(ctx.retries, 3);
         assert_eq!(ctx.timeout, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn probe_ctx_new_defaults_port_budget_to_none() {
+        let ctx = ProbeCtx::new(Duration::from_millis(500), 0);
+        assert!(ctx.port_budget.is_none());
+    }
+
+    #[test]
+    fn with_port_budget_shares_the_permit_pool() {
+        let sem = Arc::new(Semaphore::new(4));
+        let ctx =
+            ProbeCtx::new(Duration::from_millis(500), 0).with_port_budget(Some(Arc::clone(&sem)));
+        let budget = ctx.port_budget.expect("budget set");
+        assert!(
+            Arc::ptr_eq(&budget, &sem),
+            "the builder shares the same pool"
+        );
+        assert_eq!(budget.available_permits(), 4);
     }
 
     #[test]

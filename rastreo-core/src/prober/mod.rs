@@ -10,6 +10,7 @@ pub mod icmp;
 mod link_layer;
 #[cfg(feature = "ndp")]
 pub mod ndp;
+pub(crate) mod ports;
 mod redacted;
 pub mod reverse_dns;
 #[cfg(feature = "snmp")]

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
 use crate::config::DiscoverScenarioConfig;
@@ -153,10 +153,14 @@ pub async fn run_discovery_with_components_cancellable(
     let scheduler = BoundedScheduler::new(max_concurrent).with_probe_rate(scenario.base.probe_rate);
 
     let timeout_ms = scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-    let ctx = ProbeCtx {
-        timeout: Duration::from_millis(timeout_ms),
-        retries: scenario.base.retries.unwrap_or(0),
-    };
+    // One shared permit pool sized to the concurrency cap keeps total in-flight sockets at the same
+    // fd envelope as a serial sweep, no matter how wide targets × ports grows.
+    let port_budget = Arc::new(Semaphore::new(max_concurrent));
+    let ctx = ProbeCtx::new(
+        Duration::from_millis(timeout_ms),
+        scenario.base.retries.unwrap_or(0),
+    )
+    .with_port_budget(Some(port_budget));
 
     let encoder_config = scenario
         .base
@@ -2110,10 +2114,7 @@ mod tests {
             fuser_cfg: &FuserConfig,
             scan_metadata: &Arc<ScanMetadata>,
         ) -> (Result<DiscoverySummary, RastreoError>, Vec<String>) {
-            let ctx = ProbeCtx {
-                timeout: Duration::from_millis(100),
-                retries: 0,
-            };
+            let ctx = ProbeCtx::new(Duration::from_millis(100), 0);
             let scheduler = BoundedScheduler::new(8);
             let mut fuser = create_fuser(fuser_cfg).expect("fuser");
             let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
@@ -2149,10 +2150,7 @@ mod tests {
             fuser_cfg: &FuserConfig,
             scan_metadata: &Arc<ScanMetadata>,
         ) -> (Result<DiscoverySummary, RastreoError>, Vec<String>) {
-            let ctx = ProbeCtx {
-                timeout: Duration::from_millis(100),
-                retries: 0,
-            };
+            let ctx = ProbeCtx::new(Duration::from_millis(100), 0);
             let scheduler = BoundedScheduler::new(8);
             let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
             let mut fuser = create_fuser(fuser_cfg).expect("fuser");
@@ -2189,10 +2187,7 @@ mod tests {
             scan_metadata: &Arc<ScanMetadata>,
             peak: &AtomicUsize,
         ) -> Result<DiscoverySummary, RastreoError> {
-            let ctx = ProbeCtx {
-                timeout: Duration::from_millis(500),
-                retries: 0,
-            };
+            let ctx = ProbeCtx::new(Duration::from_millis(500), 0);
             let scheduler = BoundedScheduler::new(max_concurrent);
             let mut fuser = create_fuser(&direct_cfg()).expect("fuser");
             let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
@@ -2225,10 +2220,7 @@ mod tests {
             max_concurrent: usize,
             scan_metadata: &Arc<ScanMetadata>,
         ) -> Result<DiscoverySummary, RastreoError> {
-            let ctx = ProbeCtx {
-                timeout: Duration::from_millis(500),
-                retries: 0,
-            };
+            let ctx = ProbeCtx::new(Duration::from_millis(500), 0);
             let scheduler = BoundedScheduler::new(max_concurrent);
             let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
             let mut fuser = create_fuser(&direct_cfg()).expect("fuser");
@@ -2844,6 +2836,108 @@ mod tests {
                 observed < N as usize,
                 "the first record ({observed} probes complete) must be written before the scan of \
                  all {N} targets finishes; a buffer-then-emit pipeline would write it only at the end"
+            );
+        }
+
+        struct PortBudgetProber {
+            ports: Vec<u16>,
+            current: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Prober for PortBudgetProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::TcpConnect
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                let current = Arc::clone(&self.current);
+                let peak = Arc::clone(&self.peak);
+                crate::prober::ports::probe_ports(
+                    &self.ports,
+                    crate::prober::ports::MAX_PORTS_IN_FLIGHT,
+                    ctx.port_budget.as_ref(),
+                    move |_port| {
+                        let current = Arc::clone(&current);
+                        let peak = Arc::clone(&peak);
+                        async move {
+                            let in_flight = current.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(in_flight, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            current.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    },
+                )
+                .await;
+                Ok(ProbeOutcome {
+                    kind: ProbeKind::TcpConnect,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: false,
+                    signals: Vec::new(),
+                    fault: None,
+                })
+            }
+        }
+
+        // The guard: the global budget must cap total in-flight port ops at the concurrency cap, not
+        // cap * ports. Driven through the real scheduler so the ctx-cloned Arc<Semaphore> is what
+        // bounds every target's fan-out. Delete the acquire in `probe_ports` and the peak jumps to
+        // CAP * PORTS, tripping the `<= CAP` assertion.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn global_port_budget_bounds_in_flight_ops_across_targets_and_ports() {
+            const TARGETS: usize = 8;
+            const PORTS: u16 = 16;
+            const CAP: usize = 4;
+
+            let current = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let probers: Vec<Arc<dyn Prober>> = vec![Arc::new(PortBudgetProber {
+                ports: (1..=PORTS).collect(),
+                current: Arc::clone(&current),
+                peak: Arc::clone(&peak),
+            })];
+
+            let budget = Arc::new(Semaphore::new(CAP));
+            let ctx = ProbeCtx::new(Duration::from_millis(500), 0)
+                .with_port_budget(Some(Arc::clone(&budget)));
+            let scheduler = BoundedScheduler::new(CAP);
+            let (tx, mut rx) = mpsc::channel::<TargetScan>(CAP);
+            let scan = scheduler.run_scan(
+                probers,
+                resolved_many(TARGETS),
+                ctx,
+                watch::channel(false).1,
+                tx,
+            );
+            tokio::pin!(scan);
+            let mut done = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut scan, if !done => { done = true; }
+                    maybe = rx.recv() => {
+                        if maybe.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let observed = peak.load(Ordering::SeqCst);
+            assert!(
+                observed <= CAP,
+                "global in-flight port ops {observed} must stay within the concurrency cap {CAP}, \
+                 never cap * ports ({})",
+                CAP * PORTS as usize
+            );
+            assert_eq!(
+                observed, CAP,
+                "with {TARGETS} targets * {PORTS} ports the shared budget should saturate to {CAP}"
             );
         }
     }
