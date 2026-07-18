@@ -55,11 +55,16 @@ fn absent(config: ProberConfig, target: IpAddr) -> Absence {
     Absence::Probe { config, target }
 }
 
-/// `icmp::open_socket` failing without `CAP_NET_RAW` cannot be induced on a host that grants the
-/// capability; the send arm faults on the same classifier verdict and stands for it.
+/// The shared-engine fault paths — a failed socket open (no `CAP_NET_RAW`) and a dead reader —
+/// cannot be induced on a host that grants the capability, so the named unit tests are the record:
+/// an open failure is cached and faults every probe, and reader death poisons in-flight waiters.
 #[cfg(feature = "icmp")]
 const ICMP_FAULT_SEAM: &str =
-    "seam: icmp::a_send_that_fails_locally_is_a_probe_fault_not_a_silent_host";
+    "seams: icmp::get_or_open_caches_an_open_failure_and_faults_every_probe_without_re_opening, \
+     icmp::open_fault_outcome_is_an_unreachable_kinded_fault_with_no_signals, \
+     icmp::dropping_reader_exit_poisons_the_demux_and_faults_the_waiter, \
+     icmp::a_poison_delivered_during_send_outranks_an_absence_classified_send_error, \
+     icmp::a_poisoned_engine_wakes_a_waiter_with_a_fault_not_absence";
 
 async fn contract_for(kind: ProbeKind) -> Contract {
     match kind {

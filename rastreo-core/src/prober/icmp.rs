@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
@@ -13,11 +14,15 @@ use pnet_packet::icmpv6::echo_request::MutableEchoRequestPacket as MutableIcmpv6
 use pnet_packet::icmpv6::Icmpv6Types;
 use pnet_packet::Packet;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::time::timeout;
+use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
+use tokio::task::AbortHandle;
+use tokio::time::{timeout_at, Instant as TokioInstant};
 
-use crate::error::{ConfigError, ProbeErrorKind, RastreoError, RuntimeError};
+use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::demux::{Demux, EngineReply};
 use crate::prober::Prober;
 
 const PAYLOAD_NONCE_LEN: usize = 8;
@@ -27,11 +32,32 @@ const PAYLOAD_LEN: usize = PAYLOAD_NONCE_LEN + PAYLOAD_TIMESTAMP_LEN + PAYLOAD_M
 const ICMP_HEADER_LEN: usize = 8;
 const ICMP_PACKET_LEN: usize = ICMP_HEADER_LEN + PAYLOAD_LEN;
 const RECV_BUF_LEN: usize = 2048;
+// Generous so a wide scan's reply burst queues instead of overflowing the shared socket; kernel clamps to rmem_max.
+const SOCKET_RECV_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COUNT: u32 = 1024;
+const IDENTIFIER: u16 = 0;
+
+type Nonce = [u8; PAYLOAD_NONCE_LEN];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Family {
+    V4,
+    V6,
+}
+
+impl Family {
+    fn of(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(_) => Family::V4,
+            IpAddr::V6(_) => Family::V6,
+        }
+    }
+}
 
 pub struct IcmpProber {
     count: u32,
     interval: Duration,
+    engines: Mutex<HashMap<Family, Result<Arc<Engine>, ProbeFault>>>,
 }
 
 impl IcmpProber {
@@ -45,6 +71,7 @@ impl IcmpProber {
         Ok(Self {
             count,
             interval: Duration::from_millis(interval_ms),
+            engines: Mutex::new(HashMap::new()),
         })
     }
 
@@ -54,6 +81,11 @@ impl IcmpProber {
 
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    fn engine_for(&self, ip: IpAddr) -> Result<Arc<Engine>, ProbeFault> {
+        let family = Family::of(ip);
+        get_or_open(&self.engines, family, || Engine::open(family))
     }
 }
 
@@ -159,10 +191,10 @@ pub(crate) fn build_icmpv6_echo_request(
     buf
 }
 
-fn open_socket(target: IpAddr) -> Result<Socket, ProbeFault> {
-    let (domain, protocol) = match target {
-        IpAddr::V4(_) => (Domain::IPV4, Protocol::ICMPV4),
-        IpAddr::V6(_) => (Domain::IPV6, Protocol::ICMPV6),
+fn open_socket(family: Family) -> Result<Socket, ProbeFault> {
+    let (domain, protocol) = match family {
+        Family::V4 => (Domain::IPV4, Protocol::ICMPV4),
+        Family::V6 => (Domain::IPV6, Protocol::ICMPV6),
     };
 
     let socket = match Socket::new(domain, Type::DGRAM, Some(protocol)) {
@@ -184,41 +216,6 @@ fn open_socket(target: IpAddr) -> Result<Socket, ProbeFault> {
     };
 
     Ok(socket)
-}
-
-fn recv_matching_reply(
-    socket: &Socket,
-    target: IpAddr,
-    nonce: &[u8; PAYLOAD_NONCE_LEN],
-    max_sequence: u16,
-    deadline: Instant,
-) -> Result<Option<Duration>, std::io::Error> {
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(None);
-        }
-        let remaining = deadline - now;
-        socket.set_read_timeout(Some(remaining))?;
-
-        let mut buf = [MaybeUninit::<u8>::uninit(); RECV_BUF_LEN];
-        match socket.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                if from.as_socket().map(|s| s.ip()) != Some(target) {
-                    continue;
-                }
-                let bytes: &[u8] =
-                    unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-                if let Some(rtt) = match_reply(target, bytes, nonce, max_sequence) {
-                    return Ok(Some(rtt));
-                }
-            }
-            Err(err) => match err.kind() {
-                ErrorKind::WouldBlock | ErrorKind::TimedOut => return Ok(None),
-                _ => return Err(err),
-            },
-        }
-    }
 }
 
 fn ipv4_header_len(bytes: &[u8]) -> Option<usize> {
@@ -290,38 +287,6 @@ fn payload_rtt(payload: &[u8], nonce: &[u8; PAYLOAD_NONCE_LEN]) -> Option<Durati
     Some(Duration::from_micros(sent_micros))
 }
 
-/// What the ping loop has learned so far, readable while the loop is still running.
-#[derive(Debug, Clone, Default)]
-struct Evidence {
-    started: bool,
-    rtts: Vec<Duration>,
-    fault: Option<ProbeFault>,
-}
-
-/// Readable by the async caller after it abandons the blocking ping thread at its own deadline.
-type EvidenceSlot = Arc<Mutex<Evidence>>;
-
-fn mark_started(slot: &EvidenceSlot) {
-    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.started = true;
-}
-
-fn push_rtt(slot: &EvidenceSlot, rtt: Duration) {
-    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.rtts.push(rtt);
-}
-
-fn latch_fault(slot: &EvidenceSlot, fault: ProbeFault) {
-    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.fault = Some(fault);
-}
-
-fn collected(slot: &EvidenceSlot) -> Evidence {
-    slot.lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-}
-
 // An echo reply already in hand outranks a fault on a later packet: the host answered.
 fn fault_when_unanswered(rtts: &[Duration], fault: Option<ProbeFault>) -> Option<ProbeFault> {
     if rtts.is_empty() {
@@ -331,137 +296,283 @@ fn fault_when_unanswered(rtts: &[Duration], fault: Option<ProbeFault>) -> Option
     }
 }
 
-type BlockingOutcome =
-    Result<Result<Vec<Duration>, tokio::task::JoinError>, tokio::time::error::Elapsed>;
+/// The per-waiter context the shared reader reads to validate a reply before delivering it.
+#[derive(Debug, Clone, Copy)]
+struct ReplyCtx {
+    target: IpAddr,
+    max_sequence: u16,
+}
 
-fn fold_probe_outcome(
-    outcome: BlockingOutcome,
-    slot: &EvidenceSlot,
-) -> Result<Vec<Duration>, RastreoError> {
-    match outcome {
-        Ok(Ok(rtts)) => Ok(rtts),
-        Ok(Err(join_err)) => Err(RastreoError::Runtime(RuntimeError::TaskPanicked(
-            join_err.to_string(),
-        ))),
-        // The ping loop outlived our deadline: keep what it had already learned.
-        Err(_) => {
-            let evidence = collected(slot);
-            if !evidence.started {
-                // The pool never ran the closure: nothing was learned, so latch a fault.
-                latch_fault(
-                    slot,
-                    ProbeFault::new(
-                        ProbeErrorKind::Other,
-                        "icmp: probe did not start before the deadline".to_string(),
-                    ),
-                );
-            }
-            Ok(evidence.rtts)
-        }
+type IcmpDemux = Demux<Nonce, ReplyCtx, Duration>;
+
+/// One shared non-blocking socket per address family plus the reader task that multiplexes every
+/// probe's replies by nonce. Cached on the prober and shared for the scan.
+struct Engine {
+    socket: Arc<AsyncFd<Socket>>,
+    demux: Arc<IcmpDemux>,
+    reference: Instant,
+    reader: AbortHandle,
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.reader.abort();
     }
 }
 
-fn run_probe_blocking(
-    target: IpAddr,
-    count: u32,
-    interval: Duration,
-    deadline: Instant,
-    slot: &EvidenceSlot,
-) -> Vec<Duration> {
-    mark_started(slot);
-    let socket = match open_socket(target) {
-        Ok(s) => s,
-        Err(fault) => {
-            latch_fault(slot, fault);
-            return Vec::new();
-        }
-    };
-    if let Err(err) = socket.set_nonblocking(false) {
-        latch_fault(
-            slot,
+impl Engine {
+    fn open(family: Family) -> Result<Arc<Engine>, ProbeFault> {
+        let socket = open_socket(family)?;
+        // Best-effort: the drain loop bounds the risk if the kernel rejects the size.
+        let _ = socket.set_recv_buffer_size(SOCKET_RECV_BUFFER_BYTES);
+        socket.set_nonblocking(true).map_err(|e| {
             ProbeFault::new(
                 ProbeErrorKind::Other,
-                format!("icmp: set_nonblocking failed: {err}"),
-            ),
-        );
-        return Vec::new();
+                format!("icmp: set_nonblocking failed: {e}"),
+            )
+        })?;
+        let async_fd = AsyncFd::new(socket).map_err(|e| {
+            ProbeFault::new(
+                ProbeErrorKind::Other,
+                format!("icmp: async fd registration failed: {e}"),
+            )
+        })?;
+        let socket = Arc::new(async_fd);
+        let demux: Arc<IcmpDemux> = Arc::new(Demux::new());
+        let reference = Instant::now();
+        let reader = tokio::spawn(run_reader(
+            Arc::clone(&socket),
+            Arc::clone(&demux),
+            reference,
+            family,
+        ));
+        Ok(Arc::new(Engine {
+            socket,
+            demux,
+            reference,
+            reader: reader.abort_handle(),
+        }))
     }
-    ping_loop(&socket, target, count, interval, deadline, slot)
 }
 
-fn ping_loop(
-    socket: &Socket,
-    target: IpAddr,
-    count: u32,
-    interval: Duration,
-    deadline: Instant,
-    slot: &EvidenceSlot,
-) -> Vec<Duration> {
+/// Memoizes `open` per family: an open failure is cached and returned to every subsequent probe,
+/// so one broken family faults uniformly instead of leaking through as absence.
+fn get_or_open<T: Clone>(
+    cache: &Mutex<HashMap<Family, Result<T, ProbeFault>>>,
+    family: Family,
+    open: impl FnOnce() -> Result<T, ProbeFault>,
+) -> Result<T, ProbeFault> {
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = cache.get(&family) {
+        return cached.clone();
+    }
+    let result = open();
+    cache.insert(family, result.clone());
+    result
+}
+
+/// Poisons the demux on any reader exit — a fatal `recv` (via `set_fault`) or a panic (the default
+/// fault) — so a dead reader wakes every waiter with a fault instead of leaving them to time out.
+struct ReaderExit {
+    demux: Arc<IcmpDemux>,
+    fault: ProbeFault,
+}
+
+impl ReaderExit {
+    fn new(demux: Arc<IcmpDemux>) -> Self {
+        Self {
+            demux,
+            fault: ProbeFault::new(
+                ProbeErrorKind::Other,
+                "icmp: reader task exited unexpectedly".to_string(),
+            ),
+        }
+    }
+
+    fn set_fault(&mut self, fault: ProbeFault) {
+        self.fault = fault;
+    }
+}
+
+impl Drop for ReaderExit {
+    fn drop(&mut self) {
+        self.demux.poison(self.fault.clone());
+    }
+}
+
+fn recv_error_is_transient(err: &std::io::Error) -> bool {
+    // EINTR interrupts the recv syscall but the socket is fine; retry instead of poisoning the family.
+    err.kind() == ErrorKind::Interrupted
+}
+
+fn reader_fault(err: &std::io::Error) -> ProbeFault {
+    // A dead shared reader is never absence: coerce an absence-classified io error to a fault.
+    let kind = match classify::io_error(err) {
+        Disposition::Fault(kind) => kind,
+        Disposition::Absence => ProbeErrorKind::Other,
+    };
+    ProbeFault::new(kind, format!("icmp: reader recv failed: {err}"))
+}
+
+async fn run_reader(
+    socket: Arc<AsyncFd<Socket>>,
+    demux: Arc<IcmpDemux>,
+    reference: Instant,
+    family: Family,
+) {
+    let mut exit = ReaderExit::new(Arc::clone(&demux));
+    let mut buf = [MaybeUninit::<u8>::uninit(); RECV_BUF_LEN];
+    loop {
+        let mut guard = match socket.readable().await {
+            Ok(guard) => guard,
+            Err(err) => {
+                exit.set_fault(reader_fault(&err));
+                return;
+            }
+        };
+        // Drain every queued datagram per wakeup so a reply burst cannot overflow the buffer while the reader is unscheduled.
+        loop {
+            match guard.try_io(|sock| sock.get_ref().recv_from(&mut buf)) {
+                Ok(Ok((n, from))) => {
+                    let recv_at = Instant::now();
+                    let bytes: &[u8] =
+                        unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+                    let from_ip = from.as_socket().map(|s| s.ip());
+                    deliver_reply(&demux, reference, family, bytes, from_ip, recv_at);
+                }
+                Ok(Err(err)) if recv_error_is_transient(&err) => continue,
+                Ok(Err(err)) => {
+                    exit.set_fault(reader_fault(&err));
+                    return;
+                }
+                Err(_would_block) => break,
+            }
+        }
+    }
+}
+
+fn deliver_reply(
+    demux: &IcmpDemux,
+    reference: Instant,
+    family: Family,
+    bytes: &[u8],
+    from_ip: Option<IpAddr>,
+    recv_at: Instant,
+) {
+    let Some(nonce) = parse_reply_nonce(family, bytes) else {
+        return;
+    };
+    let Some(ctx) = demux.context(&nonce) else {
+        return;
+    };
+    if from_ip != Some(ctx.target) {
+        return;
+    }
+    if let Some(sent_offset) = match_reply(ctx.target, bytes, &nonce, ctx.max_sequence) {
+        let rtt = recv_at
+            .saturating_duration_since(reference)
+            .saturating_sub(sent_offset);
+        demux.dispatch(&nonce, EngineReply::Reached(rtt));
+    }
+}
+
+fn parse_reply_nonce(family: Family, bytes: &[u8]) -> Option<Nonce> {
+    match family {
+        Family::V4 => {
+            let raw_stripped = ipv4_header_len(bytes)
+                .and_then(|len| bytes.get(len..))
+                .unwrap_or(&[]);
+            for slice in [bytes, raw_stripped] {
+                if let Some(reply) = EchoReplyPacket::new(slice) {
+                    if reply.get_icmp_type() != IcmpTypes::EchoReply {
+                        continue;
+                    }
+                    if let Some(Ok(nonce)) = reply
+                        .payload()
+                        .get(..PAYLOAD_NONCE_LEN)
+                        .map(TryInto::try_into)
+                    {
+                        return Some(nonce);
+                    }
+                }
+            }
+            None
+        }
+        Family::V6 => {
+            let reply = Icmpv6EchoReplyPacket::new(bytes)?;
+            if reply.get_icmpv6_type() != Icmpv6Types::EchoReply {
+                return None;
+            }
+            reply.payload().get(..PAYLOAD_NONCE_LEN)?.try_into().ok()
+        }
+    }
+}
+
+fn dest_sockaddr(target: IpAddr) -> socket2::SockAddr {
     let dest: SocketAddr = match target {
         IpAddr::V4(v4) => SocketAddr::from((v4, 0)),
         IpAddr::V6(v6) => SocketAddr::from((v6, 0)),
     };
-    let dest_sock = socket2::SockAddr::from(dest);
+    socket2::SockAddr::from(dest)
+}
 
-    let identifier: u16 = 0;
-    let nonce = generate_nonce();
-    let reference = Instant::now();
-    let per_packet_budget = deadline.saturating_duration_since(reference) / count.max(1);
-
-    let max_seq = count.saturating_sub(1).min(u16::MAX as u32) as u16;
-
-    for seq in 0..count {
-        if Instant::now() >= deadline {
-            break;
-        }
-        let send_at = Instant::now();
-        let payload = build_payload(&nonce, reference, send_at);
-        let packet = match target {
-            IpAddr::V4(_) => build_icmpv4_echo_request(identifier, seq as u16, &payload),
-            IpAddr::V6(_) => build_icmpv6_echo_request(identifier, seq as u16, &payload),
-        };
-
-        if let Err(err) = socket.send_to(&packet, &dest_sock) {
-            // A dark host latches EHOSTUNREACH / ENETUNREACH on the socket: no reply, not a fault.
-            if let Disposition::Fault(kind) = classify::io_error(&err) {
-                latch_fault(
-                    slot,
-                    ProbeFault::new(kind, format!("icmp: send failed: {err}")),
-                );
-            }
-            break;
-        }
-
-        let per_pkt_deadline = (send_at + per_packet_budget).min(deadline);
-        match recv_matching_reply(socket, target, &nonce, max_seq, per_pkt_deadline) {
-            Ok(Some(sent_offset)) => {
-                let now = Instant::now();
-                let elapsed = now.saturating_duration_since(reference);
-                push_rtt(slot, elapsed.saturating_sub(sent_offset));
-            }
-            Ok(None) => {}
-            Err(err) => {
-                if let Disposition::Fault(kind) = classify::io_error(&err) {
-                    latch_fault(
-                        slot,
-                        ProbeFault::new(kind, format!("icmp: recv failed: {err}")),
-                    );
-                }
-                break;
-            }
-        }
-
-        if seq + 1 < count && !interval.is_zero() {
-            let now = Instant::now();
-            let sleep_until = now + interval;
-            if sleep_until >= deadline {
-                break;
-            }
-            std::thread::sleep(interval);
-        }
+fn build_echo_request(family: Family, seq: u16, payload: &[u8]) -> [u8; ICMP_PACKET_LEN] {
+    match family {
+        Family::V4 => build_icmpv4_echo_request(IDENTIFIER, seq, payload),
+        Family::V6 => build_icmpv6_echo_request(IDENTIFIER, seq, payload),
     }
+}
 
-    collected(slot).rtts
+fn open_fault_outcome(target_ip: IpAddr, fault: ProbeFault) -> ProbeOutcome {
+    ProbeOutcome {
+        kind: ProbeKind::Icmp,
+        target_ip,
+        timestamp: SystemTime::now(),
+        reachable: false,
+        signals: Vec::new(),
+        fault: Some(fault),
+    }
+}
+
+// A poison delivered mid-send outranks the send error: a dead engine is a fault, not a dark host.
+fn send_failure_fault(
+    mut rx: tokio::sync::oneshot::Receiver<EngineReply<Duration>>,
+    send_err: Option<&std::io::Error>,
+) -> Option<ProbeFault> {
+    if let Ok(EngineReply::Failed(fault)) = rx.try_recv() {
+        return Some(fault);
+    }
+    let err = send_err?;
+    match classify::io_error(err) {
+        Disposition::Fault(kind) => {
+            Some(ProbeFault::new(kind, format!("icmp: send failed: {err}")))
+        }
+        Disposition::Absence => None,
+    }
+}
+
+fn min_rtt_outcome(
+    target_ip: IpAddr,
+    rtts: &[Duration],
+    fault: Option<ProbeFault>,
+) -> ProbeOutcome {
+    let (reachable, signals) = match rtts.iter().min().copied() {
+        Some(min) => (
+            true,
+            vec![Signal::IcmpEchoRttMicros(min.as_micros() as u64)],
+        ),
+        None => (false, Vec::new()),
+    };
+    ProbeOutcome {
+        kind: ProbeKind::Icmp,
+        target_ip,
+        timestamp: SystemTime::now(),
+        reachable,
+        signals,
+        fault: fault_when_unanswered(rtts, fault),
+    }
 }
 
 #[async_trait::async_trait]
@@ -475,48 +586,81 @@ impl Prober for IcmpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
-        let target_ip = target.ip;
-        let count = self.count;
-        let interval = self.interval;
-        // Set before the spawn so a queued closure cannot outlive the timer below.
-        let deadline = Instant::now() + ctx.timeout;
-
-        let evidence: EvidenceSlot = Arc::default();
-        let sink = Arc::clone(&evidence);
-
-        let outcome = timeout(
-            ctx.timeout,
-            tokio::task::spawn_blocking(move || {
-                run_probe_blocking(target_ip, count, interval, deadline, &sink)
-            }),
-        )
-        .await;
-
-        let rtts = fold_probe_outcome(outcome, &evidence)?;
-        let fault = fault_when_unanswered(&rtts, collected(&evidence).fault);
-
-        let (reachable, signals) = if rtts.is_empty() {
-            (false, Vec::new())
-        } else {
-            let min = rtts
-                .iter()
-                .min()
-                .copied()
-                .unwrap_or_else(|| Duration::from_micros(0));
-            (
-                true,
-                vec![Signal::IcmpEchoRttMicros(min.as_micros() as u64)],
-            )
+        let engine = match self.engine_for(target.ip) {
+            Ok(engine) => engine,
+            Err(fault) => return Ok(open_fault_outcome(target.ip, fault)),
         };
 
-        Ok(ProbeOutcome {
-            kind: ProbeKind::Icmp,
-            target_ip: target.ip,
-            timestamp: SystemTime::now(),
-            reachable,
-            signals,
-            fault,
-        })
+        let deadline = Instant::now() + ctx.timeout;
+        let tokio_deadline = TokioInstant::from_std(deadline);
+        let family = Family::of(target.ip);
+        let dest = dest_sockaddr(target.ip);
+        let max_sequence = self.count.saturating_sub(1).min(u16::MAX as u32) as u16;
+
+        let mut pending: Vec<(Nonce, tokio::sync::oneshot::Receiver<EngineReply<Duration>>)> =
+            Vec::with_capacity(self.count as usize);
+        let mut send_fault: Option<ProbeFault> = None;
+
+        for seq in 0..self.count {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let nonce = generate_nonce();
+            // Register before send so a reply that races the send has a waiter to land on.
+            let rx = engine.demux.register(
+                nonce,
+                ReplyCtx {
+                    target: target.ip,
+                    max_sequence,
+                },
+            );
+            let payload = build_payload(&nonce, engine.reference, Instant::now());
+            let packet = build_echo_request(family, seq as u16, &payload);
+            let send = timeout_at(
+                tokio_deadline,
+                engine
+                    .socket
+                    .async_io(Interest::WRITABLE, |sock| sock.send_to(&packet, &dest)),
+            )
+            .await;
+            match send {
+                Ok(Ok(_)) => pending.push((nonce, rx)),
+                Ok(Err(err)) => {
+                    engine.demux.deregister(&nonce);
+                    send_fault = send_failure_fault(rx, Some(&err));
+                    break;
+                }
+                Err(_elapsed) => {
+                    engine.demux.deregister(&nonce);
+                    send_fault = send_failure_fault(rx, None);
+                    break;
+                }
+            }
+
+            if seq + 1 < self.count && !self.interval.is_zero() {
+                if Instant::now() + self.interval >= deadline {
+                    break;
+                }
+                tokio::time::sleep(self.interval).await;
+            }
+        }
+
+        let mut rtts: Vec<Duration> = Vec::with_capacity(pending.len());
+        let mut poison_fault: Option<ProbeFault> = None;
+        for (nonce, rx) in pending {
+            match timeout_at(tokio_deadline, rx).await {
+                Ok(Ok(EngineReply::Reached(rtt))) => rtts.push(rtt),
+                Ok(Ok(EngineReply::Failed(fault))) => poison_fault = Some(fault),
+                Ok(Err(_recv)) => {}
+                Err(_elapsed) => engine.demux.deregister(&nonce),
+            }
+        }
+
+        Ok(min_rtt_outcome(
+            target.ip,
+            &rtts,
+            poison_fault.or(send_fault),
+        ))
     }
 }
 
@@ -729,78 +873,17 @@ mod tests {
         assert_eq!(sequence, 0x5678);
     }
 
-    #[test]
-    fn a_send_that_fails_locally_is_a_probe_fault_not_a_silent_host() {
-        // An AF_INET socket cannot send to an IPv6 destination, so the send fails in the kernel
-        // before a packet leaves the host — the same shape as an ICMP send denied locally, and
-        // reachable without CAP_NET_RAW.
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("socket");
-        socket.set_nonblocking(false).expect("blocking socket");
-        let target: IpAddr = "2001:db8::1".parse().expect("valid ipv6");
-        let slot: EvidenceSlot = Arc::default();
-
-        let rtts = ping_loop(
-            &socket,
-            target,
-            1,
-            Duration::ZERO,
-            Instant::now() + Duration::from_millis(200),
-            &slot,
-        );
-        assert!(rtts.is_empty(), "a send that failed learned no rtt");
-        let fault = collected(&slot).fault.expect(
-            "a send the classifier calls a fault must be latched, not booked as a dark host",
-        );
-        assert!(
-            fault.detail.contains("icmp: send failed"),
-            "got: {}",
-            fault.detail
-        );
-    }
-
-    #[test]
-    fn run_probe_blocking_marks_the_slot_started_before_it_touches_a_socket() {
-        let slot: EvidenceSlot = Arc::default();
-
-        let _ = run_probe_blocking(
-            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            1,
-            Duration::ZERO,
-            Instant::now(),
-            &slot,
-        );
-
-        assert!(
-            collected(&slot).started,
-            "the caller cannot tell a probe that never ran from a host that never answered \
-             unless the closure publishes that it ran"
-        );
-    }
-
-    #[test]
-    fn a_socket_fault_is_latched_before_it_leaves_the_blocking_thread() {
-        let slot: EvidenceSlot = Arc::default();
-
-        latch_fault(
-            &slot,
-            ProbeFault::new(
-                ProbeErrorKind::Other,
-                "icmp: dgram socket open failed: too many open files".to_string(),
-            ),
-        );
-
-        let fault = collected(&slot)
-            .fault
-            .expect("a caller that abandons the thread must still see the fault it hit");
-        assert!(
-            fault.detail.contains("icmp: dgram socket open failed"),
-            "got: {}",
-            fault.detail
-        );
-    }
-
     fn sample_fault(detail: &str) -> ProbeFault {
         ProbeFault::new(ProbeErrorKind::Other, detail.to_string())
+    }
+
+    #[test]
+    fn family_of_maps_address_to_its_socket_family() {
+        assert_eq!(
+            Family::of(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            Family::V4
+        );
+        assert_eq!(Family::of("2001:db8::1".parse().unwrap()), Family::V6);
     }
 
     #[test]
@@ -832,91 +915,384 @@ mod tests {
         assert!(fault_when_unanswered(&[], None).is_none());
     }
 
-    async fn elapsed() -> tokio::time::error::Elapsed {
-        timeout(Duration::ZERO, std::future::pending::<()>())
-            .await
-            .expect_err("a zero deadline on a pending future always elapses")
+    #[test]
+    fn min_rtt_outcome_reports_the_minimum_over_the_echoes() {
+        let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let outcome = min_rtt_outcome(
+            ip,
+            &[
+                Duration::from_micros(3_000),
+                Duration::from_micros(900),
+                Duration::from_micros(2_100),
+            ],
+            None,
+        );
+        assert!(outcome.reachable);
+        assert_eq!(
+            outcome.signals,
+            vec![Signal::IcmpEchoRttMicros(900)],
+            "the signal carries the minimum rtt over the answered echoes"
+        );
+        assert!(outcome.fault.is_none());
     }
 
     #[test]
-    fn a_probe_that_finishes_inside_the_deadline_returns_its_rtts() {
-        let slot: EvidenceSlot = Arc::default();
-        let rtts = fold_probe_outcome(Ok(Ok(vec![Duration::from_micros(900)])), &slot)
-            .expect("a completed probe is an outcome");
-        assert_eq!(rtts, vec![Duration::from_micros(900)]);
+    fn min_rtt_outcome_with_no_replies_and_no_fault_is_absence() {
+        let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let outcome = min_rtt_outcome(ip, &[], None);
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+        assert!(
+            outcome.fault.is_none(),
+            "a silent host is absence, not a fault"
+        );
     }
 
-    #[tokio::test]
-    async fn a_deadline_that_fires_after_a_reply_keeps_the_rtt() {
-        // A host behind an ICMP policer answers the first echo, drops the rest, and runs the loop
-        // past the caller's deadline.
-        let slot: EvidenceSlot = Arc::default();
-        mark_started(&slot);
-        push_rtt(&slot, Duration::from_micros(1_500));
-
-        let rtts = fold_probe_outcome(Err(elapsed().await), &slot)
-            .expect("a host that answered before the deadline is not a dark host");
-        assert_eq!(rtts, vec![Duration::from_micros(1_500)]);
-    }
-
-    #[tokio::test]
-    async fn a_deadline_that_fires_with_nothing_learned_is_an_absent_target() {
-        let slot: EvidenceSlot = Arc::default();
-        mark_started(&slot);
-
-        let rtts = fold_probe_outcome(Err(elapsed().await), &slot)
-            .expect("a silent host is an outcome, not an error");
-        assert!(rtts.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_deadline_that_fires_before_the_probe_starts_latches_a_fault() {
-        // A backed-up blocking pool never runs the closure: the target was never asked anything.
-        let slot: EvidenceSlot = Arc::default();
-
-        let rtts = fold_probe_outcome(Err(elapsed().await), &slot)
-            .expect("a probe that never ran carries its fault on the outcome, not as an Err");
-        assert!(rtts.is_empty());
-        let fault = collected(&slot)
+    #[test]
+    fn min_rtt_outcome_with_no_replies_and_a_fault_surfaces_the_fault() {
+        let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let outcome = min_rtt_outcome(ip, &[], Some(sample_fault("icmp: reader recv failed")));
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+        let fault = outcome
             .fault
-            .expect("a probe that never ran latches a fault");
+            .expect("a probe that learned nothing and broke surfaces the fault");
         assert!(
-            fault.detail.contains("did not start"),
+            fault.detail.contains("reader recv failed"),
             "got: {}",
             fault.detail
         );
     }
 
-    #[tokio::test]
-    async fn a_deadline_that_fires_after_a_latched_fault_keeps_the_fault() {
-        let slot: EvidenceSlot = Arc::default();
-        mark_started(&slot);
-        latch_fault(&slot, sample_fault("icmp: recv failed: interrupted"));
+    #[test]
+    fn open_fault_outcome_is_an_unreachable_kinded_fault_with_no_signals() {
+        let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let outcome = open_fault_outcome(
+            ip,
+            ProbeFault::new(
+                ProbeErrorKind::PermissionDenied,
+                "icmp: raw socket unavailable",
+            ),
+        );
+        assert_eq!(outcome.kind, ProbeKind::Icmp);
+        assert!(!outcome.reachable);
+        assert!(outcome.signals.is_empty());
+        let fault = outcome
+            .fault
+            .expect("an engine-open failure is carried as a fault");
+        assert_eq!(fault.kind, ProbeErrorKind::PermissionDenied);
+    }
 
-        let rtts = fold_probe_outcome(Err(elapsed().await), &slot)
-            .expect("a broken probe carries its fault on the outcome, not as an Err");
-        assert!(rtts.is_empty());
-        let fault = collected(&slot).fault.expect("the latched fault survives");
+    #[test]
+    fn get_or_open_caches_a_success_and_never_re_opens() {
+        let cache: Mutex<HashMap<Family, Result<u32, ProbeFault>>> = Mutex::new(HashMap::new());
+        let mut opens = 0;
+        for _ in 0..3 {
+            let value = get_or_open(&cache, Family::V4, || {
+                opens += 1;
+                Ok(42)
+            })
+            .expect("open succeeds");
+            assert_eq!(value, 42);
+        }
+        assert_eq!(
+            opens, 1,
+            "a cached engine is opened exactly once for the family"
+        );
+    }
+
+    #[test]
+    fn get_or_open_caches_an_open_failure_and_faults_every_probe_without_re_opening() {
+        let cache: Mutex<HashMap<Family, Result<u32, ProbeFault>>> = Mutex::new(HashMap::new());
+        let mut opens = 0;
+        for _ in 0..3 {
+            let result = get_or_open(&cache, Family::V4, || {
+                opens += 1;
+                Err(ProbeFault::new(
+                    ProbeErrorKind::PermissionDenied,
+                    "no CAP_NET_RAW",
+                ))
+            });
+            let fault = result.expect_err("a cached open failure faults the probe");
+            assert_eq!(fault.kind, ProbeErrorKind::PermissionDenied);
+        }
+        assert_eq!(
+            opens, 1,
+            "a broken family caches its open fault and does not re-attempt the open per probe"
+        );
+    }
+
+    #[test]
+    fn get_or_open_keys_by_family_independently() {
+        let cache: Mutex<HashMap<Family, Result<u32, ProbeFault>>> = Mutex::new(HashMap::new());
+        let v4 = get_or_open(&cache, Family::V4, || Ok(4)).expect("v4");
+        let v6 = get_or_open(&cache, Family::V6, || Ok(6)).expect("v6");
+        assert_eq!((v4, v6), (4, 6));
+    }
+
+    fn craft_v4_echo_reply(
+        nonce: &Nonce,
+        reference: Instant,
+        send_at: Instant,
+        seq: u16,
+    ) -> Vec<u8> {
+        let payload = build_payload(nonce, reference, send_at);
+        let mut packet = build_icmpv4_echo_request(IDENTIFIER, seq, &payload).to_vec();
+        // Flip the type byte from EchoRequest (8) to EchoReply (0); match_reply ignores checksum.
+        packet[0] = 0;
+        packet
+    }
+
+    #[test]
+    fn parse_reply_nonce_recovers_the_nonce_from_a_v4_echo_reply() {
+        let nonce = [0x5au8; PAYLOAD_NONCE_LEN];
+        let reply = craft_v4_echo_reply(&nonce, Instant::now(), Instant::now(), 0);
+        assert_eq!(parse_reply_nonce(Family::V4, &reply), Some(nonce));
+    }
+
+    #[test]
+    fn parse_reply_nonce_rejects_a_non_reply_packet() {
+        let payload = build_payload(&[0u8; PAYLOAD_NONCE_LEN], Instant::now(), Instant::now());
+        let request = build_icmpv4_echo_request(IDENTIFIER, 0, &payload);
+        assert_eq!(parse_reply_nonce(Family::V4, &request), None);
+    }
+
+    #[tokio::test]
+    async fn deliver_reply_hands_the_rtt_to_the_matching_waiter() {
+        let demux: IcmpDemux = Demux::new();
+        let target = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let nonce = [0x11u8; PAYLOAD_NONCE_LEN];
+        let rx = demux.register(
+            nonce,
+            ReplyCtx {
+                target,
+                max_sequence: 0,
+            },
+        );
+
+        let reference = Instant::now();
+        let send_at = reference + Duration::from_micros(1_000);
+        let recv_at = reference + Duration::from_micros(5_000);
+        let reply = craft_v4_echo_reply(&nonce, reference, send_at, 0);
+
+        deliver_reply(&demux, reference, Family::V4, &reply, Some(target), recv_at);
+
+        match rx.await {
+            Ok(EngineReply::Reached(rtt)) => assert_eq!(rtt, Duration::from_micros(4_000)),
+            _ => panic!("the matching waiter must receive its own rtt"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_reply_drops_a_reply_from_the_wrong_source() {
+        let demux: IcmpDemux = Demux::new();
+        let target = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        let nonce = [0x22u8; PAYLOAD_NONCE_LEN];
+        let rx = demux.register(
+            nonce,
+            ReplyCtx {
+                target,
+                max_sequence: 0,
+            },
+        );
+
+        let reference = Instant::now();
+        let reply = craft_v4_echo_reply(&nonce, reference, reference, 0);
+        let wrong_source = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2));
+
+        deliver_reply(
+            &demux,
+            reference,
+            Family::V4,
+            &reply,
+            Some(wrong_source),
+            reference + Duration::from_micros(500),
+        );
+
+        assert_eq!(
+            demux.waiter_count(),
+            1,
+            "a reply whose source is not the waiter's target is dropped, waiter stays pending"
+        );
+        drop(rx);
+    }
+
+    #[tokio::test]
+    async fn deliver_reply_drops_a_reply_for_an_unregistered_nonce() {
+        let demux: IcmpDemux = Demux::new();
+        let target = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let reply = craft_v4_echo_reply(
+            &[0x33u8; PAYLOAD_NONCE_LEN],
+            Instant::now(),
+            Instant::now(),
+            0,
+        );
+        deliver_reply(
+            &demux,
+            Instant::now(),
+            Family::V4,
+            &reply,
+            Some(target),
+            Instant::now(),
+        );
+        assert_eq!(demux.waiter_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_engine_wakes_a_waiter_with_a_fault_not_absence() {
+        let demux: IcmpDemux = Demux::new();
+        let rx = demux.register(
+            [0x44u8; PAYLOAD_NONCE_LEN],
+            ReplyCtx {
+                target: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                max_sequence: 0,
+            },
+        );
+        demux.poison(sample_fault("icmp: reader recv failed: host down"));
+        match rx.await {
+            Ok(EngineReply::Failed(fault)) => {
+                assert!(
+                    fault.detail.contains("reader recv failed"),
+                    "got: {}",
+                    fault.detail
+                )
+            }
+            _ => panic!("a reader that died wakes the waiter with a fault, never a silent absence"),
+        }
+    }
+
+    #[test]
+    fn reader_fault_coerces_an_absence_classified_error_to_a_fault() {
+        // A dead shared reader is never a dark host, even for an io kind the classifier calls absence.
+        let fault = reader_fault(&std::io::Error::from(ErrorKind::ConnectionReset));
+        assert_eq!(fault.kind, ProbeErrorKind::Other);
+        assert!(fault.detail.contains("icmp: reader recv failed"));
+    }
+
+    #[test]
+    fn reader_fault_preserves_a_permission_denied_kind() {
+        let fault = reader_fault(&std::io::Error::from(ErrorKind::PermissionDenied));
+        assert_eq!(fault.kind, ProbeErrorKind::PermissionDenied);
+    }
+
+    fn poisoned_waiter(detail: &str) -> tokio::sync::oneshot::Receiver<EngineReply<Duration>> {
+        let demux: IcmpDemux = Demux::new();
+        let rx = demux.register(
+            [0x55u8; PAYLOAD_NONCE_LEN],
+            ReplyCtx {
+                target: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                max_sequence: 0,
+            },
+        );
+        demux.poison(sample_fault(detail));
+        rx
+    }
+
+    fn live_waiter() -> tokio::sync::oneshot::Receiver<EngineReply<Duration>> {
+        let demux: IcmpDemux = Demux::new();
+        demux.register(
+            [0x66u8; PAYLOAD_NONCE_LEN],
+            ReplyCtx {
+                target: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                max_sequence: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn a_poison_delivered_during_send_outranks_an_absence_classified_send_error() {
+        let rx = poisoned_waiter("icmp: reader recv failed: host down");
+        let unreachable = std::io::Error::from(ErrorKind::HostUnreachable);
+        let fault = send_failure_fault(rx, Some(&unreachable))
+            .expect("a poison delivered mid-send outranks an absence-classified send error");
         assert!(
-            fault.detail.contains("icmp: recv failed"),
+            fault.detail.contains("reader recv failed"),
+            "the dead engine faults the probe, it is not booked as a dark host: {}",
+            fault.detail
+        );
+    }
+
+    #[test]
+    fn a_poison_delivered_during_a_send_timeout_is_a_fault() {
+        let rx = poisoned_waiter("icmp: reader recv failed: host down");
+        let fault = send_failure_fault(rx, None)
+            .expect("a poison delivered mid-send outranks a send timeout");
+        assert!(
+            fault.detail.contains("reader recv failed"),
             "got: {}",
             fault.detail
         );
     }
 
+    #[test]
+    fn a_send_that_fails_locally_is_a_probe_fault_not_a_silent_host() {
+        let rx = live_waiter();
+        let denied = std::io::Error::from(ErrorKind::PermissionDenied);
+        let fault = send_failure_fault(rx, Some(&denied))
+            .expect("a locally-failed send is a fault, not a silent host");
+        assert_eq!(fault.kind, ProbeErrorKind::PermissionDenied);
+        assert!(
+            fault.detail.contains("icmp: send failed"),
+            "{}",
+            fault.detail
+        );
+    }
+
+    #[test]
+    fn a_send_that_fails_to_a_dark_host_on_a_live_engine_is_absence() {
+        let rx = live_waiter();
+        let unreachable = std::io::Error::from(ErrorKind::HostUnreachable);
+        assert!(
+            send_failure_fault(rx, Some(&unreachable)).is_none(),
+            "a dark host on a live engine is absence, not a fault"
+        );
+    }
+
+    #[test]
+    fn a_send_timeout_on_a_live_engine_is_absence() {
+        let rx = live_waiter();
+        assert!(
+            send_failure_fault(rx, None).is_none(),
+            "a send timeout on a live engine is absence, not a fault"
+        );
+    }
+
     #[tokio::test]
-    async fn a_panicked_ping_thread_is_a_runtime_error() {
-        let join_err = tokio::task::spawn_blocking(|| panic!("ping thread died"))
+    async fn dropping_reader_exit_poisons_the_demux_and_faults_the_waiter() {
+        let demux: Arc<IcmpDemux> = Arc::new(Demux::new());
+        let rx = demux.register(
+            [0x77u8; PAYLOAD_NONCE_LEN],
+            ReplyCtx {
+                target: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                max_sequence: 0,
+            },
+        );
+        let exit = ReaderExit::new(Arc::clone(&demux));
+        drop(exit);
+        let received = tokio::time::timeout(Duration::from_secs(1), rx)
             .await
-            .expect_err("the task panicked");
-        let slot: EvidenceSlot = Arc::default();
+            .expect("a dropped ReaderExit must wake the waiter, not leave it hanging");
+        match received {
+            Ok(EngineReply::Failed(fault)) => assert!(
+                fault.detail.contains("reader task exited"),
+                "got: {}",
+                fault.detail
+            ),
+            _ => panic!("a dropped ReaderExit poisons the demux, faulting every in-flight waiter"),
+        }
+    }
 
-        let err = fold_probe_outcome(Ok(Err(join_err)), &slot)
-            .expect_err("a dead probe thread is a runtime error, not a dark host");
-        assert!(
-            matches!(err, RastreoError::Runtime(RuntimeError::TaskPanicked(_))),
-            "got: {err:?}"
-        );
+    #[test]
+    fn an_interrupted_recv_is_transient_and_other_recv_errors_are_fatal() {
+        assert!(recv_error_is_transient(&std::io::Error::from(
+            ErrorKind::Interrupted
+        )));
+        assert!(!recv_error_is_transient(&std::io::Error::from(
+            ErrorKind::ConnectionReset
+        )));
+        assert!(!recv_error_is_transient(&std::io::Error::from(
+            ErrorKind::PermissionDenied
+        )));
     }
 
     #[test]
@@ -950,40 +1326,6 @@ mod tests {
             matches!(outcome.signals.first(), Some(Signal::IcmpEchoRttMicros(_))),
             "expected IcmpEchoRttMicros signal, got {:?}",
             outcome.signals
-        );
-    }
-
-    #[test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "requires Linux ping_group_range sysctl or CAP_NET_RAW"
-    )]
-    fn a_live_ping_loop_publishes_each_rtt_before_it_returns() {
-        // The caller reads this slot after abandoning the loop at its own deadline, so a reply is
-        // only safe once it is in there — not when the loop finally returns it.
-        use std::net::Ipv4Addr;
-
-        let socket = open_socket(IpAddr::V4(Ipv4Addr::LOCALHOST)).expect("icmp socket");
-        socket.set_nonblocking(false).expect("blocking socket");
-        let slot: EvidenceSlot = Arc::default();
-
-        let returned = ping_loop(
-            &socket,
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            2,
-            Duration::ZERO,
-            Instant::now() + Duration::from_secs(2),
-            &slot,
-        );
-
-        let published = collected(&slot).rtts;
-        assert!(
-            !published.is_empty(),
-            "loopback answered, so the slot must hold its rtt"
-        );
-        assert_eq!(
-            published, returned,
-            "what the loop publishes and what it returns must not diverge"
         );
     }
 }
