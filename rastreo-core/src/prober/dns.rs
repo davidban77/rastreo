@@ -13,6 +13,7 @@ use hickory_resolver::TokioResolver;
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
 
 const MAX_LABEL_BYTES: usize = 63;
@@ -239,64 +240,88 @@ impl Prober for DnsProber {
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
         let record_type = self.query_type.to_record_type();
-        let mut signals = Vec::new();
-        let mut any_reachable = false;
-        let mut last_fault: Option<ProbeFault> = None;
         // Split the timeout across attempts so a dropped query is retransmitted inside the same total per-probe deadline.
         let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
 
-        for &port in &self.ports {
-            let resolver = match self.build_resolver(target.ip, port) {
-                Ok(r) => r,
-                Err(e) => {
-                    last_fault = Some(ProbeFault::new(
-                        ProbeErrorKind::DnsFailed,
-                        format!("failed to build dns resolver on port {port}: {e}"),
-                    ));
-                    continue;
-                }
-            };
-            for name in self.query_names.iter() {
-                let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
-                for _ in 0..=ctx.retries {
-                    let attempt_deadline =
-                        (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
-                    let lookup = resolver.lookup(name.as_str(), record_type);
-                    match tokio::time::timeout_at(attempt_deadline, lookup).await {
-                        Ok(Ok(response)) => {
-                            any_reachable = true;
-                            for record in response.answers() {
-                                if let Some(text) = format_signal(name, &record.data) {
-                                    signals.push(Signal::DnsHost(text));
+        let per_port = probe_ports(
+            &self.ports,
+            MAX_PORTS_IN_FLIGHT,
+            ctx.port_budget.as_ref(),
+            |port| async move {
+                let mut port_signals = Vec::new();
+                let mut reachable = false;
+                let mut port_fault: Option<ProbeFault> = None;
+
+                let resolver = match self.build_resolver(target.ip, port) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return (
+                            false,
+                            port_signals,
+                            Some(ProbeFault::new(
+                                ProbeErrorKind::DnsFailed,
+                                format!("failed to build dns resolver on port {port}: {e}"),
+                            )),
+                        );
+                    }
+                };
+                for name in self.query_names.iter() {
+                    let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
+                    for _ in 0..=ctx.retries {
+                        let attempt_deadline =
+                            (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
+                        let lookup = resolver.lookup(name.as_str(), record_type);
+                        match tokio::time::timeout_at(attempt_deadline, lookup).await {
+                            Ok(Ok(response)) => {
+                                reachable = true;
+                                for record in response.answers() {
+                                    if let Some(text) = format_signal(name, &record.data) {
+                                        port_signals.push(Signal::DnsHost(text));
+                                    }
                                 }
+                                break;
                             }
+                            Ok(Err(err)) => {
+                                if err.is_no_records_found() {
+                                    // NXDOMAIN, NoError-with-empty-answers: server responded.
+                                    reachable = true;
+                                } else if let hickory_resolver::net::NetError::Dns(
+                                    hickory_resolver::net::DnsError::ResponseCode(_),
+                                ) = &err
+                                {
+                                    // REFUSED / SERVFAIL / etc. — server responded.
+                                    reachable = true;
+                                } else if let Disposition::Fault(kind) = classify::net_error(&err) {
+                                    port_fault = Some(ProbeFault::new(
+                                        kind,
+                                        format!(
+                                            "dns probe failed on port {port} for {name}: {err}"
+                                        ),
+                                    ));
+                                }
+                                break;
+                            }
+                            // No response within the attempt slice: retransmit until the overall deadline.
+                            Err(_) => {}
+                        }
+                        if tokio::time::Instant::now() >= overall_deadline {
                             break;
                         }
-                        Ok(Err(err)) => {
-                            if err.is_no_records_found() {
-                                // NXDOMAIN, NoError-with-empty-answers: server responded.
-                                any_reachable = true;
-                            } else if let hickory_resolver::net::NetError::Dns(
-                                hickory_resolver::net::DnsError::ResponseCode(_),
-                            ) = &err
-                            {
-                                // REFUSED / SERVFAIL / etc. — server responded.
-                                any_reachable = true;
-                            } else if let Disposition::Fault(kind) = classify::net_error(&err) {
-                                last_fault = Some(ProbeFault::new(
-                                    kind,
-                                    format!("dns probe failed on port {port} for {name}: {err}"),
-                                ));
-                            }
-                            break;
-                        }
-                        // No response within the attempt slice: retransmit until the overall deadline.
-                        Err(_) => {}
-                    }
-                    if tokio::time::Instant::now() >= overall_deadline {
-                        break;
                     }
                 }
+                (reachable, port_signals, port_fault)
+            },
+        )
+        .await;
+
+        let mut signals = Vec::new();
+        let mut any_reachable = false;
+        let mut last_fault: Option<ProbeFault> = None;
+        for (reachable, port_signals, port_fault) in per_port {
+            any_reachable |= reachable;
+            signals.extend(port_signals);
+            if port_fault.is_some() {
+                last_fault = port_fault;
             }
         }
 
@@ -346,10 +371,7 @@ mod tests {
     }
 
     fn ctx_with_timeout(ms: u64) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), 0)
     }
 
     fn build_response(query: &Query, answers: Vec<Record>, response_code: ResponseCode) -> Message {
@@ -549,10 +571,7 @@ mod tests {
     }
 
     fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), retries)
     }
 
     fn a_record_responder() -> DnsResponder {
@@ -1224,5 +1243,102 @@ mod tests {
         assert_eq!(prober.query_type(), DnsQueryType::Mx);
         assert_eq!(prober.transport(), DnsTransport::Tcp);
         assert!(!prober.recursion_desired());
+    }
+
+    async fn spawn_silent_udp_port() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let _ = socket.recv_from(&mut buf).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn dns_multi_port_collects_signals_in_port_order() {
+        let port_a = spawn_udp_dns_server(
+            "127.0.0.1:0",
+            DnsResponder(Arc::new(|q| {
+                (
+                    vec![a_record(&q.name().to_ascii(), Ipv4Addr::new(10, 0, 0, 1))],
+                    ResponseCode::NoError,
+                )
+            })),
+        )
+        .await
+        .expect("bind a");
+        let port_b = spawn_udp_dns_server(
+            "127.0.0.1:0",
+            DnsResponder(Arc::new(|q| {
+                (
+                    vec![a_record(&q.name().to_ascii(), Ipv4Addr::new(10, 0, 0, 2))],
+                    ResponseCode::NoError,
+                )
+            })),
+        )
+        .await
+        .expect("bind b");
+        let prober = make_prober(vec![port_a, port_b], DnsQueryType::A, DnsTransport::Udp);
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect("probe ok");
+        let hosts: Vec<String> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::DnsHost(h) => Some(h.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut by_port = [
+            (port_a, "example.com. -> 10.0.0.1"),
+            (port_b, "example.com. -> 10.0.0.2"),
+        ];
+        by_port.sort_by_key(|(p, _)| *p);
+        let expected: Vec<String> = by_port.iter().map(|(_, h)| h.to_string()).collect();
+        assert_eq!(
+            hosts, expected,
+            "signals follow port order, not arrival order"
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_multi_port_mixes_a_responding_and_a_silent_port() {
+        let responding = spawn_udp_dns_server("127.0.0.1:0", a_record_responder())
+            .await
+            .expect("bind");
+        let silent = spawn_silent_udp_port().await;
+        let prober = make_prober(vec![responding, silent], DnsQueryType::A, DnsTransport::Udp);
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(500))
+            .await
+            .expect("probe ok");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 1);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn dns_multiple_silent_ports_finish_near_one_timeout() {
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            ports.push(spawn_silent_udp_port().await);
+        }
+        let prober = make_prober(ports, DnsQueryType::A, DnsTransport::Udp);
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(200))
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "four silent ports serially would be ~800ms; concurrent stays near 1x: {elapsed:?}"
+        );
     }
 }

@@ -19,6 +19,7 @@ use x509_parser::parse_x509_certificate;
 use crate::error::{ConfigError, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
 
 pub struct TlsProber {
@@ -297,21 +298,40 @@ impl Prober for TlsProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
+        let per_port = probe_ports(
+            &self.ports,
+            MAX_PORTS_IN_FLIGHT,
+            ctx.port_budget.as_ref(),
+            |port| {
+                let connector = TlsConnector::from(Arc::clone(&self.tls_config));
+                let addr = SocketAddr::new(target.ip, port);
+                async move {
+                    let mut port_signals = Vec::new();
+                    let mut port_fault: Option<ProbeFault> = None;
+
+                    let outcome = timeout(ctx.timeout, TcpStream::connect(addr)).await;
+                    if let Some(stream) =
+                        fold_connect(port, outcome, &mut port_signals, &mut port_fault)
+                    {
+                        if let Ok(mut handshake_signals) =
+                            timeout(ctx.timeout, handshake_and_extract(&connector, stream, addr))
+                                .await
+                        {
+                            port_signals.append(&mut handshake_signals);
+                        }
+                    }
+                    (port_signals, port_fault)
+                }
+            },
+        )
+        .await;
+
         let mut signals = Vec::new();
         let mut last_fault: Option<ProbeFault> = None;
-        let connector = TlsConnector::from(Arc::clone(&self.tls_config));
-
-        for &port in &self.ports {
-            let addr = SocketAddr::new(target.ip, port);
-            let outcome = timeout(ctx.timeout, TcpStream::connect(addr)).await;
-            let Some(stream) = fold_connect(port, outcome, &mut signals, &mut last_fault) else {
-                continue;
-            };
-
-            if let Ok(mut port_signals) =
-                timeout(ctx.timeout, handshake_and_extract(&connector, stream, addr)).await
-            {
-                signals.append(&mut port_signals);
+        for (port_signals, port_fault) in per_port {
+            signals.extend(port_signals);
+            if port_fault.is_some() {
+                last_fault = port_fault;
             }
         }
 
@@ -348,10 +368,7 @@ mod tests {
     }
 
     fn ctx_with_timeout(ms: u64) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), 0)
     }
 
     struct GeneratedCert {
@@ -1032,5 +1049,74 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<TlsProber>();
         assert_send_sync::<Box<dyn Prober>>();
+    }
+
+    async fn spawn_hanging_tls_stub() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        tokio::spawn(async move {
+                            let _hold = stream;
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                        });
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn probe_collects_open_ports_in_ascending_port_order() {
+        let mut ports = Vec::new();
+        for _ in 0..3 {
+            ports.push(spawn_tls_stub_server("router.example.com", Vec::new()).await);
+        }
+        let prober = TlsProber::new(ports.clone()).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(5_000),
+            )
+            .await
+            .expect("probe ok");
+        let open: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(open, ports, "OpenPort signals must follow port order");
+    }
+
+    #[tokio::test]
+    async fn probe_multiple_hanging_ports_finish_near_one_timeout() {
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            ports.push(spawn_hanging_tls_stub().await);
+        }
+        let prober = TlsProber::new(ports).expect("valid");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(150),
+            )
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        // Connect succeeds fast; the handshake times out, so every port reports open.
+        assert!(outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "four hanging handshakes serially would be ~600ms; concurrent stays near 1x: {elapsed:?}"
+        );
     }
 }

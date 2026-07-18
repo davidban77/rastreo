@@ -8,6 +8,7 @@ use tokio::time::error::Elapsed;
 use crate::error::{ConfigError, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
 
 pub struct TcpConnectProber {
@@ -89,13 +90,23 @@ impl Prober for TcpConnectProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
+        let per_port = probe_ports(
+            &self.ports,
+            MAX_PORTS_IN_FLIGHT,
+            ctx.port_budget.as_ref(),
+            |port| {
+                let addr = SocketAddr::new(target.ip, port);
+                async move {
+                    let outcome = tokio::time::timeout(ctx.timeout, TcpStream::connect(addr)).await;
+                    (port, outcome)
+                }
+            },
+        )
+        .await;
+
         let mut signals = Vec::new();
         let mut last_fault: Option<ProbeFault> = None;
-
-        for &port in &self.ports {
-            let addr = SocketAddr::new(target.ip, port);
-            let connect = TcpStream::connect(addr);
-            let outcome = tokio::time::timeout(ctx.timeout, connect).await;
+        for (port, outcome) in per_port {
             fold_connect(port, outcome, &mut signals, &mut last_fault);
         }
 
@@ -122,10 +133,7 @@ mod tests {
     }
 
     fn ctx_with_timeout(ms: u64) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), 0)
     }
 
     #[test]
@@ -430,5 +438,59 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<TcpConnectProber>();
         assert_send_sync::<Box<dyn Prober>>();
+    }
+
+    #[tokio::test]
+    async fn probe_collects_open_ports_in_ascending_port_order() {
+        let mut listeners = Vec::new();
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            ports.push(listener.local_addr().expect("addr").port());
+            listeners.push(listener);
+        }
+        let prober = TcpConnectProber::new(ports.clone()).expect("valid");
+        let outcome = prober
+            .probe(
+                &loopback_target(Ipv4Addr::LOCALHOST),
+                &ctx_with_timeout(500),
+            )
+            .await
+            .expect("probe ok");
+        let open: Vec<u16> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::OpenPort(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(open, ports, "OpenPort signals must follow port order");
+    }
+
+    #[tokio::test]
+    async fn probe_multiple_timeout_ports_finish_near_one_timeout() {
+        // TEST-NET-1 blackholes the SYN; each port would consume the full timeout serially.
+        let addr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let target = ResolvedTarget {
+            ip: addr,
+            original: Target::Ip(addr),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let prober = TcpConnectProber::new(vec![80, 81, 82, 83, 84, 85]).expect("valid");
+        let start = Instant::now();
+        let outcome = prober
+            .probe(&target, &ctx_with_timeout(200))
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "six timeout ports run serially would be ~1200ms; concurrent stays near 1x: {elapsed:?}"
+        );
     }
 }

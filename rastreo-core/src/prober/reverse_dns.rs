@@ -159,10 +159,7 @@ mod tests {
     use crate::model::Target;
 
     fn ctx_with_timeout(ms: u64) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), 0)
     }
 
     #[test]
@@ -409,10 +406,7 @@ mod tests {
     }
 
     fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), retries)
     }
 
     async fn spawn_ptr_server_dropping(

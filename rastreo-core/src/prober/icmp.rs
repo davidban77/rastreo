@@ -936,10 +936,7 @@ mod tests {
         use std::net::Ipv4Addr;
 
         let prober = IcmpProber::new(3, 50).expect("valid");
-        let ctx = ProbeCtx {
-            timeout: Duration::from_secs(2),
-            retries: 0,
-        };
+        let ctx = ProbeCtx::new(Duration::from_secs(2), 0);
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let target = ResolvedTarget {
             ip,

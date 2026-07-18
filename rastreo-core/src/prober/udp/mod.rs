@@ -14,6 +14,7 @@ use tokio::net::UdpSocket;
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
 use crate::prober::classify::{self, Disposition};
+use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
 
 const RECV_BUF_LEN: usize = 4096;
@@ -197,13 +198,22 @@ impl Prober for UdpProber {
         target: &ResolvedTarget,
         ctx: &ProbeCtx,
     ) -> Result<ProbeOutcome, RastreoError> {
+        let per_port = probe_ports(
+            &self.ports,
+            MAX_PORTS_IN_FLIGHT,
+            ctx.port_budget.as_ref(),
+            |port| {
+                let addr = SocketAddr::new(target.ip, port);
+                async move { (port, probe_port(addr, self.protocol, ctx).await) }
+            },
+        )
+        .await;
+
         let mut signals = Vec::new();
         let mut any_reachable = false;
         let mut last_fault: Option<ProbeFault> = None;
 
-        for &port in &self.ports {
-            let addr = SocketAddr::new(target.ip, port);
-            let outcome = probe_port(addr, self.protocol, ctx).await;
+        for (port, outcome) in per_port {
             if let Some(fault) = port_fault(port, &outcome) {
                 last_fault = Some(fault);
             }
@@ -239,10 +249,7 @@ mod tests {
     }
 
     fn ctx_with_timeout(ms: u64) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), 0)
     }
 
     type Responder = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static>;
@@ -673,10 +680,7 @@ mod tests {
     }
 
     fn ctx_with_retries(ms: u64, retries: u32) -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(ms),
-            retries,
-        }
+        ProbeCtx::new(Duration::from_millis(ms), retries)
     }
 
     async fn spawn_ntp_server_dropping(drop_first: usize) -> (u16, Arc<AtomicUsize>) {
@@ -799,6 +803,96 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(600),
             "split model keeps the total near timeout, not retries+1 times it: {elapsed:?}"
+        );
+    }
+
+    async fn spawn_silent_udp_port() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let port = socket.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let _ = socket.recv_from(&mut buf).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn udp_multi_port_collects_signals_in_port_order() {
+        let port_a = spawn_server_bound_to(
+            "127.0.0.1:0",
+            Arc::new(|_req| Some(ntp_response(1, [10, 0, 0, 1]))),
+        )
+        .await
+        .expect("bind a");
+        let port_b = spawn_server_bound_to(
+            "127.0.0.1:0",
+            Arc::new(|_req| Some(ntp_response(2, [10, 0, 0, 2]))),
+        )
+        .await
+        .expect("bind b");
+        let prober = UdpProber::new(vec![port_a, port_b], UdpProtocol::Ntp).expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect("probe ok");
+        let banners: Vec<String> = outcome
+            .signals
+            .iter()
+            .filter_map(|s| match s {
+                Signal::NtpBanner(b) => Some(b.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut by_port = [
+            (port_a, "stratum=1 ref=10.0.0.1"),
+            (port_b, "stratum=2 ref=10.0.0.2"),
+        ];
+        by_port.sort_by_key(|(p, _)| *p);
+        let expected: Vec<String> = by_port.iter().map(|(_, b)| b.to_string()).collect();
+        assert_eq!(
+            banners, expected,
+            "signals follow port order, not arrival order"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_multi_port_mixes_a_responding_and_a_silent_port() {
+        let responding = spawn_server_bound_to(
+            "127.0.0.1:0",
+            Arc::new(|_req| Some(ntp_response(2, [203, 0, 113, 1]))),
+        )
+        .await
+        .expect("bind");
+        let silent = spawn_silent_udp_port().await;
+        let prober = UdpProber::new(vec![responding, silent], UdpProtocol::Ntp).expect("valid");
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(500))
+            .await
+            .expect("probe ok");
+        assert!(outcome.reachable);
+        assert_eq!(outcome.signals.len(), 1);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn udp_multiple_silent_ports_finish_near_one_timeout() {
+        let mut ports = Vec::new();
+        for _ in 0..4 {
+            ports.push(spawn_silent_udp_port().await);
+        }
+        let prober = UdpProber::new(ports, UdpProtocol::Ntp).expect("valid");
+        let start = std::time::Instant::now();
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(200))
+            .await
+            .expect("probe ok");
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "four silent ports serially would be ~800ms; concurrent stays near 1x: {elapsed:?}"
         );
     }
 }

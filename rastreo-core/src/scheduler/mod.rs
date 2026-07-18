@@ -509,10 +509,7 @@ mod tests {
     }
 
     fn ctx() -> ProbeCtx {
-        ProbeCtx {
-            timeout: Duration::from_millis(500),
-            retries: 0,
-        }
+        ProbeCtx::new(Duration::from_millis(500), 0)
     }
 
     fn target(last_octet: u8) -> ResolvedTarget {
