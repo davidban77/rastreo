@@ -5,10 +5,12 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Context;
+use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 use tracing::Subscriber;
 use tracing_subscriber::registry::LookupSpan;
@@ -27,6 +29,7 @@ pub struct OtlpConfig {
     pub protocol: OtlpProtocol,
     pub metrics_enabled: bool,
     pub logs_enabled: bool,
+    pub traces_enabled: bool,
     pub metrics_interval: Duration,
     pub service_name: String,
 }
@@ -42,17 +45,19 @@ impl OtlpConfig {
         let metrics_enabled =
             metrics_supported && parse_env_bool("RASTREO_OTLP_METRICS_ENABLED", false)?;
         let logs_enabled = parse_env_bool("RASTREO_OTLP_LOGS_ENABLED", false)?;
-        if !metrics_enabled && !logs_enabled {
+        let traces_enabled = parse_env_bool("RASTREO_OTLP_TRACES_ENABLED", false)?;
+        // A traces-only config must still return Some, else trace export silently no-ops.
+        if !metrics_enabled && !logs_enabled && !traces_enabled {
             return Ok(None);
         }
         let endpoint = match std::env::var("RASTREO_OTLP_ENDPOINT") {
             Ok(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
             Ok(_) | Err(std::env::VarError::NotPresent) => {
                 return Err(anyhow::anyhow!(
-                    "RASTREO_OTLP_ENDPOINT is required when RASTREO_OTLP_METRICS_ENABLED or \
-                     RASTREO_OTLP_LOGS_ENABLED is true; set it to your OTLP collector URL \
-                     (for example http://otel-collector:4317 for gRPC or \
-                     http://otel-collector:4318 for HTTP+protobuf)"
+                    "RASTREO_OTLP_ENDPOINT is required when RASTREO_OTLP_METRICS_ENABLED, \
+                     RASTREO_OTLP_LOGS_ENABLED, or RASTREO_OTLP_TRACES_ENABLED is true; set it \
+                     to your OTLP collector URL (for example http://otel-collector:4317 for gRPC \
+                     or http://otel-collector:4318 for HTTP+protobuf)"
                 ));
             }
             Err(std::env::VarError::NotUnicode(_)) => {
@@ -80,6 +85,7 @@ impl OtlpConfig {
             protocol,
             metrics_enabled,
             logs_enabled,
+            traces_enabled,
             metrics_interval,
             service_name,
         }))
@@ -91,6 +97,7 @@ impl OtlpConfig {
 pub struct OtlpGuard {
     meter: Option<SdkMeterProvider>,
     logger: Option<SdkLoggerProvider>,
+    tracer: Option<SdkTracerProvider>,
 }
 
 impl OtlpGuard {
@@ -98,6 +105,7 @@ impl OtlpGuard {
         Self {
             meter: None,
             logger: None,
+            tracer: None,
         }
     }
 }
@@ -114,11 +122,20 @@ impl Drop for OtlpGuard {
                 tracing::warn!(%err, "OTLP logger provider shutdown failed");
             }
         }
+        if let Some(t) = self.tracer.take() {
+            if let Err(err) = t.shutdown() {
+                tracing::warn!(%err, "OTLP tracer provider shutdown failed");
+            }
+        }
     }
 }
 
 pub fn attach_logger(guard: &mut OtlpGuard, logger: SdkLoggerProvider) {
     guard.logger = Some(logger);
+}
+
+pub fn attach_tracer(guard: &mut OtlpGuard, tracer: SdkTracerProvider) {
+    guard.tracer = Some(tracer);
 }
 
 pub fn attach_meter(guard: &mut OtlpGuard, meter: SdkMeterProvider) {
@@ -153,7 +170,40 @@ where
     Ok((layer, provider))
 }
 
+/// Build a `tracing_subscriber::Layer` that ships pipeline-stage spans to the OTLP trace exporter.
+pub fn traces_layer<S>(config: &OtlpConfig) -> anyhow::Result<(impl Layer<S>, SdkTracerProvider)>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let exporter = match config.protocol {
+        OtlpProtocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&config.endpoint)
+            .build()
+            .context("failed to build OTLP gRPC span exporter")?,
+        OtlpProtocol::HttpProtobuf => opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/traces"))
+            .build()
+            .context("failed to build OTLP HTTP+protobuf span exporter")?,
+    };
+    let resource = Resource::builder()
+        .with_service_name(config.service_name.clone())
+        .build();
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+    // Trim thread attributes and inactivity timing: their per-span cost would be load-bearing if span count grew.
+    let layer = tracing_opentelemetry::layer()
+        .with_tracer(provider.tracer("rastreo"))
+        .with_threads(false)
+        .with_tracked_inactivity(false);
+    Ok((layer, provider))
+}
+
 static OTLP_LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
+static OTLP_TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 /// The logger provider stashed by [`init_tracing`], if OTLP log export was enabled. Callers attach
 /// it to an [`OtlpGuard`] so its shutdown runs at process exit.
@@ -161,8 +211,14 @@ pub fn stashed_logger_provider() -> Option<SdkLoggerProvider> {
     OTLP_LOGGER_PROVIDER.get().cloned()
 }
 
+/// The tracer provider stashed by [`init_tracing`], if OTLP trace export was enabled. Callers attach
+/// it to an [`OtlpGuard`] so its shutdown runs at process exit.
+pub fn stashed_tracer_provider() -> Option<SdkTracerProvider> {
+    OTLP_TRACER_PROVIDER.get().cloned()
+}
+
 /// Install the tracing subscriber: an stderr fmt layer (`json` selects JSON lines) at `base_level`,
-/// plus the OTLP log layer when `otlp_config` has logs enabled.
+/// plus the OTLP log layer when logs are enabled and the OTLP trace layer when traces are enabled.
 pub fn init_tracing(
     base_level: &str,
     json: bool,
@@ -184,18 +240,28 @@ pub fn init_tracing(
     };
     let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
 
-    match otlp_config {
+    let logs = match otlp_config {
         Some(cfg) if cfg.logs_enabled => {
-            let (otlp_layer, provider) = logs_layer(cfg)?;
+            let (layer, provider) = logs_layer(cfg)?;
             OTLP_LOGGER_PROVIDER
                 .set(provider)
                 .map_err(|_| anyhow::anyhow!("OTLP logger provider already initialized"))?;
-            registry.with(otlp_layer).init();
+            Some(layer)
         }
-        _ => {
-            registry.init();
+        _ => None,
+    };
+    let traces = match otlp_config {
+        Some(cfg) if cfg.traces_enabled => {
+            let (layer, provider) = traces_layer(cfg)?;
+            OTLP_TRACER_PROVIDER
+                .set(provider)
+                .map_err(|_| anyhow::anyhow!("OTLP tracer provider already initialized"))?;
+            Some(layer)
         }
-    }
+        _ => None,
+    };
+
+    registry.with(logs).with(traces).init();
     Ok(())
 }
 
@@ -211,10 +277,11 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 7] = [
         "RASTREO_OTLP_ENDPOINT",
         "RASTREO_OTLP_METRICS_ENABLED",
         "RASTREO_OTLP_LOGS_ENABLED",
+        "RASTREO_OTLP_TRACES_ENABLED",
         "RASTREO_OTLP_METRICS_INTERVAL_SECS",
         "RASTREO_OTLP_SERVICE_NAME",
         "RASTREO_OTLP_PROTOCOL",
@@ -371,6 +438,37 @@ mod tests {
     }
 
     #[test]
+    fn from_env_traces_only_returns_some() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_TRACES_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+        }
+        let cfg = OtlpConfig::from_env("svc", false)
+            .expect("from_env")
+            .expect("traces-only must not be a silent no-op");
+        clear();
+        assert!(cfg.traces_enabled);
+        assert!(!cfg.metrics_enabled);
+        assert!(!cfg.logs_enabled);
+    }
+
+    #[test]
+    fn from_env_traces_only_requires_endpoint() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var("RASTREO_OTLP_TRACES_ENABLED", "true") };
+        let err = OtlpConfig::from_env("svc", false).expect_err("must reject");
+        clear();
+        let msg = err.to_string();
+        assert!(msg.contains("RASTREO_OTLP_ENDPOINT"), "msg was {msg}");
+        assert!(msg.contains("RASTREO_OTLP_TRACES_ENABLED"), "msg was {msg}");
+    }
+
+    #[test]
     fn empty_guard_drops_without_panic() {
         let guard = OtlpGuard::empty();
         drop(guard);
@@ -383,6 +481,7 @@ mod tests {
             protocol: OtlpProtocol::Grpc,
             metrics_enabled: false,
             logs_enabled: true,
+            traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-core-test".to_string(),
         };
@@ -398,11 +497,50 @@ mod tests {
             protocol: OtlpProtocol::HttpProtobuf,
             metrics_enabled: false,
             logs_enabled: true,
+            traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-core-test".to_string(),
         };
         let (_layer, provider) =
             logs_layer::<tracing_subscriber::Registry>(&cfg).expect("build http log layer");
         provider.shutdown().expect("shutdown");
+    }
+
+    fn traces_cfg(protocol: OtlpProtocol) -> OtlpConfig {
+        OtlpConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            protocol,
+            metrics_enabled: false,
+            logs_enabled: false,
+            traces_enabled: true,
+            metrics_interval: Duration::from_secs(30),
+            service_name: "rastreo-core-test".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn traces_layer_builds_grpc_exporter() {
+        let cfg = traces_cfg(OtlpProtocol::Grpc);
+        let (_layer, provider) =
+            traces_layer::<tracing_subscriber::Registry>(&cfg).expect("build grpc span layer");
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn traces_layer_builds_http_protobuf_exporter() {
+        let cfg = traces_cfg(OtlpProtocol::HttpProtobuf);
+        let (_layer, provider) =
+            traces_layer::<tracing_subscriber::Registry>(&cfg).expect("build http span layer");
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn guard_with_tracer_drops_without_panic() {
+        let cfg = traces_cfg(OtlpProtocol::Grpc);
+        let (_layer, provider) =
+            traces_layer::<tracing_subscriber::Registry>(&cfg).expect("build span layer");
+        let mut guard = OtlpGuard::empty();
+        attach_tracer(&mut guard, provider);
+        drop(guard);
     }
 }
