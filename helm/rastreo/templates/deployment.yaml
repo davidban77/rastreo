@@ -106,9 +106,9 @@ spec:
           {{- end }}
           {{- end }}
           {{- if .Values.otlp }}
-          {{- if or .Values.otlp.metricsEnabled .Values.otlp.logsEnabled }}
+          {{- if or .Values.otlp.metricsEnabled .Values.otlp.logsEnabled .Values.otlp.tracesEnabled }}
           {{- if not .Values.otlp.endpoint }}
-          {{- fail "otlp.endpoint must be set when otlp.metricsEnabled or otlp.logsEnabled is true" }}
+          {{- fail "otlp.endpoint must be set when otlp.metricsEnabled, otlp.logsEnabled, or otlp.tracesEnabled is true" }}
           {{- end }}
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_ENDPOINT" "value" (printf "%v" .Values.otlp.endpoint)) }}
           {{- if .Values.otlp.protocol }}
@@ -119,6 +119,9 @@ spec:
           {{- end }}
           {{- if .Values.otlp.logsEnabled }}
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_LOGS_ENABLED" "value" "true") }}
+          {{- end }}
+          {{- if .Values.otlp.tracesEnabled }}
+          {{- $envs = append $envs (dict "name" "RASTREO_OTLP_TRACES_ENABLED" "value" "true") }}
           {{- end }}
           {{- if and .Values.otlp.metricsEnabled .Values.otlp.metricsIntervalSeconds }}
           {{- $envs = append $envs (dict "name" "RASTREO_OTLP_METRICS_INTERVAL_SECS" "value" (printf "%d" (int64 .Values.otlp.metricsIntervalSeconds))) }}
