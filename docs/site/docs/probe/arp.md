@@ -61,7 +61,14 @@ cargo build --release --features arp,ndp,snmp,http,kafka
 
 The published Docker image and release binaries bundle the `arp` feature by default. When the feature is disabled the prober module is not compiled and the `arp` variant of `ProberConfig` is not present — scenarios that reference `type: arp` will fail to deserialize with an unknown-variant error.
 
-The feature pulls in `pnet_datalink` and `pnet_packet` from the libpnet family, plus `ipnetwork` for subnet arithmetic. On Linux the raw send/receive path uses `AF_PACKET` sockets directly — no libpcap dependency — so musl static builds work unchanged.
+The feature pulls in `pnet_datalink` and `pnet_packet` from the libpnet family, plus `ipnetwork` for subnet arithmetic and `socket2` for sizing the socket receive buffer. On Linux the raw send/receive path uses `AF_PACKET` sockets directly — no libpcap dependency — so musl static builds work unchanged.
+
+!!! note "Tuning the capture buffer for very large scans"
+    All probes on one interface share one receive socket. A very large scan sends a burst of replies that must not overflow the kernel capture buffer. On Linux this is handled for you: rastreo requests an 8 MiB receive buffer, and the kernel caps it at `net.core.rmem_max`. On macOS the BPF capture buffer is capped by `debug.bpf_maxbufsize`, often around 512 KiB by default. That is fine for typical scans, but a very large scan can drop replies. Raise the cap before a huge local scan:
+
+    ```bash
+    sudo sysctl -w debug.bpf_maxbufsize=4194304
+    ```
 
 The published image ships both binaries with `cap_net_raw+ep` set as a file capability, so the non-root runtime user (`UID 65532`) can open `AF_PACKET` sockets without escalating. The container still needs `NET_RAW` in its bounding set — pass `--cap-add=NET_RAW` to `docker run` (standalone) or set `capabilities.add: [NET_RAW]` on the Kubernetes container (via the Helm chart's `podSecurity.netRaw`). Without a bounding-set entry, the file capability alone is not enough.
 

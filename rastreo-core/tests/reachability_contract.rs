@@ -58,6 +58,23 @@ fn absent(config: ProberConfig, target: IpAddr) -> Absence {
 /// The shared-engine fault paths — a failed socket open (no `CAP_NET_RAW`) and a dead reader —
 /// cannot be induced on a host that grants the capability, so the named unit tests are the record:
 /// an open failure is cached and faults every probe, and reader death poisons in-flight waiters.
+/// The link-layer engine's absence is a live send that times out with no reply. It needs a raw
+/// socket, so the outcome-mapping unit test is the record for absence.
+#[cfg(any(feature = "arp", feature = "ndp"))]
+const LINK_LAYER_ABSENCE_SEAM: &str =
+    "privileged socket; seam: link_layer::reply_to_outcome_maps_a_timeout_to_absence";
+
+/// The link-layer engine's faults — a channel open that fails (no `CAP_NET_RAW`), a dead reader
+/// that poisons in-flight waiters, and a demux key collision — cannot be induced on a host that
+/// grants the capability, so the named unit tests are the record.
+#[cfg(any(feature = "arp", feature = "ndp"))]
+const LINK_LAYER_FAULT_SEAM: &str =
+    "seams: link_layer::get_or_open_caches_an_open_failure_and_faults_every_probe_without_re_opening, \
+     link_layer::channel_open_fault_names_cap_net_raw_on_permission_denied, \
+     link_layer::reply_to_outcome_maps_a_failed_delivery_to_a_kinded_fault, \
+     link_layer::dropping_reader_exit_poisons_the_demux_and_faults_the_waiter, \
+     demux::a_duplicate_key_faults_both_the_prior_waiter_and_the_new_registrant";
+
 #[cfg(feature = "icmp")]
 const ICMP_FAULT_SEAM: &str =
     "seams: icmp::get_or_open_caches_an_open_failure_and_faults_every_probe_without_re_opening, \
@@ -212,17 +229,8 @@ async fn contract_for(kind: ProbeKind) -> Contract {
         },
         #[cfg(feature = "arp")]
         ProbeKind::Arp => Contract {
-            absence: Absence::Seam(
-                "privileged socket; \
-                 seam: arp::timeout_resolution_is_an_unreachable_outcome_not_an_error",
-            ),
-            fault: Fault::Probe {
-                config: ProberConfig::Arp {
-                    interface: String::new(),
-                },
-                target: "2001:db8::1".parse().expect("valid ipv6"),
-                expect_kind: ProbeErrorKind::Other,
-            },
+            absence: Absence::Seam(LINK_LAYER_ABSENCE_SEAM),
+            fault: Fault::Seam(LINK_LAYER_FAULT_SEAM),
         },
         #[cfg(not(feature = "arp"))]
         ProbeKind::Arp => Contract {
@@ -231,17 +239,8 @@ async fn contract_for(kind: ProbeKind) -> Contract {
         },
         #[cfg(feature = "ndp")]
         ProbeKind::Ndp => Contract {
-            absence: Absence::Seam(
-                "privileged socket; \
-                 seam: ndp::timeout_resolution_is_an_unreachable_outcome_not_an_error",
-            ),
-            fault: Fault::Probe {
-                config: ProberConfig::Ndp {
-                    interface: String::new(),
-                },
-                target: LOOPBACK,
-                expect_kind: ProbeErrorKind::Other,
-            },
+            absence: Absence::Seam(LINK_LAYER_ABSENCE_SEAM),
+            fault: Fault::Seam(LINK_LAYER_FAULT_SEAM),
         },
         #[cfg(not(feature = "ndp"))]
         ProbeKind::Ndp => Contract {

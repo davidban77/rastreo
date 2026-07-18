@@ -1,9 +1,11 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
+use crate::error::ProbeErrorKind;
 use crate::model::ProbeFault;
 
 /// What a demux waiter receives: `Reached` from the reader on a matched reply, `Failed` from
@@ -14,6 +16,8 @@ pub(crate) enum EngineReply<R> {
 }
 
 struct Waiter<C, R> {
+    // Read only by consumers that validate a reply against per-waiter state (icmp); () for link-layer.
+    #[cfg_attr(not(feature = "icmp"), allow(dead_code))]
     context: C,
     tx: oneshot::Sender<EngineReply<R>>,
 }
@@ -51,7 +55,9 @@ where
 
     /// Registers a waiter and hands back its receiver. On an already-poisoned engine the receiver
     /// is completed with the poison fault immediately, so a probe racing the reader's death faults
-    /// rather than falling through to a bogus absence.
+    /// rather than falling through to a bogus absence. A key already in flight faults BOTH the
+    /// prior waiter and this registrant: the engine cannot correlate two waiters to one key, and a
+    /// silent overwrite would orphan the first into a false absence.
     pub(crate) fn register(&self, key: K, context: C) -> oneshot::Receiver<EngineReply<R>> {
         let (tx, rx) = oneshot::channel();
         let mut state = self.lock();
@@ -59,13 +65,27 @@ where
             Some(fault) => {
                 let _ = tx.send(EngineReply::Failed(fault.clone()));
             }
-            None => {
-                state.waiters.insert(key, Waiter { context, tx });
-            }
+            None => match state.waiters.entry(key) {
+                Entry::Occupied(existing) => {
+                    let fault = ProbeFault::new(
+                        ProbeErrorKind::Other,
+                        "duplicate demux key — engine cannot correlate".to_string(),
+                    );
+                    let _ = existing
+                        .remove()
+                        .tx
+                        .send(EngineReply::Failed(fault.clone()));
+                    let _ = tx.send(EngineReply::Failed(fault));
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(Waiter { context, tx });
+                }
+            },
         }
         rx
     }
 
+    #[cfg_attr(not(feature = "icmp"), allow(dead_code))]
     pub(crate) fn context(&self, key: &K) -> Option<C> {
         self.lock().waiters.get(key).map(|w| w.context.clone())
     }
@@ -207,6 +227,35 @@ mod tests {
                 "registering on a poisoned engine must return the fault, not hang or absence"
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_key_faults_both_the_prior_waiter_and_the_new_registrant() {
+        let demux: Demux<u64, (), u32> = Demux::new();
+        let rx_first = demux.register(1, ());
+        let rx_second = demux.register(1, ());
+
+        match rx_first.await {
+            Ok(EngineReply::Failed(f)) => assert!(
+                f.detail.contains("duplicate demux key"),
+                "got: {}",
+                f.detail
+            ),
+            _ => panic!("a colliding key must fault the prior waiter, not silently orphan it"),
+        }
+        match rx_second.await {
+            Ok(EngineReply::Failed(f)) => assert!(
+                f.detail.contains("duplicate demux key"),
+                "got: {}",
+                f.detail
+            ),
+            _ => panic!("a colliding key must fault the new registrant, not leave it pending"),
+        }
+        assert_eq!(
+            demux.waiter_count(),
+            0,
+            "a collision clears the slot; neither waiter is left registered"
+        );
     }
 
     #[tokio::test]
