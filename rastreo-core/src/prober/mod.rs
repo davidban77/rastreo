@@ -1,6 +1,8 @@
 #[cfg(feature = "arp")]
 pub mod arp;
 pub(crate) mod classify;
+#[cfg(feature = "icmp")]
+pub(crate) mod demux;
 pub mod dns;
 #[cfg(feature = "http")]
 pub mod http;
