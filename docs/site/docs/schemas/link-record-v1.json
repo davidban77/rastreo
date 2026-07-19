@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "LinkEndpoint": {
+      "description": "One end of a discovered link. `identity_key` correlates the endpoint to a probed device; it is\n`None` for a neighbor rastreo learned via LLDP but never probed (\"known-unknown\").",
+      "properties": {
+        "chassis_id": {
+          "type": "string"
+        },
+        "identity_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "type": "string"
+        },
+        "sys_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "chassis_id",
+        "port"
+      ],
+      "type": "object"
+    },
+    "ScanMetadata": {
+      "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",
+      "properties": {
+        "initiated_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "scan_id": {
+          "type": "string"
+        },
+        "scenario_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_config_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "scan_id",
+        "initiated_at"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://davidban77.github.io/rastreo/schemas/link-record-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A deduplicated topology edge between two endpoints. Both directions of a physical link collapse\ninto one record keyed by the unordered pair of LLDP chassis-ids.",
+  "properties": {
+    "a": {
+      "$ref": "#/$defs/LinkEndpoint"
+    },
+    "b": {
+      "$ref": "#/$defs/LinkEndpoint"
+    },
+    "discovered_via": {
+      "description": "Discovery mechanism that produced the link (`lldp` today; leaves room for `cdp`/`gnmi`).",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "scan_metadata": {
+      "$ref": "#/$defs/ScanMetadata"
+    },
+    "schema_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema_id",
+    "a",
+    "b",
+    "discovered_via",
+    "observed_at",
+    "scan_metadata"
+  ],
+  "title": "LinkRecord",
+  "type": "object"
+}

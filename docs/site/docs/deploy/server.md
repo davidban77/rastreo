@@ -302,6 +302,7 @@ The response is `{summary, records, truncated}`, plus an optional `hint` when a 
     "targets_resolved": 1,
     "probe_attempts": 1,
     "records_emitted": 1,
+    "links_emitted": 0,
     "probes_by_kind": [
       { "kind": "TcpConnect", "attempted": 1, "errored": 0 }
     ],
@@ -335,6 +336,7 @@ The summary fields:
 | `probe_attempts` | Probes started: `targets_resolved` × number of probers. |
 | `error_counts` | Faulted probes tallied by fault kind, as a JSON object — for example `{"decode_failed": 1}`. A kind appears only when it happened at least once, so a scan with no faults omits the field. A target that stays silent is a normal result, not a fault. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). |
 | `records_emitted` | `DeviceRecord` events produced. By default only targets that at least one prober reached produce a record. |
+| `links_emitted` | Topology link records produced by the [LLDP prober](../probe/lldp.md). Always present; `0` when no LLDP neighbors were found. See [Topology](../discover/topology.md). |
 | `probes_by_kind` | Per-prober `attempted` / `errored` breakdown. Omitted when no probes ran. |
 | `first_probe_error` | The first probe fault, as an object with a `kind` field (the fault kind) and a `detail` field (a sample detail string). Omitted when no probe faulted. |
 | `dlq_records` | Records the sink diverted to a dead-letter destination. |
@@ -350,6 +352,7 @@ When a probe faults, `error_counts` tallies it by kind and `first_probe_error` n
     "targets_resolved": 1,
     "probe_attempts": 1,
     "records_emitted": 1,
+    "links_emitted": 0,
     "error_counts": { "decode_failed": 1 },
     "probes_by_kind": [
       { "kind": "Snmp", "attempted": 1, "errored": 1 }
@@ -401,6 +404,7 @@ The example below used a deliberately tiny cap, so the single record did not fit
     "targets_resolved": 1,
     "probe_attempts": 1,
     "records_emitted": 1,
+    "links_emitted": 0,
     "probes_by_kind": [
       { "kind": "TcpConnect", "attempted": 1, "errored": 0 }
     ],

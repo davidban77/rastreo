@@ -122,4 +122,35 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<NdjsonEncoder>();
     }
+
+    #[test]
+    fn encode_link_writes_one_newline_terminated_json_line() {
+        use crate::model::{LinkEndpoint, LinkRecord, LINK_SCHEMA_ID};
+
+        let link = LinkRecord {
+            schema_version: LinkRecord::SCHEMA_VERSION.to_string(),
+            schema_id: LINK_SCHEMA_ID.to_string(),
+            a: LinkEndpoint {
+                identity_key: Some("mac:aabbccddeeff".into()),
+                chassis_id: "aabbccddeeff".into(),
+                sys_name: None,
+                port: "Gi0/1".into(),
+            },
+            b: LinkEndpoint {
+                identity_key: None,
+                chassis_id: "001122334455".into(),
+                sys_name: Some("peer".into()),
+                port: "Gi0/2".into(),
+            },
+            discovered_via: "lldp".into(),
+            observed_at: SystemTime::UNIX_EPOCH,
+            scan_metadata: ScanMetadata::default(),
+        };
+        let enc = NdjsonEncoder::new();
+        let mut buf = Vec::new();
+        enc.encode_link(&link, &mut buf).expect("encode link");
+        assert_eq!(buf.last().copied(), Some(b'\n'));
+        let back: LinkRecord = serde_json::from_slice(&buf[..buf.len() - 1]).expect("parse line");
+        assert_eq!(back, link);
+    }
 }

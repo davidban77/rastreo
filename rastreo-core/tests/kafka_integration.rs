@@ -36,6 +36,7 @@ async fn kafka_create_sink_batched_close_delivers_one_message_per_record() {
     let config = SinkConfig::Kafka {
         brokers: vec![broker.clone()],
         topic: topic.to_string(),
+        links_topic: None,
         flush_mode: KafkaFlushMode::default(),
         dead_letter: None,
         tls: None,

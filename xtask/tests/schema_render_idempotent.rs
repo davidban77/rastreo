@@ -25,6 +25,21 @@ fn committed_device_record_render_matches_current_schema() {
 }
 
 #[test]
+fn committed_link_record_render_matches_current_schema() {
+    let root = workspace_root();
+    let raw = fs::read_to_string(root.join("schemas/link-record-v1.json"))
+        .expect("read link-record schema");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse schema");
+    let rendered = xtask::render_schema(&value, "rastreo-core/src/model/link.rs");
+    let committed = fs::read_to_string(root.join("docs/site/docs/reference/schema/link-record.md"))
+        .expect("read committed link-record.md");
+    assert_eq!(
+        rendered, committed,
+        "committed link-record.md is out of sync with the schema. Run `task schema:all`."
+    );
+}
+
+#[test]
 fn committed_scan_metadata_render_matches_current_schema() {
     let root = workspace_root();
     let raw = fs::read_to_string(root.join("schemas/scan-metadata-v1.json"))
@@ -81,6 +96,14 @@ fn committed_schemas_match_derives() {
     assert_eq!(
         device_committed, device_current,
         "committed device-record-v1.json is out of sync with the DeviceRecord derives. Run `task schema:generate`."
+    );
+
+    let link_committed =
+        fs::read_to_string(root.join("schemas/link-record-v1.json")).expect("read link schema");
+    let link_current = xtask::link_record_schema().expect("link schema");
+    assert_eq!(
+        link_committed, link_current,
+        "committed link-record-v1.json is out of sync with the LinkRecord derives. Run `task schema:generate`."
     );
 
     let scan_committed =

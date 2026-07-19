@@ -59,7 +59,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Twelve probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, and `gnmi`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, and `gnmi` variants are gated behind their matching Cargo features on `rastreo-core`, all bundled with the published binaries and Docker image. The `tcp_connect`, `dns`, `reverse_dns`, and `udp` variants are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Thirteen probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, and `gnmi` variants are gated behind their matching Cargo features on `rastreo-core`, all bundled with the published binaries and Docker image. The `lldp` variant is gated behind the `lldp` feature (which turns on `snmp`), bundled with the published binaries and Docker image. The `tcp_connect`, `dns`, `reverse_dns`, and `udp` variants are always available.
 
 ### `tcp_connect`
 
@@ -157,6 +157,38 @@ An SNMPv3 example with `authPriv`, SHA-256, and AES-128:
 
 ```yaml
 type: snmp
+version: v3
+credentials:
+  username: probe
+  auth:
+    algorithm: sha256
+    password: authpassword
+  privacy:
+    algorithm: aes128
+    password: privpassword
+```
+
+### `lldp`
+
+Walks the LLDP-MIB over SNMP to read a device's link-layer neighbors, then assembles them into topology links emitted as `LinkRecord`s. Emits no device signals — a device it reaches produces a reachable `DeviceRecord` with `probe_kinds: ["Lldp"]` and no signals, while its neighbors flow onto a second stream. Takes the same transport fields as the `snmp` prober plus `max_rows`. See the [LLDP prober page](../probe/lldp.md) for the SNMP transport, credential shape, and reachability model, and [Topology](../discover/topology.md) for the `LinkRecord` shape and where links are emitted.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"lldp"`. |
+| `ports` | array of u16 | no | `[161]` | SNMP ports to read from. |
+| `version` | string | no | `v2c` | One of `v1`, `v2c`, `v3`. |
+| `community` | string | no | `public` | SNMP community string. Transmitted in cleartext on v1 and v2c. Ignored on v3. |
+| `credentials` | object | no | `{}` | USM credentials. Required on `v3` (username must be non-empty). Ignored on v1 and v2c. See [SNMPv3 credentials](../probe/snmp.md#snmpv3-credentials). |
+| `max_rows` | integer | no | `4096` | Maximum neighbor-table rows a single walk reads. |
+
+```json
+{"type": "lldp", "ports": [161], "version": "v2c", "community": "public"}
+```
+
+An SNMPv3 example with `authPriv`, SHA-256, and AES-128:
+
+```yaml
+type: lldp
 version: v3
 credentials:
   username: probe
@@ -296,7 +328,8 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `brokers` | array of string | yes | Kafka broker `host:port` list. |
-| `topic` | string | yes | Topic name. |
+| `topic` | string | yes | Topic name for the `DeviceRecord` stream. |
+| `links_topic` | string | no | Topic for the `LinkRecord` stream. Defaults to `rastreo.discovery.links.v1`. Used only when an [LLDP prober](../probe/lldp.md) produces links. See [Topology](../discover/topology.md#where-links-are-emitted). |
 | `flush_mode` | object | no | Defaults to `batched` with a 64 KiB threshold. See below. |
 | `dead_letter` | object | no | Optional quarantine topic for records the primary produce refused. Omit to preserve the pre-existing "return error, retain buffer" behavior on produce failure. |
 | `tls` | object | no | Optional TLS for the broker connection. `verify` defaults to `false`. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
@@ -350,7 +383,8 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `servers` | array of string | yes | NATS server URLs, e.g. `["nats://nats-01:4222"]`. |
-| `subject` | string | yes | Subject to publish to. |
+| `subject` | string | yes | Subject to publish the `DeviceRecord` stream to. |
+| `links_subject` | string | no | Subject for the `LinkRecord` stream. Defaults to `rastreo.discovery.links.v1`. Used only when an [LLDP prober](../probe/lldp.md) produces links. See [Topology](../discover/topology.md#where-links-are-emitted). |
 | `stream` | string | yes | JetStream stream name bound to the subject. |
 | `credentials` | object | no | Auth details. Defaults to anonymous. See below. |
 | `flush_mode` | object | no | Flush mode. Defaults to `per_record`. See below. |

@@ -89,6 +89,7 @@ pub fn generate_all() -> Result<()> {
         .with_context(|| format!("create {}", docs_schemas_dir.display()))?;
     for (name, content) in [
         ("device-record-v1.json", device_record_schema()?),
+        ("link-record-v1.json", link_record_schema()?),
         ("scan-metadata-v1.json", scan_metadata_schema()?),
         ("scenario-v1.json", scenario_file_schema()?),
         ("discovery-plan-v1.json", discovery_plan_schema()?),
@@ -116,6 +117,11 @@ pub fn render_all() -> Result<()> {
         "rastreo-core/src/model/device.rs",
     )?;
     render_schema_file(
+        &schemas_dir.join("link-record-v1.json"),
+        &docs_dir.join("link-record.md"),
+        "rastreo-core/src/model/link.rs",
+    )?;
+    render_schema_file(
         &schemas_dir.join("scan-metadata-v1.json"),
         &docs_dir.join("scan-metadata.md"),
         "rastreo-core/src/model/scan.rs",
@@ -138,6 +144,14 @@ pub fn device_record_schema() -> Result<String> {
         schema_for!(rastreo_core::DeviceRecord),
         "device-record-v1.json",
         "DeviceRecord",
+    )
+}
+
+pub fn link_record_schema() -> Result<String> {
+    render_schema_json(
+        schema_for!(rastreo_core::LinkRecord),
+        "link-record-v1.json",
+        "LinkRecord",
     )
 }
 
@@ -549,6 +563,11 @@ mod tests {
         serde_json::from_str(&raw).expect("parse device schema")
     }
 
+    fn link_schema_value() -> Value {
+        let raw = link_record_schema().expect("link schema");
+        serde_json::from_str(&raw).expect("parse link schema")
+    }
+
     fn scan_schema_value() -> Value {
         let raw = scan_metadata_schema().expect("scan schema");
         serde_json::from_str(&raw).expect("parse scan schema")
@@ -690,6 +709,52 @@ mod tests {
     fn device_record_schema_names_current_type() {
         let json = device_record_schema().expect("gen");
         assert!(json.contains("\"title\": \"DeviceRecord\""));
+    }
+
+    #[test]
+    fn link_record_schema_generation_is_idempotent() {
+        let a = link_record_schema().expect("first gen");
+        let b = link_record_schema().expect("second gen");
+        assert_eq!(a.as_bytes(), b.as_bytes());
+    }
+
+    #[test]
+    fn link_record_schema_names_current_type() {
+        let json = link_record_schema().expect("gen");
+        assert!(json.contains("\"title\": \"LinkRecord\""));
+    }
+
+    #[test]
+    fn link_record_schema_id_matches_served_url() {
+        let value = link_schema_value();
+        assert_eq!(
+            value["$id"].as_str(),
+            Some(format!("{SCHEMA_BASE_URL}/link-record-v1.json").as_str())
+        );
+    }
+
+    #[test]
+    fn link_record_schema_matches_core_constant() {
+        let value = link_schema_value();
+        assert_eq!(value["$id"].as_str(), Some(rastreo_core::LINK_SCHEMA_ID));
+    }
+
+    #[test]
+    fn render_link_record_lists_endpoints_and_provenance() {
+        let md = render_schema(&link_schema_value(), "rastreo-core/src/model/link.rs");
+        for field in [
+            "`a`",
+            "`b`",
+            "`discovered_via`",
+            "`observed_at`",
+            "`scan_metadata`",
+        ] {
+            assert!(md.contains(field), "link render missing {field}");
+        }
+        assert!(md.contains("### `LinkEndpoint`"));
+        for field in ["`identity_key`", "`chassis_id`", "`sys_name`", "`port`"] {
+            assert!(md.contains(field), "LinkEndpoint render missing {field}");
+        }
     }
 
     #[test]

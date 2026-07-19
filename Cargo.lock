@@ -3367,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "rastreo"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "rastreo-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -3450,7 +3450,7 @@ dependencies = [
 
 [[package]]
 name = "rastreo-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",

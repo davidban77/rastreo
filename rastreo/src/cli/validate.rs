@@ -160,6 +160,7 @@ mod tests {
         let sink = SinkConfig::Kafka {
             brokers: Vec::new(),
             topic: "t".into(),
+            links_topic: None,
             flush_mode: rastreo_core::KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,

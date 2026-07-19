@@ -6,10 +6,12 @@ info:
   description: |
     Transport-neutral description of the rastreo discovery streaming API.
     Every scan emits one `DeviceRecord` message per discovered device onto a
-    versioned topic (Kafka) or subject (NATS). The wire payload is the same
-    JSON Schema at `schemas/device-record-v1.json` regardless of transport;
-    consumers can validate incoming records against the URL embedded in each
-    record's `schema_id` field.
+    versioned topic (Kafka) or subject (NATS), and one `LinkRecord` message per
+    deduplicated topology link onto a separate versioned channel. The wire
+    payload is the same JSON Schema (`schemas/device-record-v1.json`,
+    `schemas/link-record-v1.json`) regardless of transport; consumers can
+    validate incoming records against the URL embedded in each record's
+    `schema_id` field.
   license:
     name: MIT OR Apache-2.0
 
@@ -51,6 +53,24 @@ channels:
       deviceRecord:
         $ref: '#/components/messages/deviceRecord'
 
+  discoveryLinks:
+    address: rastreo.discovery.links.v1
+    title: LinkRecord stream
+    description: |
+      Deduplicated topology edges, one message per physical link discovered
+      via LLDP. Both directions of a link collapse to a single `LinkRecord`
+      keyed by the unordered pair of chassis-ids. The channel address is used
+      verbatim as the Kafka topic name (`links_topic`) and the NATS subject
+      (`links_subject`). The `v1` suffix pins the wire schema; a breaking
+      change ships a new channel (`rastreo.discovery.links.v2`) and both run
+      in parallel for one release cycle.
+    servers:
+      - $ref: '#/servers/kafka'
+      - $ref: '#/servers/nats'
+    messages:
+      linkRecord:
+        $ref: '#/components/messages/linkRecord'
+
   deadLetterRecords:
     address: rastreo.discovery.dlq.v1
     title: Dead-letter DeviceRecord stream
@@ -84,6 +104,19 @@ operations:
     messages:
       - $ref: '#/channels/discoveryRecords/messages/deviceRecord'
 
+  emitDiscoveryLink:
+    action: send
+    channel:
+      $ref: '#/channels/discoveryLinks'
+    summary: Emit a single deduplicated topology link.
+    description: |
+      After every device record from a scan is emitted, rastreo flushes one
+      message per discovered link. Consumers key correlation off
+      `scan_metadata.scan_id` to align links with the device records from the
+      same scan.
+    messages:
+      - $ref: '#/channels/discoveryLinks/messages/linkRecord'
+
   quarantineDiscoveryRecord:
     action: send
     channel:
@@ -110,6 +143,20 @@ components:
         description: |
           ULID stamped per scan. Consumers use it to group messages
           belonging to the same scan into a single batch.
+
+    linkRecord:
+      name: LinkRecord
+      title: LinkRecord
+      summary: A single deduplicated topology edge between two endpoints.
+      contentType: application/json
+      payload:
+        $ref: './link-record-v1.json'
+      correlationId:
+        location: $message.payload#/scan_metadata/scan_id
+        description: |
+          ULID stamped per scan, identical to the device-record stream.
+          Consumers use it to correlate links with the devices from the
+          same scan.
 
     deadLetterRecord:
       name: DeadLetterRecord
