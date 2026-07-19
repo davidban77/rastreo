@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use schemars::JsonSchema;
 
 use crate::error::{ConfigError, RastreoError};
+use crate::fuser::keys::normalize_mac;
 use crate::fuser::Fuser;
 use crate::model::device::{AltIp, AltIpRole, Confidence, DeviceRecord};
 use crate::model::outcome::{ProbeKind, ProbeOutcome, Signal};
@@ -786,13 +787,6 @@ pub(crate) fn parse_mac_prefix(mac: &str) -> Option<[u8; 5]> {
         return None;
     }
     Some(bytes)
-}
-
-fn normalize_mac(mac: &str) -> String {
-    mac.chars()
-        .filter(|c| *c != ':' && *c != '-')
-        .flat_map(|c| c.to_lowercase())
-        .collect()
 }
 
 fn mac_equal(a: &str, b: &str) -> bool {
@@ -1754,6 +1748,7 @@ mod tests {
         let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
         let outcome =
             |octet: u8, kind: ProbeKind, reachable: bool, signals: Vec<Signal>| ProbeOutcome {
+                lldp: None,
                 kind,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -2478,6 +2473,7 @@ mod tests {
             fault: Option<ProbeFault>,
         ) -> ProbeOutcome {
             ProbeOutcome {
+                lldp: None,
                 kind,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
                 timestamp: SystemTime::UNIX_EPOCH,

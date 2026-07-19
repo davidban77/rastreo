@@ -29,6 +29,7 @@ snmp = [
     "dep:cfb-mode",
     "dep:des",
 ]
+lldp = ["snmp"]
 arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2", "dep:caps"]
 ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2", "dep:caps"]
 nats = ["dep:async-nats", "dep:bytes", "chrono/clock"]

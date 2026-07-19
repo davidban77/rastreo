@@ -154,6 +154,7 @@ fn build_outcome(
     let reachable = !signals.is_empty();
     let fault = if reachable { None } else { last_fault };
     ProbeOutcome {
+        lldp: None,
         kind: ProbeKind::Http,
         target_ip,
         timestamp: SystemTime::now(),

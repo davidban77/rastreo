@@ -25,9 +25,9 @@ pub use error::{
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
 pub use hints::hint_for_error_kind;
 pub use model::{
-    AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, ProbeCtx, ProbeFault, ProbeKind,
-    ProbeOutcome, ResolvedTarget, ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID,
-    CURRENT_SCHEMA_VERSION, PROBE_KIND_COUNT,
+    AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, LldpNeighbor, LldpObservation,
+    ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, ScanMetadata, Signal, Target,
+    CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION, PROBE_KIND_COUNT,
 };
 pub use pipeline::{
     resolve_scenario_targets, run_discovery, run_discovery_cancellable,

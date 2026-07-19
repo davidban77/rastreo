@@ -316,6 +316,7 @@ impl<P: LinkLayerProtocol> fmt::Debug for LinkLayerEngines<P> {
 
 fn fault_outcome<P: LinkLayerProtocol>(target_ip: IpAddr, fault: ProbeFault) -> ProbeOutcome {
     ProbeOutcome {
+        lldp: None,
         kind: P::kind(),
         target_ip,
         timestamp: SystemTime::now(),
@@ -333,6 +334,7 @@ fn link_layer_fault<P: LinkLayerProtocol>(target_ip: IpAddr, detail: String) -> 
 
 fn reached_outcome<P: LinkLayerProtocol>(target_ip: IpAddr, mac: MacAddr) -> ProbeOutcome {
     ProbeOutcome {
+        lldp: None,
         kind: P::kind(),
         target_ip,
         timestamp: SystemTime::now(),
@@ -345,6 +347,7 @@ fn reached_outcome<P: LinkLayerProtocol>(target_ip: IpAddr, mac: MacAddr) -> Pro
 // A silent host is a negative discovery result, not a probe fault.
 fn absence_outcome<P: LinkLayerProtocol>(target_ip: IpAddr) -> ProbeOutcome {
     ProbeOutcome {
+        lldp: None,
         kind: P::kind(),
         target_ip,
         timestamp: SystemTime::now(),

@@ -1736,6 +1736,7 @@ mod tests {
         let mac = "aa:bb:cc:11:22:33";
         let outcomes = vec![
             ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::Snmp,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -1744,6 +1745,7 @@ mod tests {
                 fault: None,
             },
             ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::Snmp,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -1752,6 +1754,7 @@ mod tests {
                 fault: None,
             },
             ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::Snmp,
                 target_ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -2050,6 +2053,7 @@ mod tests {
                 };
                 match &self.responses[idx] {
                     Resp::Reachable(signals) => Ok(ProbeOutcome {
+                        lldp: None,
                         kind: self.kind,
                         target_ip: target.ip,
                         timestamp: SystemTime::UNIX_EPOCH,
@@ -2058,6 +2062,7 @@ mod tests {
                         fault: None,
                     }),
                     Resp::Dark => Ok(ProbeOutcome {
+                        lldp: None,
                         kind: self.kind,
                         target_ip: target.ip,
                         timestamp: SystemTime::UNIX_EPOCH,
@@ -2066,6 +2071,7 @@ mod tests {
                         fault: None,
                     }),
                     Resp::Fault(kind, detail) => Ok(ProbeOutcome {
+                        lldp: None,
                         kind: self.kind,
                         target_ip: target.ip,
                         timestamp: SystemTime::UNIX_EPOCH,
@@ -2471,6 +2477,7 @@ mod tests {
                 };
                 tokio::time::sleep(Duration::from_millis((self.n - idx) as u64)).await;
                 Ok(ProbeOutcome {
+                    lldp: None,
                     kind: ProbeKind::Snmp,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -2554,6 +2561,7 @@ mod tests {
             ) -> Result<ProbeOutcome, RastreoError> {
                 self.probed.fetch_add(1, Ordering::SeqCst);
                 Ok(ProbeOutcome {
+                    lldp: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -2714,6 +2722,7 @@ mod tests {
                 // Small per-target jitter so completions interleave within the concurrency window.
                 tokio::time::sleep(Duration::from_micros((last % 4) * 50)).await;
                 Ok(ProbeOutcome {
+                    lldp: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -2792,6 +2801,7 @@ mod tests {
                 }
                 self.probes_done.fetch_add(1, Ordering::SeqCst);
                 Ok(ProbeOutcome {
+                    lldp: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -2895,6 +2905,7 @@ mod tests {
                 )
                 .await;
                 Ok(ProbeOutcome {
+                    lldp: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,

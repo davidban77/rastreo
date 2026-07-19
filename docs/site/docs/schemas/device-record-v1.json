@@ -84,7 +84,8 @@
         "Icmp",
         "Tls",
         "ReverseDns",
-        "Gnmi"
+        "Gnmi",
+        "Lldp"
       ],
       "type": "string"
     },

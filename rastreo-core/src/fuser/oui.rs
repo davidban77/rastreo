@@ -541,6 +541,7 @@ mod tests {
 
     fn outcome_with_mac(mac: &str) -> ProbeOutcome {
         ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -552,6 +553,7 @@ mod tests {
 
     fn outcome_no_mac() -> ProbeOutcome {
         ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             timestamp: SystemTime::UNIX_EPOCH,

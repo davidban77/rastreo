@@ -272,6 +272,7 @@ mod tests {
         ) -> Result<ProbeOutcome, RastreoError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -301,6 +302,7 @@ mod tests {
             tokio::time::sleep(self.delay).await;
             self.completed.fetch_add(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -330,6 +332,7 @@ mod tests {
             self.started.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(self.delay).await;
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -361,6 +364,7 @@ mod tests {
             };
             tokio::time::sleep(Duration::from_micros(self.delays_us[index])).await;
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -392,6 +396,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -427,6 +432,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: self.kind,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -465,6 +471,7 @@ mod tests {
                 )));
             }
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -498,6 +505,7 @@ mod tests {
                 panic!("intentional panic at octet {last_octet}");
             }
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,

@@ -874,6 +874,56 @@
         },
         {
           "properties": {
+            "community": {
+              "$ref": "#/$defs/Community",
+              "default": "public"
+            },
+            "credentials": {
+              "$ref": "#/$defs/UsmCredentials",
+              "default": {
+                "auth": {
+                  "algorithm": "none"
+                },
+                "privacy": {
+                  "algorithm": "none"
+                },
+                "username": ""
+              }
+            },
+            "max_rows": {
+              "default": 4096,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ports": {
+              "default": [
+                161
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "lldp",
+              "type": "string"
+            },
+            "version": {
+              "$ref": "#/$defs/SnmpVersion",
+              "default": "v2c"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "interface": {
               "default": "",
               "type": "string"

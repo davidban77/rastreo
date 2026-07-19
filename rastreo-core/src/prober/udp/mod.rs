@@ -178,6 +178,7 @@ fn build_outcome(
     // Silence on one port is not evidence against a fault on another, but a port that answered is.
     let fault = if any_reachable { None } else { last_fault };
     ProbeOutcome {
+        lldp: None,
         kind: ProbeKind::Udp,
         target_ip,
         timestamp: SystemTime::now(),
