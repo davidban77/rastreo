@@ -125,6 +125,7 @@ nav:
       - SSH: probe/ssh.md
       - ICMP: probe/icmp.md
       - TLS: probe/tls.md
+      - gNMI: probe/gnmi.md
   - Integrate:
       - integrate/index.md
       - Kafka: integrate/kafka.md

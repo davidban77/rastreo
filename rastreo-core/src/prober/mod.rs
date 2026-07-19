@@ -1,3 +1,5 @@
+#[cfg(any(feature = "tls", feature = "gnmi"))]
+pub(crate) mod accept_any_tls;
 #[cfg(feature = "arp")]
 pub mod arp;
 #[cfg(all(
@@ -9,6 +11,8 @@ pub(crate) mod classify;
 #[cfg(any(feature = "icmp", feature = "arp", feature = "ndp"))]
 pub(crate) mod demux;
 pub mod dns;
+#[cfg(feature = "gnmi")]
+pub mod gnmi;
 #[cfg(feature = "http")]
 pub mod http;
 #[cfg(feature = "icmp")]
@@ -32,6 +36,8 @@ pub mod udp;
 #[cfg(feature = "arp")]
 pub use arp::ArpProber;
 pub use dns::{DnsProber, DnsQueryType, DnsTransport};
+#[cfg(feature = "gnmi")]
+pub use gnmi::GnmiProber;
 #[cfg(feature = "http")]
 pub use http::{HttpProber, HttpScheme};
 #[cfg(feature = "icmp")]
@@ -40,7 +46,12 @@ pub use icmp::IcmpProber;
 pub use ndp::NdpProber;
 #[cfg(feature = "snmp")]
 pub use redacted::Community;
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 pub use redacted::Password;
 pub use reverse_dns::ReverseDnsProber;
 #[cfg(feature = "snmp")]
@@ -153,6 +164,20 @@ pub enum ProberConfig {
         #[serde(default = "tls::default_ports")]
         ports: Vec<u16>,
     },
+    #[cfg(feature = "gnmi")]
+    Gnmi {
+        #[serde(default = "gnmi::default_ports")]
+        ports: Vec<u16>,
+        #[serde(default = "gnmi::default_plaintext")]
+        plaintext: bool,
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        #[schemars(default = "gnmi::default_password_schema")]
+        password: Password,
+        #[serde(default = "gnmi::default_get_paths")]
+        get_paths: Vec<String>,
+    },
     ReverseDns {
         #[serde(default = "reverse_dns::default_resolvers")]
         resolvers: Vec<std::net::IpAddr>,
@@ -216,6 +241,20 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
         }
         #[cfg(feature = "tls")]
         ProberConfig::Tls { ports } => Ok(Box::new(TlsProber::new(ports.clone())?)),
+        #[cfg(feature = "gnmi")]
+        ProberConfig::Gnmi {
+            ports,
+            plaintext,
+            username,
+            password,
+            get_paths,
+        } => Ok(Box::new(GnmiProber::new(
+            ports.clone(),
+            *plaintext,
+            username.clone(),
+            password.clone(),
+            get_paths.clone(),
+        )?)),
         ProberConfig::ReverseDns { resolvers } => {
             Ok(Box::new(ReverseDnsProber::new(resolvers.clone())?))
         }

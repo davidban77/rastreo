@@ -201,6 +201,22 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             absence: Absence::Seam("tls feature disabled"),
             fault: Fault::Seam("tls feature disabled"),
         },
+        // A refused/timed-out gNMI endpoint learns nothing → absence. Its fault half is a device
+        // that answers with a gRPC status (UNAUTHENTICATED with no creds) — reachable + AuthFailed
+        // — which needs a live server, so the mapper unit test is the record.
+        #[cfg(feature = "gnmi")]
+        ProbeKind::Gnmi => Contract {
+            absence: absent(gnmi_config(closed_tcp_port().await), LOOPBACK),
+            fault: Fault::Seam(
+                "an UNAUTHENTICATED gRPC status needs a live gNMI server; \
+                 seam: gnmi::status_to_outcome_unauthenticated_keeps_the_device_as_auth_failure",
+            ),
+        },
+        #[cfg(not(feature = "gnmi"))]
+        ProbeKind::Gnmi => Contract {
+            absence: Absence::Seam("gnmi feature disabled"),
+            fault: Fault::Seam("gnmi feature disabled"),
+        },
         // A dgram ICMP socket is unprivileged on macOS; on Linux it needs the
         // ping_group_range sysctl or CAP_NET_RAW, neither of which CI grants.
         #[cfg(all(feature = "icmp", target_os = "macos"))]
@@ -276,6 +292,19 @@ fn http_config(port: u16) -> ProberConfig {
         path: default_path(),
         tls_verify: default_tls_verify(),
         user_agent: default_user_agent(),
+    }
+}
+
+#[cfg(feature = "gnmi")]
+fn gnmi_config(port: u16) -> ProberConfig {
+    use rastreo_core::prober::Password;
+
+    ProberConfig::Gnmi {
+        ports: vec![port],
+        plaintext: true,
+        username: String::new(),
+        password: Password::default(),
+        get_paths: rastreo_core::prober::gnmi::default_get_paths(),
     }
 }
 

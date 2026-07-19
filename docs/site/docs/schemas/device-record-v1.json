@@ -83,7 +83,8 @@
         "Ssh",
         "Icmp",
         "Tls",
-        "ReverseDns"
+        "ReverseDns",
+        "Gnmi"
       ],
       "type": "string"
     },
@@ -360,6 +361,66 @@
           },
           "required": [
             "ReverseDnsName"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiVersion": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "GnmiVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiSupportedModel": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "GnmiSupportedModel"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiSupportedEncoding": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "GnmiSupportedEncoding"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiState": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "value"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "GnmiState"
           ],
           "type": "object"
         }

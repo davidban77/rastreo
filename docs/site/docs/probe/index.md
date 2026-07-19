@@ -1,10 +1,10 @@
 ---
-description: Reference for each prober. rastreo ships the TCP-connect, HTTP, DNS, reverse DNS, UDP, SNMP, ARP, NDP, SSH, ICMP, and TLS probers, each with its own configuration schema, observable signals, and build feature.
+description: Reference for each prober. rastreo ships the TCP-connect, HTTP, DNS, reverse DNS, UDP, SNMP, ARP, NDP, SSH, ICMP, TLS, and gNMI probers, each with its own configuration schema, observable signals, and build feature.
 ---
 
 # Probe
 
-This section is the per-prober reference. Each prober has its own configuration, its own observable signals, and its own timing semantics. Eleven probers ship today — TCP-connect for reachability, HTTP for `Server:` banner fingerprinting, DNS for authoritative-server discovery, reverse DNS for attaching a hostname to an unknown IP, UDP for protocol-specific fingerprints over NTP, SIP, memcached, and STUN, SNMP for MIB-II system-group vendor and identity fingerprinting, ARP + NDP for link-layer MAC-address discovery on IPv4 and IPv6 subnets respectively, SSH for banner and host-key identity fingerprinting, ICMP for baseline reachability plus a canonical RTT measurement, and TLS for capturing the server certificate's Subject and Subject Alternative Names as an identity fingerprint.
+This section is the per-prober reference. Each prober has its own configuration, its own observable signals, and its own timing semantics. Twelve probers ship today — TCP-connect for reachability, HTTP for `Server:` banner fingerprinting, DNS for authoritative-server discovery, reverse DNS for attaching a hostname to an unknown IP, UDP for protocol-specific fingerprints over NTP, SIP, memcached, and STUN, SNMP for MIB-II system-group vendor and identity fingerprinting, ARP + NDP for link-layer MAC-address discovery on IPv4 and IPv6 subnets respectively, SSH for banner and host-key identity fingerprinting, ICMP for baseline reachability plus a canonical RTT measurement, TLS for capturing the server certificate's Subject and Subject Alternative Names as an identity fingerprint, and gNMI for reading a device's supported YANG models and configured state over gRPC.
 
 | Prober | Signal | Build feature |
 |---|---|---|
@@ -19,12 +19,13 @@ This section is the per-prober reference. Each prober has its own configuration,
 | [SSH](ssh.md) | `OpenPort(<port>)`, `SshBanner(<value>)`, `SshHostKey(<value>)` | `--features ssh` (bundled with release binaries) |
 | [ICMP](icmp.md) | `IcmpEchoRttMicros(<value>)` | `--features icmp` (bundled with release binaries; unprivileged where `SOCK_DGRAM` ICMP is permitted, `CAP_NET_RAW` otherwise) |
 | [TLS](tls.md) | `OpenPort(<port>)`, `TlsSubject(<value>)`, `TlsSanName(<value>)` | `--features tls` (bundled with release binaries) |
+| [gNMI](gnmi.md) | `GnmiVersion`, `GnmiSupportedModel`, `GnmiSupportedEncoding`, `GnmiState` | `--features gnmi` (bundled with release binaries) |
 
 Topics covered here include the configuration schema, observable signal shape, timeout semantics, and known limits for each prober. Where a prober has nontrivial tuning (HTTP TLS modes, DNS transport selection, UDP protocol selection, SNMP credentials, ARP or NDP interface selection, reverse DNS resolver selection), that surface lives on the prober's page rather than scattered across the scenario reference.
 
 ## Reachable, unreachable, and probe faults
 
-Every prober reports one of three results for a target. The rules are the same for all eleven.
+Every prober reports one of three results for a target. The rules are the same for all twelve.
 
 | Result | What happened | Counted as an error? |
 |---|---|---|
@@ -40,6 +41,7 @@ A target that does not answer is a normal discovery result. Most addresses in a 
 Each fault carries a named kind, and the summary tallies faults by kind in `error_counts`. The kinds you will see are:
 
 - `decode_failed` — the target answered, but the reply could not be parsed.
+- `auth_failed` — the target answered but rejected the credentials, such as a gNMI endpoint probed with no or wrong credentials.
 - `permission_denied` — the host refused a privileged operation, such as a raw socket without `CAP_NET_RAW`.
 - `dns_failed` — a name lookup the probe needed did not resolve.
 - `other` — a fault with no more specific kind.

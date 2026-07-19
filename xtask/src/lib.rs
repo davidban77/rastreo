@@ -15,6 +15,70 @@ pub fn workspace_root() -> Result<PathBuf> {
         .to_path_buf())
 }
 
+/// Vendored openconfig/gnmi source: tag `v0.14.1`, commit `8b7dd494c4f6ff517431965d662621d8884bad0f`.
+pub const GNMI_PROTO_TAG: &str = "v0.14.1";
+pub const GNMI_PROTO_SHA: &str = "8b7dd494c4f6ff517431965d662621d8884bad0f";
+
+/// Regenerates the checked-in gNMI bindings from the vendored protos. Requires `protoc` on PATH;
+/// the normal `cargo build --workspace` never runs this — it consumes the committed output.
+pub fn gen_gnmi() -> Result<()> {
+    let root = workspace_root()?;
+    let proto_root = root.join("rastreo-core").join("proto");
+    let gnmi_proto = proto_root
+        .join("github.com/openconfig/gnmi/proto/gnmi/gnmi.proto")
+        .to_path_buf();
+    let gnmi_ext_proto = proto_root
+        .join("github.com/openconfig/gnmi/proto/gnmi_ext/gnmi_ext.proto")
+        .to_path_buf();
+
+    let out_dir = tempfile::Builder::new()
+        .prefix("rastreo-gnmi-gen")
+        .tempdir()
+        .context("create temp out dir for codegen")?;
+
+    tonic_prost_build::configure()
+        .build_client(true)
+        .build_server(false)
+        .out_dir(out_dir.path())
+        .compile_protos(&[&gnmi_proto, &gnmi_ext_proto], &[&proto_root])
+        .context("tonic-prost-build codegen failed (is protoc installed?)")?;
+
+    let gnmi_rs = fs::read_to_string(out_dir.path().join("gnmi.rs"))
+        .context("read generated gnmi.rs from out dir")?;
+    let gnmi_ext_rs = fs::read_to_string(out_dir.path().join("gnmi_ext.rs"))
+        .context("read generated gnmi_ext.rs from out dir")?;
+
+    let combined = format!(
+        "pub mod gnmi {{\n{gnmi_rs}}}\npub mod gnmi_ext {{\n{gnmi_ext_rs}}}\n",
+        gnmi_rs = indent(&gnmi_rs),
+        gnmi_ext_rs = indent(&gnmi_ext_rs),
+    );
+
+    let dest = root
+        .join("rastreo-core/src/prober/gnmi/generated.rs")
+        .to_path_buf();
+    fs::write(&dest, &combined).with_context(|| format!("write {}", dest.display()))?;
+    println!(
+        "Wrote {} (openconfig/gnmi {GNMI_PROTO_TAG} @ {GNMI_PROTO_SHA})",
+        dest.display()
+    );
+    Ok(())
+}
+
+fn indent(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + src.len() / 16);
+    for line in src.lines() {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str("    ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 pub fn generate_all() -> Result<()> {
     let root = workspace_root()?;
     let schemas_dir = root.join("schemas");
@@ -600,8 +664,8 @@ mod tests {
             .expect("ProberConfig oneOf variants");
         assert_eq!(
             variants.len(),
-            11,
-            "expected 11 prober variants (tcp_connect, http, dns, udp, snmp, arp, ndp, ssh, icmp, tls, reverse_dns); got {}",
+            12,
+            "expected 12 prober variants (tcp_connect, http, dns, udp, snmp, arp, ndp, ssh, icmp, tls, gnmi, reverse_dns); got {}",
             variants.len()
         );
     }

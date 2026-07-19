@@ -19,7 +19,7 @@ ARG TARGETARCH
 # Cargo features to compile into the binaries. Default matches the historical
 # ghcr.io/davidban77/rastreo image; override to `${default},otlp` when building
 # the `-otlp` variant.
-ARG FEATURES=kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls
+ARG FEATURES=kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi
 
 # Install cross-compilation toolchain based on target architecture.
 # For amd64: musl-tools provides the native musl-gcc wrapper.

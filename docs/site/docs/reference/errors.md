@@ -18,7 +18,7 @@ The CLI prints the `Display` message to stderr and exits with code `1`. The HTTP
 
 ## Probe errors
 
-Probe faults are typed data, not returned errors. When a probe faults, it records the reason as a named kind on the outcome and the scan keeps running. The named kinds you will see are `decode_failed`, `permission_denied`, `dns_failed`, and `other` — each explained in [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). A `permission_denied` fault from a missing `CAP_NET_RAW` is covered in [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
+Probe faults are typed data, not returned errors. When a probe faults, it records the reason as a named kind on the outcome and the scan keeps running. The named kinds you will see are `decode_failed`, `auth_failed`, `permission_denied`, `dns_failed`, and `other` — each explained in [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). A `permission_denied` fault from a missing `CAP_NET_RAW` is covered in [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
 
 !!! warning "A fault is the probe breaking, not a silent target"
     A timeout, a refused connection, an unreachable network, or a port that is not speaking the protocol you probed — each is a normal negative discovery result, and `error_counts` stays empty. A probe that learned something partial keeps it: a device that answers TCP but refuses the TLS handshake produces a record carrying the open port, no fault. One fault keeps the device even so — a reply rastreo cannot decode marks the target reachable, emits a record with no signals, and counts the fault as `decode_failed`.

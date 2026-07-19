@@ -89,6 +89,7 @@ Several CLI surfaces appear conditionally based on which Cargo features were ena
 | `ssh` | no | Enables the SSH prober. Accepted as `type: ssh` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 | `icmp` | no | Enables the ICMP Echo prober. Prefers unprivileged `SOCK_DGRAM` and falls back to `SOCK_RAW` (requires `CAP_NET_RAW`). Accepted as `type: icmp` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 | `tls` | no | Enables the TLS handshake prober. Opens a TLS connection to each configured port, accepts any certificate (fingerprinting, not authentication), and emits the leaf certificate's Subject CN and Subject Alternative Names as `TlsSubject` / `TlsSanName` signals. Accepted as `type: tls` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
+| `gnmi` | no | Enables the gNMI prober for gRPC/gNMI device fingerprinting. Accepted as `type: gnmi` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
 
 ## Exit codes
 

@@ -49,7 +49,7 @@ Lints a scenario file entirely offline — no DNS resolution, no probing, no bro
 Two modes:
 
 - **Flag-driven** (`--target` + `--port`): builds an in-memory `DiscoverScenarioConfig` that runs a single TCP-connect prober against the listed targets. Suitable for quick reachability sweeps.
-- **YAML-driven** (`--file`): loads a `ScenarioFile` from disk, validates `version: 1` + `kind: discovery`, and executes each entry sequentially. This is the only CLI path to the HTTP, DNS, Reverse DNS, UDP, SNMP, ARP, NDP, SSH, ICMP, TLS, and OUI-enrichment surface. Sink and per-scenario knob overrides via `--sink`, `--concurrency`, `--timeout-ms` follow the precedence rule below (CLI > YAML).
+- **YAML-driven** (`--file`): loads a `ScenarioFile` from disk, validates `version: 1` + `kind: discovery`, and executes each entry sequentially. This is the only CLI path to the HTTP, DNS, Reverse DNS, UDP, SNMP, ARP, NDP, SSH, ICMP, TLS, gNMI, and OUI-enrichment surface. Sink and per-scenario knob overrides via `--sink`, `--concurrency`, `--timeout-ms` follow the precedence rule below (CLI > YAML).
 
 Catalog references (`@name`) resolve `--file` to a scenario file in `RASTREO_CATALOG_DIR` (colon-separated PATH-style) if set, otherwise `$XDG_CONFIG_HOME/rastreo/catalog/` (fallback `$HOME/.config/rastreo/catalog/`) then `/etc/rastreo/catalog/`. First hit wins, `.yml` before `.yaml` within each directory. Names may not contain path separators.
 
