@@ -980,7 +980,8 @@
           "properties": {
             "get_paths": {
               "default": [
-                "/system/state/hostname"
+                "/system/state/hostname",
+                "/system/state/software-version"
               ],
               "items": {
                 "type": "string"

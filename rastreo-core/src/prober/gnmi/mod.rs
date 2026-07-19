@@ -3,6 +3,7 @@ mod proto {
     include!("generated.rs");
 }
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -37,7 +38,10 @@ pub fn default_plaintext() -> bool {
 }
 
 pub fn default_get_paths() -> Vec<String> {
-    vec!["/system/state/hostname".to_string()]
+    vec![
+        "/system/state/hostname".to_string(),
+        "/system/state/software-version".to_string(),
+    ]
 }
 
 /// JsonSchema-facing default for the redacted `password` field: the plaintext empty string, not
@@ -177,6 +181,8 @@ impl GnmiProber {
         let mut signals = Vec::new();
         let mut answered = false;
         let mut status: Option<Status> = None;
+        // No Capabilities answer leaves the fallback encoding.
+        let mut get_encoding = select_get_encoding(&[]);
 
         match timeout(
             ctx.timeout,
@@ -186,7 +192,9 @@ impl GnmiProber {
         {
             Ok(Ok(response)) => {
                 answered = true;
-                collect_capability_signals(response.into_inner(), &mut signals);
+                let response = response.into_inner();
+                get_encoding = select_get_encoding(&response.supported_encodings);
+                collect_capability_signals(response, &mut signals);
             }
             Ok(Err(gnmi_status)) => {
                 status.get_or_insert(gnmi_status);
@@ -197,6 +205,7 @@ impl GnmiProber {
         if !self.get_paths.is_empty() {
             let request = self.request(GetRequest {
                 path: self.get_paths.clone(),
+                encoding: get_encoding,
                 ..Default::default()
             });
             match timeout(ctx.timeout, client.get(request)).await {
@@ -235,19 +244,83 @@ enum PortResult {
     Fault(ProbeFault),
 }
 
+/// Picks the `Get` encoding from Capabilities: `JSON_IETF` when advertised, else the first
+/// renderable advertised encoding. The no-Capabilities fallback is `JSON_IETF`, not plain `JSON`,
+/// which SR Linux and IOS-XR reject.
+fn select_get_encoding(supported: &[i32]) -> i32 {
+    let json_ietf = Encoding::JsonIetf as i32;
+    if supported.is_empty() || supported.contains(&json_ietf) {
+        return json_ietf;
+    }
+    supported
+        .iter()
+        .copied()
+        .find(|&encoding| is_renderable_encoding(encoding))
+        .unwrap_or(json_ietf)
+}
+
+fn is_renderable_encoding(encoding: i32) -> bool {
+    matches!(
+        Encoding::try_from(encoding),
+        Ok(Encoding::Json | Encoding::Proto | Encoding::Ascii | Encoding::JsonIetf)
+    )
+}
+
 fn parse_path(raw: &str) -> Path {
-    let elem = raw
+    let (origin, rest) = split_origin(raw);
+    let elem = rest
         .split('/')
         .filter(|segment| !segment.is_empty())
-        .map(|name| PathElem {
-            name: name.to_string(),
-            ..Default::default()
-        })
+        .map(parse_elem)
         .collect();
     Path {
+        origin,
         elem,
         ..Default::default()
     }
+}
+
+// Origin only precedes the first "/"; a colon after that (e.g. in a key value) is not a separator.
+fn split_origin(raw: &str) -> (String, &str) {
+    let head = raw.split('/').next().unwrap_or("");
+    match head.find(':') {
+        Some(colon) => (raw[..colon].to_string(), &raw[colon + 1..]),
+        None => (String::new(), raw),
+    }
+}
+
+fn parse_elem(segment: &str) -> PathElem {
+    // Unbalanced brackets or a missing name degrade to a literal element name; never panic.
+    parse_keyed_elem(segment).unwrap_or_else(|| PathElem {
+        name: segment.to_string(),
+        ..Default::default()
+    })
+}
+
+fn parse_keyed_elem(segment: &str) -> Option<PathElem> {
+    let open = segment.find('[')?;
+    let name = &segment[..open];
+    if name.is_empty() {
+        return None;
+    }
+    let mut key = HashMap::new();
+    let mut remaining = &segment[open..];
+    while !remaining.is_empty() {
+        let inner = remaining.strip_prefix('[')?;
+        let close = inner.find(']')?;
+        let pair = &inner[..close];
+        let eq = pair.find('=')?;
+        let attribute = &pair[..eq];
+        if attribute.is_empty() {
+            return None;
+        }
+        key.insert(attribute.to_string(), pair[eq + 1..].to_string());
+        remaining = &inner[close + 1..];
+    }
+    Some(PathElem {
+        name: name.to_string(),
+        key,
+    })
 }
 
 fn classify_connect_error(port: u16, err: &tonic::transport::Error) -> ConnectError {
@@ -289,12 +362,18 @@ fn model_signal(model: &ModelData) -> Option<Signal> {
     if name.is_empty() {
         return None;
     }
+    let mut rendered = name.to_string();
     let version = model.version.trim();
-    let rendered = if version.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {version}")
-    };
+    if !version.is_empty() {
+        rendered.push(' ');
+        rendered.push_str(version);
+    }
+    let org = model.organization.trim();
+    if !org.is_empty() {
+        rendered.push_str(" (");
+        rendered.push_str(org);
+        rendered.push(')');
+    }
     Some(Signal::GnmiSupportedModel(truncate(&rendered)))
 }
 
@@ -354,6 +433,17 @@ fn render_typed_value(value: &TypedValue) -> Option<String> {
         Value::AsciiVal(s) => s.clone(),
         Value::JsonVal(bytes) | Value::JsonIetfVal(bytes) => {
             String::from_utf8_lossy(bytes).into_owned()
+        }
+        Value::LeaflistVal(array) => {
+            let items: Vec<String> = array
+                .element
+                .iter()
+                .filter_map(render_typed_value)
+                .collect();
+            if items.is_empty() {
+                return None;
+            }
+            items.join(",")
         }
         _ => return None,
     };
@@ -546,7 +636,7 @@ mod tests {
     fn new_accepts_anonymous_defaults() {
         let p = prober();
         assert!(p.auth.is_none(), "no username means an anonymous probe");
-        assert_eq!(p.get_paths.len(), 1);
+        assert_eq!(p.get_paths.len(), 2);
     }
 
     #[test]
@@ -602,7 +692,10 @@ mod tests {
         assert!(!default_plaintext());
         assert_eq!(
             default_get_paths(),
-            vec!["/system/state/hostname".to_string()]
+            vec![
+                "/system/state/hostname".to_string(),
+                "/system/state/software-version".to_string(),
+            ]
         );
     }
 
@@ -683,7 +776,7 @@ mod tests {
         collect_capability_signals(response, &mut signals);
         assert!(signals.contains(&Signal::GnmiVersion("0.10.0".to_string())));
         assert!(signals.contains(&Signal::GnmiSupportedModel(
-            "openconfig-interfaces 3.0.0".to_string()
+            "openconfig-interfaces 3.0.0 (OpenConfig)".to_string()
         )));
         assert!(signals.contains(&Signal::GnmiSupportedModel("srl_nokia-system".to_string())));
         assert!(signals.contains(&Signal::GnmiSupportedEncoding("JSON_IETF".to_string())));
@@ -753,6 +846,210 @@ mod tests {
         let path = parse_path("/system/state/hostname");
         let names: Vec<&str> = path.elem.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["system", "state", "hostname"]);
+    }
+
+    #[test]
+    fn select_get_encoding_prefers_json_ietf_when_advertised() {
+        let supported = vec![Encoding::JsonIetf as i32, Encoding::Proto as i32];
+        assert_eq!(select_get_encoding(&supported), Encoding::JsonIetf as i32);
+    }
+
+    #[test]
+    fn select_get_encoding_picks_json_when_only_json_advertised() {
+        assert_eq!(
+            select_get_encoding(&[Encoding::Json as i32]),
+            Encoding::Json as i32
+        );
+    }
+
+    #[test]
+    fn select_get_encoding_picks_proto_when_only_proto_advertised() {
+        assert_eq!(
+            select_get_encoding(&[Encoding::Proto as i32]),
+            Encoding::Proto as i32
+        );
+    }
+
+    #[test]
+    fn select_get_encoding_skips_unrenderable_bytes_for_the_next_renderable() {
+        let supported = vec![Encoding::Bytes as i32, Encoding::Ascii as i32];
+        assert_eq!(select_get_encoding(&supported), Encoding::Ascii as i32);
+    }
+
+    #[test]
+    fn select_get_encoding_falls_back_when_only_unrenderable_advertised() {
+        assert_eq!(
+            select_get_encoding(&[Encoding::Bytes as i32]),
+            Encoding::JsonIetf as i32
+        );
+    }
+
+    #[test]
+    fn select_get_encoding_falls_back_to_json_ietf_without_capabilities() {
+        assert_eq!(select_get_encoding(&[]), Encoding::JsonIetf as i32);
+        assert_ne!(select_get_encoding(&[]), Encoding::Json as i32);
+    }
+
+    #[test]
+    fn parse_path_splits_origin_on_the_first_colon() {
+        let path = parse_path("openconfig:/interfaces/interface");
+        assert_eq!(path.origin, "openconfig");
+        let names: Vec<&str> = path.elem.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["interfaces", "interface"]);
+    }
+
+    #[test]
+    fn parse_path_accepts_a_hyphenated_origin() {
+        let path = parse_path("srl_nokia-interfaces:/interface");
+        assert_eq!(path.origin, "srl_nokia-interfaces");
+        assert_eq!(path.elem.len(), 1);
+        assert_eq!(path.elem[0].name, "interface");
+    }
+
+    #[test]
+    fn parse_path_without_origin_has_empty_origin() {
+        let path = parse_path("/system/state/hostname");
+        assert!(path.origin.is_empty());
+        let names: Vec<&str> = path.elem.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["system", "state", "hostname"]);
+    }
+
+    #[test]
+    fn parse_path_parses_a_single_key() {
+        let path = parse_path("/interfaces/interface[name=Ethernet1]");
+        let elem = path.elem.last().expect("interface elem");
+        assert_eq!(elem.name, "interface");
+        assert_eq!(elem.key.get("name").map(String::as_str), Some("Ethernet1"));
+    }
+
+    #[test]
+    fn parse_path_parses_multiple_keys() {
+        let path = parse_path("/interface[name=et1][index=0]");
+        let elem = &path.elem[0];
+        assert_eq!(elem.name, "interface");
+        assert_eq!(elem.key.get("name").map(String::as_str), Some("et1"));
+        assert_eq!(elem.key.get("index").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn parse_path_parses_a_wildcard_key() {
+        let path = parse_path("/interface[name=*]");
+        assert_eq!(path.elem[0].key.get("name").map(String::as_str), Some("*"));
+    }
+
+    #[test]
+    fn parse_path_round_trips_a_keyed_path_through_append_path() {
+        let original = parse_path("/interfaces/interface[name=et1][index=0]/state");
+        let mut rendered = String::new();
+        append_path(&mut rendered, &original);
+        let reparsed = parse_path(&rendered);
+        assert_eq!(original, reparsed);
+        let mut rendered_again = String::new();
+        append_path(&mut rendered_again, &reparsed);
+        assert_eq!(rendered, rendered_again);
+    }
+
+    #[test]
+    fn parse_path_degrades_unbalanced_brackets_to_a_literal_name() {
+        let path = parse_path("/interface[name=et1");
+        assert_eq!(path.elem.len(), 1);
+        assert_eq!(path.elem[0].name, "interface[name=et1");
+        assert!(path.elem[0].key.is_empty());
+    }
+
+    #[test]
+    fn parse_path_never_panics_on_malformed_input() {
+        for raw in [
+            "[", "]", "a[b", "a]b", "a[=v]", "a[k=]", "::/", "a[[b]]", ":", "",
+        ] {
+            let _ = parse_path(raw);
+        }
+    }
+
+    #[test]
+    fn model_signal_includes_organization_when_present() {
+        let model = ModelData {
+            name: "openconfig-interfaces".to_string(),
+            organization: "OpenConfig".to_string(),
+            version: "3.0.0".to_string(),
+        };
+        assert_eq!(
+            model_signal(&model),
+            Some(Signal::GnmiSupportedModel(
+                "openconfig-interfaces 3.0.0 (OpenConfig)".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn model_signal_omits_the_org_suffix_when_org_is_empty() {
+        let model = ModelData {
+            name: "srl_nokia-system".to_string(),
+            organization: String::new(),
+            version: "2024-03-31".to_string(),
+        };
+        assert_eq!(
+            model_signal(&model),
+            Some(Signal::GnmiSupportedModel(
+                "srl_nokia-system 2024-03-31".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn model_signal_renders_org_without_version() {
+        let model = ModelData {
+            name: "arista-intf".to_string(),
+            organization: "Arista".to_string(),
+            version: String::new(),
+        };
+        assert_eq!(
+            model_signal(&model),
+            Some(Signal::GnmiSupportedModel(
+                "arista-intf (Arista)".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn model_signal_returns_none_for_an_empty_name() {
+        let model = ModelData {
+            name: "   ".to_string(),
+            organization: "OpenConfig".to_string(),
+            version: "3.0.0".to_string(),
+        };
+        assert!(model_signal(&model).is_none());
+    }
+
+    #[test]
+    fn render_typed_value_joins_a_leaf_list_of_scalars() {
+        use proto::gnmi::typed_value::Value;
+        let array = proto::gnmi::ScalarArray {
+            element: vec![
+                TypedValue {
+                    value: Some(Value::StringVal("10.0.0.1".to_string())),
+                },
+                TypedValue {
+                    value: Some(Value::UintVal(42)),
+                },
+            ],
+        };
+        let leaflist = TypedValue {
+            value: Some(Value::LeaflistVal(array)),
+        };
+        assert_eq!(
+            render_typed_value(&leaflist).as_deref(),
+            Some("10.0.0.1,42")
+        );
+    }
+
+    #[test]
+    fn render_typed_value_skips_an_empty_leaf_list() {
+        use proto::gnmi::typed_value::Value;
+        let leaflist = TypedValue {
+            value: Some(Value::LeaflistVal(proto::gnmi::ScalarArray::default())),
+        };
+        assert!(render_typed_value(&leaflist).is_none());
     }
 
     #[test]
