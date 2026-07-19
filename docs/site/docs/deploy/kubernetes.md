@@ -8,7 +8,7 @@ The repository ships a Helm chart at `helm/rastreo/` that installs `rastreo-serv
 
 ## Install
 
-The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. The current published chart version is `0.7.0`. <!-- x-release-please-version --> An install with no `--version` pulls the latest published chart. To pin an upgrade intentionally, add `--version` with that version.
+The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. The current published chart version is `0.8.0`. <!-- x-release-please-version --> An install with no `--version` pulls the latest published chart. To pin an upgrade intentionally, add `--version` with that version.
 
 ```bash
 helm install rastreo oci://ghcr.io/davidban77/charts/rastreo
