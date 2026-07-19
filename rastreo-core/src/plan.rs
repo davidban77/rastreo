@@ -366,6 +366,7 @@ mod tests {
         let sink = SinkConfig::Kafka {
             brokers: vec!["127.0.0.1:1".into(), "127.0.0.1:2".into()],
             topic: "rastreo.devices".into(),
+            links_topic: None,
             flush_mode: crate::sink::KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,
@@ -384,6 +385,7 @@ mod tests {
         let sink = SinkConfig::Kafka {
             brokers: vec!["127.0.0.1:1".into()],
             topic: "rastreo.devices".into(),
+            links_topic: None,
             flush_mode: crate::sink::KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,
@@ -412,6 +414,7 @@ mod tests {
             servers: vec!["nats://127.0.0.1:4222".into()],
             subject: "rastreo.devices".into(),
             stream: "RASTREO".into(),
+            links_subject: None,
             credentials: crate::sink::NatsCredentials::default(),
             flush_mode: crate::sink::NatsFlushMode::default(),
             dead_letter: None,
@@ -430,6 +433,7 @@ mod tests {
             servers: vec!["nats://u:p@h:4222".into()],
             subject: "rastreo.devices".into(),
             stream: "RASTREO".into(),
+            links_subject: None,
             credentials: crate::sink::NatsCredentials::default(),
             flush_mode: crate::sink::NatsFlushMode::default(),
             dead_letter: None,

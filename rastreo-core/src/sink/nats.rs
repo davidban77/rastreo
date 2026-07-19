@@ -11,8 +11,8 @@ use chrono::Utc;
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
 use crate::sink::{
-    retry_with_backoff, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
-    SINK_ERROR_CLASS_COUNT,
+    retry_with_backoff, RecordKind, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
+    DEFAULT_LINKS_DESTINATION, SINK_ERROR_CLASS_COUNT,
 };
 
 const HEADER_SOURCE_SUBJECT: &str = "x-rastreo-source-subject";
@@ -122,6 +122,9 @@ pub struct NatsSink {
     include_error_metadata: bool,
     dlq_delivered: [AtomicU64; SINK_ERROR_CLASS_COUNT],
     retry: SinkRetry,
+    links_subject: String,
+    links_buffer: Vec<Vec<u8>>,
+    links_buffered_bytes: usize,
 }
 
 impl std::fmt::Debug for NatsSink {
@@ -219,11 +222,19 @@ impl NatsSink {
             include_error_metadata: false,
             dlq_delivered: std::array::from_fn(|_| AtomicU64::new(0)),
             retry: SinkRetry::default(),
+            links_subject: DEFAULT_LINKS_DESTINATION.to_string(),
+            links_buffer: Vec::new(),
+            links_buffered_bytes: 0,
         })
     }
 
     pub fn with_flush_mode(mut self, mode: NatsFlushMode) -> Self {
         self.buffer_threshold = mode.to_threshold();
+        self
+    }
+
+    pub fn with_links_subject(mut self, subject: String) -> Self {
+        self.links_subject = subject;
         self
     }
 
@@ -437,6 +448,41 @@ impl NatsSink {
             None => Ok(()),
         }
     }
+
+    async fn write_link(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+        buffer_record(&mut self.links_buffer, &mut self.links_buffered_bytes, data);
+        if should_flush_after_append(self.links_buffered_bytes, self.buffer_threshold) {
+            self.publish_links_buffer().await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_links_buffer(&mut self) -> Result<(), RastreoError> {
+        if self.links_buffer.is_empty() {
+            return Ok(());
+        }
+        let subject = self.links_subject.clone();
+        let entries = std::mem::take(&mut self.links_buffer);
+        self.links_buffered_bytes = 0;
+        for entry in entries {
+            let payload = Bytes::from(entry);
+            let ack = {
+                let ctx = &self.ctx;
+                let servers = &self.servers;
+                let subject = &subject;
+                let payload = &payload;
+                retry_with_backoff(&self.retry, || async move {
+                    ctx.publish(subject.clone(), payload.clone())
+                        .await
+                        .map_err(|e| build_publish_error(subject, servers, e))
+                })
+                .await
+            }?;
+            ack.await
+                .map_err(|e| build_ack_error(&subject, &self.servers, e))?;
+        }
+        Ok(())
+    }
 }
 
 async fn connect_with_credentials(
@@ -483,12 +529,22 @@ impl Sink for NatsSink {
         Ok(())
     }
 
+    async fn write_kind(&mut self, kind: RecordKind, data: &[u8]) -> Result<(), RastreoError> {
+        match kind {
+            RecordKind::Device => self.write(data).await,
+            RecordKind::Link => self.write_link(data).await,
+        }
+    }
+
     async fn flush(&mut self) -> Result<(), RastreoError> {
         if !self.buffer.is_empty() {
             self.publish_buffer().await?;
         }
         self.drain_pending_acks().await?;
         self.last_write_delivered = true;
+        if !self.links_buffer.is_empty() {
+            self.publish_links_buffer().await?;
+        }
         Ok(())
     }
 

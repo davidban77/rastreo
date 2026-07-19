@@ -164,6 +164,12 @@ for _, rec := range fetches.Records() {
 }
 ```
 
+## Topology links on a second topic
+
+When a scan runs the [LLDP prober](../probe/lldp.md), rastreo discovers links between devices and emits them as `LinkRecord`s on a **second topic**, separate from the device stream. Device records go to `topic`; link records go to `links_topic`, which defaults to `rastreo.discovery.links.v1`.
+
+A consumer that reconciles topology subscribes to both topics: the device topic to create or update devices, the links topic to create or update cables. A `LinkRecord` carries the same one-message-per-record wire framing as a `DeviceRecord`, so the parsing code is identical — only the topic and the payload shape differ. See [Topology](../discover/topology.md) for the record shape and the mapping to NetBox cables and Nautobot interface connections.
+
 ## Idempotency
 
 `identity_key` is the stable dedup key. For IP targets, it is `ip:<address>`. The same target probed twice produces two `DeviceRecord` events with the same `identity_key` but different `last_seen` timestamps. Consumers must upsert by `identity_key` — replace the fields the new record carries, update `last_seen`, and tolerate seeing the same key arrive any number of times.

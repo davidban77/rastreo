@@ -113,6 +113,7 @@ nav:
       - Enrichment: discover/enrichment.md
       - Identity: discover/identity.md
       - Classification: discover/classification.md
+      - Topology: discover/topology.md
   - Probe:
       - probe/index.md
       - HTTP: probe/http.md
@@ -126,6 +127,7 @@ nav:
       - ICMP: probe/icmp.md
       - TLS: probe/tls.md
       - gNMI: probe/gnmi.md
+      - LLDP: probe/lldp.md
   - Integrate:
       - integrate/index.md
       - Kafka: integrate/kafka.md
@@ -147,6 +149,7 @@ nav:
       - Schema:
           - reference/schema/index.md
           - DeviceRecord: reference/schema/device-record.md
+          - LinkRecord: reference/schema/link-record.md
           - ScanMetadata: reference/schema/scan-metadata.md
           - ScenarioFile: reference/schema/scenario-config.md
           - DiscoveryPlan: reference/schema/discovery-plan.md

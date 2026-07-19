@@ -2,11 +2,19 @@ pub mod ndjson;
 
 pub use ndjson::NdjsonEncoder;
 
-use crate::error::RastreoError;
-use crate::model::DeviceRecord;
+use crate::error::{EncoderError, RastreoError};
+use crate::model::{DeviceRecord, LinkRecord};
 
 pub trait Encoder: Send + Sync {
     fn encode_record(&self, record: &DeviceRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError>;
+
+    /// Encodes a topology link. Defaulted so existing encoders gain the second stream without
+    /// change; the default mirrors `encode_record`'s one-object-per-line NDJSON framing.
+    fn encode_link(&self, link: &LinkRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError> {
+        serde_json::to_writer(&mut *buf, link).map_err(EncoderError::SerializationFailed)?;
+        buf.push(b'\n');
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]

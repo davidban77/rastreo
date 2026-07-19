@@ -181,6 +181,25 @@ async def main():
 asyncio.run(main())
 ```
 
+## Topology links on a second subject
+
+When a scan runs the [LLDP prober](../probe/lldp.md), rastreo discovers links between devices and publishes them as `LinkRecord`s on a **second subject**, separate from the device stream. Device records go to `subject`; link records go to `links_subject`, which defaults to `rastreo.discovery.links.v1`.
+
+!!! warning "The JetStream stream must capture both subjects"
+    A JetStream stream only stores messages on the subjects its filter covers. The [Stream setup](#stream-setup) example binds only the device subject, so link publishes to `rastreo.discovery.links.v1` would be refused at ack time once LLDP data appears. rastreo checks that the stream exists, not that both subjects fall inside its filter, so this failure surfaces mid-scan.
+
+    Bind the stream to a subject filter that covers both, for example the wildcard `rastreo.discovery.>`:
+
+    ```
+    nats stream add rastreo \
+      --subjects 'rastreo.discovery.>' \
+      --storage file --retention limits --replicas 1
+    ```
+
+    A refused link publish goes to the dead-letter queue with error class `ack_rejection` when one is configured — see [Dead-letter queue](../discover/sinks.md#dead-letter-queue_1).
+
+A consumer that reconciles topology subscribes to both subjects: the device subject to create or update devices, the links subject to create or update cables. A `LinkRecord` carries the same one-message-per-record framing as a `DeviceRecord`. See [Topology](../discover/topology.md) for the record shape and the mapping to NetBox cables and Nautobot interface connections.
+
 ## Idempotency
 
 `identity_key` is the stable dedup key, identical to the Kafka sink. Consumers must upsert by `identity_key` — replace fields the new record carries, bump `last_seen`, and tolerate seeing the same key arrive any number of times. The NATS sink does not deduplicate. JetStream's built-in message deduplication window (`--dupe-window` on the stream) dedupes only on the JetStream message ID, not on the payload, so use it as a safety net against duplicate publishes, not as a record dedup mechanism.

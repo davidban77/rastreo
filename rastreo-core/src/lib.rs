@@ -12,6 +12,7 @@ pub mod prober;
 pub mod resolver;
 pub mod scheduler;
 pub mod sink;
+pub mod topology;
 
 pub use classifier::{
     create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
@@ -25,9 +26,10 @@ pub use error::{
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
 pub use hints::hint_for_error_kind;
 pub use model::{
-    AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, LldpNeighbor, LldpObservation,
-    ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, ScanMetadata, Signal, Target,
-    CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION, PROBE_KIND_COUNT,
+    AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, LinkEndpoint, LinkRecord,
+    LldpNeighbor, LldpObservation, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget,
+    ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
+    LINK_CURRENT_SCHEMA_VERSION, LINK_SCHEMA_ID, PROBE_KIND_COUNT,
 };
 pub use pipeline::{
     resolve_scenario_targets, run_discovery, run_discovery_cancellable,
@@ -45,13 +47,14 @@ pub use prober::{Prober, ProberConfig, ReverseDnsProber, TcpConnectProber};
 pub use resolver::{GuardedResolver, HickoryResolver, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{
-    FileSink, MemorySink, MemorySinkHandle, Sink, SinkConfig, SinkError, SinkErrorClass, SinkRetry,
-    SinkType, StdoutSink, TeeChild, TeeSink, SINK_ERROR_CLASS_COUNT,
+    FileSink, MemorySink, MemorySinkHandle, RecordKind, Sink, SinkConfig, SinkError,
+    SinkErrorClass, SinkRetry, SinkType, StdoutSink, TeeChild, TeeSink, SINK_ERROR_CLASS_COUNT,
 };
 #[cfg(feature = "kafka")]
 pub use sink::{KafkaFlushMode, KafkaSink};
 #[cfg(feature = "nats")]
 pub use sink::{NatsCredentials, NatsFlushMode, NatsSink};
+pub use topology::TopologyAssembler;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

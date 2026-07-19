@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use schemars::JsonSchema;
 
 use crate::error::{ConfigError, RastreoError};
-use crate::fuser::keys::normalize_mac;
+use crate::fuser::keys::{normalize_mac, normalize_sys_name};
 use crate::fuser::Fuser;
 use crate::model::device::{AltIp, AltIpRole, Confidence, DeviceRecord};
 use crate::model::outcome::{ProbeKind, ProbeOutcome, Signal};
@@ -148,7 +148,7 @@ impl IdentityFuser {
         }
         if let Some(name) = find_sysname(&record.signals) {
             if !name.is_empty() {
-                keys.insert(BucketKey::SysName(name.to_ascii_lowercase()));
+                keys.insert(BucketKey::SysName(normalize_sys_name(name)));
             }
         }
         if let Some(host_key) = find_ssh_host_key(&record.signals) {
@@ -168,7 +168,7 @@ impl IdentityFuser {
         }
         for name in collect_reverse_dns_names(&record.signals) {
             if !name.is_empty() {
-                keys.insert(BucketKey::ReverseDnsName(name.to_ascii_lowercase()));
+                keys.insert(BucketKey::ReverseDnsName(normalize_sys_name(name)));
             }
         }
         keys

@@ -1245,6 +1245,13 @@
                 "type": "batched"
               }
             },
+            "links_topic": {
+              "description": "Topic the `Link` record stream is produced to; defaults to `rastreo.discovery.links.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "retry": {
               "$ref": "#/$defs/SinkRetry",
               "default": {
@@ -1311,6 +1318,13 @@
               "default": {
                 "type": "per_record"
               }
+            },
+            "links_subject": {
+              "description": "Subject the `Link` record stream is published to; defaults to `rastreo.discovery.links.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "retry": {
               "$ref": "#/$defs/SinkRetry",

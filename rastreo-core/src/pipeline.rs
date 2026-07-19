@@ -19,7 +19,8 @@ use crate::model::{
 use crate::prober::{create_prober, Prober};
 use crate::resolver::{HickoryResolver, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler, TargetScan};
-use crate::sink::{create_sink, Sink, SinkConfig, SinkErrorClass, SinkType};
+use crate::sink::{create_sink, RecordKind, Sink, SinkConfig, SinkErrorClass, SinkType};
+use crate::topology::TopologyAssembler;
 
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CONCURRENCY: u32 = 64;
@@ -30,6 +31,9 @@ pub struct DiscoverySummary {
     pub targets_resolved: usize,
     pub probe_attempts: usize,
     pub records_emitted: usize,
+    /// Topology links emitted on the second stream; `0` when no LLDP data was collected.
+    #[serde(default)]
+    pub links_emitted: usize,
     /// Faulted probes tallied by [`ProbeErrorKind`]; empty when no probe faulted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub error_counts: BTreeMap<ProbeErrorKind, usize>,
@@ -284,6 +288,7 @@ async fn emit_target_records(
     encoder: &dyn Encoder,
     sink: &mut dyn Sink,
     scan_metadata: &Arc<ScanMetadata>,
+    assembler: &mut TopologyAssembler,
     buf: &mut Vec<u8>,
     records_emitted: &mut usize,
     emit_err: &mut Option<RastreoError>,
@@ -292,10 +297,12 @@ async fn emit_target_records(
     // accumulation and carries nothing to emit.
     let probe_outcomes: Vec<ProbeOutcome> =
         outcomes.into_iter().filter_map(|(_, r)| r.ok()).collect();
+    assembler.observe_outcomes(&probe_outcomes);
     let mut records = fuser.ingest(probe_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
         stamp_scan_metadata(record, scan_metadata);
+        assembler.observe_record(record);
     }
     for record in &records {
         buf.clear();
@@ -349,6 +356,7 @@ async fn stream_discovery(
     let mut records_emitted: usize = 0;
     let mut emit_err: Option<RastreoError> = None;
     let mut scan_done = false;
+    let mut assembler = TopologyAssembler::new(Arc::clone(scan_metadata));
 
     let stream_span = tracing::info_span!(parent: scan_span, "stream");
 
@@ -377,6 +385,7 @@ async fn stream_discovery(
                             encoder,
                             sink,
                             scan_metadata,
+                            &mut assembler,
                             &mut buf,
                             &mut records_emitted,
                             &mut emit_err,
@@ -401,6 +410,7 @@ async fn stream_discovery(
                 encoder,
                 sink,
                 scan_metadata,
+                &mut assembler,
                 &mut buf,
                 &mut records_emitted,
                 &mut emit_err,
@@ -416,6 +426,7 @@ async fn stream_discovery(
     for record in &mut tail {
         classifier.classify(record)?;
         stamp_scan_metadata(record, scan_metadata);
+        assembler.observe_record(record);
     }
     for record in &tail {
         if emit_err.is_some() {
@@ -434,6 +445,24 @@ async fn stream_discovery(
     }
     finish_span.record("records_emitted", records_emitted as u64);
     drop(finish_span);
+
+    // Links flush after every device record so the identity index is complete before correlation.
+    let mut links_emitted: usize = 0;
+    for link in &assembler.finish() {
+        if emit_err.is_some() {
+            break;
+        }
+        buf.clear();
+        if let Err(e) = encoder.encode_link(link, &mut buf) {
+            emit_err = Some(e);
+            break;
+        }
+        if let Err(e) = sink.write_kind(RecordKind::Link, &buf).await {
+            emit_err = Some(e);
+            break;
+        }
+        links_emitted += 1;
+    }
 
     let close_err = sink.close().await.err();
 
@@ -458,6 +487,7 @@ async fn stream_discovery(
         targets_resolved,
         probe_attempts: acc.probe_attempts,
         records_emitted,
+        links_emitted,
         error_counts: acc.error_counts,
         probes_by_kind,
         dlq_records,
@@ -538,14 +568,18 @@ async fn finish_discovery_ref(
 ) -> Result<DiscoverySummary, RastreoError> {
     let sink_type = sink.kind();
 
+    let mut assembler = TopologyAssembler::new(Arc::clone(scan_metadata));
+    assembler.observe_outcomes(&acc.all_outcomes);
     let mut records = crate::fuser::drive_fuser(fuser, acc.all_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
         stamp_scan_metadata(record, scan_metadata);
+        assembler.observe_record(record);
     }
 
     let mut buf: Vec<u8> = Vec::new();
     let mut records_emitted: usize = 0;
+    let mut links_emitted: usize = 0;
     let mut emit_err: Option<RastreoError> = None;
 
     for record in &records {
@@ -559,6 +593,22 @@ async fn finish_discovery_ref(
             break;
         }
         records_emitted += 1;
+    }
+
+    for link in &assembler.finish() {
+        if emit_err.is_some() {
+            break;
+        }
+        buf.clear();
+        if let Err(e) = encoder.encode_link(link, &mut buf) {
+            emit_err = Some(e);
+            break;
+        }
+        if let Err(e) = sink.write_kind(RecordKind::Link, &buf).await {
+            emit_err = Some(e);
+            break;
+        }
+        links_emitted += 1;
     }
 
     let close_err = sink.close().await.err();
@@ -580,6 +630,7 @@ async fn finish_discovery_ref(
         targets_resolved,
         probe_attempts: acc.probe_attempts,
         records_emitted,
+        links_emitted,
         error_counts: acc.error_counts,
         probes_by_kind,
         dlq_records,
@@ -2010,6 +2061,154 @@ mod tests {
         }
     }
 
+    struct MutualLldpProber {
+        cx: &'static str,
+        cy: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Prober for MutualLldpProber {
+        fn kind(&self) -> ProbeKind {
+            ProbeKind::Lldp
+        }
+        async fn probe(
+            &self,
+            target: &ResolvedTarget,
+            _ctx: &ProbeCtx,
+        ) -> Result<ProbeOutcome, RastreoError> {
+            let last = match target.ip {
+                IpAddr::V4(v4) => v4.octets()[3],
+                IpAddr::V6(_) => 0,
+            };
+            let (local, remote) = if last == 1 {
+                (self.cx, self.cy)
+            } else {
+                (self.cy, self.cx)
+            };
+            Ok(ProbeOutcome {
+                kind: ProbeKind::Lldp,
+                target_ip: target.ip,
+                timestamp: std::time::SystemTime::UNIX_EPOCH,
+                reachable: true,
+                signals: vec![crate::model::Signal::Mac(local.into())],
+                fault: None,
+                lldp: Some(crate::model::LldpObservation {
+                    local_chassis_id: local.into(),
+                    local_chassis_subtype: 4,
+                    neighbors: vec![crate::model::LldpNeighbor {
+                        local_port: "Gi0/1".into(),
+                        remote_chassis_id: remote.into(),
+                        remote_chassis_subtype: 4,
+                        remote_port_id: "Gi0/2".into(),
+                        remote_port_subtype: 5,
+                        remote_port_desc: None,
+                        remote_sys_name: None,
+                    }],
+                }),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_emits_one_link_for_two_mutually_lldp_devices() {
+        let cx = "aaaaaaaaaaaa";
+        let cy = "bbbbbbbbbbbb";
+        let resolved: Vec<ResolvedTarget> = (1u8..=2)
+            .map(|i| {
+                let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i));
+                ResolvedTarget {
+                    ip,
+                    original: Target::Ip(ip),
+                    resolved_at: std::time::SystemTime::UNIX_EPOCH,
+                }
+            })
+            .collect();
+
+        let scan_metadata = Arc::new(ScanMetadata {
+            scan_id: "0123456789ABCDEFGHJKMNPQRS".to_string(),
+            ..ScanMetadata::default()
+        });
+        let probers: Vec<Arc<dyn Prober>> = vec![Arc::new(MutualLldpProber { cx, cy })];
+        let scheduler = BoundedScheduler::new(8);
+        let mut fuser = create_fuser(&FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: None,
+            confidence_per_signal: None,
+        })
+        .expect("fuser");
+        let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
+        let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let mut sink: Box<dyn Sink> = Box::new(mem);
+        let peak = AtomicUsize::new(0);
+        let scan_span = tracing::info_span!("scan");
+        let summary = stream_discovery(
+            &scheduler,
+            probers,
+            resolved,
+            ProbeCtx::new(Duration::from_millis(100), 0),
+            watch::channel(false).1,
+            fuser.as_mut(),
+            classifier.as_ref(),
+            encoder.as_ref(),
+            sink.as_mut(),
+            &scan_metadata,
+            2,
+            Instant::now(),
+            &peak,
+            &scan_span,
+        )
+        .await
+        .expect("stream summary");
+
+        assert_eq!(
+            summary.records_emitted, 2,
+            "one device record per probed host"
+        );
+        assert_eq!(
+            summary.links_emitted, 1,
+            "the mutual link collapses to one record"
+        );
+
+        let lines = handle.ndjson_lines();
+        let values: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("json line"))
+            .collect();
+        let link_positions: Vec<usize> = values
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| {
+                v["schema_id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("link-record-v1.json"))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            link_positions,
+            vec![values.len() - 1],
+            "the link flushes last"
+        );
+
+        let link: crate::model::LinkRecord =
+            serde_json::from_str(&lines[values.len() - 1]).expect("parse link");
+        assert_eq!(link.scan_metadata.scan_id, "0123456789ABCDEFGHJKMNPQRS");
+        let chassis: std::collections::BTreeSet<&str> =
+            [link.a.chassis_id.as_str(), link.b.chassis_id.as_str()]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            chassis,
+            [cx, cy]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert!(link.a.identity_key.is_some());
+        assert!(link.b.identity_key.is_some());
+    }
+
     mod streaming_differential {
         use super::*;
 
@@ -2287,6 +2486,10 @@ mod tests {
                 "{label}: records_emitted"
             );
             assert_eq!(
+                new.links_emitted, batch.links_emitted,
+                "{label}: links_emitted"
+            );
+            assert_eq!(
                 new.error_counts, batch.error_counts,
                 "{label}: error_counts"
             );
@@ -2306,6 +2509,19 @@ mod tests {
                 "{label}: first_probe_error"
             );
             // elapsed intentionally excluded — wall-clock differs between the two runs.
+        }
+
+        fn parse_link_records(lines: &[String]) -> Vec<crate::model::LinkRecord> {
+            lines
+                .iter()
+                .filter_map(|line| {
+                    let value: serde_json::Value = serde_json::from_str(line).expect("json line");
+                    let is_link = value["schema_id"]
+                        .as_str()
+                        .is_some_and(|id| id.contains("link-record-v1.json"));
+                    is_link.then(|| serde_json::from_str(line).expect("parse link record"))
+                })
+                .collect()
         }
 
         fn first_probe_error_stress_setup() -> ProbeSetup {
@@ -2420,6 +2636,14 @@ mod tests {
                     resolved_n(3),
                 ),
                 ("first_probe_error_stress", stress_probers, stress_targets),
+                (
+                    "mutual_lldp_link",
+                    vec![Arc::new(MutualLldpProber {
+                        cx: "aaaaaaaaaaaa",
+                        cy: "bbbbbbbbbbbb",
+                    })],
+                    resolved_n(2),
+                ),
             ]
         }
 
@@ -2448,6 +2672,11 @@ mod tests {
                     assert_eq!(
                         records_stream, records_batch,
                         "{label}: streaming and batch pipelines must emit byte-identical records"
+                    );
+                    assert_eq!(
+                        parse_link_records(&records_stream),
+                        parse_link_records(&records_batch),
+                        "{label}: streaming and batch pipelines must emit field-identical link records"
                     );
                 }
             }

@@ -8,6 +8,9 @@ Reference consumers are self-contained, copy-shaped implementations of the [sour
 
 Each reference consumer targets one source of truth, reads `DeviceRecord` events from Kafka, and upserts them idempotently. Priorities in order: readability first, correctness second, minimum code third. None of them ship a dead-letter queue, backoff/retry loop, or metrics endpoint — those are production concerns and the references point at where each would go.
 
+!!! info "The reference consumers read the device stream only"
+    A scan that runs the [LLDP prober](../probe/lldp.md) also emits `LinkRecord` topology edges on a second Kafka topic (or NATS subject) — `rastreo.discovery.links.v1` by default. The three reference consumers below reconcile the device stream only. Reconciling links into NetBox cables or Nautobot interface connections is a separate consumer; see [Topology](../discover/topology.md#mapping-to-a-source-of-truth) for the mapping.
+
 ## Available now
 
 | Consumer | Source of truth | Location | Runtime |

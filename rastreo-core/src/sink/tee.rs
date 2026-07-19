@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::error::RastreoError;
 
-use super::{Sink, SinkErrorClass, SinkType, SINK_ERROR_CLASS_COUNT};
+use super::{RecordKind, Sink, SinkErrorClass, SinkType, SINK_ERROR_CLASS_COUNT};
 
 /// A child of [`TeeSink`] — either an owned `Box<dyn Sink>` or a shared handle to one.
 pub enum TeeChild {
@@ -93,6 +93,36 @@ async fn write_child(child: &mut TeeChild, data: &[u8]) -> Result<WriteAttributi
     }
 }
 
+async fn write_kind_child(
+    child: &mut TeeChild,
+    kind: RecordKind,
+    data: &[u8],
+) -> Result<WriteAttribution, RastreoError> {
+    match child {
+        TeeChild::Owned(sink) => {
+            let before = sink.dlq_records_by_class();
+            sink.write_kind(kind, data).await?;
+            let after = sink.dlq_records_by_class();
+            Ok(WriteAttribution {
+                kind: sink.kind(),
+                deltas: class_deltas(before, after),
+                delivered: sink.last_write_delivered(),
+            })
+        }
+        TeeChild::Shared(sink) => {
+            let mut guard = sink.lock().await;
+            let before = guard.dlq_records_by_class();
+            guard.write_kind(kind, data).await?;
+            let after = guard.dlq_records_by_class();
+            Ok(WriteAttribution {
+                kind: guard.kind(),
+                deltas: class_deltas(before, after),
+                delivered: guard.last_write_delivered(),
+            })
+        }
+    }
+}
+
 async fn flush_child(child: &mut TeeChild) -> Result<(SinkType, ClassDeltas), RastreoError> {
     match child {
         TeeChild::Owned(sink) => {
@@ -147,6 +177,21 @@ impl Sink for TeeSink {
                 delivered,
             } = write_child(child, data).await?;
             credit_attribution(&self.attribution, kind, &deltas);
+            all_delivered &= delivered;
+        }
+        self.last_delivered = all_delivered;
+        Ok(())
+    }
+
+    async fn write_kind(&mut self, kind: RecordKind, data: &[u8]) -> Result<(), RastreoError> {
+        let mut all_delivered = true;
+        for child in &mut self.children {
+            let WriteAttribution {
+                kind: sink_kind,
+                deltas,
+                delivered,
+            } = write_kind_child(child, kind, data).await?;
+            credit_attribution(&self.attribution, sink_kind, &deltas);
             all_delivered &= delivered;
         }
         self.last_delivered = all_delivered;
@@ -762,5 +807,51 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<TeeSink>();
         assert_send_sync::<TeeChild>();
+    }
+
+    struct KindRecordingSink {
+        kinds: Arc<std::sync::Mutex<Vec<RecordKind>>>,
+    }
+
+    #[async_trait]
+    impl Sink for KindRecordingSink {
+        async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+            self.kinds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(RecordKind::Device);
+            Ok(())
+        }
+        async fn write_kind(&mut self, kind: RecordKind, _data: &[u8]) -> Result<(), RastreoError> {
+            self.kinds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(kind);
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tee_sink_write_kind_forwards_the_kind_to_every_child() {
+        let a_kinds = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let b_kinds = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(KindRecordingSink {
+                kinds: Arc::clone(&a_kinds),
+            })),
+            TeeChild::Owned(Box::new(KindRecordingSink {
+                kinds: Arc::clone(&b_kinds),
+            })),
+        ]);
+        tee.write_kind(RecordKind::Device, b"d")
+            .await
+            .expect("device");
+        tee.write_kind(RecordKind::Link, b"l").await.expect("link");
+        let expected = vec![RecordKind::Device, RecordKind::Link];
+        assert_eq!(*a_kinds.lock().unwrap_or_else(|e| e.into_inner()), expected);
+        assert_eq!(*b_kinds.lock().unwrap_or_else(|e| e.into_inner()), expected);
     }
 }
