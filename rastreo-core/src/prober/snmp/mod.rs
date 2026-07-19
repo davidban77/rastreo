@@ -1,7 +1,10 @@
 pub mod crypto;
+pub(crate) mod request;
 pub mod usm;
 pub mod v1_v2c;
 pub mod v3;
+#[cfg(feature = "lldp")]
+pub(crate) mod walk;
 
 pub use usm::{AuthAlgo, PrivAlgo, SecurityLevel, UsmAuth, UsmCredentials, UsmPrivacy};
 pub use v1_v2c::{
@@ -67,6 +70,46 @@ impl std::fmt::Debug for SnmpProber {
     }
 }
 
+/// Validate the transport/auth surface shared by the SNMP and LLDP probers (both speak SNMP).
+pub(crate) fn validate_transport(
+    ports: &[u16],
+    version: SnmpVersion,
+    community: &str,
+    credentials: &UsmCredentials,
+) -> Result<(), RastreoError> {
+    if ports.is_empty() {
+        return Err(ConfigError::invalid("snmp prober requires at least one port").into());
+    }
+    if matches!(version, SnmpVersion::V1 | SnmpVersion::V2c) && community.is_empty() {
+        return Err(ConfigError::invalid("snmp community string must not be empty").into());
+    }
+    if version == SnmpVersion::V3 && credentials.username.is_empty() {
+        return Err(
+            ConfigError::invalid("snmp v3 requires a non-empty username in credentials").into(),
+        );
+    }
+    if version == SnmpVersion::V3 {
+        let auth = credentials.auth.resolve();
+        let privacy = credentials.privacy.resolve();
+        if let Err(msg) = usm::derive_security_level(&auth, &privacy) {
+            return Err(ConfigError::invalid(msg).into());
+        }
+        if let Some(password) = credentials.auth.password() {
+            if password.is_empty() {
+                return Err(ConfigError::invalid("snmp v3 auth password must not be empty").into());
+            }
+        }
+        if let Some(password) = credentials.privacy.password() {
+            if password.is_empty() {
+                return Err(
+                    ConfigError::invalid("snmp v3 privacy password must not be empty").into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 impl SnmpProber {
     pub fn new(
         ports: Vec<u16>,
@@ -74,39 +117,7 @@ impl SnmpProber {
         community: String,
         credentials: UsmCredentials,
     ) -> Result<Self, RastreoError> {
-        if ports.is_empty() {
-            return Err(ConfigError::invalid("snmp prober requires at least one port").into());
-        }
-        if matches!(version, SnmpVersion::V1 | SnmpVersion::V2c) && community.is_empty() {
-            return Err(ConfigError::invalid("snmp community string must not be empty").into());
-        }
-        if version == SnmpVersion::V3 && credentials.username.is_empty() {
-            return Err(ConfigError::invalid(
-                "snmp v3 requires a non-empty username in credentials",
-            )
-            .into());
-        }
-        if version == SnmpVersion::V3 {
-            let auth = credentials.auth.resolve();
-            let privacy = credentials.privacy.resolve();
-            if let Err(msg) = usm::derive_security_level(&auth, &privacy) {
-                return Err(ConfigError::invalid(msg).into());
-            }
-            if let Some(password) = credentials.auth.password() {
-                if password.is_empty() {
-                    return Err(
-                        ConfigError::invalid("snmp v3 auth password must not be empty").into(),
-                    );
-                }
-            }
-            if let Some(password) = credentials.privacy.password() {
-                if password.is_empty() {
-                    return Err(
-                        ConfigError::invalid("snmp v3 privacy password must not be empty").into(),
-                    );
-                }
-            }
-        }
+        validate_transport(&ports, version, &community, &credentials)?;
         let mut ports = ports;
         ports.sort_unstable();
         ports.dedup();
@@ -264,6 +275,7 @@ fn assemble_outcome(
 ) -> ProbeOutcome {
     if any_reachable {
         return ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::Snmp,
             target_ip,
             timestamp: SystemTime::now(),
@@ -278,6 +290,7 @@ fn assemble_outcome(
     // the decode fault recorded and no signals.
     if let Some(port) = decode_failed_port {
         return ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::Snmp,
             target_ip,
             timestamp: SystemTime::now(),
@@ -291,6 +304,7 @@ fn assemble_outcome(
     }
 
     ProbeOutcome {
+        lldp: None,
         kind: ProbeKind::Snmp,
         target_ip,
         timestamp: SystemTime::now(),

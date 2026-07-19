@@ -141,6 +141,7 @@ impl Prober for ReverseDnsProber {
         }
 
         Ok(ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::ReverseDns,
             target_ip: target.ip,
             timestamp: SystemTime::now(),

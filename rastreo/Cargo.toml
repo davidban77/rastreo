@@ -25,6 +25,7 @@ ssh = ["rastreo-core/ssh"]
 icmp = ["rastreo-core/icmp"]
 tls = ["rastreo-core/tls"]
 gnmi = ["rastreo-core/gnmi"]
+lldp = ["rastreo-core/lldp"]
 otlp = ["rastreo-core/otlp"]
 
 [[bin]]

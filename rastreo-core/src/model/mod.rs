@@ -8,6 +8,9 @@ pub use device::{
     AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, CURRENT_SCHEMA_ID,
     CURRENT_SCHEMA_VERSION,
 };
-pub use outcome::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, Signal, PROBE_KIND_COUNT};
+pub use outcome::{
+    LldpNeighbor, LldpObservation, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, Signal,
+    PROBE_KIND_COUNT,
+};
 pub use scan::ScanMetadata;
 pub use target::{ResolvedTarget, Target};

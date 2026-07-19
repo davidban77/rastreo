@@ -15,6 +15,7 @@ use crate::model::outcome::{ProbeKind, ProbeOutcome, Signal};
 use crate::model::scan::ScanMetadata;
 
 pub mod identity;
+pub(crate) mod keys;
 #[cfg(feature = "oui")]
 pub mod oui;
 
@@ -355,6 +356,7 @@ mod tests {
         signals: Vec<Signal>,
     ) -> ProbeOutcome {
         ProbeOutcome {
+            lldp: None,
             kind,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -371,6 +373,7 @@ mod tests {
         ts: SystemTime,
     ) -> ProbeOutcome {
         ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
             timestamp: ts,

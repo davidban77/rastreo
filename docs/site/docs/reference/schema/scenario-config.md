@@ -224,6 +224,7 @@ One of:
 - { `ports`: array<uint16>, `query_names`: array<string>, `query_type`: [`DnsQueryType`](#dnsquerytype), `recursion_desired`: boolean, `transport`: [`DnsTransport`](#dnstransport), `type`: `dns` }
 - { `ports`: array<uint16>, `protocol`: [`UdpProtocol`](#udpprotocol), `type`: `udp` }
 - { `community`: [`Community`](#community), `credentials`: [`UsmCredentials`](#usmcredentials), `ports`: array<uint16>, `type`: `snmp`, `version`: [`SnmpVersion`](#snmpversion) }
+- { `community`: [`Community`](#community), `credentials`: [`UsmCredentials`](#usmcredentials), `max_rows`: uint, `ports`: array<uint16>, `type`: `lldp`, `version`: [`SnmpVersion`](#snmpversion) }
 - { `interface`: string, `type`: `arp` }
 - { `interface`: string, `type`: `ndp` }
 - { `ports`: array<uint16>, `type`: `ssh` }

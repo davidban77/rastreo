@@ -476,6 +476,7 @@ fn status_to_outcome(target_ip: IpAddr, status: &Status) -> ProbeOutcome {
         _ => ProbeErrorKind::Other,
     };
     ProbeOutcome {
+        lldp: None,
         kind: ProbeKind::Gnmi,
         target_ip,
         timestamp: SystemTime::now(),
@@ -516,6 +517,7 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
 
     if answered {
         return ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::Gnmi,
             target_ip,
             timestamp: SystemTime::now(),
@@ -530,6 +532,7 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
     }
 
     ProbeOutcome {
+        lldp: None,
         kind: ProbeKind::Gnmi,
         target_ip,
         timestamp: SystemTime::now(),

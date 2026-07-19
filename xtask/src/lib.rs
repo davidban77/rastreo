@@ -664,8 +664,8 @@ mod tests {
             .expect("ProberConfig oneOf variants");
         assert_eq!(
             variants.len(),
-            12,
-            "expected 12 prober variants (tcp_connect, http, dns, udp, snmp, arp, ndp, ssh, icmp, tls, gnmi, reverse_dns); got {}",
+            13,
+            "expected 13 prober variants (tcp_connect, http, dns, udp, snmp, lldp, arp, ndp, ssh, icmp, tls, gnmi, reverse_dns); got {}",
             variants.len()
         );
     }

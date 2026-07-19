@@ -5,13 +5,19 @@ use rasn::types::{Integer, ObjectIdentifier, OctetString};
 use rasn_smi::v1 as smi_v1;
 use rasn_smi::v2 as smi_v2;
 use rasn_snmp::{v1 as snmp_v1, v2 as snmp_v2, v2c};
+use tokio::net::UdpSocket;
 
+#[cfg(test)]
 use crate::error::{ProbeError, RastreoError};
 use crate::model::{ProbeCtx, Signal};
 
+use super::request::{
+    snmp_io_error, snmp_request, RequestPdu, SnmpError, SnmpResponse, SnmpSession, VarBind,
+    VarValue,
+};
 use super::{
-    bind_socket, classify_io_error, oid_eq, oid_to_dotted, sanitize_octets, PortOutcome,
-    SnmpProber, SnmpVersion, RECV_BUF_LEN,
+    bind_socket, oid_eq, oid_to_dotted, sanitize_octets, PortOutcome, SnmpProber, SnmpVersion,
+    RECV_BUF_LEN,
 };
 
 pub const MAX_STRING_BYTES: usize = 256;
@@ -48,177 +54,262 @@ pub(super) fn new_request_id(port: u16) -> i32 {
 }
 
 impl SnmpProber {
+    #[cfg(test)]
     pub(super) fn build_v1_v2c_request(&self, request_id: i32) -> Result<Vec<u8>, RastreoError> {
-        match self.version() {
-            SnmpVersion::V1 => {
-                let variable_bindings = self
-                    .oids()
-                    .into_iter()
-                    .map(|oid| snmp_v1::VarBind {
-                        name: oid.clone(),
-                        value: smi_v1::ObjectSyntax::Simple(smi_v1::SimpleSyntax::Empty),
-                    })
-                    .collect();
-                let msg: snmp_v1::Message<snmp_v1::Pdus> = snmp_v1::Message {
-                    version: Integer::from(snmp_v1::Message::<()>::VERSION_1),
-                    community: OctetString::from_slice(self.community().as_bytes()),
-                    data: snmp_v1::Pdus::GetRequest(snmp_v1::GetRequest(snmp_v1::Pdu {
-                        request_id: Integer::from(request_id),
-                        error_status: Integer::from(0),
-                        error_index: Integer::from(0),
-                        variable_bindings,
-                    })),
-                };
-                rasn::ber::encode(&msg)
-                    .map_err(|e| ProbeError::Other(format!("snmp v1 encode failed: {e}")).into())
-            }
-            SnmpVersion::V2c => {
-                let variable_bindings = self
-                    .oids()
-                    .into_iter()
-                    .map(|oid| snmp_v2::VarBind {
-                        name: oid.clone(),
-                        value: snmp_v2::VarBindValue::Unspecified,
-                    })
-                    .collect();
-                let msg: v2c::Message<snmp_v2::Pdus> = v2c::Message {
-                    version: Integer::from(v2c::Message::<()>::VERSION),
-                    community: OctetString::from_slice(self.community().as_bytes()),
-                    data: snmp_v2::Pdus::GetRequest(snmp_v2::GetRequest(snmp_v2::Pdu {
-                        request_id,
-                        error_status: 0,
-                        error_index: 0,
-                        variable_bindings,
-                    })),
-                };
-                rasn::ber::encode(&msg)
-                    .map_err(|e| ProbeError::Other(format!("snmp v2c encode failed: {e}")).into())
-            }
-            SnmpVersion::V3 => unreachable!("build_v1_v2c_request called for v3"),
-        }
+        let names: Vec<ObjectIdentifier> = self.oids().into_iter().cloned().collect();
+        encode_community_message(
+            self.version(),
+            self.community(),
+            &RequestPdu::Get(names),
+            request_id,
+        )
+        .map_err(|e| ProbeError::Other(e).into())
     }
 
+    #[cfg(test)]
     pub(super) fn parse_v1_v2c_response(
         &self,
         bytes: &[u8],
         expected_request_id: i32,
     ) -> ResponseVerdict {
-        match self.version() {
-            SnmpVersion::V1 => match rasn::ber::decode::<snmp_v1::Message<snmp_v1::Pdus>>(bytes) {
-                Ok(msg) => self.parse_v1(msg, expected_request_id),
-                Err(_) => ResponseVerdict::Malformed,
-            },
-            SnmpVersion::V2c => match rasn::ber::decode::<v2c::Message<snmp_v2::Pdus>>(bytes) {
-                Ok(msg) => self.parse_v2c(msg, expected_request_id),
-                Err(_) => ResponseVerdict::Malformed,
-            },
-            SnmpVersion::V3 => unreachable!("parse_v1_v2c_response called for v3"),
-        }
-    }
-
-    fn parse_v1(
-        &self,
-        msg: snmp_v1::Message<snmp_v1::Pdus>,
-        expected_request_id: i32,
-    ) -> ResponseVerdict {
-        let pdu = match msg.data {
-            snmp_v1::Pdus::GetResponse(snmp_v1::GetResponse(pdu)) => pdu,
-            _ => return ResponseVerdict::UnexpectedPdu,
-        };
-        if !integer_matches_i32(&pdu.request_id, expected_request_id) {
-            return ResponseVerdict::MismatchedRequestId;
-        }
-        if !integer_matches_i32(&pdu.error_status, 0) {
-            return ResponseVerdict::Ok(Vec::new());
-        }
-        let mut signals = Vec::new();
-        for binding in pdu.variable_bindings {
-            if let Some(signal) = self.map_v1_varbind(&binding.name, &binding.value) {
-                signals.push(signal);
+        match decode_community_response(self.version(), bytes, expected_request_id) {
+            CommunityVerdict::Response(resp) if resp.error_status != 0 => {
+                ResponseVerdict::Ok(Vec::new())
             }
+            CommunityVerdict::Response(resp) => {
+                ResponseVerdict::Ok(map_varbinds_to_signals(self, &resp.var_binds))
+            }
+            CommunityVerdict::WrongRequestId => ResponseVerdict::MismatchedRequestId,
+            CommunityVerdict::UnexpectedPdu => ResponseVerdict::UnexpectedPdu,
+            CommunityVerdict::Malformed => ResponseVerdict::Malformed,
         }
-        ResponseVerdict::Ok(signals)
-    }
-
-    fn parse_v2c(
-        &self,
-        msg: v2c::Message<snmp_v2::Pdus>,
-        expected_request_id: i32,
-    ) -> ResponseVerdict {
-        let pdu = match msg.data {
-            snmp_v2::Pdus::Response(snmp_v2::Response(pdu)) => pdu,
-            _ => return ResponseVerdict::UnexpectedPdu,
-        };
-        if pdu.request_id != expected_request_id {
-            return ResponseVerdict::MismatchedRequestId;
-        }
-        if pdu.error_status != 0 {
-            return ResponseVerdict::Ok(Vec::new());
-        }
-        let mut signals = Vec::new();
-        for binding in pdu.variable_bindings {
-            let syntax = match binding.value {
-                snmp_v2::VarBindValue::Value(s) => s,
-                _ => continue,
-            };
-            if let Some(signal) = self.map_v2_varbind(&binding.name, &syntax) {
-                signals.push(signal);
-            }
-        }
-        ResponseVerdict::Ok(signals)
-    }
-
-    pub(super) fn map_v1_varbind(
-        &self,
-        name: &ObjectIdentifier,
-        value: &smi_v1::ObjectSyntax,
-    ) -> Option<Signal> {
-        let simple = match value {
-            smi_v1::ObjectSyntax::Simple(s) => s,
-            _ => return None,
-        };
-        if oid_eq(name, self.oid_sys_descr()) {
-            if let smi_v1::SimpleSyntax::String(bytes) = simple {
-                return Some(Signal::SnmpSysDescr(sanitize_octets(bytes.as_ref())));
-            }
-        } else if oid_eq(name, self.oid_sys_object_id()) {
-            if let smi_v1::SimpleSyntax::Object(oid) = simple {
-                return Some(Signal::SnmpSysObjectId(oid_to_dotted(oid)));
-            }
-        } else if oid_eq(name, self.oid_sys_name()) {
-            if let smi_v1::SimpleSyntax::String(bytes) = simple {
-                return Some(Signal::SnmpSysName(sanitize_octets(bytes.as_ref())));
-            }
-        }
-        None
-    }
-
-    pub(super) fn map_v2_varbind(
-        &self,
-        name: &ObjectIdentifier,
-        value: &smi_v2::ObjectSyntax,
-    ) -> Option<Signal> {
-        let simple = match value {
-            smi_v2::ObjectSyntax::Simple(s) => s,
-            _ => return None,
-        };
-        if oid_eq(name, self.oid_sys_descr()) {
-            if let smi_v2::SimpleSyntax::String(bytes) = simple {
-                return Some(Signal::SnmpSysDescr(sanitize_octets(bytes.as_ref())));
-            }
-        } else if oid_eq(name, self.oid_sys_object_id()) {
-            if let smi_v2::SimpleSyntax::ObjectId(oid) = simple {
-                return Some(Signal::SnmpSysObjectId(oid_to_dotted(oid)));
-            }
-        } else if oid_eq(name, self.oid_sys_name()) {
-            if let smi_v2::SimpleSyntax::String(bytes) = simple {
-                return Some(Signal::SnmpSysName(sanitize_octets(bytes.as_ref())));
-            }
-        }
-        None
     }
 }
 
+/// Encode a v1/v2c request message from a version-agnostic PDU. GETBULK is v2c-only.
+pub(super) fn encode_community_message(
+    version: SnmpVersion,
+    community: &str,
+    pdu: &RequestPdu,
+    request_id: i32,
+) -> Result<Vec<u8>, String> {
+    match version {
+        SnmpVersion::V1 => {
+            let variable_bindings = pdu
+                .names()
+                .iter()
+                .map(|oid| snmp_v1::VarBind {
+                    name: oid.clone(),
+                    value: smi_v1::ObjectSyntax::Simple(smi_v1::SimpleSyntax::Empty),
+                })
+                .collect();
+            let inner = snmp_v1::Pdu {
+                request_id: Integer::from(request_id),
+                error_status: Integer::from(0),
+                error_index: Integer::from(0),
+                variable_bindings,
+            };
+            let data = match pdu {
+                RequestPdu::Get(_) => snmp_v1::Pdus::GetRequest(snmp_v1::GetRequest(inner)),
+                #[cfg(feature = "lldp")]
+                RequestPdu::GetNext(_) => {
+                    snmp_v1::Pdus::GetNextRequest(snmp_v1::GetNextRequest(inner))
+                }
+                #[cfg(feature = "lldp")]
+                RequestPdu::GetBulk { .. } => return Err("snmp v1 has no GetBulkRequest".into()),
+            };
+            let msg: snmp_v1::Message<snmp_v1::Pdus> = snmp_v1::Message {
+                version: Integer::from(snmp_v1::Message::<()>::VERSION_1),
+                community: OctetString::from_slice(community.as_bytes()),
+                data,
+            };
+            rasn::ber::encode(&msg).map_err(|e| format!("snmp v1 encode failed: {e}"))
+        }
+        SnmpVersion::V2c => {
+            let data = match pdu {
+                RequestPdu::Get(names) => {
+                    snmp_v2::Pdus::GetRequest(snmp_v2::GetRequest(simple_v2_pdu(request_id, names)))
+                }
+                #[cfg(feature = "lldp")]
+                RequestPdu::GetNext(names) => snmp_v2::Pdus::GetNextRequest(
+                    snmp_v2::GetNextRequest(simple_v2_pdu(request_id, names)),
+                ),
+                #[cfg(feature = "lldp")]
+                RequestPdu::GetBulk {
+                    non_repeaters,
+                    max_repetitions,
+                    names,
+                } => snmp_v2::Pdus::GetBulkRequest(snmp_v2::GetBulkRequest(snmp_v2::BulkPdu {
+                    request_id,
+                    non_repeaters: *non_repeaters,
+                    max_repetitions: *max_repetitions,
+                    variable_bindings: unspecified_v2_varbinds(names),
+                })),
+            };
+            let msg: v2c::Message<snmp_v2::Pdus> = v2c::Message {
+                version: Integer::from(v2c::Message::<()>::VERSION),
+                community: OctetString::from_slice(community.as_bytes()),
+                data,
+            };
+            rasn::ber::encode(&msg).map_err(|e| format!("snmp v2c encode failed: {e}"))
+        }
+        SnmpVersion::V3 => Err("encode_community_message called for v3".into()),
+    }
+}
+
+fn simple_v2_pdu(request_id: i32, names: &[ObjectIdentifier]) -> snmp_v2::Pdu {
+    snmp_v2::Pdu {
+        request_id,
+        error_status: 0,
+        error_index: 0,
+        variable_bindings: unspecified_v2_varbinds(names),
+    }
+}
+
+pub(super) fn unspecified_v2_varbinds(names: &[ObjectIdentifier]) -> Vec<snmp_v2::VarBind> {
+    names
+        .iter()
+        .map(|oid| snmp_v2::VarBind {
+            name: oid.clone(),
+            value: snmp_v2::VarBindValue::Unspecified,
+        })
+        .collect()
+}
+
+pub(super) enum CommunityVerdict {
+    Response(SnmpResponse),
+    UnexpectedPdu,
+    WrongRequestId,
+    Malformed,
+}
+
+pub(super) fn decode_community_response(
+    version: SnmpVersion,
+    bytes: &[u8],
+    expected_request_id: i32,
+) -> CommunityVerdict {
+    match version {
+        SnmpVersion::V1 => match rasn::ber::decode::<snmp_v1::Message<snmp_v1::Pdus>>(bytes) {
+            Ok(msg) => decode_v1_pdu(msg, expected_request_id),
+            Err(_) => CommunityVerdict::Malformed,
+        },
+        SnmpVersion::V2c => match rasn::ber::decode::<v2c::Message<snmp_v2::Pdus>>(bytes) {
+            Ok(msg) => decode_v2c_pdu(msg, expected_request_id),
+            Err(_) => CommunityVerdict::Malformed,
+        },
+        SnmpVersion::V3 => CommunityVerdict::Malformed,
+    }
+}
+
+fn decode_v1_pdu(
+    msg: snmp_v1::Message<snmp_v1::Pdus>,
+    expected_request_id: i32,
+) -> CommunityVerdict {
+    let pdu = match msg.data {
+        snmp_v1::Pdus::GetResponse(snmp_v1::GetResponse(pdu)) => pdu,
+        _ => return CommunityVerdict::UnexpectedPdu,
+    };
+    if !integer_matches_i32(&pdu.request_id, expected_request_id) {
+        return CommunityVerdict::WrongRequestId;
+    }
+    // A nonzero status that does not fit i32 still means "not success" — coerce to a nonzero marker.
+    let error_status = i32::try_from(&pdu.error_status)
+        .map(|v| v as u32)
+        .unwrap_or(1);
+    let var_binds = pdu
+        .variable_bindings
+        .into_iter()
+        .map(normalize_v1_varbind)
+        .collect();
+    CommunityVerdict::Response(SnmpResponse {
+        error_status,
+        var_binds,
+    })
+}
+
+fn decode_v2c_pdu(msg: v2c::Message<snmp_v2::Pdus>, expected_request_id: i32) -> CommunityVerdict {
+    let pdu = match msg.data {
+        snmp_v2::Pdus::Response(snmp_v2::Response(pdu)) => pdu,
+        _ => return CommunityVerdict::UnexpectedPdu,
+    };
+    if pdu.request_id != expected_request_id {
+        return CommunityVerdict::WrongRequestId;
+    }
+    let var_binds = pdu
+        .variable_bindings
+        .into_iter()
+        .map(normalize_v2_varbind)
+        .collect();
+    CommunityVerdict::Response(SnmpResponse {
+        error_status: pdu.error_status,
+        var_binds,
+    })
+}
+
+pub(super) fn normalize_v1_varbind(vb: snmp_v1::VarBind) -> VarBind {
+    let value = match vb.value {
+        smi_v1::ObjectSyntax::Simple(smi_v1::SimpleSyntax::Number(i)) => {
+            VarValue::Int(i32::try_from(&i).map(i64::from).unwrap_or(0))
+        }
+        smi_v1::ObjectSyntax::Simple(smi_v1::SimpleSyntax::String(s)) => {
+            VarValue::Bytes(s.to_vec())
+        }
+        smi_v1::ObjectSyntax::Simple(smi_v1::SimpleSyntax::Object(o)) => VarValue::Oid(o),
+        smi_v1::ObjectSyntax::Simple(smi_v1::SimpleSyntax::Empty) => VarValue::Unspecified,
+        _ => VarValue::Other,
+    };
+    VarBind {
+        name: vb.name,
+        value,
+    }
+}
+
+pub(super) fn normalize_v2_varbind(vb: snmp_v2::VarBind) -> VarBind {
+    let value = match vb.value {
+        snmp_v2::VarBindValue::Value(smi_v2::ObjectSyntax::Simple(simple)) => match simple {
+            smi_v2::SimpleSyntax::Integer(i) => {
+                VarValue::Int(i32::try_from(&i).map(i64::from).unwrap_or(0))
+            }
+            smi_v2::SimpleSyntax::String(s) => VarValue::Bytes(s.to_vec()),
+            smi_v2::SimpleSyntax::ObjectId(o) => VarValue::Oid(o),
+        },
+        snmp_v2::VarBindValue::Value(_) => VarValue::Other,
+        snmp_v2::VarBindValue::Unspecified => VarValue::Unspecified,
+        snmp_v2::VarBindValue::NoSuchObject => VarValue::NoSuchObject,
+        snmp_v2::VarBindValue::NoSuchInstance => VarValue::NoSuchInstance,
+        snmp_v2::VarBindValue::EndOfMibView => VarValue::EndOfMibView,
+    };
+    VarBind {
+        name: vb.name,
+        value,
+    }
+}
+
+pub(super) fn map_varbinds_to_signals(prober: &SnmpProber, var_binds: &[VarBind]) -> Vec<Signal> {
+    var_binds
+        .iter()
+        .filter_map(|vb| map_varbind_to_signal(prober, vb))
+        .collect()
+}
+
+fn map_varbind_to_signal(prober: &SnmpProber, vb: &VarBind) -> Option<Signal> {
+    if oid_eq(&vb.name, prober.oid_sys_descr()) {
+        if let VarValue::Bytes(bytes) = &vb.value {
+            return Some(Signal::SnmpSysDescr(sanitize_octets(bytes)));
+        }
+    } else if oid_eq(&vb.name, prober.oid_sys_object_id()) {
+        if let VarValue::Oid(oid) = &vb.value {
+            return Some(Signal::SnmpSysObjectId(oid_to_dotted(oid)));
+        }
+    } else if oid_eq(&vb.name, prober.oid_sys_name()) {
+        if let VarValue::Bytes(bytes) = &vb.value {
+            return Some(Signal::SnmpSysName(sanitize_octets(bytes)));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
 pub(super) enum ResponseVerdict {
     Ok(Vec<Signal>),
     UnexpectedPdu,
@@ -230,6 +321,55 @@ fn integer_matches_i32(value: &Integer, expected: i32) -> bool {
     i32::try_from(value).map(|v| v == expected).unwrap_or(false)
 }
 
+/// Send + retry loop for a community request: retransmits within a per-attempt slice of the total
+/// deadline, ignores replies from the wrong peer or with a stale request-id, and stops when the
+/// deadline lapses. `Absent` is exhausted silence, not a fault.
+pub(super) async fn community_exchange(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+    version: SnmpVersion,
+    community: &str,
+    pdu: &RequestPdu,
+    ctx: &ProbeCtx,
+) -> Result<SnmpResponse, SnmpError> {
+    let request_id = new_request_id(target_addr.port());
+    let payload = match encode_community_message(version, community, pdu, request_id) {
+        Ok(p) => p,
+        Err(e) => return Err(SnmpError::Other(format!("snmp encode failed: {e}"))),
+    };
+    let mut buf = vec![0u8; RECV_BUF_LEN];
+    let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
+    let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
+    for _ in 0..=ctx.retries {
+        if let Err(e) = socket.send_to(&payload, target_addr).await {
+            return Err(snmp_io_error(&e));
+        }
+        let attempt_deadline = (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
+        loop {
+            match tokio::time::timeout_at(attempt_deadline, socket.recv_from(&mut buf)).await {
+                Ok(Ok((n, peer))) => {
+                    if peer.ip() != target_addr.ip() {
+                        continue;
+                    }
+                    match decode_community_response(version, &buf[..n], request_id) {
+                        CommunityVerdict::Response(resp) => return Ok(resp),
+                        CommunityVerdict::UnexpectedPdu | CommunityVerdict::WrongRequestId => {
+                            continue
+                        }
+                        CommunityVerdict::Malformed => return Err(SnmpError::Decode),
+                    }
+                }
+                Ok(Err(e)) => return Err(snmp_io_error(&e)),
+                Err(_) => break,
+            }
+        }
+        if tokio::time::Instant::now() >= overall_deadline {
+            break;
+        }
+    }
+    Err(SnmpError::Absent)
+}
+
 pub(super) async fn probe_port(
     target_addr: SocketAddr,
     prober: &SnmpProber,
@@ -239,44 +379,23 @@ pub(super) async fn probe_port(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let request_id = new_request_id(target_addr.port());
-    let payload = match prober.build_v1_v2c_request(request_id) {
-        Ok(p) => p,
-        Err(e) => return PortOutcome::Other(format!("snmp encode failed: {e}")),
-    };
-    let mut buf = vec![0u8; RECV_BUF_LEN];
-    // Split the timeout across attempts so retransmits stay inside the same total per-probe deadline.
-    let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
-    let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
-    for _ in 0..=ctx.retries {
-        if let Err(e) = socket.send_to(&payload, target_addr).await {
-            return classify_io_error(&e);
+    let session = SnmpSession::community(
+        socket,
+        target_addr,
+        prober.version(),
+        prober.community().to_string(),
+    );
+    let get = RequestPdu::Get(prober.oids().into_iter().cloned().collect());
+    match snmp_request(&session, &get, ctx).await {
+        Ok(resp) if resp.error_status == 0 => {
+            PortOutcome::Reached(map_varbinds_to_signals(prober, &resp.var_binds))
         }
-        let attempt_deadline = (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
-        loop {
-            match tokio::time::timeout_at(attempt_deadline, socket.recv_from(&mut buf)).await {
-                Ok(Ok((n, peer))) => {
-                    if peer.ip() != target_addr.ip() {
-                        continue;
-                    }
-                    let bytes = &buf[..n];
-                    match prober.parse_v1_v2c_response(bytes, request_id) {
-                        ResponseVerdict::Ok(signals) => return PortOutcome::Reached(signals),
-                        ResponseVerdict::UnexpectedPdu | ResponseVerdict::MismatchedRequestId => {
-                            continue;
-                        }
-                        ResponseVerdict::Malformed => return PortOutcome::DecodeFailed,
-                    }
-                }
-                Ok(Err(e)) => return classify_io_error(&e),
-                Err(_) => break,
-            }
-        }
-        if tokio::time::Instant::now() >= overall_deadline {
-            break;
-        }
+        Ok(_) => PortOutcome::Reached(Vec::new()),
+        Err(SnmpError::Absent) => PortOutcome::Timeout,
+        Err(SnmpError::Decode) => PortOutcome::DecodeFailed,
+        Err(SnmpError::Fault(kind, msg)) => PortOutcome::Fault(kind, msg),
+        Err(SnmpError::Other(msg)) => PortOutcome::Other(msg),
     }
-    PortOutcome::Timeout
 }
 
 #[cfg(test)]

@@ -163,6 +163,22 @@ async fn contract_for(kind: ProbeKind) -> Contract {
             absence: Absence::Seam("snmp feature disabled"),
             fault: Fault::Seam("snmp feature disabled"),
         },
+        // LLDP mirrors SNMP: a session that answered is reachable (empty neighbor table included);
+        // silence is absence; a reply it cannot decode is reachable + DecodeFailed.
+        #[cfg(feature = "lldp")]
+        ProbeKind::Lldp => Contract {
+            absence: absent(lldp_config(closed_udp_port().await), LOOPBACK),
+            fault: Fault::Probe {
+                config: lldp_config(garbage_udp_port().await),
+                target: LOOPBACK,
+                expect_kind: ProbeErrorKind::DecodeFailed,
+            },
+        },
+        #[cfg(not(feature = "lldp"))]
+        ProbeKind::Lldp => Contract {
+            absence: Absence::Seam("lldp feature disabled"),
+            fault: Fault::Seam("lldp feature disabled"),
+        },
         #[cfg(feature = "ssh")]
         ProbeKind::Ssh => Contract {
             absence: absent(
@@ -317,6 +333,19 @@ fn snmp_config(port: u16) -> ProberConfig {
         version: SnmpVersion::V2c,
         community: Community("public".into()),
         credentials: UsmCredentials::default(),
+    }
+}
+
+#[cfg(feature = "lldp")]
+fn lldp_config(port: u16) -> ProberConfig {
+    use rastreo_core::prober::{Community, SnmpVersion, UsmCredentials};
+
+    ProberConfig::Lldp {
+        ports: vec![port],
+        version: SnmpVersion::V2c,
+        community: Community("public".into()),
+        credentials: UsmCredentials::default(),
+        max_rows: rastreo_core::prober::lldp::default_max_rows(),
     }
 }
 

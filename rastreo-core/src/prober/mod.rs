@@ -19,6 +19,8 @@ pub mod http;
 pub mod icmp;
 #[cfg(any(feature = "arp", feature = "ndp"))]
 mod link_layer;
+#[cfg(feature = "lldp")]
+pub mod lldp;
 #[cfg(feature = "ndp")]
 pub mod ndp;
 pub(crate) mod ports;
@@ -42,6 +44,8 @@ pub use gnmi::GnmiProber;
 pub use http::{HttpProber, HttpScheme};
 #[cfg(feature = "icmp")]
 pub use icmp::IcmpProber;
+#[cfg(feature = "lldp")]
+pub use lldp::LldpProber;
 #[cfg(feature = "ndp")]
 pub use ndp::NdpProber;
 #[cfg(feature = "snmp")]
@@ -137,6 +141,20 @@ pub enum ProberConfig {
         #[serde(default)]
         credentials: UsmCredentials,
     },
+    #[cfg(feature = "lldp")]
+    Lldp {
+        #[serde(default = "snmp::default_ports")]
+        ports: Vec<u16>,
+        #[serde(default)]
+        version: SnmpVersion,
+        #[serde(default = "snmp::default_community")]
+        #[schemars(default = "snmp::default_community_plaintext")]
+        community: Community,
+        #[serde(default)]
+        credentials: UsmCredentials,
+        #[serde(default = "lldp::default_max_rows")]
+        max_rows: usize,
+    },
     #[cfg(feature = "arp")]
     Arp {
         #[serde(default = "arp::default_interface")]
@@ -229,6 +247,20 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
             community.0.clone(),
             credentials.clone(),
         )?)),
+        #[cfg(feature = "lldp")]
+        ProberConfig::Lldp {
+            ports,
+            version,
+            community,
+            credentials,
+            max_rows,
+        } => Ok(Box::new(LldpProber::new(
+            ports.clone(),
+            *version,
+            community.0.clone(),
+            credentials.clone(),
+            *max_rows,
+        )?)),
         #[cfg(feature = "arp")]
         ProberConfig::Arp { interface } => Ok(Box::new(ArpProber::new(interface.clone())?)),
         #[cfg(feature = "ndp")]
@@ -315,6 +347,7 @@ mod tests {
             _ctx: &ProbeCtx,
         ) -> Result<ProbeOutcome, RastreoError> {
             Ok(ProbeOutcome {
+                lldp: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,

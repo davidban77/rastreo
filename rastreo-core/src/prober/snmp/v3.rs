@@ -1,22 +1,21 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rasn::types::{Integer, OctetString};
 use rasn_snmp::{v2 as snmp_v2, v3};
 use tokio::net::UdpSocket;
 
-use crate::model::{ProbeCtx, Signal};
+use crate::model::ProbeCtx;
 
 use super::crypto::{
     ct_eq, decrypt_scoped_pdu, derive_priv_key, encrypt_scoped_pdu, hmac_truncated, localize_key,
 };
-use super::usm::{ResolvedAuth, ResolvedPriv, SecurityLevel};
-use super::v1_v2c::new_request_id;
-use super::{
-    bind_socket, classify_io_error, oid_eq, oid_to_dotted, sanitize_octets, PortOutcome,
-    SnmpProber, RECV_BUF_LEN,
-};
+use super::request::{snmp_io_error, RequestPdu, SnmpError, SnmpResponse};
+use super::usm::{ResolvedAuth, ResolvedPriv, SecurityLevel, UsmCredentials};
+use super::v1_v2c::{new_request_id, normalize_v2_varbind, unspecified_v2_varbinds};
+use super::{bind_socket, PortOutcome, SnmpProber, RECV_BUF_LEN};
 
 const MSG_ID_LIMIT: i64 = 0x7fff_ffff;
 const MAX_SIZE_DEFAULT: i64 = 65_507;
@@ -62,6 +61,81 @@ pub(super) struct EngineSnapshot {
     pub engine_time: u32,
 }
 
+/// A v3 session that has completed engine discovery and key derivation. The engine snapshot is
+/// held behind a mutex so a `notInTimeWindow` correction persists across requests in a walk.
+pub(crate) struct V3Session {
+    username: String,
+    security_level: SecurityLevel,
+    auth: ResolvedAuth,
+    privacy: ResolvedPriv,
+    auth_key: Vec<u8>,
+    priv_key: Vec<u8>,
+    engine: Mutex<EngineSnapshot>,
+}
+
+pub(super) async fn discover_and_derive(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+    credentials: &UsmCredentials,
+    ctx: &ProbeCtx,
+    deadline: tokio::time::Instant,
+) -> Result<V3Session, SnmpError> {
+    let auth = credentials.auth.resolve();
+    let privacy = credentials.privacy.resolve();
+    let security_level = super::usm::derive_security_level(&auth, &privacy)
+        .map_err(|msg| SnmpError::Other(msg.to_string()))?;
+    let engine = discover_engine(socket, target_addr, &credentials.username, ctx, deadline).await?;
+    let (auth_key, priv_key) = derive_keys(&engine, &auth, &privacy);
+    Ok(V3Session {
+        username: credentials.username.clone(),
+        security_level,
+        auth,
+        privacy,
+        auth_key,
+        priv_key,
+        engine: Mutex::new(engine),
+    })
+}
+
+pub(super) async fn authenticated_exchange(
+    socket: &UdpSocket,
+    target_addr: SocketAddr,
+    state: &V3Session,
+    pdu: &RequestPdu,
+    ctx: &ProbeCtx,
+) -> Result<SnmpResponse, SnmpError> {
+    let deadline = tokio::time::Instant::now() + ctx.timeout;
+    let mut retried_time_window = false;
+    loop {
+        let engine = state.engine.lock().expect("v3 engine mutex").clone();
+        match one_authenticated_exchange(socket, target_addr, state, &engine, pdu, deadline).await {
+            AuthExchange::Response(resp) => return Ok(resp),
+            // The engine answered but the fingerprint is unusable (auth/report/bad digest): the
+            // device is reachable — the caller keeps it with no data, not a fault.
+            AuthExchange::Empty | AuthExchange::Report => {
+                return Ok(SnmpResponse {
+                    error_status: 0,
+                    var_binds: Vec::new(),
+                })
+            }
+            AuthExchange::NotInTimeWindow(new_engine) if !retried_time_window => {
+                retried_time_window = true;
+                *state.engine.lock().expect("v3 engine mutex") = new_engine;
+                continue;
+            }
+            AuthExchange::NotInTimeWindow(_) => {
+                return Ok(SnmpResponse {
+                    error_status: 0,
+                    var_binds: Vec::new(),
+                })
+            }
+            AuthExchange::Absent => return Err(SnmpError::Absent),
+            AuthExchange::Decode => return Err(SnmpError::Decode),
+            AuthExchange::Other(msg) => return Err(SnmpError::Other(msg)),
+        }
+    }
+}
+
 pub(super) async fn probe_port(
     target_addr: SocketAddr,
     prober: &SnmpProber,
@@ -72,68 +146,33 @@ pub(super) async fn probe_port(
         Err(e) => return e,
     };
     let overall_deadline = tokio::time::Instant::now() + ctx.timeout;
-    let credentials = prober.credentials();
-    let auth = credentials.auth.resolve();
-    let privacy = credentials.privacy.resolve();
-    let security_level = match super::usm::derive_security_level(&auth, &privacy) {
-        Ok(sl) => sl,
-        Err(msg) => return PortOutcome::Other(msg.to_string()),
-    };
-
-    let engine = match discover_engine(
-        &socket,
+    let session = match super::request::SnmpSession::establish_v3(
+        socket,
         target_addr,
-        &credentials.username,
+        prober.credentials(),
         ctx,
         overall_deadline,
     )
     .await
     {
-        Ok(e) => e,
-        Err(e) => return e,
+        Ok(s) => s,
+        Err(SnmpError::Absent) => return PortOutcome::Timeout,
+        Err(SnmpError::Decode) => return PortOutcome::DecodeFailed,
+        Err(SnmpError::Fault(kind, msg)) => return PortOutcome::Fault(kind, msg),
+        Err(SnmpError::Other(msg)) => return PortOutcome::Other(msg),
     };
 
-    let (auth_key, priv_key) = match derive_keys(&engine, &auth, &privacy) {
-        Ok(pair) => pair,
-        Err(msg) => return PortOutcome::Other(msg),
-    };
-
-    let mut current_engine = engine;
-    let mut retried_time_window = false;
-
-    loop {
-        let outcome = probe_authenticated(
-            &socket,
-            target_addr,
-            prober,
-            &credentials.username,
-            security_level,
-            &current_engine,
-            &auth,
-            &auth_key,
-            &privacy,
-            &priv_key,
-            overall_deadline,
-        )
-        .await;
-
-        match outcome {
-            AuthenticatedOutcome::Signals(sigs) => return PortOutcome::Reached(sigs),
-            AuthenticatedOutcome::Report(kind) => match kind {
-                ReportKind::NotInTimeWindow(new_engine) if !retried_time_window => {
-                    retried_time_window = true;
-                    current_engine = new_engine;
-                    continue;
-                }
-                _ => return PortOutcome::Reached(Vec::new()),
-            },
-            // The engine answered discovery: silence now costs the fingerprint, not the device.
-            AuthenticatedOutcome::Timeout | AuthenticatedOutcome::Unreachable => {
-                return PortOutcome::Reached(Vec::new())
-            }
-            AuthenticatedOutcome::DecodeFailed => return PortOutcome::DecodeFailed,
-            AuthenticatedOutcome::Other(msg) => return PortOutcome::Other(msg),
-        }
+    let mut req_ctx = ctx.clone();
+    req_ctx.timeout = overall_deadline.saturating_duration_since(tokio::time::Instant::now());
+    let get = RequestPdu::Get(prober.oids().into_iter().cloned().collect());
+    match super::request::snmp_request(&session, &get, &req_ctx).await {
+        // Discovery already proved the engine answered, so silence on the fetch keeps the device.
+        Ok(resp) if resp.error_status == 0 => PortOutcome::Reached(
+            super::v1_v2c::map_varbinds_to_signals(prober, &resp.var_binds),
+        ),
+        Ok(_) | Err(SnmpError::Absent) => PortOutcome::Reached(Vec::new()),
+        Err(SnmpError::Decode) => PortOutcome::DecodeFailed,
+        Err(SnmpError::Fault(_, msg)) | Err(SnmpError::Other(msg)) => PortOutcome::Other(msg),
     }
 }
 
@@ -141,7 +180,7 @@ fn derive_keys(
     engine: &EngineSnapshot,
     auth: &ResolvedAuth,
     privacy: &ResolvedPriv,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+) -> (Vec<u8>, Vec<u8>) {
     let auth_key = match auth {
         ResolvedAuth::None => Vec::new(),
         ResolvedAuth::Some { algo, password } => localize_key(password, &engine.engine_id, *algo),
@@ -165,7 +204,7 @@ fn derive_keys(
             *priv_algo,
         ),
     };
-    Ok((auth_key, priv_key))
+    (auth_key, priv_key)
 }
 
 async fn discover_engine(
@@ -174,7 +213,7 @@ async fn discover_engine(
     username: &str,
     ctx: &ProbeCtx,
     overall_deadline: tokio::time::Instant,
-) -> Result<EngineSnapshot, PortOutcome> {
+) -> Result<EngineSnapshot, SnmpError> {
     let msg_id = next_msg_id();
     let scoped_pdu = v3::ScopedPdu {
         engine_id: OctetString::from_static(&[]),
@@ -194,17 +233,17 @@ async fn discover_engine(
         authentication_parameters: OctetString::from_static(&[]),
         privacy_parameters: OctetString::from_static(&[]),
     };
-    let msg = build_message(msg_id, REPORTABLE_FLAG, usm_params, scoped_pdu)
-        .map_err(PortOutcome::Other)?;
+    let msg =
+        build_message(msg_id, REPORTABLE_FLAG, usm_params, scoped_pdu).map_err(SnmpError::Other)?;
     let payload = rasn::ber::encode(&msg)
-        .map_err(|e| PortOutcome::Other(format!("snmp v3 discovery encode failed: {e}")))?;
+        .map_err(|e| SnmpError::Other(format!("snmp v3 discovery encode failed: {e}")))?;
 
     let mut buf = vec![0u8; RECV_BUF_LEN];
     // Split the timeout across attempts so a dropped discovery packet is retransmitted inside the same total per-probe deadline.
     let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
     for _ in 0..=ctx.retries {
         if let Err(e) = socket.send_to(&payload, target_addr).await {
-            return Err(classify_io_error(&e));
+            return Err(snmp_io_error(&e));
         }
         let attempt_deadline = (tokio::time::Instant::now() + per_attempt).min(overall_deadline);
         loop {
@@ -215,16 +254,16 @@ async fn discover_engine(
                     }
                     let reply: v3::Message = match rasn::ber::decode(&buf[..n]) {
                         Ok(m) => m,
-                        Err(_) => return Err(PortOutcome::DecodeFailed),
+                        Err(_) => return Err(SnmpError::Decode),
                     };
                     let params: v3::USMSecurityParameters =
                         match reply.decode_security_parameters(rasn::Codec::Ber) {
                             Ok(p) => p,
-                            Err(_) => return Err(PortOutcome::DecodeFailed),
+                            Err(_) => return Err(SnmpError::Decode),
                         };
                     let engine_id: Vec<u8> = params.authoritative_engine_id.to_vec();
                     if engine_id.is_empty() {
-                        return Err(PortOutcome::Other(
+                        return Err(SnmpError::Other(
                             "snmp v3 discovery response missing engine id".to_string(),
                         ));
                     }
@@ -236,7 +275,7 @@ async fn discover_engine(
                         engine_time: time,
                     });
                 }
-                Ok(Err(e)) => return Err(classify_io_error(&e)),
+                Ok(Err(e)) => return Err(snmp_io_error(&e)),
                 Err(_) => break,
             }
         }
@@ -244,7 +283,7 @@ async fn discover_engine(
             break;
         }
     }
-    Err(PortOutcome::Timeout)
+    Err(SnmpError::Absent)
 }
 
 fn integer_to_u32(v: &Integer) -> u32 {
@@ -273,12 +312,15 @@ fn build_message(
     Ok(msg)
 }
 
-enum AuthenticatedOutcome {
-    Signals(Vec<Signal>),
-    Report(ReportKind),
-    Timeout,
-    Unreachable,
-    DecodeFailed,
+enum AuthExchange {
+    Response(SnmpResponse),
+    /// The engine answered but the fingerprint is unusable (auth fail, bad response digest, or a
+    /// non-response PDU): reachable, no data.
+    Empty,
+    Report,
+    NotInTimeWindow(EngineSnapshot),
+    Absent,
+    Decode,
     Other(String),
 }
 
@@ -287,27 +329,27 @@ enum ReportKind {
     Other,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn probe_authenticated(
+async fn one_authenticated_exchange(
     socket: &UdpSocket,
     target_addr: SocketAddr,
-    prober: &SnmpProber,
-    username: &str,
-    security_level: SecurityLevel,
+    state: &V3Session,
     engine: &EngineSnapshot,
-    auth: &ResolvedAuth,
-    auth_key: &[u8],
-    privacy: &ResolvedPriv,
-    priv_key: &[u8],
+    pdu: &RequestPdu,
     deadline: tokio::time::Instant,
-) -> AuthenticatedOutcome {
+) -> AuthExchange {
     let msg_id = next_msg_id();
     let request_id = new_request_id(target_addr.port());
+    let security_level = state.security_level;
+    let auth = &state.auth;
+    let auth_key = &state.auth_key;
+    let privacy = &state.privacy;
+    let priv_key = &state.priv_key;
+    let username = state.username.as_str();
 
-    let scoped_pdu = build_scoped_get_request(prober, engine, request_id);
+    let scoped_pdu = build_scoped_pdu(engine, pdu, request_id);
     let scoped_plaintext = match rasn::ber::encode(&scoped_pdu) {
         Ok(b) => b,
-        Err(e) => return AuthenticatedOutcome::Other(format!("snmp v3 scoped encode failed: {e}")),
+        Err(e) => return AuthExchange::Other(format!("snmp v3 scoped encode failed: {e}")),
     };
 
     let (scoped_data, privacy_parameters) = match (security_level, privacy) {
@@ -325,9 +367,7 @@ async fn probe_authenticated(
                     v3::ScopedPduData::EncryptedPdu(OctetString::from(enc.ciphertext)),
                     enc.privacy_parameters,
                 ),
-                Err(e) => {
-                    return AuthenticatedOutcome::Other(format!("snmp v3 encrypt failed: {e}"))
-                }
+                Err(e) => return AuthExchange::Other(format!("snmp v3 encrypt failed: {e}")),
             }
         }
         _ => (v3::ScopedPduData::CleartextPdu(scoped_pdu), Vec::new()),
@@ -361,20 +401,18 @@ async fn probe_authenticated(
         scoped_data,
     };
     if let Err(e) = msg.encode_security_parameters(rasn::Codec::Ber, &usm_params) {
-        return AuthenticatedOutcome::Other(format!("snmp v3 params encode failed: {e}"));
+        return AuthExchange::Other(format!("snmp v3 params encode failed: {e}"));
     }
 
     let payload = match (security_level, auth) {
         (SecurityLevel::NoAuthNoPriv, _) => match rasn::ber::encode(&msg) {
             Ok(b) => b,
-            Err(e) => return AuthenticatedOutcome::Other(format!("snmp v3 encode failed: {e}")),
+            Err(e) => return AuthExchange::Other(format!("snmp v3 encode failed: {e}")),
         },
         (_, ResolvedAuth::Some { algo, .. }) => {
             let encoded_zeroed = match rasn::ber::encode(&msg) {
                 Ok(b) => b,
-                Err(e) => {
-                    return AuthenticatedOutcome::Other(format!("snmp v3 encode failed: {e}"))
-                }
+                Err(e) => return AuthExchange::Other(format!("snmp v3 encode failed: {e}")),
             };
             let hmac = hmac_truncated(*algo, auth_key, &encoded_zeroed);
             let usm_params_real = v3::USMSecurityParameters {
@@ -386,35 +424,24 @@ async fn probe_authenticated(
                 privacy_parameters: usm_params.privacy_parameters.clone(),
             };
             if let Err(e) = msg.encode_security_parameters(rasn::Codec::Ber, &usm_params_real) {
-                return AuthenticatedOutcome::Other(format!(
-                    "snmp v3 params re-encode failed: {e}"
-                ));
+                return AuthExchange::Other(format!("snmp v3 params re-encode failed: {e}"));
             }
             match rasn::ber::encode(&msg) {
                 Ok(b) => b,
                 Err(e) => {
-                    return AuthenticatedOutcome::Other(format!(
-                        "snmp v3 encode with auth failed: {e}"
-                    ))
+                    return AuthExchange::Other(format!("snmp v3 encode with auth failed: {e}"))
                 }
             }
         }
         _ => {
-            return AuthenticatedOutcome::Other(
+            return AuthExchange::Other(
                 "snmp v3 invariant broken: authPriv without auth algorithm".to_string(),
             )
         }
     };
 
     if let Err(e) = socket.send_to(&payload, target_addr).await {
-        return match classify_io_error(&e) {
-            PortOutcome::Timeout => AuthenticatedOutcome::Timeout,
-            PortOutcome::Unreachable => AuthenticatedOutcome::Unreachable,
-            PortOutcome::Fault(_, msg) | PortOutcome::Other(msg) => {
-                AuthenticatedOutcome::Other(msg)
-            }
-            _ => AuthenticatedOutcome::Unreachable,
-        };
+        return io_error_to_exchange(&e);
     }
 
     let mut buf = vec![0u8; RECV_BUF_LEN];
@@ -426,13 +453,13 @@ async fn probe_authenticated(
                 }
                 let reply: v3::Message = match rasn::ber::decode(&buf[..n]) {
                     Ok(m) => m,
-                    Err(_) => return AuthenticatedOutcome::DecodeFailed,
+                    Err(_) => return AuthExchange::Decode,
                 };
 
                 let params: v3::USMSecurityParameters =
                     match reply.decode_security_parameters(rasn::Codec::Ber) {
                         Ok(p) => p,
-                        Err(_) => return AuthenticatedOutcome::DecodeFailed,
+                        Err(_) => return AuthExchange::Decode,
                     };
 
                 let response_engine = EngineSnapshot {
@@ -447,7 +474,7 @@ async fn probe_authenticated(
                 if response_is_authenticated
                     && !verify_response_auth(&reply, auth, auth_key, &params)
                 {
-                    return AuthenticatedOutcome::Signals(Vec::new());
+                    return AuthExchange::Empty;
                 }
 
                 let scoped = match extract_scoped_pdu(
@@ -458,57 +485,67 @@ async fn probe_authenticated(
                     &params,
                 ) {
                     Ok(s) => s,
-                    Err(_) => return AuthenticatedOutcome::DecodeFailed,
+                    Err(_) => return AuthExchange::Decode,
                 };
 
                 if scoped_pdu_is_report(&scoped) {
-                    return AuthenticatedOutcome::Report(classify_report(&scoped, response_engine));
+                    return match classify_report(&scoped, response_engine) {
+                        ReportKind::NotInTimeWindow(e) => AuthExchange::NotInTimeWindow(e),
+                        ReportKind::Other => AuthExchange::Report,
+                    };
                 }
 
                 if !response_is_authenticated && matches!(auth, ResolvedAuth::Some { .. }) {
-                    return AuthenticatedOutcome::Signals(Vec::new());
+                    return AuthExchange::Empty;
                 }
 
-                let signals = extract_signals(prober, &scoped, request_id);
-                return AuthenticatedOutcome::Signals(signals);
+                return match extract_response(&scoped, request_id) {
+                    Some(resp) => AuthExchange::Response(resp),
+                    None => AuthExchange::Empty,
+                };
             }
-            Ok(Err(e)) => {
-                return match classify_io_error(&e) {
-                    PortOutcome::Timeout => AuthenticatedOutcome::Timeout,
-                    PortOutcome::Unreachable => AuthenticatedOutcome::Unreachable,
-                    PortOutcome::Fault(_, msg) | PortOutcome::Other(msg) => {
-                        AuthenticatedOutcome::Other(msg)
-                    }
-                    _ => AuthenticatedOutcome::Unreachable,
-                }
-            }
-            Err(_) => return AuthenticatedOutcome::Timeout,
+            Ok(Err(e)) => return io_error_to_exchange(&e),
+            Err(_) => return AuthExchange::Absent,
         }
     }
 }
 
-fn build_scoped_get_request(
-    prober: &SnmpProber,
-    engine: &EngineSnapshot,
-    request_id: i32,
-) -> v3::ScopedPdu {
-    let variable_bindings = prober
-        .oids()
-        .into_iter()
-        .map(|oid| snmp_v2::VarBind {
-            name: oid.clone(),
-            value: snmp_v2::VarBindValue::Unspecified,
-        })
-        .collect();
+fn io_error_to_exchange(err: &std::io::Error) -> AuthExchange {
+    match snmp_io_error(err) {
+        SnmpError::Absent | SnmpError::Decode => AuthExchange::Absent,
+        SnmpError::Fault(_, msg) | SnmpError::Other(msg) => AuthExchange::Other(msg),
+    }
+}
+
+fn build_scoped_pdu(engine: &EngineSnapshot, pdu: &RequestPdu, request_id: i32) -> v3::ScopedPdu {
+    let simple_pdu = |names: &[rasn::types::ObjectIdentifier]| snmp_v2::Pdu {
+        request_id,
+        error_status: 0,
+        error_index: 0,
+        variable_bindings: unspecified_v2_varbinds(names),
+    };
+    let data = match pdu {
+        RequestPdu::Get(names) => snmp_v2::Pdus::GetRequest(snmp_v2::GetRequest(simple_pdu(names))),
+        #[cfg(feature = "lldp")]
+        RequestPdu::GetNext(names) => {
+            snmp_v2::Pdus::GetNextRequest(snmp_v2::GetNextRequest(simple_pdu(names)))
+        }
+        #[cfg(feature = "lldp")]
+        RequestPdu::GetBulk {
+            non_repeaters,
+            max_repetitions,
+            names,
+        } => snmp_v2::Pdus::GetBulkRequest(snmp_v2::GetBulkRequest(snmp_v2::BulkPdu {
+            request_id,
+            non_repeaters: *non_repeaters,
+            max_repetitions: *max_repetitions,
+            variable_bindings: unspecified_v2_varbinds(names),
+        })),
+    };
     v3::ScopedPdu {
         engine_id: OctetString::from_slice(&engine.engine_id),
         name: OctetString::from_static(&[]),
-        data: snmp_v2::Pdus::GetRequest(snmp_v2::GetRequest(snmp_v2::Pdu {
-            request_id,
-            error_status: 0,
-            error_index: 0,
-            variable_bindings,
-        })),
+        data,
     }
 }
 
@@ -600,57 +637,24 @@ fn classify_report(scoped: &v3::ScopedPdu, engine: EngineSnapshot) -> ReportKind
     ReportKind::Other
 }
 
-fn extract_signals(
-    prober: &SnmpProber,
-    scoped: &v3::ScopedPdu,
-    expected_request_id: i32,
-) -> Vec<Signal> {
+fn extract_response(scoped: &v3::ScopedPdu, expected_request_id: i32) -> Option<SnmpResponse> {
     let pdu = match &scoped.data {
         snmp_v2::Pdus::Response(snmp_v2::Response(pdu)) => pdu,
-        _ => return Vec::new(),
-    };
-    if pdu.request_id != expected_request_id {
-        return Vec::new();
-    }
-    if pdu.error_status != 0 {
-        return Vec::new();
-    }
-    let mut signals = Vec::new();
-    for binding in &pdu.variable_bindings {
-        let syntax = match &binding.value {
-            snmp_v2::VarBindValue::Value(s) => s,
-            _ => continue,
-        };
-        if let Some(signal) = map_v2_syntax(prober, &binding.name, syntax) {
-            signals.push(signal);
-        }
-    }
-    signals
-}
-
-fn map_v2_syntax(
-    prober: &SnmpProber,
-    name: &rasn::types::ObjectIdentifier,
-    value: &rasn_smi::v2::ObjectSyntax,
-) -> Option<Signal> {
-    let simple = match value {
-        rasn_smi::v2::ObjectSyntax::Simple(s) => s,
         _ => return None,
     };
-    if oid_eq(name, prober.oid_sys_descr()) {
-        if let rasn_smi::v2::SimpleSyntax::String(bytes) = simple {
-            return Some(Signal::SnmpSysDescr(sanitize_octets(bytes.as_ref())));
-        }
-    } else if oid_eq(name, prober.oid_sys_object_id()) {
-        if let rasn_smi::v2::SimpleSyntax::ObjectId(oid) = simple {
-            return Some(Signal::SnmpSysObjectId(oid_to_dotted(oid)));
-        }
-    } else if oid_eq(name, prober.oid_sys_name()) {
-        if let rasn_smi::v2::SimpleSyntax::String(bytes) = simple {
-            return Some(Signal::SnmpSysName(sanitize_octets(bytes.as_ref())));
-        }
+    if pdu.request_id != expected_request_id {
+        return None;
     }
-    None
+    let var_binds = pdu
+        .variable_bindings
+        .iter()
+        .cloned()
+        .map(normalize_v2_varbind)
+        .collect();
+    Some(SnmpResponse {
+        error_status: pdu.error_status,
+        var_binds,
+    })
 }
 
 #[cfg(test)]

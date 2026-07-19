@@ -530,6 +530,7 @@ fn build_echo_request(family: Family, seq: u16, payload: &[u8]) -> [u8; ICMP_PAC
 
 fn open_fault_outcome(target_ip: IpAddr, fault: ProbeFault) -> ProbeOutcome {
     ProbeOutcome {
+        lldp: None,
         kind: ProbeKind::Icmp,
         target_ip,
         timestamp: SystemTime::now(),
@@ -569,6 +570,7 @@ fn min_rtt_outcome(
         None => (false, Vec::new()),
     };
     ProbeOutcome {
+        lldp: None,
         kind: ProbeKind::Icmp,
         target_ip,
         timestamp: SystemTime::now(),

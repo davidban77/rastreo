@@ -34,6 +34,7 @@ pub enum ProbeKind {
     Tls,
     ReverseDns,
     Gnmi,
+    Lldp,
 }
 
 /// Number of `ProbeKind` variants — indexes fixed-size counter arrays without heap allocation.
@@ -41,7 +42,7 @@ pub enum ProbeKind {
 /// Adding a variant to `ProbeKind` requires bumping this constant and extending
 /// `ProbeKind::all()` in the same change; the compiler surfaces the miss via the
 /// array-size mismatch.
-pub const PROBE_KIND_COUNT: usize = 12;
+pub const PROBE_KIND_COUNT: usize = 13;
 
 impl ProbeKind {
     /// Every variant in a stable, deterministic order — used for iterating fixed-size counter arrays.
@@ -59,6 +60,7 @@ impl ProbeKind {
             ProbeKind::Tls,
             ProbeKind::ReverseDns,
             ProbeKind::Gnmi,
+            ProbeKind::Lldp,
         ]
     }
 
@@ -77,6 +79,7 @@ impl ProbeKind {
             ProbeKind::Tls => 9,
             ProbeKind::ReverseDns => 10,
             ProbeKind::Gnmi => 11,
+            ProbeKind::Lldp => 12,
         }
     }
 
@@ -95,6 +98,7 @@ impl ProbeKind {
             ProbeKind::Tls => "tls",
             ProbeKind::ReverseDns => "reverse_dns",
             ProbeKind::Gnmi => "gnmi",
+            ProbeKind::Lldp => "lldp",
         }
     }
 }
@@ -170,6 +174,31 @@ impl ProbeFault {
     }
 }
 
+/// LLDP neighbor observation collected by the `lldp` prober: the probed device's own chassis-id
+/// plus the neighbors it reports. Carried on the outcome — not folded into signals — so a switch
+/// with many neighbors does not inflate its device confidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct LldpObservation {
+    pub local_chassis_id: String,
+    pub local_chassis_subtype: u32,
+    pub neighbors: Vec<LldpNeighbor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct LldpNeighbor {
+    pub local_port: String,
+    pub remote_chassis_id: String,
+    pub remote_chassis_subtype: u32,
+    pub remote_port_id: String,
+    pub remote_port_subtype: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_port_desc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_sys_name: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ProbeOutcome {
@@ -180,6 +209,8 @@ pub struct ProbeOutcome {
     pub signals: Vec<Signal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<ProbeFault>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lldp: Option<LldpObservation>,
 }
 
 #[cfg(test)]
@@ -202,6 +233,7 @@ mod tests {
             ProbeKind::Tls,
             ProbeKind::ReverseDns,
             ProbeKind::Gnmi,
+            ProbeKind::Lldp,
         ] {
             let s = serde_json::to_string(&kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
@@ -229,6 +261,7 @@ mod tests {
     #[test]
     fn probe_outcome_round_trips_json() {
         let outcome = ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -251,6 +284,7 @@ mod tests {
     #[test]
     fn probe_outcome_round_trips_a_reachable_fault() {
         let outcome = ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::Snmp,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -272,6 +306,7 @@ mod tests {
     #[test]
     fn probe_outcome_omits_fault_from_wire_when_none() {
         let outcome = ProbeOutcome {
+            lldp: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             timestamp: SystemTime::UNIX_EPOCH,

@@ -148,6 +148,10 @@ fn render_prober(config: &ProberConfig) -> String {
         ProberConfig::Snmp { ports, version, .. } => {
             format!("snmp (ports {}, {:?})", format_ports(ports), version)
         }
+        #[cfg(feature = "lldp")]
+        ProberConfig::Lldp { ports, version, .. } => {
+            format!("lldp (ports {}, {:?})", format_ports(ports), version)
+        }
         #[cfg(feature = "arp")]
         ProberConfig::Arp { interface } => format!("arp (interface {interface:?})"),
         #[cfg(feature = "ndp")]
