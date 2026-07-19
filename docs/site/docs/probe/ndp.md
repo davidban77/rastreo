@@ -82,7 +82,7 @@ The feature pulls in `pnet_datalink` and `pnet_packet` from the libpnet family, 
     sudo sysctl -w debug.bpf_maxbufsize=4194304
     ```
 
-The published image ships both binaries with `cap_net_raw+ep` set as a file capability, so the non-root runtime user (`UID 65532`) can open `AF_PACKET` sockets without escalating. The container still needs `NET_RAW` in its bounding set — pass `--cap-add=NET_RAW` to `docker run` (standalone) or set `capabilities.add: [NET_RAW]` on the Kubernetes container (via the Helm chart's `podSecurity.netRaw`). Without a bounding-set entry, the file capability alone is not enough.
+The published image ships both binaries with `CAP_NET_RAW` set as a permitted-only file capability. The non-root runtime user (`UID 65532`) raises it to effective in-process just before opening an `AF_PACKET` socket, so the image execs cleanly under a hardened, non-root `securityContext`. To actually open the socket the container still needs `NET_RAW` granted at runtime — pass `--cap-add=NET_RAW` to `docker run` (standalone) or set `capabilities.add: [NET_RAW]` on the Kubernetes container (via the Helm chart's `podSecurity.netRaw`).
 
 ## Runtime privilege
 

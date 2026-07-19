@@ -200,6 +200,9 @@ fn open_socket(family: Family) -> Result<Socket, ProbeFault> {
     let socket = match Socket::new(domain, Type::DGRAM, Some(protocol)) {
         Ok(s) => s,
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            // Raise cap_net_raw from permitted to effective so a `+p` non-root binary can open the raw socket.
+            #[cfg(target_os = "linux")]
+            crate::prober::capability::raise_net_raw_effective();
             Socket::new(domain, Type::RAW, Some(protocol)).map_err(|e| {
                 ProbeFault::new(
                     ProbeErrorKind::PermissionDenied,

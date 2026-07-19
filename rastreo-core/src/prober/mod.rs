@@ -1,5 +1,10 @@
 #[cfg(feature = "arp")]
 pub mod arp;
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "arp", feature = "ndp", feature = "icmp")
+))]
+pub(crate) mod capability;
 pub(crate) mod classify;
 #[cfg(any(feature = "icmp", feature = "arp", feature = "ndp"))]
 pub(crate) mod demux;

@@ -213,6 +213,9 @@ fn open_af_packet_socket() -> std::io::Result<std::os::fd::RawFd> {
     use socket2::{Domain, Protocol, Socket, Type};
     use std::os::fd::IntoRawFd;
 
+    // Raise cap_net_raw from permitted to effective so a `+p` non-root binary can open the socket.
+    crate::prober::capability::raise_net_raw_effective();
+
     // The protocol arg is irrelevant here — pnet re-binds the fd with its own sll_protocol before capture.
     const ETH_P_ALL: i32 = 0x0003;
     let socket = Socket::new(
@@ -248,15 +251,20 @@ fn bpf_channel_config() -> Config {
 }
 
 fn channel_open_fault<P: LinkLayerProtocol>(err: &std::io::Error) -> ProbeFault {
-    let detail = if err.kind() == ErrorKind::PermissionDenied {
-        format!(
-            "raw socket permission denied; {} requires CAP_NET_RAW",
-            P::NAME_UPPER
+    if err.kind() == ErrorKind::PermissionDenied {
+        ProbeFault::new(
+            ProbeErrorKind::PermissionDenied,
+            format!(
+                "raw socket permission denied; {} requires CAP_NET_RAW",
+                P::NAME_UPPER
+            ),
         )
     } else {
-        format!("{} channel open failed: {err}", P::NAME)
-    };
-    ProbeFault::new(ProbeErrorKind::Other, detail)
+        ProbeFault::new(
+            ProbeErrorKind::Other,
+            format!("{} channel open failed: {err}", P::NAME),
+        )
+    }
 }
 
 /// Memoizes an engine open per interface: an open failure is cached and returned to every subsequent
@@ -609,12 +617,21 @@ mod tests {
     fn channel_open_fault_names_cap_net_raw_on_permission_denied() {
         let fault =
             channel_open_fault::<TestProtocol>(&std::io::Error::from(ErrorKind::PermissionDenied));
-        assert_eq!(fault.kind, ProbeErrorKind::Other);
+        assert_eq!(fault.kind, ProbeErrorKind::PermissionDenied);
         assert!(
             fault.detail.contains("CAP_NET_RAW"),
             "got: {}",
             fault.detail
         );
+    }
+
+    #[test]
+    fn a_permission_denied_channel_open_surfaces_the_cap_net_raw_hint() {
+        let fault =
+            channel_open_fault::<TestProtocol>(&std::io::Error::from(ErrorKind::PermissionDenied));
+        assert_eq!(fault.kind, ProbeErrorKind::PermissionDenied);
+        let hint = crate::hints::hint_for_error_kind(fault.kind).expect("permission-denied hint");
+        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
     }
 
     #[test]

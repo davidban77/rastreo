@@ -56,15 +56,15 @@ The prober prefers an unprivileged path and falls back to a privileged one only 
 
 - **macOS**: unprivileged `SOCK_DGRAM` ICMP always works. No setup required.
 - **Linux (unprivileged path)**: the prober tries `SOCK_DGRAM` with `IPPROTO_ICMP` or `IPPROTO_ICMPV6` first. The kernel permits this only when the process's group ID falls inside the range in `/proc/sys/net/ipv4/ping_group_range`. Most distributions ship this as `1 0` — an empty range — which disables the unprivileged path for every user. Widen the range with `sysctl -w net.ipv4.ping_group_range="0 2147483647"` to open it up to everyone, or set a narrower range to a specific group.
-- **Linux (privileged fallback)**: when the unprivileged path is refused with a permission-denied error, the prober falls back to a `SOCK_RAW` socket, which requires the `CAP_NET_RAW` capability. If neither path is available the probe returns `ProbeError::Other("icmp: raw socket unavailable: ...")`.
+- **Linux (privileged fallback)**: when the unprivileged path is refused with a permission-denied error, the prober falls back to a `SOCK_RAW` socket, which requires the `CAP_NET_RAW` capability. If neither path is available the probe returns a `permission_denied` fault (`"icmp: raw socket unavailable: ..."`).
 
-The release Docker image ships both binaries with `cap_net_raw+ep` set as a file capability via `setcap` in the build stage. That grants `CAP_NET_RAW` to the non-root runtime user (`UID 65532`) directly, so the raw-socket fallback works without widening `ping_group_range`. The container still needs `NET_RAW` in its bounding set — the file capability alone is not enough inside Docker.
+The release Docker image ships both binaries with `CAP_NET_RAW` set as a permitted-only file capability. Each binary raises it to effective in-process before the `SOCK_RAW` fallback, so that path works without widening `ping_group_range`, and the image execs cleanly under a hardened, non-root `securityContext`. For the fallback to open its socket the container still needs `NET_RAW` granted at runtime — pass `--cap-add=NET_RAW` (already set on the bundled `docker-compose.yml`).
 
 | Runtime | How to grant | Notes |
 |---|---|---|
 | `docker run` | `--cap-add=NET_RAW` | The bundled `docker-compose.yml` already sets this on the `rastreo-server` service. |
 | Kubernetes (Helm chart) | `--set podSecurity.netRaw=true` | Off by default because Pod Security Standards `restricted` disallows capability additions. Only enable in clusters that permit it. |
-| Bare metal (Linux) | `sudo setcap cap_net_raw+ep target/release/rastreo` | Grants the capability to the binary itself. Alternatives: run under `sudo`, or widen `net.ipv4.ping_group_range` and rely on the unprivileged `SOCK_DGRAM` path. |
+| Bare metal (Linux) | `sudo setcap cap_net_raw+p target/release/rastreo` | Grants the capability to the binary itself, which raises it to effective when the fallback opens its socket. Alternatives: run under `sudo`, or widen `net.ipv4.ping_group_range` and rely on the unprivileged `SOCK_DGRAM` path. |
 | Bare metal (macOS) | none needed | Unprivileged `SOCK_DGRAM` ICMP always works. |
 
 ## Build feature

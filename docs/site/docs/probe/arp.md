@@ -70,7 +70,7 @@ The feature pulls in `pnet_datalink` and `pnet_packet` from the libpnet family, 
     sudo sysctl -w debug.bpf_maxbufsize=4194304
     ```
 
-The published image ships both binaries with `cap_net_raw+ep` set as a file capability, so the non-root runtime user (`UID 65532`) can open `AF_PACKET` sockets without escalating. The container still needs `NET_RAW` in its bounding set — pass `--cap-add=NET_RAW` to `docker run` (standalone) or set `capabilities.add: [NET_RAW]` on the Kubernetes container (via the Helm chart's `podSecurity.netRaw`). Without a bounding-set entry, the file capability alone is not enough.
+The published image ships both binaries with `CAP_NET_RAW` set as a permitted-only file capability. The non-root runtime user (`UID 65532`) raises it to effective in-process just before opening an `AF_PACKET` socket, so the image execs cleanly under a hardened, non-root `securityContext`. To actually open the socket the container still needs `NET_RAW` granted at runtime — pass `--cap-add=NET_RAW` to `docker run` (standalone) or set `capabilities.add: [NET_RAW]` on the Kubernetes container (via the Helm chart's `podSecurity.netRaw`).
 
 ## Runtime privilege
 
@@ -80,9 +80,9 @@ Opening an `AF_PACKET` socket requires `CAP_NET_RAW`. Every runtime that hosts `
 |---|---|---|
 | `docker run` | `--cap-add=NET_RAW` | The bundled `docker-compose.yml` already sets this on the `rastreo-server` service. |
 | Kubernetes (Helm chart) | `--set podSecurity.netRaw=true` | Off by default because Pod Security Standards `restricted` disallows capability additions. Only enable in clusters that permit it. |
-| Bare metal | `sudo setcap cap_net_raw+ep target/release/rastreo` | Grants the capability to the binary itself. Alternatively, run under `sudo`. |
+| Bare metal | `sudo setcap cap_net_raw+p target/release/rastreo` | Grants the capability to the binary itself, which raises it to effective when it opens the socket. Alternatively, run under `sudo`. |
 
-Without `CAP_NET_RAW` the probe returns `ProbeError::Other("raw socket permission denied; ARP requires CAP_NET_RAW")`. This is a hard error, not a timeout — the socket call fails immediately.
+Without `CAP_NET_RAW` the probe records a clean `permission_denied` fault and the scan continues; the process still exits 0. This is immediate, not a timeout — the raw socket is refused the moment the probe tries to open it, and nothing crashes.
 
 ## Security notes
 
