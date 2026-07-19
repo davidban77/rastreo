@@ -103,4 +103,8 @@ One of:
 - { `TlsCipherSuite`: string }
 - { `TlsAlpn`: string }
 - { `ReverseDnsName`: string }
+- { `GnmiVersion`: string }
+- { `GnmiSupportedModel`: string }
+- { `GnmiSupportedEncoding`: string }
+- { `GnmiState`: object }
 

@@ -36,6 +36,7 @@ oui = ["dep:flate2"]
 ssh = ["dep:russh"]
 icmp = ["dep:socket2", "dep:pnet_packet", "dep:caps"]
 tls = ["dep:rustls", "dep:rustls-pki-types", "dep:tokio-rustls", "dep:x509-parser"]
+gnmi = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:prost-types", "dep:rustls"]
 otlp = [
     "dep:anyhow",
     "dep:tracing-subscriber",
@@ -88,6 +89,10 @@ russh = { version = "0.62", default-features = false, features = ["ring", "rsa"]
 socket2 = { version = "0.6", features = ["all"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
 x509-parser = { version = "0.16", default-features = false, optional = true }
+tonic = { version = "0.14", default-features = false, features = ["channel", "tls-ring", "codegen"], optional = true }
+tonic-prost = { version = "0.14", default-features = false, optional = true }
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
 anyhow = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, features = ["json"], optional = true }
 opentelemetry = { version = "0.32", optional = true }

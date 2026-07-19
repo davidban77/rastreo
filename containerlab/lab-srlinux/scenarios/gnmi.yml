@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: srlinux-gnmi
+    targets:
+      - Ip: "198.51.100.11"
+      - Ip: "198.51.100.12"
+    probers:
+      - type: gnmi
+        ports: [57400]
+        username: admin
+        password: NokiaSrl1!
+        get_paths:
+          - /system/state/hostname

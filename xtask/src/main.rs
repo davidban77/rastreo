@@ -5,12 +5,13 @@ fn main() -> Result<()> {
     match cmd.as_str() {
         "generate" => xtask::generate_all(),
         "render" => xtask::render_all(),
+        "gen-gnmi" => xtask::gen_gnmi(),
         "all" => {
             xtask::generate_all()?;
             xtask::render_all()
         }
         other => Err(anyhow!(
-            "unknown subcommand: {other}. valid: generate | render | all"
+            "unknown subcommand: {other}. valid: generate | render | gen-gnmi | all"
         )),
     }
 }

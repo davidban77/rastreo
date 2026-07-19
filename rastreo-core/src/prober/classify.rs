@@ -50,7 +50,7 @@ fn io_source(err: &NetError) -> Option<&std::io::Error> {
     None
 }
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "gnmi"))]
 pub(crate) fn io_error_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a std::io::Error> {

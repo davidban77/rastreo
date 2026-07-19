@@ -33,6 +33,7 @@ pub enum ProbeKind {
     Icmp,
     Tls,
     ReverseDns,
+    Gnmi,
 }
 
 /// Number of `ProbeKind` variants — indexes fixed-size counter arrays without heap allocation.
@@ -40,7 +41,7 @@ pub enum ProbeKind {
 /// Adding a variant to `ProbeKind` requires bumping this constant and extending
 /// `ProbeKind::all()` in the same change; the compiler surfaces the miss via the
 /// array-size mismatch.
-pub const PROBE_KIND_COUNT: usize = 11;
+pub const PROBE_KIND_COUNT: usize = 12;
 
 impl ProbeKind {
     /// Every variant in a stable, deterministic order — used for iterating fixed-size counter arrays.
@@ -57,6 +58,7 @@ impl ProbeKind {
             ProbeKind::Icmp,
             ProbeKind::Tls,
             ProbeKind::ReverseDns,
+            ProbeKind::Gnmi,
         ]
     }
 
@@ -74,6 +76,7 @@ impl ProbeKind {
             ProbeKind::Icmp => 8,
             ProbeKind::Tls => 9,
             ProbeKind::ReverseDns => 10,
+            ProbeKind::Gnmi => 11,
         }
     }
 
@@ -91,6 +94,7 @@ impl ProbeKind {
             ProbeKind::Icmp => "icmp",
             ProbeKind::Tls => "tls",
             ProbeKind::ReverseDns => "reverse_dns",
+            ProbeKind::Gnmi => "gnmi",
         }
     }
 }
@@ -118,6 +122,10 @@ pub enum Signal {
     TlsCipherSuite(String),
     TlsAlpn(String),
     ReverseDnsName(String),
+    GnmiVersion(String),
+    GnmiSupportedModel(String),
+    GnmiSupportedEncoding(String),
+    GnmiState { path: String, value: String },
 }
 
 #[derive(Debug, Clone)]
@@ -193,10 +201,28 @@ mod tests {
             ProbeKind::Icmp,
             ProbeKind::Tls,
             ProbeKind::ReverseDns,
+            ProbeKind::Gnmi,
         ] {
             let s = serde_json::to_string(&kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
             assert_eq!(kind, back);
+        }
+    }
+
+    #[test]
+    fn gnmi_signal_variants_round_trip_json() {
+        for signal in [
+            Signal::GnmiVersion("0.10.0".into()),
+            Signal::GnmiSupportedModel("openconfig-interfaces 3.0.0".into()),
+            Signal::GnmiSupportedEncoding("JSON_IETF".into()),
+            Signal::GnmiState {
+                path: "/system/state/hostname".into(),
+                value: "srlinux".into(),
+            },
+        ] {
+            let s = serde_json::to_string(&signal).expect("serialize");
+            let back: Signal = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(signal, back);
         }
     }
 

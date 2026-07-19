@@ -59,7 +59,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Eleven probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, and `tls` variants are gated behind their matching Cargo features on `rastreo-core` (all bundled with the published binaries and Docker image); `tcp_connect`, `dns`, `reverse_dns`, and `udp` are always available.
+The `probers` array contains internally-tagged objects (each carries a `type` field). Twelve probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, and `gnmi`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, and `gnmi` variants are gated behind their matching Cargo features on `rastreo-core`, all bundled with the published binaries and Docker image. The `tcp_connect`, `dns`, `reverse_dns`, and `udp` variants are always available.
 
 ### `tcp_connect`
 
@@ -242,6 +242,23 @@ Opens a TCP connection to each configured port, performs a TLS handshake accepti
 
 ```json
 {"type": "tls", "ports": [443, 8443]}
+```
+
+### `gnmi`
+
+Connects to a device's gRPC/gNMI endpoint on each configured port, issues a Capabilities call and a Get call, and emits the gNMI version, supported YANG models and encodings, and configured state values as typed signals. TLS accepts any server certificate — the prober fingerprints the endpoint, it does not authenticate it. Credentials are optional but unlock the state values; without them most devices reject the read. See the [gNMI prober page](../probe/gnmi.md) for the transport, authentication, and reachability rules.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"gnmi"`. |
+| `ports` | array of u16 | no | `[57400]` | Ports to probe. Sorted and deduplicated at construction. |
+| `plaintext` | bool | no | `false` | When `false`, connects over TLS accepting any certificate. When `true`, connects over cleartext gRPC. |
+| `username` | string | no | `""` | gNMI username. Empty means an anonymous probe. |
+| `password` | string | no | `""` | gNMI password. Redacted in Debug output. Accepts `${VAR}` and `!file` secrets. |
+| `get_paths` | array of string | no | `["/system/state/hostname"]` | gNMI paths for the Get call. An empty list runs Capabilities only. |
+
+```json
+{"type": "gnmi", "ports": [57400], "username": "admin", "password": "${GNMI_PASSWORD}", "get_paths": ["/system/state/hostname"]}
 ```
 
 ## Encoders

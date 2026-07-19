@@ -978,6 +978,51 @@
         },
         {
           "properties": {
+            "get_paths": {
+              "default": [
+                "/system/state/hostname"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "password": {
+              "$ref": "#/$defs/Password",
+              "default": ""
+            },
+            "plaintext": {
+              "default": false,
+              "type": "boolean"
+            },
+            "ports": {
+              "default": [
+                57400
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "gnmi",
+              "type": "string"
+            },
+            "username": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "resolvers": {
               "default": [],
               "items": {

@@ -3,12 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{
-    CipherSuite, ClientConfig, DigitallySignedStruct, Error as RustlsError, ProtocolVersion,
-    SignatureScheme,
-};
+use rustls::pki_types::ServerName;
+use rustls::{CipherSuite, ClientConfig, ProtocolVersion};
 use tokio::net::TcpStream;
 use tokio::time::error::Elapsed;
 use tokio::time::timeout;
@@ -18,6 +14,7 @@ use x509_parser::parse_x509_certificate;
 
 use crate::error::{ConfigError, RastreoError};
 use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::prober::accept_any_tls::AcceptAnyVerifier;
 use crate::prober::classify::{self, Disposition};
 use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
 use crate::prober::Prober;
@@ -48,59 +45,6 @@ impl TlsProber {
 
 pub fn default_ports() -> Vec<u16> {
     vec![443]
-}
-
-/// Accepts every server certificate without validation. The prober fingerprints what a server
-/// calls itself, it does not authenticate the server; skipping trust-chain checks is required
-/// to reach servers with self-signed, expired, or otherwise untrusted certificates.
-#[derive(Debug)]
-struct AcceptAnyVerifier;
-
-impl ServerCertVerifier for AcceptAnyVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, RustlsError> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
-    }
 }
 
 fn build_accept_any_config() -> ClientConfig {

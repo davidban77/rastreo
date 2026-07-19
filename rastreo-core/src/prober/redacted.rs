@@ -55,26 +55,46 @@ impl schemars::JsonSchema for Community {
     }
 }
 
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 #[derive(Clone, Default, serde::Deserialize)]
 #[serde(transparent)]
 pub struct Password(pub String);
 
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 impl std::fmt::Debug for Password {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<redacted:{}>", short_hash(&self.0))
     }
 }
 
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 impl serde::Serialize for Password {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(&format_args!("<redacted:{}>", short_hash(&self.0)))
     }
 }
 
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 impl std::ops::Deref for Password {
     type Target = str;
     fn deref(&self) -> &str {
@@ -82,7 +102,12 @@ impl std::ops::Deref for Password {
     }
 }
 
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 impl Password {
     /// Returns the underlying secret string. Callers must not log, serialize, or persist the result.
     pub fn expose(&self) -> &str {
@@ -90,7 +115,12 @@ impl Password {
     }
 }
 
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 impl schemars::JsonSchema for Password {
     // Wire form is a plain YAML string; the redacted `<redacted:HHHHHHHH>` shape only affects Serialize output.
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -106,7 +136,12 @@ impl schemars::JsonSchema for Password {
 }
 
 // Distinct-per-value redacted marker: credential rotation must change `source_config_hash`.
-#[cfg(any(feature = "snmp", feature = "nats", feature = "kafka"))]
+#[cfg(any(
+    feature = "snmp",
+    feature = "nats",
+    feature = "kafka",
+    feature = "gnmi"
+))]
 fn short_hash(s: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();

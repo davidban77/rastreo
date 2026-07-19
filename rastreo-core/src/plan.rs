@@ -160,6 +160,14 @@ fn render_prober(config: &ProberConfig) -> String {
         }
         #[cfg(feature = "tls")]
         ProberConfig::Tls { ports } => format!("tls (ports {})", format_ports(ports)),
+        #[cfg(feature = "gnmi")]
+        ProberConfig::Gnmi {
+            ports, plaintext, ..
+        } => format!(
+            "gnmi (ports {}, {})",
+            format_ports(ports),
+            if *plaintext { "plaintext" } else { "tls" }
+        ),
         ProberConfig::ReverseDns { resolvers } => {
             if resolvers.is_empty() {
                 "reverse_dns (system resolvers)".to_string()
