@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0](https://github.com/davidban77/rastreo/compare/v0.7.0...v0.8.0) (2026-07-19)
+
+
+### Features
+
+* **observability:** OTLP trace export over the scan pipeline ([#172](https://github.com/davidban77/rastreo/issues/172)) ([daa97e9](https://github.com/davidban77/rastreo/commit/daa97e933466eaee5d86702df60c0441ca52ed4f))
+* **prober:** gNMI prober for gRPC device fingerprinting ([#174](https://github.com/davidban77/rastreo/issues/174)) ([03b4e57](https://github.com/davidban77/rastreo/commit/03b4e57a13023f455c722f1766b01b5f7c88e31c))
+* **prober:** richer gNMI capture — encoding negotiation, path origin/keys, model org ([#175](https://github.com/davidban77/rastreo/issues/175)) ([0b7ac6e](https://github.com/davidban77/rastreo/commit/0b7ac6ea0bad389a99ad8dd4ef36ea747bf030a5))
+
+
+### Bug Fixes
+
+* **cli:** rastreo validate rejects invalid fuser config offline ([#161](https://github.com/davidban77/rastreo/issues/161)) ([88a98c8](https://github.com/davidban77/rastreo/commit/88a98c84d2f260abb524e832f1d3176963a81ea7))
+* **container:** run under a hardened securityContext (permitted-only CAP_NET_RAW) ([#173](https://github.com/davidban77/rastreo/issues/173)) ([4dc5878](https://github.com/davidban77/rastreo/commit/4dc587847049b1853abb04b92ad8f21d834cdda8))
+
+
+### CI/CD
+
+* bump astral-sh/setup-uv from 5 to 7 ([#166](https://github.com/davidban77/rastreo/issues/166)) ([e122bce](https://github.com/davidban77/rastreo/commit/e122bceeebbe8ed2573d82927d366ffc70992fbd))
+
+
+### Refactoring
+
+* **fuser:** streaming-native ingest/finish Fuser contract ([#157](https://github.com/davidban77/rastreo/issues/157)) ([2b1747b](https://github.com/davidban77/rastreo/commit/2b1747b115e729a5cd7bf2b2689fb5c77392ba29))
+* **scheduler:** run probers target-outer instead of prober-outer ([#159](https://github.com/davidban77/rastreo/issues/159)) ([397fabe](https://github.com/davidban77/rastreo/commit/397fabef9e4b5bfd876241ee08f3a95f22060ea9))
+
 ## [0.7.0](https://github.com/davidban77/rastreo/compare/v0.6.0...v0.7.0) (2026-07-16)
 
 
