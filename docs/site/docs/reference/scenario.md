@@ -255,7 +255,7 @@ Connects to a device's gRPC/gNMI endpoint on each configured port, issues a Capa
 | `plaintext` | bool | no | `false` | When `false`, connects over TLS accepting any certificate. When `true`, connects over cleartext gRPC. |
 | `username` | string | no | `""` | gNMI username. Empty means an anonymous probe. |
 | `password` | string | no | `""` | gNMI password. Redacted in Debug output. Accepts `${VAR}` and `!file` secrets. |
-| `get_paths` | array of string | no | `["/system/state/hostname"]` | gNMI paths for the Get call. An empty list runs Capabilities only. |
+| `get_paths` | array of string | no | `["/system/state/hostname", "/system/state/software-version"]` | gNMI paths for the Get call. Supports path origins and keyed list elements. An empty list runs Capabilities only. |
 
 ```json
 {"type": "gnmi", "ports": [57400], "username": "admin", "password": "${GNMI_PASSWORD}", "get_paths": ["/system/state/hostname"]}

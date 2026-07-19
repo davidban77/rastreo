@@ -11,7 +11,7 @@ gNMI is a network-device management protocol that runs over gRPC. Modern network
 
 ## Configuration
 
-Add a `gnmi` entry to a scenario's `probers` array. Every field has a default, so the minimum shape is `{"type": "gnmi"}` — that probes TCP 57400 over TLS, anonymously, and reads `/system/state/hostname`.
+Add a `gnmi` entry to a scenario's `probers` array. Every field has a default, so the minimum shape is `{"type": "gnmi"}` — that probes TCP 57400 over TLS, anonymously, and reads the two default paths `/system/state/hostname` and `/system/state/software-version`.
 
 The prober has five fields:
 
@@ -39,9 +39,44 @@ probers:
 | `plaintext` | bool | no | `false` | When `false`, the prober connects over TLS. When `true`, it connects over cleartext gRPC (no TLS) — use this for lab devices with TLS disabled on the gNMI port. See [Transport and certificate handling](#transport-and-certificate-handling). |
 | `username` | string | no | `""` | gNMI username. Empty means an anonymous probe — no credentials are sent. See [Authentication](#authentication). |
 | `password` | string | no | `""` | gNMI password. Redacted from logs and from any debug output. Supports the `${VAR}` and `!file /path` secret syntax — see [Secrets](../reference/secrets.md). |
-| `get_paths` | array of string | no | `["/system/state/hostname"]` | gNMI paths for the Get call. Each path is a slash-separated location in the device's data tree. An empty list skips the Get call and runs Capabilities only. |
+| `get_paths` | array of string | no | `["/system/state/hostname", "/system/state/software-version"]` | gNMI paths for the Get call. Each path is a slash-separated location in the device's data tree. An empty list skips the Get call and runs Capabilities only. See [Path syntax](#path-syntax) for origins and list keys. |
 
 `username` and `password` are checked when the scenario loads. A value with a control character is not a valid gRPC header, so it is rejected before the scan starts rather than failing mid-probe.
+
+### Path syntax
+
+Each entry in `get_paths` is a gNMI path. A plain slash path such as `/system/state/hostname` reads one value. Two additions let you target native models and specific list entries:
+
+- **Origin** — a model name before the first slash, written `origin:/path`. It selects an OpenConfig tree or a vendor-native tree, such as `openconfig:/interfaces/interface`.
+- **Keyed list element** — a list key in square brackets, written `name[key=value]`. It selects one entry in a keyed list, such as a single interface by name.
+
+```yaml
+get_paths:
+  - openconfig:/interfaces/interface[name=Ethernet1]/state
+  - /interfaces/interface[name=*]/state/oper-status
+  - /interface[name=et1][index=0]/state
+```
+
+A `*` key value matches every entry in the list. Repeat the brackets to pass more than one key. Returned signal paths carry the keys back inline, so a value reads at `/interfaces/interface[name=ethernet-1/1]/state/oper-status`.
+
+!!! warning "One limit on key values"
+    A key value cannot yet contain a `]` — rastreo reads the value up to the first `]`, and escaping it (`\]`) is not supported. Keep key values to plain names and the `*` wildcard.
+
+### Fingerprint paths
+
+The default `get_paths` reads the hostname and the software version. Add more OpenConfig state paths per scenario for a richer fingerprint:
+
+| Path | What it captures |
+|---|---|
+| `/system/state/software-version` | Software version string. Already in the default set. |
+| `/system/state/boot-time` | Last boot time. |
+| `/components/component[name=*]/state/serial-no` | Serial number, per hardware component. |
+| `/components/component[name=*]/state/part-no` | Part number, per hardware component. |
+| `/components/component[name=*]/state/description` | Component description, often the model name. |
+| `/interfaces/interface[name=*]/state/oper-status` | Up or down status, per interface. |
+
+!!! warning "List only paths the target supports"
+    These paths are vendor- and model-dependent. A device that does not implement one path can reject the whole Get call, so every path returns nothing. Keep `get_paths` to paths the target platform supports, and test against one device before a wide scan.
 
 ## Transport and certificate handling
 
@@ -51,6 +86,12 @@ By default (`plaintext: false`) the prober connects over TLS and **accepts any s
     The prober fingerprints the gNMI endpoint; it does not authenticate the server. There is no `tls_verify` toggle. Treat the values you read as unverified claims, useful for correlation and inventory, not as proof of the device's identity.
 
 Set `plaintext: true` to connect over cleartext gRPC with no TLS. Use this only for lab devices that expose gNMI without TLS. A `plaintext: true` probe against a TLS-only port fails to connect. A `plaintext: false` probe against a cleartext-only port fails the same way. The two are not interchangeable, so match the setting to the device.
+
+### Get encoding
+
+The Get call negotiates its encoding from the device's Capabilities, preferring `JSON_IETF`. There is no field to set; the prober picks the encoding for you. When the device answered no Capabilities, it falls back to `JSON_IETF`.
+
+Many platforms — Nokia SR Linux and Cisco IOS-XR among them — reject plain JSON. Negotiating `JSON_IETF` means the Get returns state values on those platforms instead of an empty answer.
 
 ## Authentication
 
@@ -65,7 +106,7 @@ Keep the password out of the scenario file. Reference an environment variable wi
 | Signal | Source | When produced |
 |---|---|---|
 | `GnmiVersion(<value>)` | Capabilities | The device reported a non-empty gNMI protocol version, such as `0.10.0`. |
-| `GnmiSupportedModel(<value>)` | Capabilities | One per YANG model the device supports. Rendered as `name version` (for example `openconfig-interfaces 3.0.0`), or just `name` when the device reports no version. |
+| `GnmiSupportedModel(<value>)` | Capabilities | One per YANG model the device supports. Rendered as `name version (organization)`, for example `openconfig-interfaces 3.0.0 (OpenConfig)`. The version and the organization are each dropped when the device does not report them, so a bare model reads as `srl_nokia-system`. The organization is a vendor hint. |
 | `GnmiSupportedEncoding(<value>)` | Capabilities | One per encoding the device can speak, by its gNMI name, such as `JSON_IETF` or `PROTO`. |
 | `GnmiState { path, value }` | Get | One per path/value pair the Get call returned. `path` is the full path, with list keys rendered inline as `/interfaces/interface[name=ethernet-1/1]/state/oper-status`. `value` is the scalar rendered as a string. |
 
@@ -75,7 +116,7 @@ Example signals from an SR Linux node that answered Capabilities and a hostname 
 
 ```
 GnmiVersion("0.10.0")
-GnmiSupportedModel("openconfig-interfaces 3.0.0")
+GnmiSupportedModel("openconfig-interfaces 3.0.0 (OpenConfig)")
 GnmiSupportedModel("srl_nokia-system")
 GnmiSupportedEncoding("JSON_IETF")
 GnmiState { path: "/system/state/hostname", value: "srlinux-a" }
@@ -134,7 +175,7 @@ A record produced against an authenticated SR Linux node looks like this:
 {
   "signals": [
     {"GnmiVersion": "0.10.0"},
-    {"GnmiSupportedModel": "openconfig-interfaces 3.0.0"},
+    {"GnmiSupportedModel": "openconfig-interfaces 3.0.0 (OpenConfig)"},
     {"GnmiSupportedEncoding": "JSON_IETF"},
     {"GnmiState": {"path": "/system/state/hostname", "value": "srlinux-a"}}
   ]
