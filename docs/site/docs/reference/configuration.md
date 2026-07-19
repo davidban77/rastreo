@@ -66,15 +66,16 @@ Both binaries read the same `RASTREO_OTLP_*` variables at startup, and both fail
 
 | Variable | Default | Scope | Description |
 |---|---|---|---|
-| `RASTREO_OTLP_ENDPOINT` | unset (required when export is on) | both | OTLP collector URL. Required when metric or log export is enabled. The format depends on `RASTREO_OTLP_PROTOCOL`. |
+| `RASTREO_OTLP_ENDPOINT` | unset (required when export is on) | both | OTLP collector URL. Required when metric, log, or trace export is enabled. The format depends on `RASTREO_OTLP_PROTOCOL`. |
 | `RASTREO_OTLP_LOGS_ENABLED` | `false` | both | Enable log export via OTLP. |
+| `RASTREO_OTLP_TRACES_ENABLED` | `false` | both | Enable trace export via OTLP. Emits a fixed set of per-scan pipeline-stage spans. Valid on its own, without metrics or logs. |
 | `RASTREO_OTLP_METRICS_ENABLED` | `false` | server | Enable metric export via OTLP. Server-only — setting `true` on the CLI is rejected at startup. |
 | `RASTREO_OTLP_PROTOCOL` | `grpc` | both | OTLP transport: `grpc`, `http-protobuf`, or the alias `http`. Case-insensitive. |
 | `RASTREO_OTLP_SERVICE_NAME` | `rastreo-server` (server) / `rastreo` (CLI) | both | Value of the `service.name` resource attribute on every exported signal. |
 | `RASTREO_OTLP_METRICS_INTERVAL_SECS` | `30` | server | Metric export interval in seconds. The CLI ignores it, because the CLI does not export metrics. |
 
 !!! tip "Boolean values"
-    The boolean variables (`RASTREO_AUTH_DISABLED`, `RASTREO_OTLP_LOGS_ENABLED`, `RASTREO_OTLP_METRICS_ENABLED`) accept `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`. Any other value fails startup with a clear error.
+    The boolean variables (`RASTREO_AUTH_DISABLED`, `RASTREO_OTLP_LOGS_ENABLED`, `RASTREO_OTLP_TRACES_ENABLED`, `RASTREO_OTLP_METRICS_ENABLED`) accept `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`. Any other value fails startup with a clear error.
 
 ## See also
 

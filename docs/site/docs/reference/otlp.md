@@ -1,12 +1,12 @@
 ---
-description: OpenTelemetry OTLP export for rastreo — build with the otlp feature to push the metrics and logs that /metrics and stderr already emit to a Grafana Alloy, OpenTelemetry Collector, or Grafana Cloud endpoint over gRPC or HTTP+protobuf. Metrics export is server-only; the `rastreo` CLI ships logs.
+description: OpenTelemetry OTLP export for rastreo — build with the otlp feature to push metrics, logs, and pipeline-stage traces to a Grafana Alloy, OpenTelemetry Collector, or Grafana Cloud endpoint over gRPC or HTTP+protobuf. Metrics export is server-only; logs and traces work on both the CLI and the server.
 ---
 
 # OpenTelemetry OTLP
 
-`rastreo-server` can push metrics and logs, and the `rastreo` CLI can push logs, to any OTLP-speaking backend (Grafana Alloy, OpenTelemetry Collector, Grafana Cloud, Honeycomb, Tempo, or a self-hosted collector) via gRPC or HTTP+protobuf. The exporter is behind an opt-in Cargo feature — the default binaries do not include it because the OpenTelemetry Rust chain pulls in `tonic`, `prost`, `reqwest`, and a large slice of the async transport stack. OTLP is off by default even in feature-enabled builds; enable per binary with environment variables.
+`rastreo-server` can push metrics, logs, and traces, and the `rastreo` CLI can push logs and traces, to any OTLP-speaking backend (Grafana Alloy, OpenTelemetry Collector, Grafana Cloud, Honeycomb, Tempo, or a self-hosted collector) via gRPC or HTTP+protobuf. The exporter is behind an opt-in Cargo feature — the default binaries do not include it because the OpenTelemetry Rust chain pulls in `tonic`, `prost`, `reqwest`, and a large slice of the async transport stack. OTLP is off by default even in feature-enabled builds; enable per binary with environment variables.
 
-Metrics and logs are the two signal types shipped in this integration. Metrics export is server-only — the CLI is short-running and does not export metrics; setting `RASTREO_OTLP_METRICS_ENABLED=true` on the CLI is rejected at startup with a clear error. Traces are deliberately deferred — see [Why traces are deferred](#why-traces-are-deferred).
+Metrics, logs, and traces are the three signal types. Metrics export is server-only — the CLI is short-running and does not export metrics; setting `RASTREO_OTLP_METRICS_ENABLED=true` on the CLI is rejected at startup with a clear error. Logs and traces work on both binaries. See [Traces exported via OTLP](#traces-exported-via-otlp) for what a trace contains.
 
 ## Building with OTLP support
 
@@ -27,14 +27,15 @@ Both binaries read the same environment variables at startup and fail-fast on in
 |---|---|---|
 | `RASTREO_OTLP_METRICS_ENABLED` | `false` | Enable metrics export. **Server-only** — setting this to `true` on the `rastreo` CLI is rejected at startup. Booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `RASTREO_OTLP_LOGS_ENABLED` | `false` | Enable logs export. Supported on both the server and the CLI. |
-| `RASTREO_OTLP_ENDPOINT` | — (required) | OTLP collector endpoint URL. Format depends on `RASTREO_OTLP_PROTOCOL`: gRPC uses `http://otel-collector.observability.svc:4317`; HTTP+protobuf typically uses `http://otel-collector.observability.svc:4318`. Required when either exporter is enabled. |
+| `RASTREO_OTLP_TRACES_ENABLED` | `false` | Enable trace export. Supported on both the server and the CLI. Enabling traces alone, without metrics or logs, is valid. See [Traces exported via OTLP](#traces-exported-via-otlp). |
+| `RASTREO_OTLP_ENDPOINT` | — (required) | OTLP collector endpoint URL. Format depends on `RASTREO_OTLP_PROTOCOL`: gRPC uses `http://otel-collector.observability.svc:4317`; HTTP+protobuf typically uses `http://otel-collector.observability.svc:4318`. Required when any exporter is enabled. |
 | `RASTREO_OTLP_PROTOCOL` | `grpc` | Transport protocol. Accepts `grpc`, `http-protobuf`, or the alias `http`. Values are case-insensitive. See [Transport protocol](#transport-protocol). |
 | `RASTREO_OTLP_METRICS_INTERVAL_SECS` | `30` | Periodic export interval for metrics, in seconds. **Server-only**; ignored when metrics export is off. |
 | `RASTREO_OTLP_SERVICE_NAME` | `rastreo-server` (server) / `rastreo` (CLI) | Value of the OpenTelemetry resource attribute `service.name` on every exported signal. |
 
-Configuration is validated at startup. Enabling either exporter without an endpoint, passing a non-boolean value for a flag, or passing a non-numeric interval all fail the process with an actionable error before the HTTP server binds or the CLI runs a scan.
+Configuration is validated at startup. Enabling any exporter without an endpoint, passing a non-boolean value for a flag, or passing a non-numeric interval all fail the process with an actionable error before the HTTP server binds or the CLI runs a scan.
 
-Both signals may run at once, either alone, or neither — a common pattern is to enable logs only in local development (the collector is easier to reach than a Loki instance) and metrics only in production (Prometheus scrape covers `/metrics` too, so OTLP metrics are usually redundant).
+The three signals can run together, alone, or not at all — a common pattern is to enable logs only in local development (the collector is easier to reach than a Loki instance) and metrics only in production (Prometheus scrape covers `/metrics` too, so OTLP metrics are usually redundant).
 
 ## Transport protocol
 
@@ -77,11 +78,28 @@ When logs export is enabled, `tracing` events are bridged to OpenTelemetry log r
 
 Every `tracing::info!`, `tracing::warn!`, and `tracing::error!` call surfaces the same `target`, `severity`, `message`, and structured fields via OTLP that the JSON stderr layer already produces. The `RASTREO_LOG` env filter that governs the stderr layer also governs the OTLP layer — dropping the level to `warn` cuts both.
 
-## Why traces are deferred
+## Traces exported via OTLP
 
-An OpenTelemetry span-per-phase view of a rastreo scan — `resolve → schedule → probe → fuse → encode → sink` — would not reveal anything a metric could not. The pipeline is short, well-understood, and already instrumented with counters at every failure boundary. Traces add operational overhead (span export, sampling policy, trace-id propagation across probers) for a payoff that is not visible on a real user's dashboard.
+When trace export is enabled, each scan emits a small, fixed set of spans that show where the scan spends its time. A root span named `scan` wraps three child spans, one per pipeline stage:
 
-If a real user runs into a symptom where traces would help — a slow-tail scan with no counter movement, cross-service correlation between rastreo and a downstream Kafka consumer — the trace exporter can be added on top of the existing OpenTelemetry SDK setup without breaking any of the exported metrics or logs. The Cargo feature is already carved out; the exporter builder is a copy-paste from the metric exporter with a different signal.
+- `resolve` — turning targets (DNS names, CIDRs, ranges) into concrete IP addresses.
+- `stream` — running the probes and sending records to the sink.
+- `finish` — final correlation and flush after the last probe completes.
+
+Open a scan trace in Tempo, Jaeger, or Grafana and you see which stage takes the most time. A scan that is slow in `resolve` points at DNS. A scan that is slow in `stream` points at the probes or a slow sink.
+
+!!! info "Trace volume stays constant per scan"
+    The span count is the same for every scan — one root span plus three stage spans — no matter how many targets or ports the scan covers. There are no per-target or per-probe spans. A `/16` sweep produces the same four spans as a single-host scan, so traces stay cheap even on very large scans.
+
+Trace export works on both `rastreo-server` and the `rastreo` CLI. Enable it with `RASTREO_OTLP_TRACES_ENABLED=true` and point `RASTREO_OTLP_ENDPOINT` at your collector:
+
+```bash
+export RASTREO_OTLP_ENDPOINT=http://otel-collector:4317
+export RASTREO_OTLP_TRACES_ENABLED=true
+rastreo discover --target 192.0.2.0/24 --port 22,443
+```
+
+Traces do not depend on metrics or logs. Enabling `RASTREO_OTLP_TRACES_ENABLED` on its own is valid. To send all three signals, set each `*_ENABLED` variable.
 
 ## Docker image with OTLP support
 

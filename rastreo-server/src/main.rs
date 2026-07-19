@@ -208,6 +208,9 @@ fn init_otlp(
     if let Some(provider) = rastreo_core::observability::otlp::stashed_logger_provider() {
         rastreo_core::observability::otlp::attach_logger(&mut guard, provider);
     }
+    if let Some(provider) = rastreo_core::observability::otlp::stashed_tracer_provider() {
+        rastreo_core::observability::otlp::attach_tracer(&mut guard, provider);
+    }
     Ok(Some(guard))
 }
 

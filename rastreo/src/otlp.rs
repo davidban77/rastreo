@@ -2,7 +2,8 @@
 
 #[cfg(feature = "otlp")]
 pub use rastreo_core::observability::otlp::{
-    attach_logger, stashed_logger_provider, OtlpConfig, OtlpGuard,
+    attach_logger, attach_tracer, stashed_logger_provider, stashed_tracer_provider, OtlpConfig,
+    OtlpGuard,
 };
 
 /// Read OTLP config for the CLI. The CLI exports logs only, so `RASTREO_OTLP_METRICS_ENABLED=true`
@@ -44,10 +45,11 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 7] = [
         "RASTREO_OTLP_ENDPOINT",
         "RASTREO_OTLP_METRICS_ENABLED",
         "RASTREO_OTLP_LOGS_ENABLED",
+        "RASTREO_OTLP_TRACES_ENABLED",
         "RASTREO_OTLP_METRICS_INTERVAL_SECS",
         "RASTREO_OTLP_SERVICE_NAME",
         "RASTREO_OTLP_PROTOCOL",

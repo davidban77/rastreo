@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch, Semaphore};
+use tracing::Instrument;
 
 use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
 use crate::config::DiscoverScenarioConfig;
@@ -142,8 +143,15 @@ pub async fn run_discovery_with_components_cancellable(
     let start = Instant::now();
     let scan_metadata = Arc::new(ScanMetadata::new(scenario));
 
-    let resolved = resolver.resolve_many(&scenario.targets).await?;
+    // Constant spans per scan: root + one per stage. Probe tasks are never spanned so a /16 stays zero-alloc.
+    let scan_span = tracing::info_span!("scan", targets = tracing::field::Empty);
+
+    let resolved = resolver
+        .resolve_many(&scenario.targets)
+        .instrument(tracing::info_span!(parent: &scan_span, "resolve"))
+        .await?;
     let targets_resolved = resolved.len();
+    scan_span.record("targets", targets_resolved as u64);
 
     let max_concurrent = scenario
         .base
@@ -203,6 +211,7 @@ pub async fn run_discovery_with_components_cancellable(
         targets_resolved,
         start,
         &reorder_peak,
+        &scan_span,
     )
     .await
 }
@@ -322,6 +331,7 @@ async fn stream_discovery(
     start: Instant,
     // Test instrumentation: records the reorder buffer's peak size for the bound assertions.
     reorder_peak: &AtomicUsize,
+    scan_span: &tracing::Span,
 ) -> Result<DiscoverySummary, RastreoError> {
     let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
     let sink_type = sink.kind();
@@ -339,6 +349,8 @@ async fn stream_discovery(
     let mut records_emitted: usize = 0;
     let mut emit_err: Option<RastreoError> = None;
     let mut scan_done = false;
+
+    let stream_span = tracing::info_span!(parent: scan_span, "stream");
 
     loop {
         tokio::select! {
@@ -396,7 +408,10 @@ async fn stream_discovery(
             .await?;
         }
     }
+    drop(stream_span);
 
+    let finish_span =
+        tracing::info_span!(parent: scan_span, "finish", records_emitted = tracing::field::Empty);
     let mut tail = fuser.finish()?;
     for record in &mut tail {
         classifier.classify(record)?;
@@ -417,6 +432,8 @@ async fn stream_discovery(
         }
         records_emitted += 1;
     }
+    finish_span.record("records_emitted", records_emitted as u64);
+    drop(finish_span);
 
     let close_err = sink.close().await.err();
 
@@ -2125,6 +2142,7 @@ mod tests {
             let targets_resolved = resolved.len();
             let start = Instant::now();
             let peak = AtomicUsize::new(0);
+            let scan_span = tracing::info_span!("scan");
             let result = stream_discovery(
                 &scheduler,
                 probers,
@@ -2139,6 +2157,7 @@ mod tests {
                 targets_resolved,
                 start,
                 &peak,
+                &scan_span,
             )
             .await;
             (result, handle.ndjson_lines())
@@ -2195,6 +2214,7 @@ mod tests {
             let mut sink = sink;
             let targets_resolved = resolved.len();
             let start = Instant::now();
+            let scan_span = tracing::info_span!("scan");
             stream_discovery(
                 &scheduler,
                 probers,
@@ -2209,6 +2229,7 @@ mod tests {
                 targets_resolved,
                 start,
                 peak,
+                &scan_span,
             )
             .await
         }

@@ -22,6 +22,7 @@ fn init_metrics_only_with_unreachable_endpoint_does_not_panic() {
             protocol: OtlpProtocol::Grpc,
             metrics_enabled: true,
             logs_enabled: false,
+            traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
         };
@@ -43,6 +44,7 @@ fn init_metrics_only_with_http_protobuf_protocol_builds_exporter() {
             protocol: OtlpProtocol::HttpProtobuf,
             metrics_enabled: true,
             logs_enabled: false,
+            traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
         };
@@ -66,6 +68,7 @@ fn init_metrics_only_registers_scan_duration_histogram() {
             protocol: OtlpProtocol::Grpc,
             metrics_enabled: true,
             logs_enabled: false,
+            traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
         };
@@ -212,6 +215,7 @@ fn init_metrics_only_with_disabled_metrics_returns_empty_guard() {
             protocol: OtlpProtocol::Grpc,
             metrics_enabled: false,
             logs_enabled: true,
+            traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
         };

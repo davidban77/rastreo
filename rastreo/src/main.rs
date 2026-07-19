@@ -121,6 +121,9 @@ fn init_otlp_metrics(config: Option<&otlp::OtlpConfig>) -> anyhow::Result<Option
     if let Some(provider) = otlp::stashed_logger_provider() {
         otlp::attach_logger(&mut guard, provider);
     }
+    if let Some(provider) = otlp::stashed_tracer_provider() {
+        otlp::attach_tracer(&mut guard, provider);
+    }
     Ok(Some(guard))
 }
 

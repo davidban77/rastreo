@@ -136,16 +136,16 @@ targetGuard:
 # RASTREO_LOG_FORMAT on the container.
 logFormat: null
 
-# OpenTelemetry OTLP export for metrics and logs. Requires the `-otlp` image
+# OpenTelemetry OTLP export for metrics, logs, and traces. Requires the `-otlp` image
 # variant (ghcr.io/davidban77/rastreo:<TAG>-otlp) — the default image does
 # not include `--features otlp`. Off by default; enable when your observability
 # stack accepts OTLP over gRPC or HTTP+protobuf.
 otlp:
-  # OTLP collector endpoint. Required when either metricsEnabled or
-  # logsEnabled is true. Format depends on `protocol`:
+  # OTLP collector endpoint. Required when metricsEnabled, logsEnabled, or
+  # tracesEnabled is true. Format depends on `protocol`:
   #  - `grpc` (default): "http://otel-collector.observability.svc:4317"
   #  - `http-protobuf`:  "http://otel-collector.observability.svc:4318"
-  # On http-protobuf, rastreo appends `/v1/metrics` and `/v1/logs` per signal,
+  # On http-protobuf, rastreo appends `/v1/metrics`, `/v1/logs`, and `/v1/traces` per signal,
   # so a single base URL works for both. Pass a fully-qualified URL only when
   # your collector is on a non-standard route.
   endpoint: ""
@@ -159,6 +159,8 @@ otlp:
   metricsEnabled: false
   # Enable logs export via OTLP.
   logsEnabled: false
+  # Enable traces export via OTLP (root scan span with resolve/stream/finish stages).
+  tracesEnabled: false
   # Periodic metrics export interval in seconds.
   metricsIntervalSeconds: 30
   # Resource `service.name` attribute on exported signals.

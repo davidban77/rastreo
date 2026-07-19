@@ -161,4 +161,4 @@ The default empty allow-list is the safe posture: no per-scenario cardinality, `
 - [Kubernetes](../deploy/kubernetes.md) — the Helm chart install and top-level values reference.
 - [rastreo-server](../deploy/server.md) — the `GET /metrics` endpoint documented alongside `POST /scans`, health, and configuration.
 - [Health endpoints](health-endpoints.md) — `/healthz`, `/readyz`, and the readiness gates that pair with these metrics.
-- [OpenTelemetry OTLP](otlp.md) — pushing the same metrics and logs to a Grafana Alloy, OpenTelemetry Collector, or Grafana Cloud endpoint.
+- [OpenTelemetry OTLP](otlp.md) — pushing metrics, logs, and traces to a Grafana Alloy, OpenTelemetry Collector, or Grafana Cloud endpoint.
