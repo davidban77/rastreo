@@ -200,14 +200,16 @@ securityContext:
     drop:
       - ALL
 
-# Opt-in Linux capabilities. Off by default because many clusters disallow
-# capability additions (Pod Security Standards `restricted`).
+# Opt-in Linux capabilities. Off by default. The default deploy runs fully
+# hardened (non-root, drop ALL) and needs no capability: the binaries carry
+# CAP_NET_RAW as a permitted-only file capability and raise it in-process, so
+# they exec cleanly under a restricted securityContext instead of crash-looping.
 podSecurity:
-  # Grants NET_RAW to the container. Required for the ARP and NDP probers,
-  # which open AF_PACKET raw sockets to send Ethernet frames directly, and ICMP
-  # (SOCK_RAW fallback path). Only enable when the operator submits scenarios
-  # that use `type: arp`, `type: ndp`, or `type: icmp` on a Linux host where the
-  # unprivileged ping-socket path is unavailable.
+  # Adds NET_RAW to the container so the ARP, NDP, and ICMP (SOCK_RAW fallback)
+  # probers can open raw sockets, while keeping the pod non-root and hardened.
+  # Enable only for scenarios that use `type: arp`, `type: ndp`, or `type: icmp`.
+  # Without it, those probers record a clean fault and the scan continues
+  # (exit 0) — they do not crash.
   netRaw: false
 
 # Optional inline configuration mounted at /etc/rastreo as a ConfigMap.

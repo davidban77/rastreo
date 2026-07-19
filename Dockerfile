@@ -90,15 +90,19 @@ RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     cargo build --release --target "${RUST_TARGET}" --features "${FEATURES}" -p rastreo -p rastreo-server
 
 # Copy binaries to a known location regardless of target triple and grant
-# CAP_NET_RAW as a file capability so non-root users can open AF_PACKET raw
-# sockets. File capabilities live in xattrs on the binary and are preserved
-# through the `COPY --from=builder` into the scratch runtime stage.
+# CAP_NET_RAW as a permitted-only (`+p`) file capability so a non-root binary
+# can raise it to effective in-process before opening an AF_PACKET raw socket.
+# The effective bit (`+ep`) is deliberately NOT set: the kernel refuses to
+# execve an effective-bit file-cap binary when the cap is outside the process
+# bounding set, so a `+ep` binary crash-loops under a `drop: [ALL]` runtime.
+# File capabilities live in xattrs on the binary and are preserved through the
+# `COPY --from=builder` into the scratch runtime stage.
 RUN RUST_TARGET=$(cat /tmp/rust-target) && \
     mkdir -p /out && \
     cp "target/${RUST_TARGET}/release/rastreo" /out/rastreo && \
     cp "target/${RUST_TARGET}/release/rastreo-server" /out/rastreo-server && \
-    setcap cap_net_raw+ep /out/rastreo && \
-    setcap cap_net_raw+ep /out/rastreo-server
+    setcap cap_net_raw+p /out/rastreo && \
+    setcap cap_net_raw+p /out/rastreo-server
 
 # UID 65532 = upstream "nonroot" convention (distroless/nonroot, chainguard)
 RUN echo 'rastreo:x:65532:65532::/:' > /tmp/passwd.rastreo
@@ -114,10 +118,13 @@ USER 65532:65532
 
 EXPOSE 8080
 
-# The ARP and NDP probers use AF_PACKET raw sockets and require CAP_NET_RAW.
-# The binaries ship with `cap_net_raw+ep` set on them (via `setcap` in the
-# builder stage), so non-root users can use raw sockets — but the container
-# still needs the capability granted at runtime:
+# The ARP, NDP, and ICMP (raw) probers use raw sockets and require CAP_NET_RAW.
+# The binaries ship with `cap_net_raw+p` (permitted-only) set via `setcap` in
+# the builder stage; they raise it to effective in-process just before opening
+# a raw socket. The container still needs NET_RAW granted at runtime so the cap
+# lands in the process's permitted set:
 #   docker run --cap-add=NET_RAW rastreo
+# (or the chart's podSecurity.netRaw: true). Without it, the container still
+# execs cleanly and non-raw scans work; a raw scan faults gracefully (exit 0).
 
 ENTRYPOINT ["/rastreo-server"]

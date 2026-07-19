@@ -202,9 +202,9 @@ podSecurity:
 
 When enabled, the rendered container `securityContext.capabilities.add` includes `NET_RAW` alongside the default `drop: [ALL]`. The Pod Security Standards `baseline` profile permits this; `restricted` does not — check the target namespace's Pod Security admission mode with `kubectl get ns <ns> -o yaml` before enabling. Some managed clusters (GKE Autopilot, EKS Fargate) prohibit capability additions cluster-wide and cannot run the ARP or NDP probers regardless of chart values.
 
-The image ships with `cap_net_raw+ep` set on both `/rastreo` and `/rastreo-server` as a file capability, so the non-root runtime user picks the capability up automatically when the container has `NET_RAW` in its bounding set — no ambient-capability juggling required. Keeping `capabilities.add: [NET_RAW]` on the container is still what grants that bounding set, so the Helm toggle remains the load-bearing knob.
+The image ships with `CAP_NET_RAW` set on both `/rastreo` and `/rastreo-server` as a permitted-only file capability, and each binary raises it to effective in-process just before opening a raw socket. Because the capability is not effective at exec time, the default deploy — non-root, `drop: [ALL]`, no capability added — execs and runs cleanly; it does not crash-loop under a restricted `securityContext`. Setting `podSecurity.netRaw: true` adds `NET_RAW` to the container so the probers can actually open their sockets, while keeping the pod non-root and hardened.
 
-Without this toggle, scenarios that reference `type: arp` or `type: ndp` will fail at probe time with `raw socket permission denied; ARP requires CAP_NET_RAW` (or the analogous NDP message). The pod itself continues running; only those specific probes fail.
+Without this toggle, scenarios that reference `type: arp` or `type: ndp` record a clean `permission_denied` fault at probe time; the scan finishes with exit 0 and the pod keeps running. Only those specific probes fail — the container does not crash.
 
 ## Graceful shutdown and `terminationGracePeriodSeconds`
 

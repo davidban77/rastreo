@@ -29,12 +29,12 @@ snmp = [
     "dep:cfb-mode",
     "dep:des",
 ]
-arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2"]
-ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2"]
+arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2", "dep:caps"]
+ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2", "dep:caps"]
 nats = ["dep:async-nats", "dep:bytes", "chrono/clock"]
 oui = ["dep:flate2"]
 ssh = ["dep:russh"]
-icmp = ["dep:socket2", "dep:pnet_packet"]
+icmp = ["dep:socket2", "dep:pnet_packet", "dep:caps"]
 tls = ["dep:rustls", "dep:rustls-pki-types", "dep:tokio-rustls", "dep:x509-parser"]
 otlp = [
     "dep:anyhow",
@@ -95,6 +95,9 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "logs", "metrics
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "reqwest-blocking-client", "logs", "trace"], optional = true }
 opentelemetry-appender-tracing = { version = "0.32", optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+caps = { version = "0.5.6", optional = true }
 
 [dev-dependencies]
 insta = { workspace = true }
