@@ -441,7 +441,7 @@ The `retry` field has the same three integer fields and defaults as the `kafka` 
 
 ## Fusers
 
-The `fuser` field is an internally-tagged object. Three fusers are available: `direct` (always), `oui_enrichment` (with the `oui` build feature), and `identity` (always). `oui_enrichment` and `identity` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
+The `fuser` field is an internally-tagged object. Four fusers are available: `direct` (always), `oui_enrichment` (with the `oui` build feature), `mib_enrichment` (with the `mib_enrichment` build feature), and `identity` (always). `oui_enrichment`, `mib_enrichment`, and `identity` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
 
 ### direct
 
@@ -509,6 +509,28 @@ Requires the `oui` build feature. The bundled OUI database is a Wireshark manuf 
 ```
 
 Longest-prefix wins on lookup: a /36 MA-S allocation takes precedence over a /28 MA-M, which takes precedence over a /24 MA-L. Vendor names come from the manuf file's long-name column, falling back to the short-name column when the long name is empty.
+
+### mib_enrichment
+
+`mib_enrichment` wraps another fuser: it delegates fusion to `inner`, then matches the returned record's SNMP `sysObjectID` against a table and populates `DeviceRecord.model` and `DeviceRecord.product_family`. It also sets `manufacturer` when the record does not already have one. Records without a `SnmpSysObjectId` signal, or whose OID is not in the table, are returned unchanged. `mib_enrichment` never sets `platform` — the classifier owns that field.
+
+Requires the `mib_enrichment` build feature. The bundled table is a small seed; set `data_path` to merge your fleet's OIDs on top of it (your entries win on collision). Lookup is an exact match on the full dotted OID — no prefix matching. See the [Enrichment page](../discover/enrichment.md#mib_enrichment) for the overlay file format and worked examples.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `type` | string | yes | — | Must be `"mib_enrichment"`. |
+| `data_path` | string | no | bundled seed | Path to an overlay file that merges on top of the bundled seed. Omit or leave empty to use only the seed. |
+| `inner` | object | yes | — | Nested fuser config (typically `direct` or `oui_enrichment`). Validated recursively. |
+
+```json
+{
+  "type": "mib_enrichment",
+  "data_path": "/etc/rastreo/mib_identity.tsv",
+  "inner": {
+    "type": "direct"
+  }
+}
+```
 
 ### identity
 

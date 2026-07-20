@@ -468,6 +468,7 @@ const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
     ("icmp", "icmp"),
     ("tls", "tls"),
     ("oui_enrichment", "oui"),
+    ("mib_enrichment", "mib_enrichment"),
 ];
 
 #[cfg(feature = "config")]
@@ -1415,6 +1416,16 @@ mod tests {
                 .expect("hint");
         assert!(hint.contains("--features oui"), "hint: {hint}");
         assert!(hint.contains("'oui_enrichment'"), "hint: {hint}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn enrich_feature_hint_maps_mib_enrichment_variant_to_feature() {
+        let hint =
+            enrich_feature_hint("unknown variant `mib_enrichment`, expected one of `direct`")
+                .expect("hint");
+        assert!(hint.contains("--features mib_enrichment"), "hint: {hint}");
+        assert!(hint.contains("'mib_enrichment'"), "hint: {hint}");
     }
 
     #[cfg(feature = "config")]

@@ -130,8 +130,14 @@ pub struct DeviceRecord {
     pub mgmt_ip: Option<IpAddr>,
     /// First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex.
     pub mac: Option<String>,
-    /// Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser. `null` when the OUI is not in the bundled Wireshark manuf database.
+    /// Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser, or from the SNMP `sysObjectID` by the MIB enrichment fuser when the OUI is absent. `null` when neither source matched.
     pub manufacturer: Option<String>,
+    /// Hardware model resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Product family resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_family: Option<String>,
     /// Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing.
     pub platform: Option<String>,
     /// Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.
@@ -267,6 +273,8 @@ mod tests {
             mgmt_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             mac: Some("aa:bb:cc:dd:ee:ff".into()),
             manufacturer: Some("Cisco".into()),
+            model: None,
+            product_family: None,
             platform: Some("IOS-XR".into()),
             os_version: Some("6.5.3".into()),
             ssh_version: None,
@@ -337,6 +345,21 @@ mod tests {
     }
 
     #[test]
+    fn device_record_omits_model_and_product_family_when_none() {
+        let record = fresh_record();
+        let json = serde_json::to_value(&record).expect("serialize");
+        let obj = json.as_object().expect("object");
+        assert!(
+            obj.get("model").is_none(),
+            "model must be omitted when None"
+        );
+        assert!(
+            obj.get("product_family").is_none(),
+            "product_family must be omitted when None"
+        );
+    }
+
+    #[test]
     fn device_record_round_trips_probe_kinds() {
         let record = DeviceRecord {
             probe_kinds: vec![ProbeKind::Http, ProbeKind::Snmp],
@@ -375,6 +398,8 @@ mod tests {
             mgmt_ip: None,
             mac: None,
             manufacturer: None,
+            model: None,
+            product_family: None,
             platform: None,
             os_version: None,
             ssh_version: None,
