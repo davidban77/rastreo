@@ -1080,6 +1080,7 @@ mod tests {
             subject: "rastreo.devices".into(),
             stream: "RASTREO".into(),
             links_subject: None,
+            profiles_subject: None,
             credentials: rastreo_core::NatsCredentials::default(),
             flush_mode: rastreo_core::NatsFlushMode::default(),
             dead_letter: None,

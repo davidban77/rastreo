@@ -179,6 +179,7 @@ fn build_outcome(
     let fault = if any_reachable { None } else { last_fault };
     ProbeOutcome {
         lldp: None,
+        gnmi_endpoint: None,
         kind: ProbeKind::Udp,
         target_ip,
         timestamp: SystemTime::now(),

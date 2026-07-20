@@ -1256,6 +1256,13 @@
                 "null"
               ]
             },
+            "profiles_topic": {
+              "description": "Topic the collection-profile stream is produced to; defaults to `rastreo.discovery.profiles.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "retry": {
               "$ref": "#/$defs/SinkRetry",
               "default": {
@@ -1325,6 +1332,13 @@
             },
             "links_subject": {
               "description": "Subject the `Link` record stream is published to; defaults to `rastreo.discovery.links.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "profiles_subject": {
+              "description": "Subject the collection-profile stream is published to; defaults to `rastreo.discovery.profiles.v1`.",
               "type": [
                 "string",
                 "null"

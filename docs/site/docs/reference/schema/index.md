@@ -15,6 +15,7 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 
 - [DeviceRecord](device-record.md) — every field on the emitted record. Generated from the schemars derives.
 - [LinkRecord](link-record.md) — a topology edge between two endpoints, emitted when the [LLDP prober](../../probe/lldp.md) discovers links. Generated. See [Topology](../../discover/topology.md).
+- [CollectionProfileRecord](collection-profile-record.md) — how to collect telemetry from a discovered endpoint (transport, encoding, advertised models), emitted per gNMI endpoint that returned capability data. Generated.
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
 - [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo discover --file`. Generated. Point an IDE YAML plugin at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json` for autocomplete and validation; see [Editor setup](#editor-setup) below for the concrete snippets. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
 - [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated.

@@ -191,6 +191,7 @@ fn build_outcome(
     let fault = if reachable { None } else { last_fault };
     ProbeOutcome {
         lldp: None,
+        gnmi_endpoint: None,
         kind: ProbeKind::Ssh,
         target_ip,
         timestamp: SystemTime::now(),

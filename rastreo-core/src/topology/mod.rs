@@ -385,6 +385,7 @@ mod tests {
                 neighbors,
                 discovered_via: discovered_via.to_string(),
             }),
+            gnmi_endpoint: None,
         }
     }
 

@@ -17,8 +17,8 @@ use tonic::{Code, Request, Response, Status};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::fuser::keys::canonical_mac_str;
 use crate::model::{
-    LldpNeighbor, LldpObservation, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget,
-    Signal,
+    GnmiEndpoint, LldpNeighbor, LldpObservation, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome,
+    ResolvedTarget, Signal, Transport,
 };
 use crate::prober::accept_any_tls::AcceptAnyVerifier;
 use crate::prober::classify::{self, Disposition};
@@ -230,6 +230,7 @@ impl GnmiProber {
                 acc.answered = true;
                 let response = response.into_inner();
                 get_encoding = select_get_encoding(&response.supported_encodings);
+                acc.advertised_encodings = render_encodings(&response.supported_encodings);
                 collect_capability_signals(response, &mut acc.signals);
             }
             Ok(Err(gnmi_status)) => {
@@ -263,7 +264,12 @@ impl GnmiProber {
             }
         }
 
-        acc.into_result()
+        let transport = if self.plaintext {
+            Transport::Plaintext
+        } else {
+            Transport::Tls
+        };
+        acc.into_result(port, transport)
     }
 }
 
@@ -273,6 +279,7 @@ struct PortAccumulator {
     answered: bool,
     status: Option<Status>,
     lldp: Option<LldpObservation>,
+    advertised_encodings: Vec<String>,
 }
 
 enum GetHandler {
@@ -296,9 +303,14 @@ impl PortAccumulator {
         }
     }
 
-    fn into_result(self) -> PortResult {
+    fn into_result(self, port: u16, transport: Transport) -> PortResult {
         if self.answered {
-            PortResult::Answered(self.signals, self.lldp)
+            let endpoint = GnmiEndpoint {
+                port,
+                transport,
+                advertised_encodings: self.advertised_encodings,
+            };
+            PortResult::Answered(self.signals, self.lldp, endpoint)
         } else if let Some(status) = self.status {
             PortResult::Status(status)
         } else {
@@ -315,10 +327,18 @@ enum ConnectError {
 }
 
 enum PortResult {
-    Answered(Vec<Signal>, Option<LldpObservation>),
+    Answered(Vec<Signal>, Option<LldpObservation>, GnmiEndpoint),
     Status(Status),
     Absence,
     Fault(ProbeFault),
+}
+
+fn render_encodings(supported: &[i32]) -> Vec<String> {
+    supported
+        .iter()
+        .filter_map(|e| Encoding::try_from(*e).ok())
+        .map(|e| e.as_str_name().to_string())
+        .collect()
 }
 
 /// Picks the `Get` encoding from Capabilities: `JSON_IETF` when advertised, else the first
@@ -867,6 +887,7 @@ fn status_to_outcome(target_ip: IpAddr, status: &Status) -> ProbeOutcome {
     };
     ProbeOutcome {
         lldp: None,
+        gnmi_endpoint: None,
         kind: ProbeKind::Gnmi,
         target_ip,
         timestamp: SystemTime::now(),
@@ -889,14 +910,18 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
     let mut status: Option<Status> = None;
     let mut fault: Option<ProbeFault> = None;
     let mut lldp: Option<LldpObservation> = None;
+    let mut gnmi_endpoint: Option<GnmiEndpoint> = None;
 
     for result in results {
         match result {
-            PortResult::Answered(mut port_signals, port_lldp) => {
+            PortResult::Answered(mut port_signals, port_lldp, endpoint) => {
                 answered = true;
                 signals.append(&mut port_signals);
                 if lldp.is_none() {
                     lldp = port_lldp;
+                }
+                if gnmi_endpoint.is_none() {
+                    gnmi_endpoint = Some(endpoint);
                 }
             }
             PortResult::Status(gnmi_status) => {
@@ -912,6 +937,7 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
     if answered {
         return ProbeOutcome {
             lldp,
+            gnmi_endpoint,
             kind: ProbeKind::Gnmi,
             target_ip,
             timestamp: SystemTime::now(),
@@ -927,6 +953,7 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
 
     ProbeOutcome {
         lldp: None,
+        gnmi_endpoint: None,
         kind: ProbeKind::Gnmi,
         target_ip,
         timestamp: SystemTime::now(),
@@ -1488,13 +1515,57 @@ mod tests {
         let outcome = assemble_outcome(
             TARGET,
             vec![
-                PortResult::Answered(vec![Signal::GnmiVersion("0.10.0".to_string())], None),
+                PortResult::Answered(
+                    vec![Signal::GnmiVersion("0.10.0".to_string())],
+                    None,
+                    GnmiEndpoint {
+                        port: 57400,
+                        transport: Transport::Tls,
+                        advertised_encodings: vec!["JSON_IETF".to_string()],
+                    },
+                ),
                 PortResult::Status(Status::unauthenticated("no creds")),
             ],
         );
         assert!(outcome.reachable);
         assert!(outcome.fault.is_none(), "an answer outranks a status fault");
         assert_eq!(outcome.signals.len(), 1);
+    }
+
+    #[test]
+    fn assemble_surfaces_the_answering_endpoint_not_a_default_guess() {
+        let outcome = assemble_outcome(
+            TARGET,
+            vec![PortResult::Answered(
+                vec![Signal::GnmiSupportedEncoding("JSON_IETF".to_string())],
+                None,
+                GnmiEndpoint {
+                    port: 6030,
+                    transport: Transport::Plaintext,
+                    advertised_encodings: vec!["JSON_IETF".to_string(), "PROTO".to_string()],
+                },
+            )],
+        );
+        let endpoint = outcome
+            .gnmi_endpoint
+            .expect("an answered outcome surfaces the endpoint that answered");
+        assert_eq!(endpoint.port, 6030);
+        assert_eq!(endpoint.transport, Transport::Plaintext);
+        assert_eq!(endpoint.advertised_encodings, vec!["JSON_IETF", "PROTO"]);
+    }
+
+    #[test]
+    fn assemble_absence_and_status_carry_no_endpoint() {
+        let absent = assemble_outcome(TARGET, vec![PortResult::Absence]);
+        assert!(absent.gnmi_endpoint.is_none());
+        let auth_failed = assemble_outcome(
+            TARGET,
+            vec![PortResult::Status(Status::unauthenticated("no creds"))],
+        );
+        assert!(
+            auth_failed.gnmi_endpoint.is_none(),
+            "an auth-failure answered nothing at the application layer, so no endpoint is surfaced"
+        );
     }
 
     #[test]
@@ -1862,10 +1933,12 @@ mod tests {
         let mut acc = PortAccumulator::default();
         acc.record_get(Ok(hostname_state_response()), GetHandler::State);
         acc.record_get(Err(Status::unimplemented("no lldp path")), GetHandler::Lldp);
-        match acc.into_result() {
-            PortResult::Answered(signals, lldp) => {
+        match acc.into_result(57400, Transport::Tls) {
+            PortResult::Answered(signals, lldp, endpoint) => {
                 assert!(!signals.is_empty(), "state signals survive the lldp error");
                 assert!(lldp.is_none(), "a failed lldp Get leaves no observation");
+                assert_eq!(endpoint.port, 57400);
+                assert_eq!(endpoint.transport, Transport::Tls);
             }
             _ => panic!("a successful state Get must answer"),
         }
@@ -1879,8 +1952,8 @@ mod tests {
             GetHandler::State,
         );
         acc.record_get(Ok(device_b_leaf_response()), GetHandler::Lldp);
-        match acc.into_result() {
-            PortResult::Answered(signals, lldp) => {
+        match acc.into_result(6030, Transport::Plaintext) {
+            PortResult::Answered(signals, lldp, endpoint) => {
                 assert!(
                     signals.is_empty(),
                     "no state signals, but the port still answered"
@@ -1889,6 +1962,8 @@ mod tests {
                     lldp.is_some(),
                     "the lldp observation survives the state error"
                 );
+                assert_eq!(endpoint.port, 6030);
+                assert_eq!(endpoint.transport, Transport::Plaintext);
             }
             _ => panic!("a successful lldp Get must answer"),
         }
@@ -1903,6 +1978,7 @@ mod tests {
             signals: Vec::new(),
             fault: None,
             lldp: Some(lldp),
+            gnmi_endpoint: None,
         }
     }
 

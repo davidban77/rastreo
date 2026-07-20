@@ -4,7 +4,14 @@ description: rastreo describes its streaming surface with an AsyncAPI 3.0 docume
 
 # Streaming API
 
-rastreo ships a transport-neutral description of its streaming surface as an AsyncAPI 3.0 document at `schemas/asyncapi.yaml`. The spec describes two channels — a primary channel `rastreo.discovery.records.v1` carrying `DeviceRecord` messages, and a dead-letter channel for records that failed primary delivery — each attached to two servers (Kafka and NATS). Both transports carry the same JSON payload; the only difference is that Kafka calls a channel a "topic" and NATS calls it a "subject".
+rastreo ships a transport-neutral description of its streaming surface as an AsyncAPI 3.0 document at `schemas/asyncapi.yaml`. The spec describes four channels:
+
+- `rastreo.discovery.records.v1` — the primary channel, carrying `DeviceRecord` messages.
+- `rastreo.discovery.links.v1` — topology `LinkRecord` edges, on a second stream.
+- `rastreo.discovery.profiles.v1` — `CollectionProfileRecord` messages, on a second stream.
+- a dead-letter channel for records that failed primary delivery.
+
+Every channel is attached to two servers, Kafka and NATS. Both transports carry the same JSON payload; the only difference is that Kafka calls a channel a "topic" and NATS calls it a "subject".
 
 ## What is AsyncAPI
 
@@ -25,6 +32,15 @@ The channel address is `rastreo.discovery.records.v1`. That string is used verba
 - `v1` — the wire schema version.
 
 A breaking change to the `DeviceRecord` shape ships a new channel at `rastreo.discovery.records.v2`. Both channels run in parallel for one release cycle so consumers can migrate on their own schedule. Additive changes stay on `v1`.
+
+## Second-stream channels
+
+Beyond the primary device stream, rastreo emits two additive record streams. Each has its own channel, its own versioned address, and its own JSON Schema. Both are additive: a consumer that only wants device records ignores them.
+
+- **Topology links** — `rastreo.discovery.links.v1`. One message per deduplicated physical link the [LLDP prober](../../probe/lldp.md) discovered. The address is used verbatim as the Kafka topic (`links_topic`) and the NATS subject (`links_subject`). See [Topology](../../discover/topology.md).
+- **Collection profiles** — `rastreo.discovery.profiles.v1`. One message per gNMI endpoint that answered Capabilities, describing how to collect telemetry from it. The address is used verbatim as the Kafka topic (`profiles_topic`) and the NATS subject (`profiles_subject`). See [Collection profiles](../../discover/collection-profile.md).
+
+Both channels carry the same `scan_metadata.scan_id` correlation ID as the device stream, so a consumer aligns links and profiles with the devices from the same scan. A collection profile also carries an `identity_key` that points at its device's record. The `v1` suffix pins each wire schema; a breaking change adds a new channel, such as `rastreo.discovery.profiles.v2`, and both run in parallel for one release cycle.
 
 ## Dead-letter channel
 

@@ -329,6 +329,7 @@ impl Prober for DnsProber {
             // Silence on one port is not evidence against a fault on another, but an answer is.
             return Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::Dns,
                 target_ip: target.ip,
                 timestamp: SystemTime::now(),
@@ -340,6 +341,7 @@ impl Prober for DnsProber {
 
         Ok(ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::Dns,
             target_ip: target.ip,
             timestamp: SystemTime::now(),

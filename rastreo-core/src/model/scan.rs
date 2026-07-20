@@ -248,6 +248,7 @@ mod tests {
                     subject: "rastreo.discovery.records.v1".to_string(),
                     stream: "rastreo".to_string(),
                     links_subject: None,
+                    profiles_subject: None,
                     credentials: NatsCredentials::UserPass {
                         username: "admin".to_string(),
                         password: Password(pw.to_string()),

@@ -276,6 +276,7 @@ fn assemble_outcome(
     if any_reachable {
         return ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::Snmp,
             target_ip,
             timestamp: SystemTime::now(),
@@ -291,6 +292,7 @@ fn assemble_outcome(
     if let Some(port) = decode_failed_port {
         return ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::Snmp,
             target_ip,
             timestamp: SystemTime::now(),
@@ -305,6 +307,7 @@ fn assemble_outcome(
 
     ProbeOutcome {
         lldp: None,
+        gnmi_endpoint: None,
         kind: ProbeKind::Snmp,
         target_ip,
         timestamp: SystemTime::now(),

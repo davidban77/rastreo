@@ -40,6 +40,23 @@ fn committed_link_record_render_matches_current_schema() {
 }
 
 #[test]
+fn committed_collection_profile_render_matches_current_schema() {
+    let root = workspace_root();
+    let raw = fs::read_to_string(root.join("schemas/collection-profile-record-v1.json"))
+        .expect("read collection-profile schema");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse schema");
+    let rendered = xtask::render_schema(&value, "rastreo-core/src/model/collection_profile.rs");
+    let committed = fs::read_to_string(
+        root.join("docs/site/docs/reference/schema/collection-profile-record.md"),
+    )
+    .expect("read committed collection-profile-record.md");
+    assert_eq!(
+        rendered, committed,
+        "committed collection-profile-record.md is out of sync with the schema. Run `task schema:all`."
+    );
+}
+
+#[test]
 fn committed_scan_metadata_render_matches_current_schema() {
     let root = workspace_root();
     let raw = fs::read_to_string(root.join("schemas/scan-metadata-v1.json"))
@@ -104,6 +121,16 @@ fn committed_schemas_match_derives() {
     assert_eq!(
         link_committed, link_current,
         "committed link-record-v1.json is out of sync with the LinkRecord derives. Run `task schema:generate`."
+    );
+
+    let profile_committed =
+        fs::read_to_string(root.join("schemas/collection-profile-record-v1.json"))
+            .expect("read collection-profile schema");
+    let profile_current =
+        xtask::collection_profile_record_schema().expect("collection-profile schema");
+    assert_eq!(
+        profile_committed, profile_current,
+        "committed collection-profile-record-v1.json is out of sync with the CollectionProfileRecord derives. Run `task schema:generate`."
     );
 
     let scan_committed =

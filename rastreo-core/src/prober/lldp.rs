@@ -276,6 +276,7 @@ fn assemble_outcome(
             signals: Vec::new(),
             fault: None,
             lldp: Some(observation),
+            gnmi_endpoint: None,
         };
     }
     if let Some(port) = decode_failed_port {
@@ -290,6 +291,7 @@ fn assemble_outcome(
                 format!("lldp reply on port {port} could not be decoded"),
             )),
             lldp: None,
+            gnmi_endpoint: None,
         };
     }
     ProbeOutcome {
@@ -300,6 +302,7 @@ fn assemble_outcome(
         signals: Vec::new(),
         fault: last_fault,
         lldp: None,
+        gnmi_endpoint: None,
     }
 }
 

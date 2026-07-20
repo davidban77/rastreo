@@ -161,6 +161,7 @@ mod tests {
             brokers: Vec::new(),
             topic: "t".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: rastreo_core::KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,

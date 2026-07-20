@@ -114,6 +114,7 @@ nav:
       - Identity: discover/identity.md
       - Classification: discover/classification.md
       - Topology: discover/topology.md
+      - Collection profiles: discover/collection-profile.md
   - Probe:
       - probe/index.md
       - HTTP: probe/http.md
@@ -150,6 +151,7 @@ nav:
           - reference/schema/index.md
           - DeviceRecord: reference/schema/device-record.md
           - LinkRecord: reference/schema/link-record.md
+          - CollectionProfileRecord: reference/schema/collection-profile-record.md
           - ScanMetadata: reference/schema/scan-metadata.md
           - ScenarioFile: reference/schema/scenario-config.md
           - DiscoveryPlan: reference/schema/discovery-plan.md

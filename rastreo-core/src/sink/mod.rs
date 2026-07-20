@@ -33,11 +33,16 @@ use crate::error::RastreoError;
 pub enum RecordKind {
     Device,
     Link,
+    CollectionProfile,
 }
 
 /// Default links topic (Kafka) / subject (NATS) when the sink config omits an override.
 #[cfg(any(feature = "kafka", feature = "nats"))]
 pub const DEFAULT_LINKS_DESTINATION: &str = "rastreo.discovery.links.v1";
+
+/// Default collection-profile topic (Kafka) / subject (NATS) when the sink config omits an override.
+#[cfg(any(feature = "kafka", feature = "nats"))]
+pub const DEFAULT_PROFILES_DESTINATION: &str = "rastreo.discovery.profiles.v1";
 
 /// Bounded taxonomy of sink failure classes surfaced on `sink_errors_total` and `dlq_records_total`.
 ///
@@ -152,8 +157,8 @@ pub trait Sink: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError>;
 
     /// Writes a record of the given kind. The default delivers every kind to the single `write`
-    /// stream (records self-describe via `schema_id`); sinks with a separate link destination
-    /// override to route `RecordKind::Link` there.
+    /// stream (records self-describe via `schema_id`); sinks with separate second-stream
+    /// destinations override to route the non-`Device` kinds there.
     async fn write_kind(&mut self, kind: RecordKind, data: &[u8]) -> Result<(), RastreoError> {
         let _ = kind;
         self.write(data).await
@@ -238,6 +243,9 @@ pub enum SinkConfig {
         /// Topic the `Link` record stream is produced to; defaults to `rastreo.discovery.links.v1`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         links_topic: Option<String>,
+        /// Topic the collection-profile stream is produced to; defaults to `rastreo.discovery.profiles.v1`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profiles_topic: Option<String>,
         #[serde(default)]
         flush_mode: KafkaFlushMode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -257,6 +265,9 @@ pub enum SinkConfig {
         /// Subject the `Link` record stream is published to; defaults to `rastreo.discovery.links.v1`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         links_subject: Option<String>,
+        /// Subject the collection-profile stream is published to; defaults to `rastreo.discovery.profiles.v1`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profiles_subject: Option<String>,
         #[serde(default)]
         credentials: NatsCredentials,
         #[serde(default)]
@@ -278,6 +289,7 @@ impl SinkConfig {
                 brokers,
                 topic,
                 links_topic,
+                profiles_topic,
                 dead_letter,
                 tls,
                 sasl,
@@ -298,6 +310,12 @@ impl SinkConfig {
                 if links_topic.as_deref().is_some_and(|t| t.trim().is_empty()) {
                     return Err(ConfigError::invalid("kafka sink: links_topic is empty").into());
                 }
+                if profiles_topic
+                    .as_deref()
+                    .is_some_and(|t| t.trim().is_empty())
+                {
+                    return Err(ConfigError::invalid("kafka sink: profiles_topic is empty").into());
+                }
                 if let Some(tls) = tls {
                     tls.validate()?;
                 }
@@ -314,6 +332,7 @@ impl SinkConfig {
                 servers,
                 subject,
                 links_subject,
+                profiles_subject,
                 stream,
                 dead_letter,
                 ..
@@ -335,6 +354,12 @@ impl SinkConfig {
                     .is_some_and(|s| s.trim().is_empty())
                 {
                     return Err(ConfigError::invalid("nats sink: links_subject is empty").into());
+                }
+                if profiles_subject
+                    .as_deref()
+                    .is_some_and(|s| s.trim().is_empty())
+                {
+                    return Err(ConfigError::invalid("nats sink: profiles_subject is empty").into());
                 }
                 if stream.trim().is_empty() {
                     return Err(ConfigError::invalid("nats sink: stream is empty").into());
@@ -360,6 +385,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             brokers,
             topic,
             links_topic,
+            profiles_topic,
             flush_mode,
             dead_letter,
             tls,
@@ -369,9 +395,13 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             let links = links_topic
                 .clone()
                 .unwrap_or_else(|| DEFAULT_LINKS_DESTINATION.to_string());
+            let profiles = profiles_topic
+                .clone()
+                .unwrap_or_else(|| DEFAULT_PROFILES_DESTINATION.to_string());
             let mut sink =
                 KafkaSink::new(brokers.clone(), topic.clone(), tls.clone(), sasl.clone()).await?;
             sink = sink.with_links_topic(links);
+            sink = sink.with_profiles_topic(profiles);
             sink = sink.with_flush_mode(flush_mode.clone());
             sink = sink.with_retry(retry.clone());
             if let Some(dlq) = dead_letter {
@@ -385,6 +415,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             subject,
             stream,
             links_subject,
+            profiles_subject,
             credentials,
             flush_mode,
             dead_letter,
@@ -393,6 +424,9 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             let links = links_subject
                 .clone()
                 .unwrap_or_else(|| DEFAULT_LINKS_DESTINATION.to_string());
+            let profiles = profiles_subject
+                .clone()
+                .unwrap_or_else(|| DEFAULT_PROFILES_DESTINATION.to_string());
             let mut sink = NatsSink::new(
                 servers.clone(),
                 subject.clone(),
@@ -401,6 +435,7 @@ pub async fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>, RastreoEr
             )
             .await?;
             sink = sink.with_links_subject(links);
+            sink = sink.with_profiles_subject(profiles);
             sink = sink.with_flush_mode(flush_mode.clone());
             sink = sink.with_retry(retry.clone());
             if let Some(dlq) = dead_letter {
@@ -464,12 +499,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routing_sink_sends_links_to_the_links_destination() {
-        // Models the Kafka / NATS contract: override write_kind to split the two streams.
+    async fn routing_sink_splits_each_kind_to_its_own_destination() {
+        // Models the Kafka / NATS contract: override write_kind to split the three streams.
         #[derive(Default)]
         struct RoutingSink {
             device_stream: Vec<u8>,
             link_stream: Vec<u8>,
+            profile_stream: Vec<u8>,
         }
         #[async_trait::async_trait]
         impl Sink for RoutingSink {
@@ -488,6 +524,10 @@ mod tests {
                         self.link_stream.extend_from_slice(data);
                         Ok(())
                     }
+                    RecordKind::CollectionProfile => {
+                        self.profile_stream.extend_from_slice(data);
+                        Ok(())
+                    }
                 }
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
@@ -503,8 +543,12 @@ mod tests {
         sink.write_kind(RecordKind::Link, b"link\n")
             .await
             .expect("link");
+        sink.write_kind(RecordKind::CollectionProfile, b"profile\n")
+            .await
+            .expect("profile");
         assert_eq!(sink.device_stream, b"device\ndevice2\n");
         assert_eq!(sink.link_stream, b"link\n");
+        assert_eq!(sink.profile_stream, b"profile\n");
     }
 
     #[tokio::test]
@@ -796,6 +840,7 @@ mod tests {
                 brokers,
                 topic,
                 links_topic,
+                profiles_topic,
                 flush_mode,
                 dead_letter,
                 tls,
@@ -805,6 +850,7 @@ mod tests {
                 assert_eq!(brokers, vec!["k:9092".to_string()]);
                 assert_eq!(topic, "t");
                 assert!(links_topic.is_none());
+                assert!(profiles_topic.is_none());
                 assert!(matches!(flush_mode, KafkaFlushMode::PerRecord));
                 assert!(dead_letter.is_none());
                 assert!(tls.is_none());
@@ -826,6 +872,7 @@ mod tests {
                 subject,
                 stream,
                 links_subject,
+                profiles_subject,
                 credentials,
                 flush_mode,
                 dead_letter,
@@ -835,6 +882,7 @@ mod tests {
                 assert_eq!(subject, "rastreo.discovery.records.v1");
                 assert_eq!(stream, "rastreo");
                 assert!(links_subject.is_none());
+                assert!(profiles_subject.is_none());
                 assert!(matches!(credentials, NatsCredentials::Anonymous));
                 assert!(matches!(flush_mode, NatsFlushMode::PerRecord));
                 assert!(dead_letter.is_none());
@@ -1100,6 +1148,7 @@ mod tests {
             brokers: brokers.into_iter().map(String::from).collect(),
             topic: topic.into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,
@@ -1156,6 +1205,7 @@ mod tests {
             brokers: vec!["kafka:9092".into()],
             topic: "t".into(),
             links_topic: Some("  ".into()),
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,
@@ -1177,6 +1227,7 @@ mod tests {
             brokers: vec!["kafka:9092".into()],
             topic: "t".into(),
             links_topic: Some("rastreo.discovery.links.v1".into()),
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,
@@ -1188,11 +1239,34 @@ mod tests {
 
     #[cfg(feature = "kafka")]
     #[test]
+    fn validate_kafka_rejects_empty_profiles_topic() {
+        let config = SinkConfig::Kafka {
+            brokers: vec!["kafka:9092".into()],
+            topic: "t".into(),
+            links_topic: None,
+            profiles_topic: Some("  ".into()),
+            flush_mode: KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: None,
+            sasl: None,
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("profiles_topic"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
     fn validate_kafka_rejects_ca_cert_without_verify() {
         let config = SinkConfig::Kafka {
             brokers: vec!["kafka:9092".into()],
             topic: "t".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: Some(KafkaTls {
@@ -1217,6 +1291,7 @@ mod tests {
             brokers: vec!["kafka:9092".into()],
             topic: "t".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: Some(KafkaTls {
@@ -1241,6 +1316,7 @@ mod tests {
             brokers: vec!["kafka:9092".into()],
             topic: "t".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,
@@ -1266,6 +1342,7 @@ mod tests {
             brokers: vec!["kafka:9092".into()],
             topic: "t".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: Some(DeadLetterConfig {
                 topic: "  ".into(),
@@ -1290,6 +1367,7 @@ mod tests {
             brokers: vec!["kafka:9092".into()],
             topic: "rastreo.devices".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: Some(KafkaTls {
@@ -1316,6 +1394,7 @@ mod tests {
             brokers: vec!["127.0.0.1:1".into()],
             topic: "rastreo.devices".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: Some(DeadLetterConfig {
                 topic: "  ".into(),
@@ -1341,6 +1420,7 @@ mod tests {
             subject: subject.into(),
             stream: stream.into(),
             links_subject: None,
+            profiles_subject: None,
             credentials: NatsCredentials::Anonymous,
             flush_mode: NatsFlushMode::default(),
             dead_letter: None,
@@ -1408,6 +1488,7 @@ mod tests {
             subject: "s".into(),
             stream: "st".into(),
             links_subject: Some("  ".into()),
+            profiles_subject: None,
             credentials: NatsCredentials::Anonymous,
             flush_mode: NatsFlushMode::default(),
             dead_letter: None,
@@ -1429,6 +1510,7 @@ mod tests {
             subject: "s".into(),
             stream: "st".into(),
             links_subject: Some("rastreo.discovery.links.v1".into()),
+            profiles_subject: None,
             credentials: NatsCredentials::Anonymous,
             flush_mode: NatsFlushMode::default(),
             dead_letter: None,
@@ -1439,12 +1521,35 @@ mod tests {
 
     #[cfg(feature = "nats")]
     #[test]
+    fn validate_nats_rejects_empty_profiles_subject() {
+        let config = SinkConfig::Nats {
+            servers: vec!["nats://n:4222".into()],
+            subject: "s".into(),
+            stream: "st".into(),
+            links_subject: None,
+            profiles_subject: Some("  ".into()),
+            credentials: NatsCredentials::Anonymous,
+            flush_mode: NatsFlushMode::default(),
+            dead_letter: None,
+            retry: SinkRetry::default(),
+        };
+        match config.validate() {
+            Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
+                assert!(msg.contains("profiles_subject"), "msg was: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
     fn validate_nats_rejects_empty_dead_letter_stream() {
         let config = SinkConfig::Nats {
             servers: vec!["nats://n:4222".into()],
             subject: "s".into(),
             stream: "st".into(),
             links_subject: None,
+            profiles_subject: None,
             credentials: NatsCredentials::Anonymous,
             flush_mode: NatsFlushMode::default(),
             dead_letter: Some(NatsDeadLetterConfig {
@@ -1471,6 +1576,7 @@ mod tests {
             subject: "s".into(),
             stream: "st".into(),
             links_subject: None,
+            profiles_subject: None,
             credentials: NatsCredentials::Anonymous,
             flush_mode: NatsFlushMode::default(),
             dead_letter: Some(NatsDeadLetterConfig {

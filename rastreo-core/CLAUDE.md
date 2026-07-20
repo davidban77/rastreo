@@ -10,8 +10,9 @@ src/
 ├── error.rs         ← RastreoError umbrella + sub-enums + ProbeErrorKind taxonomy
 ├── model/
 │   ├── target.rs        ← Target, ResolvedTarget
-│   ├── outcome.rs       ← ProbeKind, ProbeOutcome, ProbeFault, Signal, ProbeCtx
+│   ├── outcome.rs       ← ProbeKind, ProbeOutcome, ProbeFault, Signal, ProbeCtx, GnmiEndpoint, Transport
 │   ├── device.rs        ← DeviceRecord, IdentityKey, AltIp, AltIpRole
+│   ├── collection_profile.rs ← CollectionProfileRecord, Collection (protocol-tagged), ProfileEndpoint, ProfileConfidence, Subscription
 │   ├── scan.rs          ← ScanMetadata, source_config_hash
 │   └── serde_iso8601.rs ← RFC 3339 serde helpers for SystemTime
 ├── resolver/
@@ -56,10 +57,20 @@ src/
 ├── observability/
 │   ├── mod.rs           ← module root
 │   └── otlp_config.rs   ← OtlpProtocol enum + shared env-var parsers (parse_env_bool / parse_env_u64 / parse_env_protocol / parse_env_headers) + http_endpoint_for_signal; consumed by rastreo and rastreo-server. No OpenTelemetry deps — pure types + string parsing.
+├── collection_profile/mod.rs ← CollectionProfileAssembler (per-gNMI-endpoint profiles, built from per-IP outcomes)
 ├── pipeline.rs     ← run_discovery + DiscoverySummary
 ├── plan.rs         ← DiscoveryPlan + PlanKnobs (exhaustive dry-run plan render + Display)
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```
+
+## Second Streams
+
+Beyond the primary `DeviceRecord` stream, the pipeline emits two additive record streams, each keyed by `RecordKind` at the sink boundary and versioned independently of the device record:
+
+- **Links** (`RecordKind::Link`, `rastreo.discovery.links.v1`) — deduplicated topology edges from `TopologyAssembler`.
+- **Collection profiles** (`RecordKind::CollectionProfile`, `rastreo.discovery.profiles.v1`) — one `CollectionProfileRecord` per gNMI endpoint that returned capability data, from `CollectionProfileAssembler`. The assembler builds from per-IP `ProbeOutcome`s (via the surfaced `ProbeOutcome::gnmi_endpoint`), not the merged `DeviceRecord`, because the identity fuser dedups signals across a device's IPs and would lose per-endpoint model attribution. It draws only from capability signals (`GnmiVersion` / `GnmiSupportedModel` / `GnmiSupportedEncoding`) and the endpoint — never `GnmiState`, whose values can be sensitive — and emits only when capability data is present (not on mere reachability).
+
+Both assemblers run in `stream_discovery` and the `finish_discovery_ref` batch reference; the streaming-vs-batch differential test pins them field-identical. Sinks route each kind via `write_kind`; the Kafka/NATS sinks fan the second streams to their own topic/subject (`profiles_topic` / `profiles_subject`), and `Encoder::encode_profile` is a defaulted trait method like `encode_link`.
 
 ## Cargo Features
 

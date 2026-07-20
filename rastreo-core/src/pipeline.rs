@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::Instrument;
 
 use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
+use crate::collection_profile::CollectionProfileAssembler;
 use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, Encoder, EncoderConfig};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
@@ -34,6 +35,9 @@ pub struct DiscoverySummary {
     /// Topology links emitted on the second stream; `0` when no LLDP data was collected.
     #[serde(default)]
     pub links_emitted: usize,
+    /// Collection profiles emitted on the second stream; `0` when no gNMI capability data was collected.
+    #[serde(default)]
+    pub profiles_emitted: usize,
     /// Faulted probes tallied by [`ProbeErrorKind`]; empty when no probe faulted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub error_counts: BTreeMap<ProbeErrorKind, usize>,
@@ -289,6 +293,7 @@ async fn emit_target_records(
     sink: &mut dyn Sink,
     scan_metadata: &Arc<ScanMetadata>,
     assembler: &mut TopologyAssembler,
+    profile_assembler: &mut CollectionProfileAssembler,
     buf: &mut Vec<u8>,
     records_emitted: &mut usize,
     emit_err: &mut Option<RastreoError>,
@@ -298,11 +303,13 @@ async fn emit_target_records(
     let probe_outcomes: Vec<ProbeOutcome> =
         outcomes.into_iter().filter_map(|(_, r)| r.ok()).collect();
     assembler.observe_outcomes(&probe_outcomes);
+    profile_assembler.observe_outcomes(&probe_outcomes);
     let mut records = fuser.ingest(probe_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
         stamp_scan_metadata(record, scan_metadata);
         assembler.observe_record(record);
+        profile_assembler.observe_record(record);
     }
     for record in &records {
         buf.clear();
@@ -357,6 +364,7 @@ async fn stream_discovery(
     let mut emit_err: Option<RastreoError> = None;
     let mut scan_done = false;
     let mut assembler = TopologyAssembler::new(Arc::clone(scan_metadata));
+    let mut profile_assembler = CollectionProfileAssembler::new(Arc::clone(scan_metadata));
 
     let stream_span = tracing::info_span!(parent: scan_span, "stream");
 
@@ -386,6 +394,7 @@ async fn stream_discovery(
                             sink,
                             scan_metadata,
                             &mut assembler,
+                            &mut profile_assembler,
                             &mut buf,
                             &mut records_emitted,
                             &mut emit_err,
@@ -411,6 +420,7 @@ async fn stream_discovery(
                 sink,
                 scan_metadata,
                 &mut assembler,
+                &mut profile_assembler,
                 &mut buf,
                 &mut records_emitted,
                 &mut emit_err,
@@ -427,6 +437,7 @@ async fn stream_discovery(
         classifier.classify(record)?;
         stamp_scan_metadata(record, scan_metadata);
         assembler.observe_record(record);
+        profile_assembler.observe_record(record);
     }
     for record in &tail {
         if emit_err.is_some() {
@@ -446,7 +457,7 @@ async fn stream_discovery(
     finish_span.record("records_emitted", records_emitted as u64);
     drop(finish_span);
 
-    // Links flush after every device record so the identity index is complete before correlation.
+    // Second streams flush after every device record so the identity index is complete before correlation.
     let mut links_emitted: usize = 0;
     for link in &assembler.finish() {
         if emit_err.is_some() {
@@ -462,6 +473,23 @@ async fn stream_discovery(
             break;
         }
         links_emitted += 1;
+    }
+
+    let mut profiles_emitted: usize = 0;
+    for profile in &profile_assembler.finish() {
+        if emit_err.is_some() {
+            break;
+        }
+        buf.clear();
+        if let Err(e) = encoder.encode_profile(profile, &mut buf) {
+            emit_err = Some(e);
+            break;
+        }
+        if let Err(e) = sink.write_kind(RecordKind::CollectionProfile, &buf).await {
+            emit_err = Some(e);
+            break;
+        }
+        profiles_emitted += 1;
     }
 
     let close_err = sink.close().await.err();
@@ -488,6 +516,7 @@ async fn stream_discovery(
         probe_attempts: acc.probe_attempts,
         records_emitted,
         links_emitted,
+        profiles_emitted,
         error_counts: acc.error_counts,
         probes_by_kind,
         dlq_records,
@@ -570,16 +599,20 @@ async fn finish_discovery_ref(
 
     let mut assembler = TopologyAssembler::new(Arc::clone(scan_metadata));
     assembler.observe_outcomes(&acc.all_outcomes);
+    let mut profile_assembler = CollectionProfileAssembler::new(Arc::clone(scan_metadata));
+    profile_assembler.observe_outcomes(&acc.all_outcomes);
     let mut records = crate::fuser::drive_fuser(fuser, acc.all_outcomes)?;
     for record in &mut records {
         classifier.classify(record)?;
         stamp_scan_metadata(record, scan_metadata);
         assembler.observe_record(record);
+        profile_assembler.observe_record(record);
     }
 
     let mut buf: Vec<u8> = Vec::new();
     let mut records_emitted: usize = 0;
     let mut links_emitted: usize = 0;
+    let mut profiles_emitted: usize = 0;
     let mut emit_err: Option<RastreoError> = None;
 
     for record in &records {
@@ -611,6 +644,22 @@ async fn finish_discovery_ref(
         links_emitted += 1;
     }
 
+    for profile in &profile_assembler.finish() {
+        if emit_err.is_some() {
+            break;
+        }
+        buf.clear();
+        if let Err(e) = encoder.encode_profile(profile, &mut buf) {
+            emit_err = Some(e);
+            break;
+        }
+        if let Err(e) = sink.write_kind(RecordKind::CollectionProfile, &buf).await {
+            emit_err = Some(e);
+            break;
+        }
+        profiles_emitted += 1;
+    }
+
     let close_err = sink.close().await.err();
 
     let dlq_records_by_type_and_class = sink.dlq_records_by_type_and_class();
@@ -631,6 +680,7 @@ async fn finish_discovery_ref(
         probe_attempts: acc.probe_attempts,
         records_emitted,
         links_emitted,
+        profiles_emitted,
         error_counts: acc.error_counts,
         probes_by_kind,
         dlq_records,
@@ -1788,6 +1838,7 @@ mod tests {
         let outcomes = vec![
             ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::Snmp,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -1797,6 +1848,7 @@ mod tests {
             },
             ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::Snmp,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -1806,6 +1858,7 @@ mod tests {
             },
             ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::Snmp,
                 target_ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -2108,6 +2161,7 @@ mod tests {
                     }],
                     discovered_via: "lldp".into(),
                 }),
+                gnmi_endpoint: None,
             })
         }
     }
@@ -2256,6 +2310,7 @@ mod tests {
                 match &self.responses[idx] {
                     Resp::Reachable(signals) => Ok(ProbeOutcome {
                         lldp: None,
+                        gnmi_endpoint: None,
                         kind: self.kind,
                         target_ip: target.ip,
                         timestamp: SystemTime::UNIX_EPOCH,
@@ -2265,6 +2320,7 @@ mod tests {
                     }),
                     Resp::Dark => Ok(ProbeOutcome {
                         lldp: None,
+                        gnmi_endpoint: None,
                         kind: self.kind,
                         target_ip: target.ip,
                         timestamp: SystemTime::UNIX_EPOCH,
@@ -2274,6 +2330,7 @@ mod tests {
                     }),
                     Resp::Fault(kind, detail) => Ok(ProbeOutcome {
                         lldp: None,
+                        gnmi_endpoint: None,
                         kind: self.kind,
                         target_ip: target.ip,
                         timestamp: SystemTime::UNIX_EPOCH,
@@ -2493,6 +2550,10 @@ mod tests {
                 "{label}: links_emitted"
             );
             assert_eq!(
+                new.profiles_emitted, batch.profiles_emitted,
+                "{label}: profiles_emitted"
+            );
+            assert_eq!(
                 new.error_counts, batch.error_counts,
                 "{label}: error_counts"
             );
@@ -2527,6 +2588,19 @@ mod tests {
                 .collect()
         }
 
+        fn parse_profile_records(lines: &[String]) -> Vec<crate::model::CollectionProfileRecord> {
+            lines
+                .iter()
+                .filter_map(|line| {
+                    let value: serde_json::Value = serde_json::from_str(line).expect("json line");
+                    let is_profile = value["schema_id"]
+                        .as_str()
+                        .is_some_and(|id| id.contains("collection-profile-record-v1.json"));
+                    is_profile.then(|| serde_json::from_str(line).expect("parse profile record"))
+                })
+                .collect()
+        }
+
         fn first_probe_error_stress_setup() -> ProbeSetup {
             let probers = vec![
                 scripted(
@@ -2555,6 +2629,43 @@ mod tests {
                 ),
             ];
             (probers, resolved_n(3))
+        }
+
+        // Emits a gNMI capability outcome per target so the differential harness exercises the
+        // profile second stream, not just links. The surfaced endpoint is what the assembler reads.
+        struct GnmiCapabilityProber;
+
+        #[async_trait::async_trait]
+        impl Prober for GnmiCapabilityProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::Gnmi
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                Ok(ProbeOutcome {
+                    kind: ProbeKind::Gnmi,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![
+                        Signal::GnmiVersion("0.10.0".into()),
+                        Signal::GnmiSupportedModel(
+                            "openconfig-interfaces 3.0.0 (OpenConfig)".into(),
+                        ),
+                        Signal::GnmiSupportedEncoding("JSON_IETF".into()),
+                    ],
+                    fault: None,
+                    lldp: None,
+                    gnmi_endpoint: Some(crate::model::GnmiEndpoint {
+                        port: 57400,
+                        transport: crate::model::Transport::Tls,
+                        advertised_encodings: vec!["JSON_IETF".into(), "PROTO".into()],
+                    }),
+                })
+            }
         }
 
         fn matrix_setups() -> Vec<MatrixSetup> {
@@ -2647,6 +2758,11 @@ mod tests {
                     })],
                     resolved_n(2),
                 ),
+                (
+                    "gnmi_profile",
+                    vec![Arc::new(GnmiCapabilityProber)],
+                    resolved_n(2),
+                ),
             ]
         }
 
@@ -2681,8 +2797,55 @@ mod tests {
                         parse_link_records(&records_batch),
                         "{label}: streaming and batch pipelines must emit field-identical link records"
                     );
+                    assert_eq!(
+                        parse_profile_records(&records_stream),
+                        parse_profile_records(&records_batch),
+                        "{label}: streaming and batch pipelines must emit field-identical profile records"
+                    );
                 }
             }
+        }
+
+        #[tokio::test]
+        async fn pipeline_emits_a_collection_profile_for_a_gnmi_capability_outcome() {
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let probers: Vec<Arc<dyn Prober>> = vec![Arc::new(GnmiCapabilityProber)];
+            let (summary, records) =
+                run_streaming(probers, resolved_n(1), &direct_cfg(), &scan_metadata).await;
+            let summary = summary.expect("summary");
+            assert_eq!(summary.profiles_emitted, 1);
+
+            let profiles = parse_profile_records(&records);
+            assert_eq!(profiles.len(), 1);
+            let p = &profiles[0];
+            assert_eq!(p.endpoint.address, "10.0.0.0");
+            assert_eq!(p.endpoint.port, 57400);
+            assert_eq!(p.endpoint.transport, crate::model::Transport::Tls);
+            assert_eq!(
+                p.confidence,
+                crate::model::ProfileConfidence::AdvertisedOnly
+            );
+
+            let value: serde_json::Value = serde_json::to_value(p).expect("serialize");
+            assert_eq!(value["collection"]["protocol"], "gnmi");
+            assert_eq!(
+                value["collection"]["suggested_subscriptions"]
+                    .as_array()
+                    .expect("array")
+                    .len(),
+                0,
+                "suggested subscriptions are curated separately; this stream ships them empty"
+            );
+
+            let crate::model::Collection::Gnmi {
+                encoding,
+                supported_models,
+                ..
+            } = &p.collection;
+            assert_eq!(encoding, "JSON_IETF");
+            assert!(supported_models
+                .iter()
+                .any(|m| m.contains("openconfig-interfaces")));
         }
 
         // Inverted latency: target `idx` sleeps `n - idx` ms, so completion order is the exact
@@ -2710,6 +2873,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis((self.n - idx) as u64)).await;
                 Ok(ProbeOutcome {
                     lldp: None,
+                    gnmi_endpoint: None,
                     kind: ProbeKind::Snmp,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -2794,6 +2958,7 @@ mod tests {
                 self.probed.fetch_add(1, Ordering::SeqCst);
                 Ok(ProbeOutcome {
                     lldp: None,
+                    gnmi_endpoint: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -2955,6 +3120,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_micros((last % 4) * 50)).await;
                 Ok(ProbeOutcome {
                     lldp: None,
+                    gnmi_endpoint: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -3034,6 +3200,7 @@ mod tests {
                 self.probes_done.fetch_add(1, Ordering::SeqCst);
                 Ok(ProbeOutcome {
                     lldp: None,
+                    gnmi_endpoint: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,
@@ -3138,6 +3305,7 @@ mod tests {
                 .await;
                 Ok(ProbeOutcome {
                     lldp: None,
+                    gnmi_endpoint: None,
                     kind: ProbeKind::TcpConnect,
                     target_ip: target.ip,
                     timestamp: SystemTime::UNIX_EPOCH,

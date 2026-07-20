@@ -53,6 +53,7 @@ async fn nats_create_sink_delivers_each_record_to_the_stream() {
         subject: subject.to_string(),
         stream: stream_name.to_string(),
         links_subject: None,
+        profiles_subject: None,
         credentials: NatsCredentials::Anonymous,
         flush_mode: NatsFlushMode::default(),
         dead_letter: None,
