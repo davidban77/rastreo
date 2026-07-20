@@ -280,6 +280,19 @@ pub enum SinkConfig {
 }
 
 impl SinkConfig {
+    /// Whether a scan writing to this sink can be resumed from a checkpoint: `true` for durable
+    /// append destinations (`File`/`Kafka`/`Nats`), `false` for `Stdout`/`Memory`.
+    pub fn supports_resume(&self) -> bool {
+        match self {
+            SinkConfig::File { .. } => true,
+            #[cfg(feature = "kafka")]
+            SinkConfig::Kafka { .. } => true,
+            #[cfg(feature = "nats")]
+            SinkConfig::Nats { .. } => true,
+            SinkConfig::Stdout | SinkConfig::Memory => false,
+        }
+    }
+
     /// Validate the sink configuration offline: no network, no connect, no filesystem access.
     pub fn validate(&self) -> Result<(), RastreoError> {
         match self {
@@ -1116,6 +1129,32 @@ mod tests {
             }
             other => panic!("expected Nats, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn supports_resume_true_for_file_sink() {
+        assert!(SinkConfig::File {
+            path: PathBuf::from("/tmp/rastreo.ndjson"),
+        }
+        .supports_resume());
+    }
+
+    #[test]
+    fn supports_resume_false_for_stdout_and_memory() {
+        assert!(!SinkConfig::Stdout.supports_resume());
+        assert!(!SinkConfig::Memory.supports_resume());
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn supports_resume_true_for_kafka_sink() {
+        assert!(kafka_config(vec!["kafka:9092"], "rastreo.devices").supports_resume());
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn supports_resume_true_for_nats_sink() {
+        assert!(nats_config(vec!["nats://n:4222"], "rastreo.records", "rastreo").supports_resume());
     }
 
     #[test]

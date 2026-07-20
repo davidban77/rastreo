@@ -8,6 +8,7 @@ This is the library crate. It owns **all** domain logic. If it probes a network,
 src/
 ├── lib.rs           ← crate-root re-exports + version()
 ├── error.rs         ← RastreoError umbrella + sub-enums + ProbeErrorKind taxonomy
+├── checkpoint/mod.rs ← Checkpoint (atomic write/load) + resume eligibility predicates + two-tier resume fingerprint
 ├── model/
 │   ├── target.rs        ← Target, ResolvedTarget
 │   ├── outcome.rs       ← ProbeKind, ProbeOutcome, ProbeFault, Signal, ProbeCtx, GnmiEndpoint, Transport
@@ -140,7 +141,7 @@ The SSH prober follows the same permissive posture without a toggle: it offers l
 
 - Define errors using `thiserror`. Every public function returns `Result<T, RastreoError>`.
 - Never `unwrap()` in this crate. Use `?` propagation or explicit error mapping.
-- The structured error hierarchy uses sub-enums per failure domain (`ConfigError`, `ProbeError`, `ResolverError`, `EncoderError`, `RuntimeError`) accessed via the umbrella `RastreoError`. No blanket `From<std::io::Error>` — sink call sites map I/O failures to `RastreoError::Sink` explicitly.
+- The structured error hierarchy uses sub-enums per failure domain (`ConfigError`, `ProbeError`, `ResolverError`, `EncoderError`, `RuntimeError`, `ResumeError`) accessed via the umbrella `RastreoError`. No blanket `From<std::io::Error>` — sink call sites map I/O failures to `RastreoError::Sink` explicitly.
 
 **The reachability contract.** A probe result is a complete, typed record of what the probe learned. `probe()` returns `Ok(ProbeOutcome)` whenever it attempted a target; the outcome carries `reachable`, `signals`, and a typed `fault: Option<ProbeFault>`. A target that does not answer is `Ok(ProbeOutcome { reachable: false, signals: [], fault: None })`. A probe that broke is `Ok(ProbeOutcome { fault: Some(ProbeFault { kind, detail }) })` — the fault is data, never discarded. `Err` from `probe()` is vestigial: reserved for "could not attempt at all" (e.g. a panicked blocking thread → `RuntimeError`); the pipeline still handles a stray `Err` by counting it as `ProbeErrorKind::Other`.
 

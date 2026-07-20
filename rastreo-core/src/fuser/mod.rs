@@ -300,7 +300,7 @@ fn reject_nested_identity(inner: &FuserConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn subtree_contains_identity(config: &FuserConfig) -> bool {
+pub(crate) fn subtree_contains_identity(config: &FuserConfig) -> bool {
     match config {
         FuserConfig::Direct { .. } => false,
         #[cfg(feature = "oui")]

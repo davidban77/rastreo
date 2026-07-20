@@ -61,7 +61,7 @@ fn hash_scenario(scenario: &DiscoverScenarioConfig) -> Option<String> {
     Some(format!("sha256:{}", hex_lower(&digest)))
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
