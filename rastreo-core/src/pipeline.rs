@@ -2104,6 +2104,7 @@ mod tests {
                         remote_port_desc: None,
                         remote_sys_name: None,
                     }],
+                    discovered_via: "lldp".into(),
                 }),
             })
         }

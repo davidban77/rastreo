@@ -3,18 +3,23 @@ mod proto {
     include!("generated.rs");
 }
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use tokio::time::timeout;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
-use tonic::{Code, Request, Status};
+use tonic::{Code, Request, Response, Status};
 
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
-use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, Signal};
+use crate::fuser::keys::canonical_mac_str;
+use crate::model::{
+    LldpNeighbor, LldpObservation, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget,
+    Signal,
+};
 use crate::prober::accept_any_tls::AcceptAnyVerifier;
 use crate::prober::classify::{self, Disposition};
 use crate::prober::ports::{probe_ports, MAX_PORTS_IN_FLIGHT};
@@ -24,16 +29,38 @@ use crate::prober::Prober;
 use proto::gnmi::g_nmi_client::GNmiClient;
 use proto::gnmi::{
     CapabilityRequest, CapabilityResponse, Encoding, GetRequest, GetResponse, ModelData, Path,
-    PathElem, TypedValue,
+    PathElem, TypedValue, Update,
 };
 
 const MAX_VALUE_BYTES: usize = 256;
+
+// IEEE 802.1AB subtypes the SNMP `lldp` path stores; the assembler correlates on these numeric
+// values, so the gNMI parser maps OpenConfig identityref strings to the same numbers.
+const CHASSIS_SUBTYPE_MAC: u32 = 4;
+const CHASSIS_SUBTYPE_NETWORK_ADDRESS: u32 = 5;
+const PORT_SUBTYPE_MAC: u32 = 3;
+const PORT_SUBTYPE_NETWORK_ADDRESS: u32 = 4;
+
+const LLDP_GET_PATHS: &[&str] = &[
+    "/lldp/state/chassis-id",
+    "/lldp/state/chassis-id-type",
+    "/lldp/interfaces/interface[name=*]/neighbors/neighbor[id=*]/state/chassis-id",
+    "/lldp/interfaces/interface[name=*]/neighbors/neighbor[id=*]/state/chassis-id-type",
+    "/lldp/interfaces/interface[name=*]/neighbors/neighbor[id=*]/state/port-id",
+    "/lldp/interfaces/interface[name=*]/neighbors/neighbor[id=*]/state/port-id-type",
+    "/lldp/interfaces/interface[name=*]/neighbors/neighbor[id=*]/state/system-name",
+    "/lldp/interfaces/interface[name=*]/neighbors/neighbor[id=*]/state/port-description",
+];
 
 pub fn default_ports() -> Vec<u16> {
     vec![57400]
 }
 
 pub fn default_plaintext() -> bool {
+    false
+}
+
+pub fn default_lldp() -> bool {
     false
 }
 
@@ -59,6 +86,8 @@ pub struct GnmiProber {
     ports: Vec<u16>,
     plaintext: bool,
     get_paths: Vec<Path>,
+    lldp: bool,
+    lldp_paths: Vec<Path>,
     auth: Option<GnmiAuth>,
 }
 
@@ -69,6 +98,7 @@ impl std::fmt::Debug for GnmiProber {
             .field("plaintext", &self.plaintext)
             .field("authenticated", &self.auth.is_some())
             .field("get_paths", &self.get_paths.len())
+            .field("lldp", &self.lldp)
             .finish()
     }
 }
@@ -80,6 +110,7 @@ impl GnmiProber {
         username: String,
         password: Password,
         get_paths: Vec<String>,
+        lldp: bool,
     ) -> Result<Self, RastreoError> {
         if ports.is_empty() {
             return Err(ConfigError::invalid("gnmi prober requires at least one port").into());
@@ -104,11 +135,18 @@ impl GnmiProber {
         };
 
         let get_paths = get_paths.iter().map(|p| parse_path(p)).collect();
+        let lldp_paths = if lldp {
+            LLDP_GET_PATHS.iter().map(|p| parse_path(p)).collect()
+        } else {
+            Vec::new()
+        };
 
         Ok(Self {
             ports,
             plaintext,
             get_paths,
+            lldp,
+            lldp_paths,
             auth,
         })
     }
@@ -178,9 +216,7 @@ impl GnmiProber {
         };
 
         let mut client = GNmiClient::new(channel);
-        let mut signals = Vec::new();
-        let mut answered = false;
-        let mut status: Option<Status> = None;
+        let mut acc = PortAccumulator::default();
         // No Capabilities answer leaves the fallback encoding.
         let mut get_encoding = select_get_encoding(&[]);
 
@@ -191,38 +227,79 @@ impl GnmiProber {
         .await
         {
             Ok(Ok(response)) => {
-                answered = true;
+                acc.answered = true;
                 let response = response.into_inner();
                 get_encoding = select_get_encoding(&response.supported_encodings);
-                collect_capability_signals(response, &mut signals);
+                collect_capability_signals(response, &mut acc.signals);
             }
             Ok(Err(gnmi_status)) => {
-                status.get_or_insert(gnmi_status);
+                acc.status.get_or_insert(gnmi_status);
             }
             Err(_) => {}
         }
 
+        // The state Get and the /lldp Get are independent: an error on one leaves the other's
+        // contribution intact, so a device that lacks the OpenConfig `/lldp` path still yields its
+        // state signals (and vice-versa).
         if !self.get_paths.is_empty() {
             let request = self.request(GetRequest {
                 path: self.get_paths.clone(),
                 encoding: get_encoding,
                 ..Default::default()
             });
-            match timeout(ctx.timeout, client.get(request)).await {
-                Ok(Ok(response)) => {
-                    answered = true;
-                    collect_get_signals(response.into_inner(), &mut signals);
-                }
-                Ok(Err(gnmi_status)) => {
-                    status.get_or_insert(gnmi_status);
-                }
-                Err(_) => {}
+            if let Ok(result) = timeout(ctx.timeout, client.get(request)).await {
+                acc.record_get(result.map(Response::into_inner), GetHandler::State);
             }
         }
 
-        if answered {
-            PortResult::Answered(signals)
-        } else if let Some(status) = status {
+        if self.lldp {
+            let request = self.request(GetRequest {
+                path: self.lldp_paths.clone(),
+                encoding: get_encoding,
+                ..Default::default()
+            });
+            if let Ok(result) = timeout(ctx.timeout, client.get(request)).await {
+                acc.record_get(result.map(Response::into_inner), GetHandler::Lldp);
+            }
+        }
+
+        acc.into_result()
+    }
+}
+
+#[derive(Default)]
+struct PortAccumulator {
+    signals: Vec<Signal>,
+    answered: bool,
+    status: Option<Status>,
+    lldp: Option<LldpObservation>,
+}
+
+enum GetHandler {
+    State,
+    Lldp,
+}
+
+impl PortAccumulator {
+    fn record_get(&mut self, result: Result<GetResponse, Status>, handler: GetHandler) {
+        match result {
+            Ok(response) => {
+                self.answered = true;
+                match handler {
+                    GetHandler::State => collect_get_signals(response, &mut self.signals),
+                    GetHandler::Lldp => self.lldp = Some(parse_lldp_response(response)),
+                }
+            }
+            Err(status) => {
+                self.status.get_or_insert(status);
+            }
+        }
+    }
+
+    fn into_result(self) -> PortResult {
+        if self.answered {
+            PortResult::Answered(self.signals, self.lldp)
+        } else if let Some(status) = self.status {
             PortResult::Status(status)
         } else {
             // The channel connected but no RPC produced an answer within the deadline: no
@@ -238,7 +315,7 @@ enum ConnectError {
 }
 
 enum PortResult {
-    Answered(Vec<Signal>),
+    Answered(Vec<Signal>, Option<LldpObservation>),
     Status(Status),
     Absence,
     Fault(ProbeFault),
@@ -466,6 +543,319 @@ fn truncate(raw: &str) -> String {
     raw[..end].to_string()
 }
 
+/// Parses an OpenConfig `/lldp` Get into an [`LldpObservation`] tagged `gnmi`. Its own parser
+/// (never `collect_get_signals`, which truncates values and mangles JSON blobs), tolerant of both
+/// device return formats: one Update per resolved leaf, or a JSON_IETF subtree blob.
+fn parse_lldp_response(response: GetResponse) -> LldpObservation {
+    let mut builder = LldpBuilder::default();
+    for notification in &response.notification {
+        let prefix = notification.prefix.as_ref();
+        for update in &notification.update {
+            builder.ingest_update(prefix, update);
+        }
+    }
+    builder.finish()
+}
+
+#[derive(Default)]
+struct LldpBuilder {
+    local_chassis_id: Option<String>,
+    local_chassis_type: Option<String>,
+    neighbors: BTreeMap<(String, String), NeighborBuilder>,
+}
+
+#[derive(Default)]
+struct NeighborBuilder {
+    chassis_id: Option<String>,
+    chassis_type: Option<String>,
+    port_id: Option<String>,
+    port_type: Option<String>,
+    system_name: Option<String>,
+    port_description: Option<String>,
+}
+
+impl LldpBuilder {
+    fn ingest_update(&mut self, prefix: Option<&Path>, update: &Update) {
+        let elems = joined_elems(prefix, update.path.as_ref());
+        let Some(value) = update.val.as_ref() else {
+            return;
+        };
+        if let Some(json) = json_blob(value) {
+            self.ingest_json(&elems, &json);
+        } else if let Some(scalar) = scalar_value(value) {
+            self.ingest_leaf(&elems, scalar);
+        }
+    }
+
+    fn ingest_leaf(&mut self, elems: &[PathElem], value: String) {
+        let leaf = elems.last().map_or("", |e| strip_module(&e.name));
+        match (
+            elem_key(elems, "interface", "name"),
+            elem_key(elems, "neighbor", "id"),
+        ) {
+            (Some(interface), Some(id)) => {
+                set_neighbor_leaf(
+                    self.neighbors.entry((interface, id)).or_default(),
+                    leaf,
+                    value,
+                );
+            }
+            _ => match leaf {
+                "chassis-id" => self.local_chassis_id = Some(value),
+                "chassis-id-type" => self.local_chassis_type = Some(value),
+                _ => {}
+            },
+        }
+    }
+
+    fn ingest_json(&mut self, elems: &[PathElem], json: &serde_json::Value) {
+        match (
+            elem_key(elems, "interface", "name"),
+            elem_key(elems, "neighbor", "id"),
+        ) {
+            (Some(interface), Some(id)) => {
+                let state = stripped_get(json, "state").unwrap_or(json);
+                apply_neighbor_state(self.neighbors.entry((interface, id)).or_default(), state);
+            }
+            _ => self.ingest_container_json(json),
+        }
+    }
+
+    fn ingest_container_json(&mut self, json: &serde_json::Value) {
+        let root = descend_lldp_wrapper(json);
+        if let Some(state) = stripped_get(root, "state") {
+            if let Some(v) = stripped_str(state, "chassis-id") {
+                self.local_chassis_id = Some(v);
+            }
+            if let Some(v) = stripped_str(state, "chassis-id-type") {
+                self.local_chassis_type = Some(v);
+            }
+        }
+        let interfaces = stripped_get(root, "interfaces").unwrap_or(root);
+        let Some(list) = stripped_get(interfaces, "interface").and_then(|v| v.as_array()) else {
+            return;
+        };
+        for intf in list {
+            let Some(name) = stripped_str(intf, "name") else {
+                continue;
+            };
+            let neighbors = stripped_get(intf, "neighbors").unwrap_or(intf);
+            let Some(nlist) = stripped_get(neighbors, "neighbor").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for nbr in nlist {
+                let Some(id) = stripped_str(nbr, "id") else {
+                    continue;
+                };
+                let state = stripped_get(nbr, "state").unwrap_or(nbr);
+                apply_neighbor_state(self.neighbors.entry((name.clone(), id)).or_default(), state);
+            }
+        }
+    }
+
+    fn finish(self) -> LldpObservation {
+        let local_subtype =
+            chassis_subtype_from_type(self.local_chassis_type.as_deref().unwrap_or(""));
+        let local_chassis_id = canonical_chassis(
+            local_subtype,
+            self.local_chassis_id.as_deref().unwrap_or(""),
+        );
+        let mut neighbors = Vec::with_capacity(self.neighbors.len());
+        for ((interface, _id), nbr) in self.neighbors {
+            let chassis_subtype =
+                chassis_subtype_from_type(nbr.chassis_type.as_deref().unwrap_or(""));
+            let port_subtype = port_subtype_from_type(nbr.port_type.as_deref().unwrap_or(""));
+            neighbors.push(LldpNeighbor {
+                local_port: interface,
+                remote_chassis_id: canonical_chassis(
+                    chassis_subtype,
+                    nbr.chassis_id.as_deref().unwrap_or(""),
+                ),
+                remote_chassis_subtype: chassis_subtype,
+                remote_port_id: canonical_port(port_subtype, nbr.port_id.as_deref().unwrap_or("")),
+                remote_port_subtype: port_subtype,
+                remote_port_desc: nbr.port_description.filter(|s| !s.is_empty()),
+                remote_sys_name: nbr.system_name.filter(|s| !s.is_empty()),
+            });
+        }
+        LldpObservation {
+            local_chassis_id,
+            local_chassis_subtype: local_subtype,
+            neighbors,
+            discovered_via: "gnmi".to_string(),
+        }
+    }
+}
+
+fn set_neighbor_leaf(entry: &mut NeighborBuilder, leaf: &str, value: String) {
+    match leaf {
+        "chassis-id" => entry.chassis_id = Some(value),
+        "chassis-id-type" => entry.chassis_type = Some(value),
+        "port-id" => entry.port_id = Some(value),
+        "port-id-type" => entry.port_type = Some(value),
+        "system-name" => entry.system_name = Some(value),
+        "port-description" => entry.port_description = Some(value),
+        _ => {}
+    }
+}
+
+fn apply_neighbor_state(entry: &mut NeighborBuilder, state: &serde_json::Value) {
+    if let Some(v) = stripped_str(state, "chassis-id") {
+        entry.chassis_id = Some(v);
+    }
+    if let Some(v) = stripped_str(state, "chassis-id-type") {
+        entry.chassis_type = Some(v);
+    }
+    if let Some(v) = stripped_str(state, "port-id") {
+        entry.port_id = Some(v);
+    }
+    if let Some(v) = stripped_str(state, "port-id-type") {
+        entry.port_type = Some(v);
+    }
+    if let Some(v) = stripped_str(state, "system-name") {
+        entry.system_name = Some(v);
+    }
+    if let Some(v) = stripped_str(state, "port-description") {
+        entry.port_description = Some(v);
+    }
+}
+
+fn joined_elems(prefix: Option<&Path>, path: Option<&Path>) -> Vec<PathElem> {
+    let mut elems = Vec::new();
+    if let Some(p) = prefix {
+        elems.extend(p.elem.iter().cloned());
+    }
+    if let Some(p) = path {
+        elems.extend(p.elem.iter().cloned());
+    }
+    elems
+}
+
+fn scalar_value(value: &TypedValue) -> Option<String> {
+    use proto::gnmi::typed_value::Value;
+    let rendered = match value.value.as_ref()? {
+        Value::StringVal(s) | Value::AsciiVal(s) => s.clone(),
+        Value::IntVal(i) => i.to_string(),
+        Value::UintVal(u) => u.to_string(),
+        _ => return None,
+    };
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn json_blob(value: &TypedValue) -> Option<serde_json::Value> {
+    use proto::gnmi::typed_value::Value;
+    let bytes = match value.value.as_ref()? {
+        Value::JsonVal(bytes) | Value::JsonIetfVal(bytes) => bytes,
+        _ => return None,
+    };
+    serde_json::from_slice(bytes).ok()
+}
+
+/// Reads the resolved key value of a keyed list element (`interface[name=…]`, `neighbor[id=…]`)
+/// from a response path, skipping the request-side `*` wildcard.
+fn elem_key(elems: &[PathElem], elem_name: &str, key_name: &str) -> Option<String> {
+    elems
+        .iter()
+        .find(|e| strip_module(&e.name) == elem_name)
+        .and_then(|e| e.key.get(key_name))
+        .filter(|v| !v.is_empty() && v.as_str() != "*")
+        .cloned()
+}
+
+fn strip_module(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+fn stripped_get<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    value
+        .as_object()?
+        .iter()
+        .find(|(k, _)| strip_module(k) == key)
+        .map(|(_, v)| v)
+}
+
+fn stripped_str(value: &serde_json::Value, key: &str) -> Option<String> {
+    match stripped_get(value, key)? {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn descend_lldp_wrapper(json: &serde_json::Value) -> &serde_json::Value {
+    if let Some(obj) = json.as_object() {
+        if obj.len() == 1 {
+            if let Some((k, v)) = obj.iter().next() {
+                if strip_module(k) == "lldp" {
+                    return v;
+                }
+            }
+        }
+    }
+    json
+}
+
+fn enum_suffix(raw: &str) -> String {
+    strip_module(raw).trim().to_ascii_uppercase()
+}
+
+// chassis-id-type identityref -> IEEE 802.1AB chassis subtype. A separate table from the port one:
+// the shared `MAC_ADDRESS` name is chassis subtype 4 but port subtype 3, and the assembler only
+// strips separators from a chassis when the subtype is 4.
+fn chassis_subtype_from_type(raw: &str) -> u32 {
+    match enum_suffix(raw).as_str() {
+        "CHASSIS_COMPONENT" => 1,
+        "INTERFACE_ALIAS" => 2,
+        "PORT_COMPONENT" => 3,
+        "MAC_ADDRESS" => CHASSIS_SUBTYPE_MAC,
+        "NETWORK_ADDRESS" => CHASSIS_SUBTYPE_NETWORK_ADDRESS,
+        "INTERFACE_NAME" => 6,
+        "LOCAL" => 7,
+        _ => 0,
+    }
+}
+
+fn port_subtype_from_type(raw: &str) -> u32 {
+    match enum_suffix(raw).as_str() {
+        "INTERFACE_ALIAS" => 1,
+        "PORT_COMPONENT" => 2,
+        "MAC_ADDRESS" => PORT_SUBTYPE_MAC,
+        "NETWORK_ADDRESS" => PORT_SUBTYPE_NETWORK_ADDRESS,
+        "INTERFACE_NAME" => 5,
+        "AGENT_CIRCUIT_ID" => 6,
+        "LOCAL" => 7,
+        _ => 0,
+    }
+}
+
+fn canonical_chassis(subtype: u32, id: &str) -> String {
+    match subtype {
+        CHASSIS_SUBTYPE_MAC => canonical_mac_str(id),
+        CHASSIS_SUBTYPE_NETWORK_ADDRESS => canonical_network_address(id),
+        _ => id.trim().to_string(),
+    }
+}
+
+fn canonical_port(subtype: u32, id: &str) -> String {
+    match subtype {
+        PORT_SUBTYPE_MAC => canonical_mac_str(id),
+        PORT_SUBTYPE_NETWORK_ADDRESS => canonical_network_address(id),
+        _ => id.trim().to_string(),
+    }
+}
+
+fn canonical_network_address(raw: &str) -> String {
+    match IpAddr::from_str(raw.trim()) {
+        Ok(ip) => ip.to_string(),
+        Err(_) => raw.trim().to_string(),
+    }
+}
+
 /// Maps a gRPC `Status` returned after a completed connect to an outcome. A gRPC status is a
 /// response — the device is provably a gNMI endpoint — so the device is kept (`reachable: true`)
 /// with a kinded fault, never dropped as absence. An `Unauthenticated`/`PermissionDenied` status
@@ -498,12 +888,16 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
     let mut answered = false;
     let mut status: Option<Status> = None;
     let mut fault: Option<ProbeFault> = None;
+    let mut lldp: Option<LldpObservation> = None;
 
     for result in results {
         match result {
-            PortResult::Answered(mut port_signals) => {
+            PortResult::Answered(mut port_signals, port_lldp) => {
                 answered = true;
                 signals.append(&mut port_signals);
+                if lldp.is_none() {
+                    lldp = port_lldp;
+                }
             }
             PortResult::Status(gnmi_status) => {
                 status.get_or_insert(gnmi_status);
@@ -517,7 +911,7 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
 
     if answered {
         return ProbeOutcome {
-            lldp: None,
+            lldp,
             kind: ProbeKind::Gnmi,
             target_ip,
             timestamp: SystemTime::now(),
@@ -601,6 +995,7 @@ mod tests {
             String::new(),
             Password::default(),
             default_get_paths(),
+            default_lldp(),
         )
         .expect("valid")
     }
@@ -613,6 +1008,7 @@ mod tests {
             String::new(),
             Password::default(),
             default_get_paths(),
+            false,
         ) {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
                 assert!(msg.contains("at least one port"), "got: {msg}");
@@ -630,6 +1026,7 @@ mod tests {
             String::new(),
             Password::default(),
             default_get_paths(),
+            false,
         )
         .expect("valid");
         assert_eq!(p.ports(), &[6030, 57400]);
@@ -650,6 +1047,7 @@ mod tests {
             "admin".to_string(),
             Password("NokiaSrl1!".to_string()),
             default_get_paths(),
+            false,
         )
         .expect("valid");
         assert!(p.auth.is_some());
@@ -663,6 +1061,7 @@ mod tests {
             "adm\u{0007}in".to_string(),
             Password::default(),
             default_get_paths(),
+            false,
         ) {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
                 assert!(msg.contains("username"), "got: {msg}");
@@ -680,6 +1079,7 @@ mod tests {
             "admin".to_string(),
             Password("pass\u{0007}word".to_string()),
             default_get_paths(),
+            false,
         ) {
             Err(RastreoError::Config(ConfigError::InvalidValue(msg))) => {
                 assert!(msg.contains("password"), "got: {msg}");
@@ -715,6 +1115,7 @@ mod tests {
             "admin".to_string(),
             Password("NokiaSrl1!".to_string()),
             default_get_paths(),
+            false,
         )
         .expect("valid");
         let debug = format!("{p:?}");
@@ -1087,7 +1488,7 @@ mod tests {
         let outcome = assemble_outcome(
             TARGET,
             vec![
-                PortResult::Answered(vec![Signal::GnmiVersion("0.10.0".to_string())]),
+                PortResult::Answered(vec![Signal::GnmiVersion("0.10.0".to_string())], None),
                 PortResult::Status(Status::unauthenticated("no creds")),
             ],
         );
@@ -1153,6 +1554,7 @@ mod tests {
             String::new(),
             Password::default(),
             Vec::new(),
+            false,
         )
         .expect("valid");
         let outcome = p
@@ -1192,5 +1594,354 @@ mod tests {
             matches!(classify_connect_error(port, &err), ConnectError::Absence),
             "a refused connect must be absence"
         );
+    }
+
+    fn string_val(value: &str) -> Option<TypedValue> {
+        use proto::gnmi::typed_value::Value;
+        Some(TypedValue {
+            value: Some(Value::StringVal(value.to_string())),
+        })
+    }
+
+    fn plain_elem(name: &str) -> PathElem {
+        PathElem {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn keyed_elem(name: &str, key: &str, value: &str) -> PathElem {
+        let mut map = HashMap::new();
+        map.insert(key.to_string(), value.to_string());
+        PathElem {
+            name: name.to_string(),
+            key: map,
+        }
+    }
+
+    // Response elements arrive as structured `PathElem`s with keys intact — including interface
+    // names that contain `/` (SR Linux `ethernet-1/1`), which a request-path string cannot express.
+    fn local_update(leaf: &str, value: &str) -> Update {
+        Update {
+            path: Some(Path {
+                elem: vec![plain_elem("lldp"), plain_elem("state"), plain_elem(leaf)],
+                ..Default::default()
+            }),
+            val: string_val(value),
+            ..Default::default()
+        }
+    }
+
+    fn neighbor_update(interface: &str, id: &str, leaf: &str, value: &str) -> Update {
+        Update {
+            path: Some(Path {
+                elem: vec![
+                    plain_elem("lldp"),
+                    plain_elem("interfaces"),
+                    keyed_elem("interface", "name", interface),
+                    plain_elem("neighbors"),
+                    keyed_elem("neighbor", "id", id),
+                    plain_elem("state"),
+                    plain_elem(leaf),
+                ],
+                ..Default::default()
+            }),
+            val: string_val(value),
+            ..Default::default()
+        }
+    }
+
+    fn lldp_leaf_response(updates: Vec<Update>) -> GetResponse {
+        GetResponse {
+            notification: vec![Notification {
+                update: updates,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn device_b_leaf_response() -> GetResponse {
+        // Device B renders MACs Cisco-dotted; the parser must canonicalize to bare hex so B's
+        // endpoints reconcile with the SNMP end's stored form.
+        lldp_leaf_response(vec![
+            local_update("chassis-id", "bbbb.bbbb.bbbb"),
+            local_update("chassis-id-type", "openconfig-lldp-types:MAC_ADDRESS"),
+            neighbor_update("ethernet-1/1", "0", "chassis-id", "aaaa.aaaa.aaaa"),
+            neighbor_update(
+                "ethernet-1/1",
+                "0",
+                "chassis-id-type",
+                "openconfig-lldp-types:MAC_ADDRESS",
+            ),
+            neighbor_update("ethernet-1/1", "0", "port-id", "ethernet-1/5"),
+            neighbor_update(
+                "ethernet-1/1",
+                "0",
+                "port-id-type",
+                "openconfig-lldp-types:INTERFACE_NAME",
+            ),
+            neighbor_update("ethernet-1/1", "0", "system-name", "device-a"),
+        ])
+    }
+
+    #[test]
+    fn default_lldp_is_off() {
+        assert!(!default_lldp());
+    }
+
+    #[test]
+    fn chassis_subtype_table_maps_every_openconfig_type() {
+        assert_eq!(chassis_subtype_from_type("CHASSIS_COMPONENT"), 1);
+        assert_eq!(chassis_subtype_from_type("INTERFACE_ALIAS"), 2);
+        assert_eq!(chassis_subtype_from_type("PORT_COMPONENT"), 3);
+        assert_eq!(chassis_subtype_from_type("MAC_ADDRESS"), 4);
+        assert_eq!(chassis_subtype_from_type("NETWORK_ADDRESS"), 5);
+        assert_eq!(chassis_subtype_from_type("INTERFACE_NAME"), 6);
+        assert_eq!(chassis_subtype_from_type("LOCAL"), 7);
+        assert_eq!(chassis_subtype_from_type("SOMETHING_ELSE"), 0);
+    }
+
+    #[test]
+    fn port_subtype_table_maps_every_openconfig_type() {
+        assert_eq!(port_subtype_from_type("INTERFACE_ALIAS"), 1);
+        assert_eq!(port_subtype_from_type("PORT_COMPONENT"), 2);
+        assert_eq!(port_subtype_from_type("MAC_ADDRESS"), 3);
+        assert_eq!(port_subtype_from_type("NETWORK_ADDRESS"), 4);
+        assert_eq!(port_subtype_from_type("INTERFACE_NAME"), 5);
+        assert_eq!(port_subtype_from_type("AGENT_CIRCUIT_ID"), 6);
+        assert_eq!(port_subtype_from_type("LOCAL"), 7);
+        assert_eq!(port_subtype_from_type("SOMETHING_ELSE"), 0);
+    }
+
+    #[test]
+    fn mac_address_maps_to_distinct_chassis_and_port_subtypes() {
+        assert_eq!(chassis_subtype_from_type("MAC_ADDRESS"), 4);
+        assert_eq!(port_subtype_from_type("MAC_ADDRESS"), 3);
+    }
+
+    #[test]
+    fn subtype_tables_strip_the_module_prefix_and_ignore_case() {
+        assert_eq!(
+            chassis_subtype_from_type("openconfig-lldp-types:MAC_ADDRESS"),
+            4
+        );
+        assert_eq!(
+            port_subtype_from_type("openconfig-lldp-types:mac_address"),
+            3
+        );
+    }
+
+    #[test]
+    fn canonical_chassis_renders_network_address_as_canonical_ip() {
+        assert_eq!(canonical_chassis(5, "10.0.0.9"), "10.0.0.9");
+        assert_eq!(canonical_chassis(5, " 10.0.0.9 "), "10.0.0.9");
+        assert_eq!(
+            canonical_chassis(5, "2001:0DB8:0000:0000:0000:0000:0000:0001"),
+            "2001:db8::1"
+        );
+        assert_eq!(canonical_chassis(5, "not-an-ip"), "not-an-ip");
+    }
+
+    #[test]
+    fn parse_lldp_leaf_updates_group_by_interface_and_neighbor_id() {
+        let obs = parse_lldp_response(device_b_leaf_response());
+        assert_eq!(obs.discovered_via, "gnmi");
+        assert_eq!(obs.local_chassis_id, "bbbbbbbbbbbb");
+        assert_eq!(obs.local_chassis_subtype, 4);
+        assert_eq!(obs.neighbors.len(), 1);
+        let n = &obs.neighbors[0];
+        assert_eq!(n.local_port, "ethernet-1/1");
+        assert_eq!(n.remote_chassis_id, "aaaaaaaaaaaa");
+        assert_eq!(n.remote_chassis_subtype, 4);
+        assert_eq!(n.remote_port_id, "ethernet-1/5");
+        assert_eq!(n.remote_port_subtype, 5);
+        assert_eq!(n.remote_sys_name.as_deref(), Some("device-a"));
+    }
+
+    #[test]
+    fn parse_lldp_groups_two_neighbors_on_separate_interfaces() {
+        let obs = parse_lldp_response(lldp_leaf_response(vec![
+            neighbor_update("eth1", "0", "chassis-id", "aa:aa:aa:aa:aa:aa"),
+            neighbor_update("eth1", "0", "chassis-id-type", "MAC_ADDRESS"),
+            neighbor_update("eth2", "0", "chassis-id", "bb:bb:bb:bb:bb:bb"),
+            neighbor_update("eth2", "0", "chassis-id-type", "MAC_ADDRESS"),
+        ]));
+        assert_eq!(obs.neighbors.len(), 2);
+        assert_eq!(obs.neighbors[0].local_port, "eth1");
+        assert_eq!(obs.neighbors[0].remote_chassis_id, "aaaaaaaaaaaa");
+        assert_eq!(obs.neighbors[1].local_port, "eth2");
+        assert_eq!(obs.neighbors[1].remote_chassis_id, "bbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn parse_lldp_json_ietf_subtree_blob() {
+        use proto::gnmi::typed_value::Value;
+        let blob = serde_json::json!({
+            "openconfig-lldp:lldp": {
+                "state": {
+                    "chassis-id": "bb:bb:bb:bb:bb:bb",
+                    "chassis-id-type": "openconfig-lldp-types:MAC_ADDRESS"
+                },
+                "interfaces": {
+                    "interface": [{
+                        "name": "ethernet-1/1",
+                        "neighbors": {
+                            "neighbor": [{
+                                "id": "0",
+                                "state": {
+                                    "chassis-id": "0011.2233.4455",
+                                    "chassis-id-type": "openconfig-lldp-types:MAC_ADDRESS",
+                                    "port-id": "ethernet-2/1",
+                                    "port-id-type": "openconfig-lldp-types:INTERFACE_NAME",
+                                    "system-name": "peer-a",
+                                    "port-description": "uplink"
+                                }
+                            }]
+                        }
+                    }]
+                }
+            }
+        });
+        let response = GetResponse {
+            notification: vec![Notification {
+                prefix: Some(parse_path("/lldp")),
+                update: vec![Update {
+                    path: None,
+                    val: Some(TypedValue {
+                        value: Some(Value::JsonIetfVal(serde_json::to_vec(&blob).expect("json"))),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let obs = parse_lldp_response(response);
+        assert_eq!(obs.discovered_via, "gnmi");
+        assert_eq!(obs.local_chassis_id, "bbbbbbbbbbbb");
+        assert_eq!(obs.local_chassis_subtype, 4);
+        assert_eq!(obs.neighbors.len(), 1);
+        let n = &obs.neighbors[0];
+        assert_eq!(n.local_port, "ethernet-1/1");
+        assert_eq!(n.remote_chassis_id, "001122334455");
+        assert_eq!(n.remote_chassis_subtype, 4);
+        assert_eq!(n.remote_port_id, "ethernet-2/1");
+        assert_eq!(n.remote_port_subtype, 5);
+        assert_eq!(n.remote_sys_name.as_deref(), Some("peer-a"));
+        assert_eq!(n.remote_port_desc.as_deref(), Some("uplink"));
+    }
+
+    #[test]
+    fn parse_lldp_empty_subtree_is_reachable_with_no_neighbors() {
+        let obs = parse_lldp_response(GetResponse::default());
+        assert_eq!(obs.discovered_via, "gnmi");
+        assert!(obs.local_chassis_id.is_empty());
+        assert!(obs.neighbors.is_empty());
+    }
+
+    fn hostname_state_response() -> GetResponse {
+        use proto::gnmi::typed_value::Value;
+        GetResponse {
+            notification: vec![Notification {
+                update: vec![Update {
+                    path: Some(parse_path("/system/state/hostname")),
+                    val: Some(TypedValue {
+                        value: Some(Value::StringVal("srlinux-a".to_string())),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lldp_get_error_does_not_clobber_a_successful_state_get() {
+        let mut acc = PortAccumulator::default();
+        acc.record_get(Ok(hostname_state_response()), GetHandler::State);
+        acc.record_get(Err(Status::unimplemented("no lldp path")), GetHandler::Lldp);
+        match acc.into_result() {
+            PortResult::Answered(signals, lldp) => {
+                assert!(!signals.is_empty(), "state signals survive the lldp error");
+                assert!(lldp.is_none(), "a failed lldp Get leaves no observation");
+            }
+            _ => panic!("a successful state Get must answer"),
+        }
+    }
+
+    #[test]
+    fn state_get_error_does_not_clobber_a_successful_lldp_get() {
+        let mut acc = PortAccumulator::default();
+        acc.record_get(
+            Err(Status::unimplemented("no state path")),
+            GetHandler::State,
+        );
+        acc.record_get(Ok(device_b_leaf_response()), GetHandler::Lldp);
+        match acc.into_result() {
+            PortResult::Answered(signals, lldp) => {
+                assert!(
+                    signals.is_empty(),
+                    "no state signals, but the port still answered"
+                );
+                assert!(
+                    lldp.is_some(),
+                    "the lldp observation survives the state error"
+                );
+            }
+            _ => panic!("a successful lldp Get must answer"),
+        }
+    }
+
+    fn sourced_outcome(ip: Ipv4Addr, lldp: LldpObservation) -> ProbeOutcome {
+        ProbeOutcome {
+            kind: ProbeKind::Gnmi,
+            target_ip: IpAddr::V4(ip),
+            timestamp: SystemTime::UNIX_EPOCH,
+            reachable: true,
+            signals: Vec::new(),
+            fault: None,
+            lldp: Some(lldp),
+        }
+    }
+
+    // Deleting `canonical_mac_str` from `canonical_chassis` OR the `MAC_ADDRESS`→4 chassis mapping
+    // makes B's dotted MACs no longer match the SNMP end's bare hex: the edge key diverges and the
+    // link count becomes 2 — this assertion goes red.
+    #[test]
+    fn cross_source_snmp_and_gnmi_collapse_to_one_link_with_merged_source() {
+        use crate::model::scan::ScanMetadata;
+        use crate::topology::TopologyAssembler;
+
+        let snmp_a = LldpObservation {
+            local_chassis_id: "aaaaaaaaaaaa".to_string(),
+            local_chassis_subtype: 4,
+            neighbors: vec![LldpNeighbor {
+                local_port: "Ethernet1/7".to_string(),
+                remote_chassis_id: "bbbbbbbbbbbb".to_string(),
+                remote_chassis_subtype: 4,
+                remote_port_id: "ethernet-1/1".to_string(),
+                remote_port_subtype: 5,
+                remote_port_desc: None,
+                remote_sys_name: Some("device-b".to_string()),
+            }],
+            discovered_via: "lldp".to_string(),
+        };
+
+        let gnmi_b = parse_lldp_response(device_b_leaf_response());
+        assert_eq!(gnmi_b.local_chassis_id, "bbbbbbbbbbbb");
+        assert_eq!(gnmi_b.discovered_via, "gnmi");
+
+        let mut assembler = TopologyAssembler::new(Arc::new(ScanMetadata::default()));
+        assembler.observe_outcomes(&[sourced_outcome(Ipv4Addr::new(10, 0, 0, 1), snmp_a)]);
+        assembler.observe_outcomes(&[sourced_outcome(Ipv4Addr::new(10, 0, 0, 2), gnmi_b)]);
+        let links = assembler.finish();
+
+        assert_eq!(links.len(), 1, "one physical link across both sources");
+        let link = &links[0];
+        assert_eq!(link.a.chassis_id, "aaaaaaaaaaaa");
+        assert_eq!(link.b.chassis_id, "bbbbbbbbbbbb");
+        assert_eq!(link.discovered_via, "gnmi,lldp");
     }
 }

@@ -230,7 +230,7 @@ One of:
 - { `ports`: array<uint16>, `type`: `ssh` }
 - { `count`: uint32, `interval_ms`: uint64, `type`: `icmp` }
 - { `ports`: array<uint16>, `type`: `tls` }
-- { `get_paths`: array<string>, `password`: [`Password`](#password), `plaintext`: boolean, `ports`: array<uint16>, `type`: `gnmi`, `username`: string }
+- { `get_paths`: array<string>, `lldp`: boolean, `password`: [`Password`](#password), `plaintext`: boolean, `ports`: array<uint16>, `type`: `gnmi`, `username`: string }
 - { `resolvers`: array<string (ip)>, `type`: `reverse_dns` }
 
 ### `RoleRule` {#rolerule}

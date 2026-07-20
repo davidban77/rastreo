@@ -183,6 +183,9 @@ pub struct LldpObservation {
     pub local_chassis_id: String,
     pub local_chassis_subtype: u32,
     pub neighbors: Vec<LldpNeighbor>,
+    /// Source that collected the observation (`lldp` for the SNMP prober, `gnmi` for gNMI); the
+    /// assembler merges both into a link's `discovered_via`.
+    pub discovered_via: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]

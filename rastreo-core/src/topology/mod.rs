@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -31,6 +31,7 @@ struct DeviceObservation {
     local_chassis_id: String,
     local_chassis_subtype: u32,
     observed_at: SystemTime,
+    discovered_via: String,
     neighbors: Vec<LldpNeighbor>,
 }
 
@@ -54,6 +55,7 @@ impl TopologyAssembler {
                 local_chassis_id: lldp.local_chassis_id.clone(),
                 local_chassis_subtype: lldp.local_chassis_subtype,
                 observed_at: outcome.timestamp,
+                discovered_via: lldp.discovered_via.clone(),
                 neighbors: lldp.neighbors.clone(),
             });
         }
@@ -137,6 +139,7 @@ impl TopologyAssembler {
                     .entry(key)
                     .or_insert_with(|| Edge::new(obs.observed_at));
                 edge.observed_at = edge.observed_at.max(obs.observed_at);
+                edge.sources.insert(obs.discovered_via.clone());
                 edge.merge(EndpointObservation {
                     chassis_norm: local_norm.clone(),
                     chassis_id: &obs.local_chassis_id,
@@ -166,7 +169,7 @@ impl TopologyAssembler {
                 schema_id: LINK_SCHEMA_ID.to_string(),
                 a: self.finalize_endpoint(&ka, &edge, &chassis_to_identity),
                 b: self.finalize_endpoint(&kb, &edge, &chassis_to_identity),
-                discovered_via: "lldp".to_string(),
+                discovered_via: join_sources(&edge.sources),
                 observed_at: edge.observed_at,
                 scan_metadata: (*self.scan_metadata).clone(),
             })
@@ -237,6 +240,7 @@ impl TopologyAssembler {
 
 struct Edge {
     observed_at: SystemTime,
+    sources: BTreeSet<String>,
     endpoints: HashMap<String, EndpointInfo>,
 }
 
@@ -244,6 +248,7 @@ impl Edge {
     fn new(observed_at: SystemTime) -> Self {
         Self {
             observed_at,
+            sources: BTreeSet::new(),
             endpoints: HashMap::new(),
         }
     }
@@ -289,6 +294,16 @@ struct EndpointObservation<'a> {
     port: Option<String>,
     port_authoritative: bool,
     sys_name: Option<String>,
+}
+
+/// Deterministic `discovered_via`: the sorted source set joined with commas, so a link seen `lldp`
+/// from one end and `gnmi` from the other emits `gnmi,lldp` regardless of scan-completion order.
+fn join_sources(sources: &BTreeSet<String>) -> String {
+    sources
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Unordered pair of chassis-ids: both directions of a physical link produce the same key.
@@ -347,6 +362,16 @@ mod tests {
         local_subtype: u32,
         neighbors: Vec<LldpNeighbor>,
     ) -> ProbeOutcome {
+        sourced_outcome(ip, local_chassis, local_subtype, "lldp", neighbors)
+    }
+
+    fn sourced_outcome(
+        ip: u8,
+        local_chassis: &str,
+        local_subtype: u32,
+        discovered_via: &str,
+        neighbors: Vec<LldpNeighbor>,
+    ) -> ProbeOutcome {
         ProbeOutcome {
             kind: ProbeKind::Lldp,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, ip)),
@@ -358,6 +383,7 @@ mod tests {
                 local_chassis_id: local_chassis.to_string(),
                 local_chassis_subtype: local_subtype,
                 neighbors,
+                discovered_via: discovered_via.to_string(),
             }),
         }
     }
@@ -609,6 +635,54 @@ mod tests {
 
         let link = &a.finish()[0];
         assert_eq!(link.scan_metadata.scan_id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    }
+
+    #[test]
+    fn single_source_link_reports_that_source() {
+        let cx = "aaaaaaaaaaaa";
+        let cy = "bbbbbbbbbbbb";
+        let mut a = assembler();
+        a.observe_outcomes(&[lldp_outcome(
+            1,
+            cx,
+            CHASSIS_SUBTYPE_MAC,
+            vec![neighbor("Gi0/1", cy, CHASSIS_SUBTYPE_MAC)],
+        )]);
+        assert_eq!(a.finish()[0].discovered_via, "lldp");
+    }
+
+    #[test]
+    fn discovered_via_merges_both_sources_regardless_of_scan_order() {
+        let cx = "aaaaaaaaaaaa";
+        let cy = "bbbbbbbbbbbb";
+        let gnmi = || {
+            sourced_outcome(
+                1,
+                cx,
+                CHASSIS_SUBTYPE_MAC,
+                "gnmi",
+                vec![neighbor("Gi0/1", cy, CHASSIS_SUBTYPE_MAC)],
+            )
+        };
+        let lldp = || {
+            sourced_outcome(
+                2,
+                cy,
+                CHASSIS_SUBTYPE_MAC,
+                "lldp",
+                vec![neighbor("Gi0/2", cx, CHASSIS_SUBTYPE_MAC)],
+            )
+        };
+
+        let mut forward = assembler();
+        forward.observe_outcomes(&[gnmi()]);
+        forward.observe_outcomes(&[lldp()]);
+        let mut reverse = assembler();
+        reverse.observe_outcomes(&[lldp()]);
+        reverse.observe_outcomes(&[gnmi()]);
+
+        assert_eq!(forward.finish()[0].discovered_via, "gnmi,lldp");
+        assert_eq!(reverse.finish()[0].discovered_via, "gnmi,lldp");
     }
 
     #[test]
