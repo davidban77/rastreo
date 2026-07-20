@@ -43,11 +43,11 @@ Anything that is not an IP, a CIDR, or an IP range is treated as a DNS name. ras
 rastreo discover --target router-1.lab.local --port 22
 ```
 
-When a name resolves to more than one A or AAAA record, every address is probed. Duplicate addresses across multiple `--target` values are deduplicated by IP before scheduling.
+When a name resolves to more than one A or AAAA record, every address is probed.
 
 ## Mixing forms
 
-`--target` is repeatable, and the four forms can be mixed freely. Each target is resolved independently before scheduling.
+`--target` is repeatable, and the four forms can be mixed freely. Each target is resolved on its own before scheduling. See [Overlapping targets](#overlapping-targets) when two targets cover the same address.
 
 ```bash
 rastreo discover \
@@ -56,6 +56,23 @@ rastreo discover \
   --target router-1.lab \
   --port 22,80,443
 ```
+
+## Overlapping targets
+
+rastreo probes each target on its own and does not remove duplicate addresses across targets. An address that appears in two targets is probed once for each of them. When that address responds, each probe produces its own record.
+
+Two common ways a target list overlaps:
+
+- A CIDR block and a host address inside it, for example `10.0.0.0/24` and `10.0.0.5`.
+- Two CIDR blocks or ranges that share addresses, for example `10.0.0.0/24` and `10.0.0.128/25`.
+
+At the start of a scan, rastreo logs a warning when it finds overlapping IP, CIDR, or range targets. The warning names the overlapping targets, so you can see which ones to change.
+
+!!! note "DNS names are not checked for overlap"
+    rastreo checks IP, CIDR, and range targets for overlap, but not DNS names. Two names that resolve to the same address are still probed once each, with no warning.
+
+!!! tip "List disjoint targets to avoid duplicate probes"
+    Cover each address once across your whole target list. Disjoint targets probe every address once, with no duplicate records.
 
 ## Detection rules
 
@@ -79,3 +96,4 @@ The rules are evaluated in this order, so a CIDR is matched before a range, and 
 
 - [CLI](cli.md) — the full flag reference for `rastreo discover`.
 - [Sinks](sinks.md) — where the resulting records go.
+- [Logging](../reference/logging.md) — where the overlapping-targets warning appears.

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -6,7 +5,7 @@ use ipnet::IpNet;
 
 use crate::error::{RastreoError, ResolverError};
 use crate::model::{ResolvedTarget, Target};
-use crate::resolver::Resolver;
+use crate::resolver::{ResolvedPlan, Resolver};
 
 pub struct GuardedResolver {
     inner: Arc<dyn Resolver>,
@@ -57,20 +56,16 @@ impl Resolver for GuardedResolver {
         Ok(resolved)
     }
 
-    async fn resolve_many(&self, targets: &[Target]) -> Result<Vec<ResolvedTarget>, RastreoError> {
-        let mut out = Vec::new();
-        let mut seen: HashSet<IpAddr> = HashSet::new();
-        for t in targets {
-            for rt in self.inner.resolve(t).await? {
-                self.check_allowed(rt.ip)?;
-                if seen.insert(rt.ip) {
-                    out.push(rt);
-                }
-            }
-            // Check between targets, not after the whole list, so a cap violation short-circuits.
-            self.check_cap(out.len())?;
+    async fn plan(&self, targets: &[Target]) -> Result<ResolvedPlan, RastreoError> {
+        // Both guards are spec-level and fail closed before any target streams: the allow-list is a
+        // whole-spec containment test, the cap an arithmetic sum, so a huge scan is rejected without
+        // materializing the address space.
+        let plan = self.inner.plan(targets).await?;
+        if let Some(nets) = &self.allowlist {
+            plan.check_allowed(nets)?;
         }
-        Ok(out)
+        self.check_cap(plan.total_hosts())?;
+        Ok(plan)
     }
 }
 
@@ -78,8 +73,6 @@ impl Resolver for GuardedResolver {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::SystemTime;
 
     use crate::resolver::HickoryResolver;
 
@@ -102,29 +95,12 @@ mod tests {
         Arc::new(HickoryResolver::from_system().expect("system resolver"))
     }
 
-    struct CountingResolver {
-        calls: AtomicUsize,
-    }
-
-    impl CountingResolver {
-        fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Resolver for CountingResolver {
-        async fn resolve(&self, _target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst) as u32;
-            let addr = IpAddr::V4(Ipv4Addr::from_bits(0x0a00_0000 + n));
-            Ok(vec![ResolvedTarget {
-                ip: addr,
-                original: Target::Ip(addr),
-                resolved_at: SystemTime::now(),
-            }])
-        }
+    fn bare_with_limit(limit: usize) -> Arc<dyn Resolver> {
+        Arc::new(
+            HickoryResolver::from_system()
+                .expect("system resolver")
+                .with_limit(limit),
+        )
     }
 
     #[test]
@@ -155,13 +131,58 @@ mod tests {
         let guard = GuardedResolver::new(bare(), Some(vec![net("10.0.0.0/8")]), None);
         let targets = vec![Target::Ip(ip(10, 0, 0, 1)), Target::Ip(ip(192, 168, 1, 1))];
         let err = rt()
-            .block_on(guard.resolve_many(&targets))
-            .expect_err("a single out-of-allow-list target rejects the request");
+            .block_on(guard.resolve_stream(&targets))
+            .err()
+            .expect("a single out-of-allow-list target rejects the request");
         assert!(matches!(
             err,
             RastreoError::Resolver(ResolverError::TargetNotAllowed { ip: got })
                 if got == ip(192, 168, 1, 1)
         ));
+    }
+
+    #[test]
+    fn allowlist_accepts_cidr_fully_inside_the_union() {
+        let guard = GuardedResolver::new(bare(), Some(vec![net("10.0.0.0/8")]), None);
+        let out: Vec<ResolvedTarget> = rt()
+            .block_on(guard.resolve_stream(&[Target::Cidr(net("10.1.2.0/30"))]))
+            .expect("inside the allow-list")
+            .collect();
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn allowlist_rejects_range_that_leaves_the_union() {
+        let guard = GuardedResolver::new(bare(), Some(vec![net("10.0.0.0/24")]), None);
+        let err = rt()
+            .block_on(guard.resolve_stream(&[Target::Range {
+                start: ip(10, 0, 0, 250),
+                end: ip(10, 0, 1, 5),
+            }]))
+            .err()
+            .expect("a range that leaves the allow-list must reject");
+        assert!(matches!(
+            err,
+            RastreoError::Resolver(ResolverError::TargetNotAllowed { ip: got })
+                if got == ip(10, 0, 1, 0)
+        ));
+    }
+
+    #[test]
+    fn allowlist_accepts_range_spanning_two_adjacent_nets() {
+        let guard = GuardedResolver::new(
+            bare(),
+            Some(vec![net("10.0.0.0/25"), net("10.0.0.128/25")]),
+            None,
+        );
+        let out: Vec<ResolvedTarget> = rt()
+            .block_on(guard.resolve_stream(&[Target::Range {
+                start: ip(10, 0, 0, 100),
+                end: ip(10, 0, 0, 200),
+            }]))
+            .expect("the union of two adjacent nets covers the range")
+            .collect();
+        assert_eq!(out.len(), 101);
     }
 
     #[test]
@@ -187,44 +208,49 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_cap_short_circuits_without_resolving_every_target() {
-        let inner = Arc::new(CountingResolver::new());
-        let inner_dyn: Arc<dyn Resolver> = inner.clone();
-        let guard = GuardedResolver::new(inner_dyn, None, Some(100));
-        let targets: Vec<Target> = (0..200)
-            .map(|i| Target::Ip(IpAddr::V4(Ipv4Addr::from_bits(i))))
-            .collect();
+    fn aggregate_cap_rejects_over_cap_cidr_without_expanding() {
+        // A raised per-spec limit lets the /17 through as one spec; the aggregate cap must still
+        // reject it, computed arithmetically from the CIDR host count — no address-space walk.
+        let guard = GuardedResolver::new(bare_with_limit(200_000), None, Some(100));
         let err = rt()
-            .block_on(guard.resolve_many(&targets))
-            .expect_err("cap exceeded");
+            .block_on(guard.resolve_stream(&[Target::Cidr(net("10.0.0.0/17"))]))
+            .err()
+            .expect("cap exceeded");
         assert!(matches!(
             err,
             RastreoError::Resolver(ResolverError::AggregateHostCapExceeded { hosts, limit })
-                if hosts == 101 && limit == 100
+                if hosts == 32_766 && limit == 100
         ));
-        assert_eq!(
-            inner.calls.load(Ordering::SeqCst),
-            101,
-            "must stop resolving once the cap is passed, not walk all 200 targets"
-        );
+    }
+
+    #[test]
+    fn aggregate_cap_sums_host_counts_across_specs() {
+        let guard = GuardedResolver::new(bare(), None, Some(100));
+        let err = rt()
+            .block_on(guard.resolve_stream(&[
+                Target::Cidr(net("10.0.0.0/25")),
+                Target::Cidr(net("10.0.1.0/25")),
+            ]))
+            .err()
+            .expect("the summed host count exceeds the cap");
+        assert!(matches!(
+            err,
+            RastreoError::Resolver(ResolverError::AggregateHostCapExceeded { hosts, limit })
+                if hosts == 252 && limit == 100
+        ));
     }
 
     #[test]
     fn aggregate_cap_allows_exactly_the_limit() {
-        let inner = Arc::new(CountingResolver::new());
-        let inner_dyn: Arc<dyn Resolver> = inner.clone();
-        let guard = GuardedResolver::new(inner_dyn, None, Some(100));
-        let targets: Vec<Target> = (0..100)
-            .map(|i| Target::Ip(IpAddr::V4(Ipv4Addr::from_bits(i))))
-            .collect();
+        let guard = GuardedResolver::new(bare(), None, Some(126));
         let out = rt()
-            .block_on(guard.resolve_many(&targets))
+            .block_on(guard.resolve_many(&[Target::Cidr(net("10.0.0.0/25"))]))
             .expect("exactly the limit is allowed");
-        assert_eq!(out.len(), 100);
+        assert_eq!(out.len(), 126);
     }
 
     #[test]
-    fn both_none_preserves_order_and_dedup() {
+    fn both_none_streams_identically_to_the_inner() {
         let inner = bare();
         let guard = GuardedResolver::new(inner.clone(), None, None);
         let targets = vec![

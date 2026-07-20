@@ -1,8 +1,8 @@
-use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::SystemTime;
 
 use hickory_resolver::TokioResolver;
+use ipnet::IpNet;
 
 use crate::error::{RastreoError, ResolverError};
 use crate::model::{ResolvedTarget, Target};
@@ -16,18 +16,255 @@ pub const DEFAULT_HOST_LIMIT: usize = 65_536;
 pub trait Resolver: Send + Sync {
     async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError>;
 
+    /// Resolve DNS eagerly and validate per-spec host limits, returning a plan whose lazy stream
+    /// expands CIDR/range specs one target at a time. The default resolves every target eagerly via
+    /// [`Resolver::resolve`]; expansion-aware resolvers override this to stay lazy.
+    async fn plan(&self, targets: &[Target]) -> Result<ResolvedPlan, RastreoError> {
+        let resolved_at = SystemTime::now();
+        let mut specs = Vec::with_capacity(targets.len());
+        for target in targets {
+            let ips = self
+                .resolve(target)
+                .await?
+                .into_iter()
+                .map(|rt| rt.ip)
+                .collect();
+            specs.push(PlannedSpec::Resolved {
+                ips,
+                original: target.clone(),
+            });
+        }
+        Ok(ResolvedPlan { specs, resolved_at })
+    }
+
+    /// Lazy resolution: DNS resolved up front, then CIDR/range specs expanded one target per `next()`
+    /// in input-target order with no cross-target dedup.
+    async fn resolve_stream(
+        &self,
+        targets: &[Target],
+    ) -> Result<Box<dyn Iterator<Item = ResolvedTarget> + Send>, RastreoError> {
+        Ok(self.plan(targets).await?.into_stream())
+    }
+
     async fn resolve_many(&self, targets: &[Target]) -> Result<Vec<ResolvedTarget>, RastreoError> {
+        Ok(self.resolve_stream(targets).await?.collect())
+    }
+}
+
+/// A resolved scan plan: DNS resolved eagerly, per-spec host counts known, ready to stream targets
+/// lazily in input order. Overlapping specs are surfaced by [`ResolvedPlan::find_overlaps`], never
+/// deduplicated — the stream yields the concatenation of each spec's expansion.
+pub struct ResolvedPlan {
+    specs: Vec<PlannedSpec>,
+    resolved_at: SystemTime,
+}
+
+enum PlannedSpec {
+    /// A contiguous address block — a single IP, a CIDR's host range, or an explicit range.
+    Block {
+        first: IpAddr,
+        last: IpAddr,
+        original: Target,
+    },
+    /// A resolved point set — a DNS name's addresses, or any target the default plan resolved eagerly.
+    Resolved { ips: Vec<IpAddr>, original: Target },
+}
+
+impl ResolvedPlan {
+    /// The number of targets the stream will yield: the arithmetic sum of per-spec host counts, with
+    /// duplicates under overlapping specs included (resolution does not dedup).
+    pub fn total_hosts(&self) -> usize {
+        self.specs
+            .iter()
+            .fold(0usize, |sum, spec| sum.saturating_add(spec.hosts()))
+    }
+
+    pub fn into_stream(self) -> Box<dyn Iterator<Item = ResolvedTarget> + Send> {
+        let now = self.resolved_at;
+        Box::new(
+            self.specs
+                .into_iter()
+                .flat_map(move |spec| spec.into_stream(now)),
+        )
+    }
+
+    pub(crate) fn check_allowed(&self, allowlist: &[IpNet]) -> Result<(), RastreoError> {
+        for spec in &self.specs {
+            spec.check_allowed(allowlist)?;
+        }
+        Ok(())
+    }
+
+    // Pairwise over contiguous blocks only — DNS point sets are excluded. No IP expansion; #specs is
+    // small, so the quadratic scan is cheaper than sorting.
+    pub(crate) fn find_overlaps(&self) -> Vec<(Target, Target)> {
+        let blocks: Vec<(bool, u128, u128, &Target)> = self
+            .specs
+            .iter()
+            .filter_map(PlannedSpec::interval)
+            .collect();
         let mut out = Vec::new();
-        let mut seen: HashSet<IpAddr> = HashSet::new();
-        for t in targets {
-            for rt in self.resolve(t).await? {
-                if seen.insert(rt.ip) {
-                    out.push(rt);
+        for a in 0..blocks.len() {
+            for b in (a + 1)..blocks.len() {
+                let (v6_a, lo_a, hi_a, target_a) = blocks[a];
+                let (v6_b, lo_b, hi_b, target_b) = blocks[b];
+                if v6_a == v6_b && lo_a <= hi_b && lo_b <= hi_a {
+                    out.push((target_a.clone(), target_b.clone()));
                 }
             }
         }
-        Ok(out)
+        out
     }
+}
+
+impl PlannedSpec {
+    fn hosts(&self) -> usize {
+        match self {
+            PlannedSpec::Block { first, last, .. } => block_span(*first, *last),
+            PlannedSpec::Resolved { ips, .. } => ips.len(),
+        }
+    }
+
+    fn interval(&self) -> Option<(bool, u128, u128, &Target)> {
+        match self {
+            PlannedSpec::Block {
+                first,
+                last,
+                original,
+            } => {
+                let (is_v6, lo) = ip_to_bits(*first);
+                let (_, hi) = ip_to_bits(*last);
+                Some((is_v6, lo, hi, original))
+            }
+            PlannedSpec::Resolved { .. } => None,
+        }
+    }
+
+    fn check_allowed(&self, allowlist: &[IpNet]) -> Result<(), RastreoError> {
+        match self {
+            PlannedSpec::Block { first, last, .. } => {
+                if let Some(ip) = first_uncovered_ip(*first, *last, allowlist) {
+                    return Err(ResolverError::TargetNotAllowed { ip }.into());
+                }
+            }
+            PlannedSpec::Resolved { ips, .. } => {
+                for ip in ips {
+                    if !allowlist.iter().any(|net| net.contains(ip)) {
+                        return Err(ResolverError::TargetNotAllowed { ip: *ip }.into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn into_stream(self, now: SystemTime) -> Box<dyn Iterator<Item = ResolvedTarget> + Send> {
+        match self {
+            PlannedSpec::Block {
+                first,
+                last,
+                original,
+            } => block_stream(first, last, original, now),
+            PlannedSpec::Resolved { ips, original } => {
+                Box::new(ips.into_iter().map(move |ip| ResolvedTarget {
+                    ip,
+                    original: original.clone(),
+                    resolved_at: now,
+                }))
+            }
+        }
+    }
+}
+
+fn ip_to_bits(ip: IpAddr) -> (bool, u128) {
+    match ip {
+        IpAddr::V4(a) => (false, a.to_bits() as u128),
+        IpAddr::V6(a) => (true, u128::from(a)),
+    }
+}
+
+fn block_span(first: IpAddr, last: IpAddr) -> usize {
+    match (first, last) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => (b.to_bits() as u128 - a.to_bits() as u128 + 1) as usize,
+        (IpAddr::V6(a), IpAddr::V6(b)) => (u128::from(b) - u128::from(a) + 1) as usize,
+        _ => 0,
+    }
+}
+
+fn block_stream(
+    first: IpAddr,
+    last: IpAddr,
+    original: Target,
+    now: SystemTime,
+) -> Box<dyn Iterator<Item = ResolvedTarget> + Send> {
+    match (first, last) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            Box::new((a.to_bits()..=b.to_bits()).map(move |bits| ResolvedTarget {
+                ip: IpAddr::V4(Ipv4Addr::from_bits(bits)),
+                original: original.clone(),
+                resolved_at: now,
+            }))
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => Box::new((u128::from(a)..=u128::from(b)).map(
+            move |bits| ResolvedTarget {
+                ip: IpAddr::V6(Ipv6Addr::from(bits)),
+                original: original.clone(),
+                resolved_at: now,
+            },
+        )),
+        // A mixed-family block is unreachable — planning validates family agreement.
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
+// The first address in `[first, last]` not covered by the allow-list union, or `None` when the whole
+// block sits inside the union. Sweeps the same-family allow-list intervals, so it is O(#allowlist).
+fn first_uncovered_ip(first: IpAddr, last: IpAddr, allowlist: &[IpNet]) -> Option<IpAddr> {
+    match (first, last) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let mut ivals: Vec<(u128, u128)> = allowlist
+                .iter()
+                .filter_map(|net| match net {
+                    IpNet::V4(n) => Some((
+                        n.network().to_bits() as u128,
+                        n.broadcast().to_bits() as u128,
+                    )),
+                    IpNet::V6(_) => None,
+                })
+                .collect();
+            uncovered_point(a.to_bits() as u128, b.to_bits() as u128, &mut ivals)
+                .map(|bits| IpAddr::V4(Ipv4Addr::from_bits(bits as u32)))
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let mut ivals: Vec<(u128, u128)> = allowlist
+                .iter()
+                .filter_map(|net| match net {
+                    IpNet::V6(n) => Some((u128::from(n.network()), u128::from(n.broadcast()))),
+                    IpNet::V4(_) => None,
+                })
+                .collect();
+            uncovered_point(u128::from(a), u128::from(b), &mut ivals)
+                .map(|bits| IpAddr::V6(Ipv6Addr::from(bits)))
+        }
+        _ => Some(first),
+    }
+}
+
+fn uncovered_point(lo: u128, hi: u128, ivals: &mut [(u128, u128)]) -> Option<u128> {
+    ivals.sort_unstable_by_key(|(start, _)| *start);
+    let mut cursor = lo;
+    for (start, end) in ivals.iter() {
+        if *start > cursor {
+            return Some(cursor);
+        }
+        if *end >= cursor {
+            if *end >= hi {
+                return None;
+            }
+            cursor = end + 1;
+        }
+    }
+    Some(cursor).filter(|c| *c <= hi)
 }
 
 pub struct HickoryResolver {
@@ -63,18 +300,28 @@ impl HickoryResolver {
         self.host_limit
     }
 
-    fn expand_cidr(
-        &self,
-        net: &ipnet::IpNet,
-        original: &Target,
-    ) -> Result<Vec<ResolvedTarget>, RastreoError> {
+    fn plan_cidr(&self, net: &IpNet, original: &Target) -> Result<PlannedSpec, RastreoError> {
         let limit = self.host_limit as u128;
-        let hosts: u128 = match net {
+        let (first, last, hosts) = match net {
             ipnet::IpNet::V4(n) => match n.prefix_len() {
-                32 => 1,
+                32 => (IpAddr::V4(n.network()), IpAddr::V4(n.network()), 1u128),
                 // RFC 3021 — /31 point-to-point links use both addresses, no network/broadcast.
-                31 => 2,
-                _ => (n.broadcast().to_bits() - n.network().to_bits() - 1) as u128,
+                31 => {
+                    let base = n.network().to_bits();
+                    (
+                        IpAddr::V4(Ipv4Addr::from_bits(base)),
+                        IpAddr::V4(Ipv4Addr::from_bits(base + 1)),
+                        2,
+                    )
+                }
+                _ => {
+                    let hosts = (n.broadcast().to_bits() - n.network().to_bits() - 1) as u128;
+                    (
+                        IpAddr::V4(Ipv4Addr::from_bits(n.network().to_bits() + 1)),
+                        IpAddr::V4(Ipv4Addr::from_bits(n.broadcast().to_bits() - 1)),
+                        hosts,
+                    )
+                }
             },
             ipnet::IpNet::V6(n) => {
                 let span = u128::from(n.broadcast()) - u128::from(n.network());
@@ -86,7 +333,7 @@ impl HickoryResolver {
                     }
                     .into());
                 }
-                span + 1
+                (IpAddr::V6(n.network()), IpAddr::V6(n.broadcast()), span + 1)
             }
         };
         if hosts > limit {
@@ -97,51 +344,22 @@ impl HickoryResolver {
             }
             .into());
         }
-        let now = SystemTime::now();
-        let mut out = Vec::with_capacity(hosts as usize);
-        match net {
-            ipnet::IpNet::V4(n) if n.prefix_len() == 32 => {
-                out.push(ResolvedTarget {
-                    ip: IpAddr::V4(n.network()),
-                    original: original.clone(),
-                    resolved_at: now,
-                });
-            }
-            ipnet::IpNet::V4(n) if n.prefix_len() == 31 => {
-                let base = n.network().to_bits();
-                out.push(ResolvedTarget {
-                    ip: IpAddr::V4(Ipv4Addr::from_bits(base)),
-                    original: original.clone(),
-                    resolved_at: now,
-                });
-                out.push(ResolvedTarget {
-                    ip: IpAddr::V4(Ipv4Addr::from_bits(base + 1)),
-                    original: original.clone(),
-                    resolved_at: now,
-                });
-            }
-            _ => {
-                for ip in net.hosts() {
-                    out.push(ResolvedTarget {
-                        ip,
-                        original: original.clone(),
-                        resolved_at: now,
-                    });
-                }
-            }
-        }
-        Ok(out)
+        Ok(PlannedSpec::Block {
+            first,
+            last,
+            original: original.clone(),
+        })
     }
 
-    fn expand_range(
+    fn plan_range(
         &self,
         start: IpAddr,
         end: IpAddr,
         original: &Target,
-    ) -> Result<Vec<ResolvedTarget>, RastreoError> {
+    ) -> Result<PlannedSpec, RastreoError> {
         match (start, end) {
             (IpAddr::V4(s), IpAddr::V4(e)) => {
-                // Widen to u128 so iteration math can't overflow for a full /0 sweep.
+                // Widen to u128 so the host count can't overflow for a full /0 sweep.
                 let (s_bits, e_bits) = (s.to_bits() as u128, e.to_bits() as u128);
                 if s_bits > e_bits {
                     return Err(ResolverError::InvalidRange {
@@ -160,16 +378,11 @@ impl HickoryResolver {
                     }
                     .into());
                 }
-                let now = SystemTime::now();
-                let mut out = Vec::with_capacity(hosts as usize);
-                for i in s_bits..=e_bits {
-                    out.push(ResolvedTarget {
-                        ip: IpAddr::V4(Ipv4Addr::from_bits(i as u32)),
-                        original: original.clone(),
-                        resolved_at: now,
-                    });
-                }
-                Ok(out)
+                Ok(PlannedSpec::Block {
+                    first: start,
+                    last: end,
+                    original: original.clone(),
+                })
             }
             (IpAddr::V6(s), IpAddr::V6(e)) => {
                 let (s_bits, e_bits) = (u128::from(s), u128::from(e));
@@ -181,8 +394,7 @@ impl HickoryResolver {
                     .into());
                 }
                 let span = e_bits - s_bits;
-                let limit = self.host_limit as u128;
-                if span >= limit {
+                if span >= self.host_limit as u128 {
                     return Err(ResolverError::RangeTooLarge {
                         start: s.to_string(),
                         end: e.to_string(),
@@ -191,17 +403,11 @@ impl HickoryResolver {
                     }
                     .into());
                 }
-                let hosts = span + 1;
-                let now = SystemTime::now();
-                let mut out = Vec::with_capacity(hosts as usize);
-                for i in s_bits..=e_bits {
-                    out.push(ResolvedTarget {
-                        ip: IpAddr::V6(Ipv6Addr::from(i)),
-                        original: original.clone(),
-                        resolved_at: now,
-                    });
-                }
-                Ok(out)
+                Ok(PlannedSpec::Block {
+                    first: start,
+                    last: end,
+                    original: original.clone(),
+                })
             }
             (s, e) => Err(ResolverError::MixedFamilyRange {
                 start: s.to_string(),
@@ -210,43 +416,57 @@ impl HickoryResolver {
             .into()),
         }
     }
+
+    async fn lookup_dns(&self, name: &str) -> Result<Vec<IpAddr>, RastreoError> {
+        let lookup =
+            self.inner
+                .lookup_ip(name)
+                .await
+                .map_err(|source| ResolverError::DnsLookupFailed {
+                    name: name.to_string(),
+                    source,
+                })?;
+        let ips: Vec<IpAddr> = lookup.iter().collect();
+        if ips.is_empty() {
+            return Err(ResolverError::DnsNoRecords {
+                name: name.to_string(),
+            }
+            .into());
+        }
+        Ok(ips)
+    }
 }
 
 #[async_trait::async_trait]
 impl Resolver for HickoryResolver {
     async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError> {
-        let now = SystemTime::now();
-        match target {
-            Target::Ip(ip) => Ok(vec![ResolvedTarget {
-                ip: *ip,
-                original: target.clone(),
-                resolved_at: now,
-            }]),
-            Target::Cidr(net) => self.expand_cidr(net, target),
-            Target::Range { start, end } => self.expand_range(*start, *end, target),
-            Target::DnsName(name) => {
-                let lookup = self
-                    .inner
-                    .lookup_ip(name.as_str())
-                    .await
-                    .map_err(|source| ResolverError::DnsLookupFailed {
-                        name: name.clone(),
-                        source,
-                    })?;
-                let ips: Vec<IpAddr> = lookup.iter().collect();
-                if ips.is_empty() {
-                    return Err(ResolverError::DnsNoRecords { name: name.clone() }.into());
-                }
-                Ok(ips
-                    .into_iter()
-                    .map(|ip| ResolvedTarget {
-                        ip,
-                        original: target.clone(),
-                        resolved_at: now,
-                    })
-                    .collect())
-            }
+        Ok(self
+            .plan(std::slice::from_ref(target))
+            .await?
+            .into_stream()
+            .collect())
+    }
+
+    async fn plan(&self, targets: &[Target]) -> Result<ResolvedPlan, RastreoError> {
+        let resolved_at = SystemTime::now();
+        let mut specs = Vec::with_capacity(targets.len());
+        for target in targets {
+            let spec = match target {
+                Target::Ip(ip) => PlannedSpec::Block {
+                    first: *ip,
+                    last: *ip,
+                    original: target.clone(),
+                },
+                Target::Cidr(net) => self.plan_cidr(net, target)?,
+                Target::Range { start, end } => self.plan_range(*start, *end, target)?,
+                Target::DnsName(name) => PlannedSpec::Resolved {
+                    ips: self.lookup_dns(name).await?,
+                    original: target.clone(),
+                },
+            };
+            specs.push(spec);
         }
+        Ok(ResolvedPlan { specs, resolved_at })
     }
 }
 
@@ -264,6 +484,10 @@ mod tests {
 
     fn resolver() -> HickoryResolver {
         HickoryResolver::from_system().expect("system resolver init")
+    }
+
+    fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
 
     #[test]
@@ -409,19 +633,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_many_deduplicates_by_ip() {
+    fn resolve_many_concatenates_duplicate_ips_without_dedup() {
         let r = resolver();
         let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
         let targets = vec![Target::Ip(ip), Target::Ip(ip)];
         let out = rt()
             .block_on(r.resolve_many(&targets))
             .expect("resolve_many");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].ip, ip);
+        let ips: Vec<IpAddr> = out.iter().map(|rt| rt.ip).collect();
+        assert_eq!(
+            ips,
+            vec![ip, ip],
+            "both specs stream — no cross-target dedup"
+        );
     }
 
     #[test]
-    fn resolve_many_preserves_distinct_ips() {
+    fn resolve_many_preserves_input_order_with_repeats() {
         let r = resolver();
         let targets = vec![
             Target::Ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
@@ -437,7 +665,100 @@ mod tests {
             vec![
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             ]
+        );
+    }
+
+    #[test]
+    fn resolve_stream_yields_concatenated_per_spec_sequence_in_input_order() {
+        let r = resolver();
+        let targets = vec![
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+            Target::Ip(ipv4(192, 168, 1, 5)),
+            Target::Range {
+                start: ipv4(10, 0, 1, 1),
+                end: ipv4(10, 0, 1, 3),
+            },
+        ];
+        let out: Vec<IpAddr> = rt()
+            .block_on(r.resolve_stream(&targets))
+            .expect("resolve_stream")
+            .map(|rt| rt.ip)
+            .collect();
+        assert_eq!(
+            out,
+            vec![
+                ipv4(10, 0, 0, 1),
+                ipv4(10, 0, 0, 2),
+                ipv4(192, 168, 1, 5),
+                ipv4(10, 0, 1, 1),
+                ipv4(10, 0, 1, 2),
+                ipv4(10, 0, 1, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn total_hosts_equals_the_number_of_targets_the_stream_yields() {
+        let r = resolver();
+        let targets = vec![
+            Target::Cidr("10.0.0.0/24".parse().expect("cidr")),
+            Target::Ip(ipv4(192, 168, 1, 5)),
+            Target::Range {
+                start: ipv4(10, 0, 1, 1),
+                end: ipv4(10, 0, 1, 200),
+            },
+            Target::Cidr("2001:db8::/126".parse().expect("cidr")),
+        ];
+        let plan = rt().block_on(r.plan(&targets)).expect("plan");
+        let counted = plan.total_hosts();
+        let yielded = plan.into_stream().count();
+        assert_eq!(
+            counted, yielded,
+            "the pre-flight sum must equal what the stream yields"
+        );
+    }
+
+    #[test]
+    fn find_overlaps_reports_specs_that_share_addresses() {
+        let r = resolver();
+        let a = Target::Cidr("10.0.0.0/24".parse().expect("cidr"));
+        let b = Target::Range {
+            start: ipv4(10, 0, 0, 100),
+            end: ipv4(10, 0, 0, 200),
+        };
+        let plan = rt()
+            .block_on(r.plan(&[a.clone(), b.clone()]))
+            .expect("plan");
+        let overlaps = plan.find_overlaps();
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0], (a, b));
+    }
+
+    #[test]
+    fn find_overlaps_empty_for_disjoint_specs() {
+        let r = resolver();
+        let targets = vec![
+            Target::Cidr("10.0.0.0/24".parse().expect("cidr")),
+            Target::Cidr("10.0.1.0/24".parse().expect("cidr")),
+            Target::Ip(ipv4(192, 168, 1, 1)),
+        ];
+        let plan = rt().block_on(r.plan(&targets)).expect("plan");
+        assert!(plan.find_overlaps().is_empty());
+    }
+
+    #[test]
+    fn find_overlaps_ignores_cross_family_specs() {
+        let r = resolver();
+        let targets = vec![
+            Target::Cidr("10.0.0.0/24".parse().expect("cidr")),
+            Target::Cidr("::/126".parse().expect("cidr")),
+        ];
+        let plan = rt().block_on(r.plan(&targets)).expect("plan");
+        assert!(
+            plan.find_overlaps().is_empty(),
+            "an IPv4 block and an IPv6 block never share addresses"
         );
     }
 
@@ -510,5 +831,15 @@ mod tests {
         assert_send_sync::<HickoryResolver>();
         assert_send_sync::<dyn Resolver>();
         assert_send_sync::<Box<dyn Resolver>>();
+    }
+
+    #[test]
+    fn resolve_stream_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let r = resolver();
+        let stream = rt()
+            .block_on(r.resolve_stream(&[Target::Ip(ipv4(10, 0, 0, 1))]))
+            .expect("resolve_stream");
+        assert_send(&stream);
     }
 }

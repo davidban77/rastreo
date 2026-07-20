@@ -18,7 +18,7 @@ use crate::model::{
     Target, PROBE_KIND_COUNT,
 };
 use crate::prober::{create_prober, Prober};
-use crate::resolver::{HickoryResolver, Resolver};
+use crate::resolver::{HickoryResolver, ResolvedPlan, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler, TargetScan};
 use crate::sink::{create_sink, RecordKind, Sink, SinkConfig, SinkErrorClass, SinkType};
 use crate::topology::TopologyAssembler;
@@ -203,12 +203,15 @@ async fn run_discovery_core(
     // Constant spans per scan: root + one per stage. Probe tasks are never spanned so a /16 stays zero-alloc.
     let scan_span = tracing::info_span!("scan", targets = tracing::field::Empty);
 
-    let resolved = resolver
-        .resolve_many(&scenario.targets)
+    let plan = resolver
+        .plan(&scenario.targets)
         .instrument(tracing::info_span!(parent: &scan_span, "resolve"))
         .await?;
-    let targets_resolved = resolved.len();
+    // Pre-flight count = the number of targets the stream yields (dedup dropped), so progress shows a
+    // real denominator without materializing the address space.
+    let targets_resolved = plan.total_hosts();
     scan_span.record("targets", targets_resolved as u64);
+    warn_on_overlapping_specs(&plan);
 
     let max_concurrent = scenario
         .base
@@ -257,7 +260,7 @@ async fn run_discovery_core(
     stream_discovery(
         &scheduler,
         probers,
-        resolved,
+        plan.into_stream(),
         ctx,
         cancel,
         fuser.as_mut(),
@@ -383,7 +386,7 @@ async fn emit_target_records(
 async fn stream_discovery(
     scheduler: &BoundedScheduler,
     probers: Vec<Arc<dyn Prober>>,
-    resolved: Vec<ResolvedTarget>,
+    targets: Box<dyn Iterator<Item = ResolvedTarget> + Send>,
     ctx: ProbeCtx,
     cancel: watch::Receiver<bool>,
     fuser: &mut dyn Fuser,
@@ -404,7 +407,7 @@ async fn stream_discovery(
     let capacity = scheduler.max_concurrent().max(1);
     let (tx, mut rx) = mpsc::channel::<TargetScan>(capacity);
 
-    let scan = scheduler.run_scan(probers, resolved, ctx, cancel.clone(), tx);
+    let scan = scheduler.run_scan(probers, targets, ctx, cancel.clone(), tx);
     tokio::pin!(scan);
 
     let mut acc = ScanAccumulation::default();
@@ -613,7 +616,13 @@ async fn collect_scans_sorted(
 ) -> (Vec<TargetScan>, bool) {
     let capacity = scheduler.max_concurrent().max(1);
     let (tx, mut rx) = mpsc::channel::<TargetScan>(capacity);
-    let scan = scheduler.run_scan(probers, resolved, ctx, cancel.clone(), tx);
+    let scan = scheduler.run_scan(
+        probers,
+        Box::new(resolved.into_iter()),
+        ctx,
+        cancel.clone(),
+        tx,
+    );
     tokio::pin!(scan);
     let mut out = Vec::new();
     let mut cancelled = false;
@@ -767,6 +776,23 @@ async fn finish_discovery_ref(
 
 fn stamp_scan_metadata(record: &mut DeviceRecord, scan_metadata: &Arc<ScanMetadata>) {
     record.scan_metadata = Arc::clone(scan_metadata);
+}
+
+// The mitigation for the dropped cross-target dedup: overlapping specs yield duplicate probes/records,
+// so name them once up front. O(#specs), no IP expansion.
+fn warn_on_overlapping_specs(plan: &ResolvedPlan) {
+    let overlaps = plan.find_overlaps();
+    if overlaps.is_empty() {
+        return;
+    }
+    let pairs: Vec<String> = overlaps
+        .iter()
+        .map(|(a, b)| format!("{a:?} & {b:?}"))
+        .collect();
+    tracing::warn!(
+        overlaps = %pairs.join(", "),
+        "target specs overlap; overlapping addresses will be probed and emitted more than once"
+    );
 }
 
 fn build_probes_by_kind(
@@ -1542,6 +1568,130 @@ mod tests {
             targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
             probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
         }
+    }
+
+    #[tokio::test]
+    async fn targets_resolved_equals_the_streamed_target_count_across_specs() {
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(100),
+                ..Default::default()
+            },
+            targets: vec![
+                Target::Cidr("127.0.0.0/30".parse().expect("cidr")),
+                Target::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 5))),
+            ],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![1] }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("run_discovery_with_components");
+        assert_eq!(
+            summary.targets_resolved, 3,
+            "the /30 (2 hosts) plus one IP stream 3 targets"
+        );
+        assert_eq!(
+            summary.probe_attempts, 3,
+            "the pre-flight denominator equals the number of targets the stream yielded"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_specs_emit_one_record_per_duplicate_target() {
+        let port = open_loopback_port().await;
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![
+                Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            ],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
+            .await
+            .expect("run_discovery_with_components");
+
+        assert_eq!(
+            summary.targets_resolved, 2,
+            "no cross-target dedup: the overlapping spec is counted twice"
+        );
+        assert_eq!(summary.probe_attempts, 2);
+        assert_eq!(
+            summary.records_emitted, 2,
+            "the overlapped IP emits one record per occurrence"
+        );
+        assert_eq!(handle.ndjson_lines().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn over_cap_scenario_is_rejected_before_any_probe() {
+        let inner: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let guard: Arc<dyn Resolver> =
+            Arc::new(crate::resolver::GuardedResolver::new(inner, None, Some(1)));
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(100),
+                ..Default::default()
+            },
+            targets: vec![Target::Cidr("10.0.0.0/30".parse().expect("cidr"))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let err = run_discovery_with_components(&scenario, guard, Box::new(mem))
+            .await
+            .expect_err("the aggregate cap must reject the scan");
+        assert!(matches!(
+            err,
+            RastreoError::Resolver(crate::error::ResolverError::AggregateHostCapExceeded { .. })
+        ));
+        assert!(
+            handle.bytes().is_empty(),
+            "rejection is pre-flight: no probe ran and no record was emitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_allowlist_scenario_is_rejected_before_any_probe() {
+        let inner: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let guard: Arc<dyn Resolver> = Arc::new(crate::resolver::GuardedResolver::new(
+            inner,
+            Some(vec!["10.0.0.0/8".parse().expect("net")]),
+            None,
+        ));
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(100),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let err = run_discovery_with_components(&scenario, guard, Box::new(mem))
+            .await
+            .expect_err("an out-of-allow-list target must reject the scan");
+        assert!(matches!(
+            err,
+            RastreoError::Resolver(crate::error::ResolverError::TargetNotAllowed { .. })
+        ));
+        assert!(
+            handle.bytes().is_empty(),
+            "rejection is pre-flight: no probe ran and no record was emitted"
+        );
     }
 
     #[tokio::test]
@@ -2432,7 +2582,7 @@ mod tests {
         let summary = stream_discovery(
             &scheduler,
             probers,
-            resolved,
+            Box::new(resolved.into_iter()),
             ProbeCtx::new(Duration::from_millis(100), 0),
             watch::channel(false).1,
             fuser.as_mut(),
@@ -2641,7 +2791,7 @@ mod tests {
             let result = stream_discovery(
                 &scheduler,
                 probers,
-                resolved,
+                Box::new(resolved.into_iter()),
                 ctx,
                 watch::channel(false).1,
                 fuser.as_mut(),
@@ -2714,7 +2864,7 @@ mod tests {
             stream_discovery(
                 &scheduler,
                 probers,
-                resolved,
+                Box::new(resolved.into_iter()),
                 ctx,
                 watch::channel(false).1,
                 fuser.as_mut(),
@@ -3583,7 +3733,7 @@ mod tests {
             let (tx, mut rx) = mpsc::channel::<TargetScan>(CAP);
             let scan = scheduler.run_scan(
                 probers,
-                resolved_many(TARGETS),
+                Box::new(resolved_many(TARGETS).into_iter()),
                 ctx,
                 watch::channel(false).1,
                 tx,
