@@ -97,7 +97,13 @@ impl<P: LinkLayerProtocol> Engine<P> {
             }
             Err(err) => return Err(channel_open_fault::<P>(&err)),
         };
+        Engine::spawn(tx, rx)
+    }
 
+    fn spawn(
+        tx: Box<dyn DataLinkSender>,
+        rx: Box<dyn DataLinkReceiver>,
+    ) -> Result<Arc<Engine<P>>, ProbeFault> {
         let demux: Arc<LinkLayerDemux<P>> = Arc::new(Demux::new());
         let stop = Arc::new(AtomicBool::new(false));
         let reader = {
@@ -437,52 +443,68 @@ pub(crate) async fn probe_link_layer<P: LinkLayerProtocol>(
         Err(fault) => return Ok(fault_outcome::<P>(target.ip, fault)),
     };
 
+    let frame = P::build_request(src_mac, src_ip, target_addr);
+    Ok(send_and_await_reply::<P>(&engine, target.ip, target_addr, &frame, ctx).await)
+}
+
+async fn send_and_await_reply<P: LinkLayerProtocol>(
+    engine: &Engine<P>,
+    target_ip: IpAddr,
+    target_addr: P::Addr,
+    frame: &[u8],
+    ctx: &ProbeCtx,
+) -> ProbeOutcome {
     // Register before send so a reply that races the send has a waiter to land on. The key is the
     // target address for the whole deadline — one registration per probe, so a future retransmit
     // re-sends without re-registering and cannot trip the demux collision guard.
     let rx = engine.demux.register(target_addr, ());
+    tokio::pin!(rx);
 
-    let frame = P::build_request(src_mac, src_ip, target_addr);
-    // Drop the sender lock before the await: the await blocks on the receiver, not the tx.
-    let send_result = {
-        let mut sender = engine
-            .sender
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sender.send_to(&frame, None)
-    };
-    match send_result {
-        Some(Ok(())) => {}
-        // A jammed raw tx is a broken engine, not target absence.
-        Some(Err(err)) => {
-            engine.demux.deregister(&target_addr);
-            return Ok(link_layer_fault::<P>(
-                target.ip,
-                format!("{} send failed: {err}", P::NAME),
-            ));
+    let per_attempt = crate::prober::per_attempt_timeout(ctx.timeout, ctx.retries);
+    let overall_deadline = TokioInstant::now() + ctx.timeout;
+
+    for _ in 0..=ctx.retries {
+        // Drop the sender lock before the await: the await blocks on the receiver, not the tx.
+        let send_result = {
+            let mut sender = engine
+                .sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sender.send_to(frame, None)
+        };
+        match send_result {
+            Some(Ok(())) => {}
+            // A jammed raw tx is a broken engine, not target absence.
+            Some(Err(err)) => {
+                engine.demux.deregister(&target_addr);
+                return link_layer_fault::<P>(target_ip, format!("{} send failed: {err}", P::NAME));
+            }
+            None => {
+                engine.demux.deregister(&target_addr);
+                return link_layer_fault::<P>(
+                    target_ip,
+                    format!(
+                        "{} send returned None (packet too large for send buffer)",
+                        P::NAME
+                    ),
+                );
+            }
         }
-        None => {
-            engine.demux.deregister(&target_addr);
-            return Ok(link_layer_fault::<P>(
-                target.ip,
-                format!(
-                    "{} send returned None (packet too large for send buffer)",
-                    P::NAME
-                ),
-            ));
+
+        let attempt_deadline = (TokioInstant::now() + per_attempt).min(overall_deadline);
+        match timeout_at(attempt_deadline, rx.as_mut()).await {
+            Ok(Ok(engine_reply)) => return reply_to_outcome::<P>(target_ip, Some(engine_reply)),
+            Ok(Err(_recv)) => return reply_to_outcome::<P>(target_ip, None),
+            Err(_elapsed) => {
+                if TokioInstant::now() >= overall_deadline {
+                    break;
+                }
+            }
         }
     }
 
-    let deadline = TokioInstant::now() + ctx.timeout;
-    let reply = match timeout_at(deadline, rx).await {
-        Ok(Ok(engine_reply)) => Some(engine_reply),
-        Ok(Err(_recv)) => None,
-        Err(_elapsed) => {
-            engine.demux.deregister(&target_addr);
-            None
-        }
-    };
-    Ok(reply_to_outcome::<P>(target.ip, reply))
+    engine.demux.deregister(&target_addr);
+    reply_to_outcome::<P>(target_ip, None)
 }
 
 #[cfg(test)]
@@ -526,13 +548,244 @@ mod tests {
             Vec::new()
         }
 
-        fn parse_reply_source(_frame: &[u8]) -> Option<(Ipv4Addr, MacAddr)> {
-            None
+        fn parse_reply_source(frame: &[u8]) -> Option<(Ipv4Addr, MacAddr)> {
+            let bytes: [u8; 10] = frame.try_into().ok()?;
+            let ip = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+            let mac = MacAddr::new(bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9]);
+            Some((ip, mac))
         }
     }
 
     fn sample_fault(detail: &str) -> ProbeFault {
         ProbeFault::new(ProbeErrorKind::Other, detail.to_string())
+    }
+
+    struct SharedChannel {
+        sends: usize,
+        drop_first: usize,
+        reply_frame: Vec<u8>,
+        reply_ready: bool,
+    }
+
+    fn shared_channel(
+        drop_first: usize,
+        target: Ipv4Addr,
+        mac: MacAddr,
+    ) -> Arc<Mutex<SharedChannel>> {
+        let mut reply_frame = target.octets().to_vec();
+        reply_frame.extend_from_slice(&[mac.0, mac.1, mac.2, mac.3, mac.4, mac.5]);
+        Arc::new(Mutex::new(SharedChannel {
+            sends: 0,
+            drop_first,
+            reply_frame,
+            reply_ready: false,
+        }))
+    }
+
+    fn send_count(shared: &Arc<Mutex<SharedChannel>>) -> usize {
+        shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .sends
+    }
+
+    struct FakeSender {
+        shared: Arc<Mutex<SharedChannel>>,
+    }
+
+    impl DataLinkSender for FakeSender {
+        fn build_and_send(
+            &mut self,
+            _num_packets: usize,
+            _packet_size: usize,
+            _func: &mut dyn FnMut(&mut [u8]),
+        ) -> Option<std::io::Result<()>> {
+            Some(Ok(()))
+        }
+
+        fn send_to(
+            &mut self,
+            _packet: &[u8],
+            _dst: Option<NetworkInterface>,
+        ) -> Option<std::io::Result<()>> {
+            let mut state = self
+                .shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.sends += 1;
+            if state.sends > state.drop_first {
+                state.reply_ready = true;
+            }
+            Some(Ok(()))
+        }
+    }
+
+    struct FakeReceiver {
+        shared: Arc<Mutex<SharedChannel>>,
+        buf: Vec<u8>,
+    }
+
+    impl DataLinkReceiver for FakeReceiver {
+        fn next(&mut self) -> std::io::Result<&[u8]> {
+            let reply = {
+                let mut state = self
+                    .shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.reply_ready.then(|| {
+                    state.reply_ready = false;
+                    state.reply_frame.clone()
+                })
+            };
+            match reply {
+                Some(frame) => {
+                    self.buf = frame;
+                    Ok(&self.buf)
+                }
+                None => {
+                    std::thread::sleep(Duration::from_millis(1));
+                    Err(std::io::Error::from(ErrorKind::WouldBlock))
+                }
+            }
+        }
+    }
+
+    fn test_engine(shared: Arc<Mutex<SharedChannel>>) -> Arc<Engine<TestProtocol>> {
+        let tx: Box<dyn DataLinkSender> = Box::new(FakeSender {
+            shared: Arc::clone(&shared),
+        });
+        let rx: Box<dyn DataLinkReceiver> = Box::new(FakeReceiver {
+            shared,
+            buf: Vec::new(),
+        });
+        Engine::<TestProtocol>::spawn(tx, rx).expect("spawn test engine")
+    }
+
+    async fn run_probe(
+        engine: &Engine<TestProtocol>,
+        target: Ipv4Addr,
+        ctx: &ProbeCtx,
+    ) -> ProbeOutcome {
+        send_and_await_reply::<TestProtocol>(engine, IpAddr::V4(target), target, &[0u8; 4], ctx)
+            .await
+    }
+
+    #[tokio::test]
+    async fn link_layer_retries_zero_issues_exactly_one_frame() {
+        let target = Ipv4Addr::new(192, 0, 2, 10);
+        let shared = shared_channel(usize::MAX, target, MacAddr::zero());
+        let engine = test_engine(Arc::clone(&shared));
+        let outcome = run_probe(
+            &engine,
+            target,
+            &ProbeCtx::new(Duration::from_millis(200), 0),
+        )
+        .await;
+        assert!(!outcome.reachable);
+        assert_eq!(send_count(&shared), 1, "retries=0 must send a single frame");
+    }
+
+    #[tokio::test]
+    async fn link_layer_retransmit_recovers_when_first_frames_are_dropped() {
+        let target = Ipv4Addr::new(192, 0, 2, 20);
+        let mac = MacAddr::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
+        let shared = shared_channel(2, target, mac);
+        let engine = test_engine(Arc::clone(&shared));
+        let outcome = run_probe(
+            &engine,
+            target,
+            &ProbeCtx::new(Duration::from_millis(900), 2),
+        )
+        .await;
+        assert!(
+            outcome.reachable,
+            "the third frame reaches the target after two drops"
+        );
+        assert!(matches!(
+            outcome.signals.first(),
+            Some(Signal::Mac(m)) if m == "aa:bb:cc:dd:ee:ff"
+        ));
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn link_layer_without_retries_reports_absent_when_first_frame_dropped() {
+        let target = Ipv4Addr::new(192, 0, 2, 30);
+        let shared = shared_channel(1, target, MacAddr::zero());
+        let engine = test_engine(Arc::clone(&shared));
+        let outcome = run_probe(
+            &engine,
+            target,
+            &ProbeCtx::new(Duration::from_millis(300), 0),
+        )
+        .await;
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn link_layer_exhausted_retries_is_absence_not_fault() {
+        let target = Ipv4Addr::new(192, 0, 2, 40);
+        let shared = shared_channel(usize::MAX, target, MacAddr::zero());
+        let engine = test_engine(Arc::clone(&shared));
+        let outcome = run_probe(
+            &engine,
+            target,
+            &ProbeCtx::new(Duration::from_millis(300), 2),
+        )
+        .await;
+        assert!(!outcome.reachable);
+        assert!(outcome.fault.is_none());
+        assert_eq!(
+            send_count(&shared),
+            3,
+            "retries=2 sends the first frame plus two retransmits"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_layer_retries_u32_max_is_bounded_and_does_not_panic() {
+        let target = Ipv4Addr::new(192, 0, 2, 50);
+        let shared = shared_channel(usize::MAX, target, MacAddr::zero());
+        let engine = test_engine(Arc::clone(&shared));
+        let start = std::time::Instant::now();
+        let outcome = run_probe(
+            &engine,
+            target,
+            &ProbeCtx::new(Duration::from_millis(2), u32::MAX),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "u32::MAX retries must stay bounded near the timeout: {elapsed:?}"
+        );
+        assert!(
+            send_count(&shared) < 100,
+            "the per-attempt floor and deadline break bound the send count: {}",
+            send_count(&shared)
+        );
+    }
+
+    #[tokio::test]
+    async fn link_layer_retransmit_stays_within_the_total_timeout() {
+        let target = Ipv4Addr::new(192, 0, 2, 60);
+        let shared = shared_channel(usize::MAX, target, MacAddr::zero());
+        let engine = test_engine(Arc::clone(&shared));
+        let start = std::time::Instant::now();
+        let outcome = run_probe(
+            &engine,
+            target,
+            &ProbeCtx::new(Duration::from_millis(300), 2),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        assert!(!outcome.reachable);
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "split model keeps the total near timeout, not retries+1 times it: {elapsed:?}"
+        );
     }
 
     #[test]
