@@ -195,6 +195,8 @@ pub enum ProberConfig {
         password: Password,
         #[serde(default = "gnmi::default_get_paths")]
         get_paths: Vec<String>,
+        #[serde(default = "gnmi::default_lldp")]
+        lldp: bool,
     },
     ReverseDns {
         #[serde(default = "reverse_dns::default_resolvers")]
@@ -280,12 +282,14 @@ pub fn create_prober(config: &ProberConfig) -> Result<Box<dyn Prober>, RastreoEr
             username,
             password,
             get_paths,
+            lldp,
         } => Ok(Box::new(GnmiProber::new(
             ports.clone(),
             *plaintext,
             username.clone(),
             password.clone(),
             get_paths.clone(),
+            *lldp,
         )?)),
         ProberConfig::ReverseDns { resolvers } => {
             Ok(Box::new(ReverseDnsProber::new(resolvers.clone())?))
@@ -966,6 +970,43 @@ mod tests {
         };
         let prober = create_prober(&config).expect("factory ok");
         assert_eq!(prober.kind(), ProbeKind::ReverseDns);
+    }
+
+    #[cfg(all(feature = "config", feature = "gnmi"))]
+    #[test]
+    fn prober_config_deserializes_gnmi_variant_lldp_defaults_off() {
+        let yaml = "type: gnmi\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize gnmi");
+        match config {
+            ProberConfig::Gnmi { lldp, .. } => assert!(!lldp, "lldp defaults off"),
+            other => panic!("expected Gnmi variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "gnmi"))]
+    #[test]
+    fn prober_config_deserializes_gnmi_variant_with_lldp_enabled() {
+        let yaml = "type: gnmi\nlldp: true\n";
+        let config: ProberConfig = serde_yaml_ng::from_str(yaml).expect("deserialize gnmi");
+        match config {
+            ProberConfig::Gnmi { lldp, .. } => assert!(lldp),
+            other => panic!("expected Gnmi variant, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "gnmi")]
+    #[test]
+    fn create_prober_gnmi_variant_produces_gnmi_prober() {
+        let config = ProberConfig::Gnmi {
+            ports: crate::prober::gnmi::default_ports(),
+            plaintext: crate::prober::gnmi::default_plaintext(),
+            username: String::new(),
+            password: Password::default(),
+            get_paths: crate::prober::gnmi::default_get_paths(),
+            lldp: true,
+        };
+        let prober = create_prober(&config).expect("factory ok");
+        assert_eq!(prober.kind(), ProbeKind::Gnmi);
     }
 
     #[cfg(all(feature = "config", feature = "snmp"))]

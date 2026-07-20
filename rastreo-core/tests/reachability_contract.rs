@@ -321,6 +321,7 @@ fn gnmi_config(port: u16) -> ProberConfig {
         username: String::new(),
         password: Password::default(),
         get_paths: rastreo_core::prober::gnmi::default_get_paths(),
+        lldp: false,
     }
 }
 

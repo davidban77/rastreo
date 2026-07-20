@@ -19,7 +19,7 @@ This section is the per-prober reference. Each prober has its own configuration,
 | [SSH](ssh.md) | `OpenPort(<port>)`, `SshBanner(<value>)`, `SshHostKey(<value>)` | `--features ssh` (bundled with release binaries) |
 | [ICMP](icmp.md) | `IcmpEchoRttMicros(<value>)` | `--features icmp` (bundled with release binaries; unprivileged where `SOCK_DGRAM` ICMP is permitted, `CAP_NET_RAW` otherwise) |
 | [TLS](tls.md) | `OpenPort(<port>)`, `TlsSubject(<value>)`, `TlsSanName(<value>)` | `--features tls` (bundled with release binaries) |
-| [gNMI](gnmi.md) | `GnmiVersion`, `GnmiSupportedModel`, `GnmiSupportedEncoding`, `GnmiState` | `--features gnmi` (bundled with release binaries) |
+| [gNMI](gnmi.md) | `GnmiVersion`, `GnmiSupportedModel`, `GnmiSupportedEncoding`, `GnmiState`; topology links with `lldp: true` (see [Topology](../discover/topology.md)) | `--features gnmi` (bundled with release binaries) |
 | [LLDP](lldp.md) | topology links, not device signals — see [Topology](../discover/topology.md) | `--features lldp` (implies `snmp`; bundled with release binaries) |
 
 Topics covered here include the configuration schema, observable signal shape, timeout semantics, and known limits for each prober. Where a prober has nontrivial tuning (HTTP TLS modes, DNS transport selection, UDP protocol selection, SNMP credentials, ARP or NDP interface selection, reverse DNS resolver selection), that surface lives on the prober's page rather than scattered across the scenario reference.

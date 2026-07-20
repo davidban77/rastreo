@@ -397,6 +397,7 @@ fn assemble_observation(
         local_chassis_id: local.id,
         local_chassis_subtype: local.subtype,
         neighbors,
+        discovered_via: "lldp".to_string(),
     }
 }
 

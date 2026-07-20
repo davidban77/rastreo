@@ -4,7 +4,7 @@ description: How rastreo turns LLDP neighbor data into LinkRecords — the two-e
 
 # Topology
 
-rastreo discovers devices, and with the [LLDP prober](../probe/lldp.md) it also discovers how those devices connect. Each connection between two devices becomes a `LinkRecord` — a topology edge you can reconcile into cables in NetBox or interface connections in Nautobot. This page explains what a `LinkRecord` is, how rastreo builds it, and where it is emitted.
+rastreo discovers devices, and it also discovers how those devices connect. It builds this topology from LLDP neighbor data — read over SNMP by the [LLDP prober](../probe/lldp.md), or over gNMI by the [gNMI prober](../probe/gnmi.md) with `lldp: true`. Each connection between two devices becomes a `LinkRecord` — a topology edge you can reconcile into cables in NetBox or interface connections in Nautobot. This page explains what a `LinkRecord` is, how rastreo builds it, and where it is emitted.
 
 ## What a LinkRecord is
 
@@ -17,7 +17,7 @@ Each endpoint carries four values:
 - `port` — the interface the link uses on that endpoint (for example `Ethernet1/1`).
 - `identity_key` — points at the matching `DeviceRecord` when rastreo also probed that endpoint. Absent when rastreo learned the endpoint only through a neighbor's advertisement. See [Known-unknown neighbors](#known-unknown-neighbors).
 
-The record also carries a few top-level fields: `discovered_via` names how rastreo found the link (`lldp` today), `observed_at` is when rastreo last saw it, and `scan_metadata` is the same per-scan provenance object stamped on every `DeviceRecord`. `schema_version` and `schema_id` identify the record shape.
+The record also carries a few top-level fields: `discovered_via` names the source that found the link (see [Topology sources](#topology-sources)), `observed_at` is when rastreo last saw it, and `scan_metadata` is the same per-scan provenance object stamped on every `DeviceRecord`. `schema_version` and `schema_id` identify the record shape.
 
 Here is one `LinkRecord` between a probed switch and a neighbor rastreo saw but never probed:
 
@@ -47,6 +47,18 @@ Here is one `LinkRecord` between a probed switch and a neighbor rastreo saw but 
 ```
 
 Endpoint `a` has an `identity_key`, so rastreo probed that device and you can join the link to its `DeviceRecord`. Endpoint `b` has no `identity_key` — it is a known-unknown neighbor.
+
+## Topology sources
+
+You can run either the SNMP [LLDP prober](../probe/lldp.md) or the [gNMI prober](../probe/gnmi.md) with `lldp: true`, or both. The `discovered_via` field on each `LinkRecord` names the source that found the link:
+
+| `discovered_via` | Source |
+|---|---|
+| `lldp` | The SNMP LLDP prober saw the link. |
+| `gnmi` | The gNMI prober saw the link. |
+| `gnmi,lldp` | Both transports saw the same physical link, and rastreo de-duplicated it to one record. |
+
+The `gnmi,lldp` value follows the [one-record-per-physical-link](#one-record-per-physical-link) rule: when the SNMP and gNMI sources report the same link, rastreo collapses them into a single `LinkRecord` and lists both sources.
 
 ## Known-unknown neighbors
 

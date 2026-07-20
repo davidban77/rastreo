@@ -1,5 +1,5 @@
 ---
-description: The gNMI prober — connects to a device's gRPC/gNMI endpoint, issues Capabilities and Get RPCs, and emits the gNMI version, supported YANG models and encodings, and configured state values as fingerprint signals. TLS accepts any certificate; credentials are optional but unlock the real state values.
+description: The gNMI prober — connects to a device's gRPC/gNMI endpoint, issues Capabilities and Get RPCs, and emits the gNMI version, supported YANG models and encodings, and configured state values as fingerprint signals. With lldp true it also discovers LLDP neighbors as topology links. TLS accepts any certificate; credentials are optional but unlock the real state values.
 ---
 
 # gNMI prober
@@ -13,13 +13,14 @@ gNMI is a network-device management protocol that runs over gRPC. Modern network
 
 Add a `gnmi` entry to a scenario's `probers` array. Every field has a default, so the minimum shape is `{"type": "gnmi"}` — that probes TCP 57400 over TLS, anonymously, and reads the two default paths `/system/state/hostname` and `/system/state/software-version`.
 
-The prober has five fields:
+The prober has six fields:
 
 - `ports` — the TCP ports to probe.
 - `plaintext` — cleartext gRPC instead of TLS.
 - `username` — the gNMI username.
 - `password` — the gNMI password.
 - `get_paths` — the gNMI paths to read with the Get call.
+- `lldp` — also discover LLDP neighbors over OpenConfig for topology.
 
 ```yaml
 probers:
@@ -40,6 +41,7 @@ probers:
 | `username` | string | no | `""` | gNMI username. Empty means an anonymous probe — no credentials are sent. See [Authentication](#authentication). |
 | `password` | string | no | `""` | gNMI password. Redacted from logs and from any debug output. Supports the `${VAR}` and `!file /path` secret syntax — see [Secrets](../reference/secrets.md). |
 | `get_paths` | array of string | no | `["/system/state/hostname", "/system/state/software-version"]` | gNMI paths for the Get call. Each path is a slash-separated location in the device's data tree. An empty list skips the Get call and runs Capabilities only. See [Path syntax](#path-syntax) for origins and list keys. |
+| `lldp` | bool | no | `false` | When `true`, also discover LLDP neighbors over the OpenConfig `/lldp` tree for topology — see [Topology](../discover/topology.md). Runs alongside `get_paths`; both run on the same probe. Requires the device to support the `openconfig-lldp` model. See [LLDP topology](#lldp-topology). |
 
 `username` and `password` are checked when the scenario loads. A value with a control character is not a valid gRPC header, so it is rejected before the scan starts rather than failing mid-probe.
 
@@ -77,6 +79,25 @@ The default `get_paths` reads the hostname and the software version. Add more Op
 
 !!! warning "List only paths the target supports"
     These paths are vendor- and model-dependent. A device that does not implement one path can reject the whole Get call, so every path returns nothing. Keep `get_paths` to paths the target platform supports, and test against one device before a wide scan.
+
+### LLDP topology
+
+Set `lldp: true` to also discover the device's LLDP neighbors over the OpenConfig `/lldp` tree. Those neighbors flow to rastreo's topology stage as `LinkRecord`s — the same output the SNMP [LLDP prober](lldp.md) produces. See [Topology](../discover/topology.md).
+
+This runs alongside the state Get, not instead of it. Fingerprinting with `get_paths` and LLDP discovery are independent. Both run on the same probe. The device must support the `openconfig-lldp` model, or the `/lldp` read returns no neighbors.
+
+```yaml
+probers:
+  - type: gnmi
+    ports: [57400]
+    username: admin
+    password: ${GNMI_PASSWORD}
+    lldp: true
+    get_paths:
+      - /system/state/hostname
+```
+
+The LLDP neighbors do not appear in the `signals` array, which carries device fingerprints only. They arrive on the [topology stream](../discover/topology.md#where-links-are-emitted) as `LinkRecord`s, tagged `discovered_via: "gnmi"`.
 
 ## Transport and certificate handling
 
@@ -212,6 +233,7 @@ probers:
 - [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a device that rejects your credentials is kept, not dropped.
 - [SNMP prober](snmp.md) — the same "keep the device that answered even when it withheld data" behavior, applied to SNMP, plus the credential-redaction approach.
 - [TLS prober](tls.md) — the same accept-any-certificate fingerprinting posture over TLS.
+- [Topology](../discover/topology.md) — how LLDP neighbors from `lldp: true` become topology links.
 - [Scenario schema](../reference/scenario.md#gnmi) — the `gnmi` prober's field table in the scenario reference.
 - [Secrets](../reference/secrets.md) — `${VAR}` and `!file` syntax for the password.
 - [Device record schema](../reference/schema/device-record.md) — every signal variant in the emitted record.

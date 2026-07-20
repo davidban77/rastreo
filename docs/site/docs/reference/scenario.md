@@ -288,6 +288,7 @@ Connects to a device's gRPC/gNMI endpoint on each configured port, issues a Capa
 | `username` | string | no | `""` | gNMI username. Empty means an anonymous probe. |
 | `password` | string | no | `""` | gNMI password. Redacted in Debug output. Accepts `${VAR}` and `!file` secrets. |
 | `get_paths` | array of string | no | `["/system/state/hostname", "/system/state/software-version"]` | gNMI paths for the Get call. Supports path origins and keyed list elements. An empty list runs Capabilities only. |
+| `lldp` | bool | no | `false` | Also discover LLDP neighbors over the OpenConfig `/lldp` tree for [topology](../discover/topology.md). Runs alongside `get_paths`. See the [gNMI prober page](../probe/gnmi.md#lldp-topology). |
 
 ```json
 {"type": "gnmi", "ports": [57400], "username": "admin", "password": "${GNMI_PASSWORD}", "get_paths": ["/system/state/hostname"]}
