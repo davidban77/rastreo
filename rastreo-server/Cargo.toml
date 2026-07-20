@@ -63,6 +63,7 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "logs", "metrics
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "reqwest-blocking-client", "metrics", "logs", "trace"], optional = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 tempfile = { workspace = true }

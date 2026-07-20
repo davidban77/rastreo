@@ -388,6 +388,26 @@ You will see a hint for the faults that carry a clear next step. A `decode_faile
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).
 
+### Progress in the logs
+
+`POST /scans` runs to completion before it responds, so a long scan gives the caller nothing until the end. To follow a scan while it runs, read the server log. About every five seconds the server writes a `scan progress` line for each running scan:
+
+```text
+INFO rastreo_server::routes::scans: scan progress scenario=unnamed targets_completed=16 targets_total=30 records=0
+```
+
+The line carries these fields:
+
+- `scenario` — the request's `name`, or `unnamed` when the request omits it.
+- `targets_completed` — targets finished so far.
+- `targets_total` — total targets to probe.
+- `records` — `DeviceRecord` events emitted so far.
+
+Logging stops when the scan finishes.
+
+!!! note "Mid-scan progress is in the logs, not the response"
+    Because `POST /scans` is synchronous, progress is not a response field and there is no progress endpoint. The response returns once, at the end, with the full summary and records. To follow a running scan, read the `scan progress` log lines above.
+
 ### Bounded response size
 
 The server holds the whole response in memory before sending it. A very large scan could then exhaust the server's memory. To prevent this, the response is capped at `RASTREO_MAX_RESULT_BYTES` bytes of records. The default is `33554432` (32 MiB).

@@ -1,16 +1,20 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
 use rastreo_core::{
-    hint_for_error_kind, resolve_scenario_targets, run_discovery_with_components, DeviceRecord,
-    DiscoveryPlan, DiscoverySummary, EncoderConfig, MemorySink, PlanKnobs, Sink, TeeChild, TeeSink,
+    hint_for_error_kind, resolve_scenario_targets, run_discovery_with_components_with_progress,
+    DeviceRecord, DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink,
+    PlanKnobs, Sink, TeeChild, TeeSink,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 use crate::error::AppError;
 use crate::state::{AppState, Metrics, ReadinessState};
@@ -191,8 +195,16 @@ async fn run_scan(
 
     let mut outcome_guard =
         ScanOutcomeGuard::new(Arc::clone(&state.metrics), start, scenario_label.clone());
-    let summary_result =
-        run_discovery_with_components(&scenario, state.resolver.clone(), pipeline_sink).await;
+    let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
+    let progress_task = spawn_progress_logger(progress_rx, scenario_label.clone());
+    let summary_result = run_discovery_with_components_with_progress(
+        &scenario,
+        state.resolver.clone(),
+        pipeline_sink,
+        progress_tx,
+    )
+    .await;
+    progress_task.abort();
 
     match summary_result {
         Ok(summary) => {
@@ -228,6 +240,38 @@ async fn run_scan(
             Err(err.into())
         }
     }
+}
+
+// POST /scans is synchronous, so mid-scan progress can't be a response field; ops read it from the server log instead.
+fn spawn_progress_logger(
+    rx: watch::Receiver<DiscoveryProgress>,
+    scenario: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(PROGRESS_LOG_INTERVAL);
+        ticker.tick().await; // the first tick fires immediately; skip it
+        loop {
+            ticker.tick().await;
+            // Exit when the scan's sender is gone, so the task never leaks if abort() is skipped by an unwind.
+            if rx.has_changed().is_err() {
+                break;
+            }
+            let snapshot = rx.borrow().clone();
+            if should_log_progress(&snapshot) {
+                tracing::info!(
+                    scenario = %scenario,
+                    targets_completed = snapshot.targets_completed,
+                    targets_total = snapshot.targets_total,
+                    records = snapshot.records_emitted,
+                    "scan progress"
+                );
+            }
+        }
+    })
+}
+
+fn should_log_progress(p: &DiscoveryProgress) -> bool {
+    p.targets_total > 0 && p.targets_completed < p.targets_total
 }
 
 #[cfg(test)]
@@ -759,6 +803,45 @@ mod tests {
     #[test]
     fn scan_params_default_is_not_dry_run() {
         assert!(!ScanParams::default().dry_run);
+    }
+
+    fn progress(completed: usize, total: usize) -> DiscoveryProgress {
+        let mut p = DiscoveryProgress::default();
+        p.targets_completed = completed;
+        p.targets_total = total;
+        p
+    }
+
+    #[test]
+    fn should_log_progress_true_mid_scan() {
+        assert!(should_log_progress(&progress(3, 10)));
+    }
+
+    #[test]
+    fn should_log_progress_false_before_resolution_is_known() {
+        assert!(!should_log_progress(&progress(0, 0)));
+    }
+
+    #[test]
+    fn should_log_progress_false_once_every_target_is_drained() {
+        assert!(!should_log_progress(&progress(10, 10)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_logger_terminates_when_sender_dropped() {
+        let (tx, rx) = watch::channel(DiscoveryProgress::default());
+        let task = spawn_progress_logger(rx, "test-scenario".to_string());
+        drop(tx);
+
+        let joined =
+            tokio::time::timeout(PROGRESS_LOG_INTERVAL * 3 + Duration::from_secs(1), task).await;
+        assert!(
+            joined.is_ok(),
+            "logger must self-terminate once the sender is dropped, not spin on the ticker forever"
+        );
+        joined
+            .expect("did not time out")
+            .expect("logger task joins cleanly");
     }
 
     #[test]

@@ -291,6 +291,40 @@ CLI flags override YAML values. Merge order per scenario, lowest to highest:
 
 Only fields the CLI flag was explicitly set for are overridden. `rastreo discover --file scan.yml --concurrency 32` overrides the YAML `max_concurrent`, but leaves the rate, sink, and timeout untouched. Omitting a flag entirely lets the YAML value win.
 
+## Progress
+
+A scan prints a live progress line to stderr while it runs — updated repeatedly through a long scan, and shown once at completion for a fast one. It shows how far the scan has reached and how much is left, so you can see it is still working. The line carries four fields:
+
+- `targets N/M` — targets finished (`N`) out of the total to probe (`M`).
+- `(X%)` — percent of targets finished.
+- `records R` — `DeviceRecord` events emitted so far.
+- `ETA ~Ss` — estimated seconds left. It appears once at least three targets have finished, so the estimate uses real timing, and it drops off at `100%`.
+
+The line updates at most once per second. On a terminal it redraws in place on a single line, then clears when the scan ends. The summary line prints next.
+
+When stderr is not a terminal, each update prints as a new line instead. Piping stderr to another program or redirecting it to a file keeps the full history in order.
+
+Progress goes to stderr, never stdout. Records stream to stdout on the default sink, so the progress line never mixes into them. If you pipe stdout to `jq` or a file, only the records pass through.
+
+```bash
+rastreo discover --target 192.0.2.0/28 --port 80 --concurrency 4 2> scan.log
+```
+
+The `2> scan.log` above redirects stderr, so the progress updates are written to `scan.log` as periodic lines:
+
+```text
+targets 4/14 (28%), records 0, ETA ~2s
+targets 8/14 (57%), records 0, ETA ~1s
+targets 12/14 (85%), records 0, ETA ~0s
+targets 14/14 (100%), records 0
+discovery complete: targets_resolved=14 probe_attempts=14 probe_errors=0 records_emitted=0 elapsed_ms=4010
+```
+
+The last line is the run summary; [Runtime hints](#runtime-hints) explains its fields. In YAML-driven mode each scenario reports its own progress line, under the `running <scenario>` header the CLI prints before it starts.
+
+!!! note "A fast scan may show no progress line"
+    The line first appears after one second. A small scan against a nearby host can finish in under a second, so you see only the summary line. Progress is for the long scans where it helps — a wide CIDR, a slow link, or a low concurrency setting.
+
 ## Cancellation
 
 On `SIGINT` (ctrl-c) or `SIGTERM`, `rastreo discover` finishes any in-flight probes that have already started, fuses the outcomes collected so far, emits the resulting records to the sink, and flushes the sink before exiting. The summary line on stderr reads `discovery cancelled:` instead of `discovery complete:` when this path runs. The exit code is still `0` for a clean shutdown — non-zero is reserved for errors.
