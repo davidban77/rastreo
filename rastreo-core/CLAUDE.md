@@ -60,7 +60,7 @@ src/
 ├── collection_profile/
 │   ├── mod.rs           ← CollectionProfileAssembler (per-gNMI-endpoint profiles, built from per-IP outcomes)
 │   └── openconfig_paths.rs ← curated OpenConfig telemetry path table + advertised-model matcher (populates suggested_subscriptions)
-├── pipeline.rs     ← run_discovery + DiscoverySummary
+├── pipeline.rs     ← run_discovery + DiscoverySummary + DiscoveryProgress (opt-in watch progress hook)
 ├── plan.rs         ← DiscoveryPlan + PlanKnobs (exhaustive dry-run plan render + Display)
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig
 ```

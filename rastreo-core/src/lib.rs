@@ -37,8 +37,9 @@ pub use model::{
 };
 pub use pipeline::{
     resolve_scenario_targets, run_discovery, run_discovery_cancellable,
-    run_discovery_with_components, run_discovery_with_components_cancellable, DiscoverySummary,
-    ProbeKindSummary, ResolvedScenarioTarget,
+    run_discovery_cancellable_with_progress, run_discovery_with_components,
+    run_discovery_with_components_cancellable, run_discovery_with_components_with_progress,
+    DiscoveryProgress, DiscoverySummary, ProbeKindSummary, ResolvedScenarioTarget,
 };
 pub use plan::{DiscoveryPlan, PlanKnobs, PlannedTarget, TargetResolution};
 #[cfg(feature = "icmp")]

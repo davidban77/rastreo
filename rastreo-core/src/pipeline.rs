@@ -63,6 +63,17 @@ pub struct DiscoverySummary {
     pub elapsed: Duration,
 }
 
+/// A running snapshot of an in-flight scan, published on each target drain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct DiscoveryProgress {
+    pub targets_completed: usize,
+    pub targets_total: usize,
+    pub records_emitted: usize,
+    pub probe_attempts: usize,
+    pub elapsed_ms: u128,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
 pub struct ProbeKindSummary {
@@ -121,7 +132,18 @@ pub async fn run_discovery_with_components(
     sink: Box<dyn Sink>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (_tx, rx) = watch::channel(false);
-    run_discovery_with_components_cancellable(scenario, resolver, sink, rx).await
+    run_discovery_core(scenario, resolver, sink, rx, None).await
+}
+
+/// Same as [`run_discovery_with_components`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
+pub async fn run_discovery_with_components_with_progress(
+    scenario: &DiscoverScenarioConfig,
+    resolver: Arc<dyn Resolver>,
+    sink: Box<dyn Sink>,
+    progress: watch::Sender<DiscoveryProgress>,
+) -> Result<DiscoverySummary, RastreoError> {
+    let (_tx, rx) = watch::channel(false);
+    run_discovery_core(scenario, resolver, sink, rx, Some(progress)).await
 }
 
 /// Same as [`run_discovery`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
@@ -129,18 +151,45 @@ pub async fn run_discovery_cancellable(
     scenario: &DiscoverScenarioConfig,
     cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
+    let (resolver, sink) = default_components(scenario).await?;
+    run_discovery_core(scenario, resolver, sink, cancel, None).await
+}
+
+/// Same as [`run_discovery_cancellable`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
+pub async fn run_discovery_cancellable_with_progress(
+    scenario: &DiscoverScenarioConfig,
+    cancel: watch::Receiver<bool>,
+    progress: watch::Sender<DiscoveryProgress>,
+) -> Result<DiscoverySummary, RastreoError> {
+    let (resolver, sink) = default_components(scenario).await?;
+    run_discovery_core(scenario, resolver, sink, cancel, Some(progress)).await
+}
+
+async fn default_components(
+    scenario: &DiscoverScenarioConfig,
+) -> Result<(Arc<dyn Resolver>, Box<dyn Sink>), RastreoError> {
     let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system()?);
     let sink_config = scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout);
     let sink = create_sink(&sink_config).await?;
-    run_discovery_with_components_cancellable(scenario, resolver, sink, cancel).await
+    Ok((resolver, sink))
 }
 
 /// Same as [`run_discovery_with_components`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
 pub async fn run_discovery_with_components_cancellable(
     scenario: &DiscoverScenarioConfig,
     resolver: Arc<dyn Resolver>,
+    sink: Box<dyn Sink>,
+    cancel: watch::Receiver<bool>,
+) -> Result<DiscoverySummary, RastreoError> {
+    run_discovery_core(scenario, resolver, sink, cancel, None).await
+}
+
+async fn run_discovery_core(
+    scenario: &DiscoverScenarioConfig,
+    resolver: Arc<dyn Resolver>,
     mut sink: Box<dyn Sink>,
     cancel: watch::Receiver<bool>,
+    progress: Option<watch::Sender<DiscoveryProgress>>,
 ) -> Result<DiscoverySummary, RastreoError> {
     scenario.base.ensure_no_retired_fields()?;
     scenario.base.ensure_retries_within_bound()?;
@@ -220,6 +269,7 @@ pub async fn run_discovery_with_components_cancellable(
         start,
         &reorder_peak,
         &scan_span,
+        progress.as_ref(),
     )
     .await
 }
@@ -346,6 +396,8 @@ async fn stream_discovery(
     // Test instrumentation: records the reorder buffer's peak size for the bound assertions.
     reorder_peak: &AtomicUsize,
     scan_span: &tracing::Span,
+    // watch, not mpsc: a progress consumer wants the latest snapshot, never a backlog.
+    progress: Option<&watch::Sender<DiscoveryProgress>>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
     let sink_type = sink.kind();
@@ -361,10 +413,24 @@ async fn stream_discovery(
     let mut next_expected: usize = 0;
     let mut buf: Vec<u8> = Vec::new();
     let mut records_emitted: usize = 0;
+    let mut targets_completed: usize = 0;
     let mut emit_err: Option<RastreoError> = None;
     let mut scan_done = false;
     let mut assembler = TopologyAssembler::new(Arc::clone(scan_metadata));
     let mut profile_assembler = CollectionProfileAssembler::new(Arc::clone(scan_metadata));
+
+    // Latest-wins send; a dropped receiver just means nobody is watching, so ignore the error.
+    let publish = |completed: usize, records: usize, attempts: usize| {
+        if let Some(tx) = progress {
+            let _ = tx.send(DiscoveryProgress {
+                targets_completed: completed,
+                targets_total: targets_resolved,
+                records_emitted: records,
+                probe_attempts: attempts,
+                elapsed_ms: start.elapsed().as_millis(),
+            });
+        }
+    };
 
     let stream_span = tracing::info_span!(parent: scan_span, "stream");
 
@@ -402,6 +468,8 @@ async fn stream_discovery(
                         .await?;
                     }
                     next_expected += 1;
+                    targets_completed += 1;
+                    publish(targets_completed, records_emitted, acc.probe_attempts);
                 }
             }
         }
@@ -427,6 +495,8 @@ async fn stream_discovery(
             )
             .await?;
         }
+        targets_completed += 1;
+        publish(targets_completed, records_emitted, acc.probe_attempts);
     }
     drop(stream_span);
 
@@ -491,6 +561,9 @@ async fn stream_discovery(
         }
         profiles_emitted += 1;
     }
+
+    // Final snapshot: a buffering fuser (identity) emits its records in the finish block above, after the last drain-time publish.
+    publish(targets_completed, records_emitted, acc.probe_attempts);
 
     let close_err = sink.close().await.err();
 
@@ -1730,6 +1803,162 @@ mod tests {
         assert_eq!(summary.records_emitted, 1);
     }
 
+    fn two_loopback_targets(port: u16) -> DiscoverScenarioConfig {
+        DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                max_concurrent: Some(1),
+                ..Default::default()
+            },
+            targets: vec![
+                Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                Target::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+            ],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_reaches_total_and_advances_monotonically() {
+        let port = open_loopback_port().await;
+        let scenario = two_loopback_targets(port);
+
+        let (tx, rx) = watch::channel(DiscoveryProgress::default());
+        let capture = tokio::spawn(async move {
+            let mut rx = rx;
+            let mut seq: Vec<DiscoveryProgress> = Vec::new();
+            while rx.changed().await.is_ok() {
+                seq.push(rx.borrow().clone());
+            }
+            seq
+        });
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary =
+            run_discovery_with_components_with_progress(&scenario, resolver, Box::new(mem), tx)
+                .await
+                .expect("progress run returns summary");
+
+        let seq = capture.await.expect("capture task joins");
+        assert!(
+            !seq.is_empty(),
+            "at least the final snapshot must be captured"
+        );
+        for pair in seq.windows(2) {
+            assert!(
+                pair[1].targets_completed >= pair[0].targets_completed,
+                "targets_completed must never go backwards: {pair:?}"
+            );
+        }
+        let last = seq.last().expect("non-empty");
+        assert_eq!(last.targets_total, summary.targets_resolved);
+        assert_eq!(
+            last.targets_completed, last.targets_total,
+            "a completed scan drains every target: {last:?}"
+        );
+        assert_eq!(last.targets_total, 2);
+    }
+
+    #[tokio::test]
+    async fn progress_hook_does_not_alter_the_summary() {
+        let port = open_loopback_port().await;
+        let scenario = two_loopback_targets(port);
+
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let without = run_discovery_with_components(
+            &scenario,
+            Arc::clone(&resolver),
+            Box::new(crate::sink::MemorySink::new()),
+        )
+        .await
+        .expect("no-progress run");
+
+        let (tx, _rx) = watch::channel(DiscoveryProgress::default());
+        let with = run_discovery_with_components_with_progress(
+            &scenario,
+            resolver,
+            Box::new(crate::sink::MemorySink::new()),
+            tx,
+        )
+        .await
+        .expect("progress run");
+
+        assert_eq!(without.targets_resolved, with.targets_resolved);
+        assert_eq!(without.probe_attempts, with.probe_attempts);
+        assert_eq!(without.records_emitted, with.records_emitted);
+        assert_eq!(without.cancelled, with.cancelled);
+    }
+
+    #[tokio::test]
+    async fn progress_with_dropped_receiver_still_completes() {
+        let port = open_loopback_port().await;
+        let scenario = two_loopback_targets(port);
+
+        let (tx, rx) = watch::channel(DiscoveryProgress::default());
+        drop(rx);
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary =
+            run_discovery_with_components_with_progress(&scenario, resolver, Box::new(mem), tx)
+                .await
+                .expect("a dropped progress receiver must not fail the scan");
+        assert_eq!(summary.targets_resolved, 2);
+        // Only 127.0.0.1 holds the open port; 127.0.0.2 is refused, so exactly one record.
+        assert_eq!(summary.records_emitted, 1);
+    }
+
+    #[tokio::test]
+    async fn identity_final_snapshot_carries_finish_block_records() {
+        let port = open_loopback_port().await;
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(500),
+                max_concurrent: Some(1),
+                fuser: Some(FuserConfig::Identity {
+                    identity_hints: crate::fuser::IdentityHints::default(),
+                    inner: Box::new(FuserConfig::Direct {
+                        include_unreachable: None,
+                        confidence_baseline: None,
+                        confidence_per_signal: None,
+                    }),
+                }),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        };
+
+        let (tx, rx) = watch::channel(DiscoveryProgress::default());
+        let capture = tokio::spawn(async move {
+            let mut rx = rx;
+            let mut seq: Vec<DiscoveryProgress> = Vec::new();
+            while rx.changed().await.is_ok() {
+                seq.push(rx.borrow().clone());
+            }
+            seq
+        });
+
+        let mem = crate::sink::MemorySink::new();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        let summary =
+            run_discovery_with_components_with_progress(&scenario, resolver, Box::new(mem), tx)
+                .await
+                .expect("identity progress run returns summary");
+
+        let seq = capture.await.expect("capture task joins");
+        let last = seq.last().expect("at least the final snapshot is captured");
+        assert!(
+            summary.records_emitted > 0,
+            "the identity scan emits a record for the reachable target: {summary:?}"
+        );
+        assert_eq!(
+            last.records_emitted, summary.records_emitted,
+            "the final snapshot must carry the identity fuser's finish-block records: {last:?}"
+        );
+    }
+
     #[derive(Default)]
     struct BatchingSinkInner {
         committed: std::sync::Mutex<Vec<Vec<u8>>>,
@@ -2215,6 +2444,7 @@ mod tests {
             Instant::now(),
             &peak,
             &scan_span,
+            None,
         )
         .await
         .expect("stream summary");
@@ -2423,6 +2653,7 @@ mod tests {
                 start,
                 &peak,
                 &scan_span,
+                None,
             )
             .await;
             (result, handle.ndjson_lines())
@@ -2495,6 +2726,7 @@ mod tests {
                 start,
                 peak,
                 &scan_span,
+                None,
             )
             .await
         }
