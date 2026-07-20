@@ -165,6 +165,20 @@ otlp:
   metricsIntervalSeconds: 30
   # Resource `service.name` attribute on exported signals.
   serviceName: "rastreo-server"
+  # Custom headers attached to every OTLP export (metrics, logs, traces) over both
+  # gRPC and HTTP+protobuf — used to authenticate to hosted collectors (Grafana
+  # Cloud, Honeycomb, etc.). OTel format: comma-separated `key=value` pairs, e.g.
+  # "authorization=Bearer <token>,x-scope-orgid=<tenant>". Header names are
+  # lowercased; values are secrets. Commas separating multiple headers must be
+  # escaped (\,) when passing via `--set`, or use a values file with `-f` instead.
+  # When set (and headersExistingSecret is empty) the chart renders a Secret holding
+  # the whole string. Prefer headersExistingSecret in production so the token never
+  # lives in values.
+  headers: ""
+  # Name of a pre-existing Secret holding the headers string. Takes precedence over headers.
+  headersExistingSecret: ""
+  # Key within the Secret that holds the headers value.
+  headersSecretKey: "otlp-headers"
 
 service:
   # Kubernetes Service type.

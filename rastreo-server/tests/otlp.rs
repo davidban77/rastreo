@@ -25,6 +25,7 @@ fn init_metrics_only_with_unreachable_endpoint_does_not_panic() {
             traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
+            headers: Vec::new(),
         };
         let metrics = Arc::new(Metrics::new());
         let reach = Arc::new(SinkReachability::not_configured());
@@ -47,6 +48,7 @@ fn init_metrics_only_with_http_protobuf_protocol_builds_exporter() {
             traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
+            headers: Vec::new(),
         };
         let metrics = Arc::new(Metrics::new());
         let reach = Arc::new(SinkReachability::not_configured());
@@ -71,6 +73,7 @@ fn init_metrics_only_registers_scan_duration_histogram() {
             traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
+            headers: Vec::new(),
         };
         let metrics = Arc::new(Metrics::new());
         let reach = Arc::new(SinkReachability::not_configured());
@@ -207,6 +210,30 @@ fn otlp_scan_duration_routes_unlisted_scenario_to_all_and_other() {
 }
 
 #[test]
+fn init_metrics_only_with_headers_builds_exporter() {
+    let rt = tokio_runtime();
+    rt.block_on(async {
+        for protocol in [OtlpProtocol::Grpc, OtlpProtocol::HttpProtobuf] {
+            let cfg = OtlpConfig {
+                endpoint: "http://127.0.0.1:1".to_string(),
+                protocol,
+                metrics_enabled: true,
+                logs_enabled: false,
+                traces_enabled: false,
+                metrics_interval: Duration::from_secs(30),
+                service_name: "rastreo-server-test".to_string(),
+                headers: vec![("authorization".to_string(), "Bearer t".to_string())],
+            };
+            let metrics = Arc::new(Metrics::new());
+            let reach = Arc::new(SinkReachability::not_configured());
+            let guard = observability::init_metrics_only(&cfg, metrics, reach)
+                .expect("init_metrics_only with headers");
+            drop(guard);
+        }
+    });
+}
+
+#[test]
 fn init_metrics_only_with_disabled_metrics_returns_empty_guard() {
     let rt = tokio_runtime();
     rt.block_on(async {
@@ -218,6 +245,7 @@ fn init_metrics_only_with_disabled_metrics_returns_empty_guard() {
             traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-server-test".to_string(),
+            headers: Vec::new(),
         };
         let metrics = Arc::new(Metrics::new());
         let reach = Arc::new(SinkReachability::not_configured());

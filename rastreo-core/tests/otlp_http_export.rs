@@ -24,6 +24,7 @@ fn http_export_reaches_collector_without_runtime_panic() {
         traces_enabled: true,
         metrics_interval: Duration::from_secs(30),
         service_name: "rastreo-http-export-test".to_string(),
+        headers: Vec::new(),
     };
 
     let (_layer, provider) =
@@ -33,12 +34,50 @@ fn http_export_reaches_collector_without_runtime_panic() {
         .in_span("probe", |_| {});
     let _ = provider.force_flush();
 
-    let request_line = request_lines
+    let request_head = request_lines
         .recv_timeout(Duration::from_secs(5))
         .expect("HTTP export thread must POST to the collector without a runtime panic");
     assert!(
-        request_line.starts_with("POST /v1/traces"),
-        "expected a POST to /v1/traces, got: {request_line}"
+        request_head.starts_with("POST /v1/traces"),
+        "expected a POST to /v1/traces, got: {request_head}"
+    );
+
+    let _ = provider.shutdown();
+    let _ = mock.join();
+}
+
+#[test]
+fn http_export_attaches_custom_headers() {
+    let (endpoint, request_lines, mock) = spawn_mock_collector();
+
+    let cfg = OtlpConfig {
+        endpoint,
+        protocol: OtlpProtocol::HttpProtobuf,
+        metrics_enabled: false,
+        logs_enabled: false,
+        traces_enabled: true,
+        metrics_interval: Duration::from_secs(30),
+        service_name: "rastreo-http-export-test".to_string(),
+        headers: vec![(
+            "authorization".to_string(),
+            "Bearer testtoken123".to_string(),
+        )],
+    };
+
+    let (_layer, provider) =
+        traces_layer::<Registry>(&cfg).expect("build http+protobuf span provider");
+    provider
+        .tracer("rastreo-http-export-test")
+        .in_span("probe", |_| {});
+    let _ = provider.force_flush();
+
+    let request_head = request_lines
+        .recv_timeout(Duration::from_secs(5))
+        .expect("HTTP export thread must POST to the collector");
+    let lowered = request_head.to_ascii_lowercase();
+    assert!(
+        lowered.contains("authorization: bearer testtoken123"),
+        "custom header must reach the collector, got: {request_head}"
     );
 
     let _ = provider.shutdown();
@@ -86,11 +125,8 @@ fn read_request(stream: &mut TcpStream) -> String {
             Err(_) => break,
         }
     }
-    let line_end = buf
-        .iter()
-        .position(|&b| b == b'\r' || b == b'\n')
-        .unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..line_end]).into_owned()
+    let head_end = find_subslice(&buf, b"\r\n\r\n").unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..head_end]).into_owned()
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {

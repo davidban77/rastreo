@@ -40,6 +40,7 @@ tls = ["dep:rustls", "dep:rustls-pki-types", "dep:tokio-rustls", "dep:x509-parse
 gnmi = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:prost-types", "dep:rustls"]
 otlp = [
     "dep:anyhow",
+    "dep:http",
     "dep:tracing-subscriber",
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
@@ -95,6 +96,7 @@ tonic-prost = { version = "0.14", default-features = false, optional = true }
 prost = { version = "0.14", optional = true }
 prost-types = { version = "0.14", optional = true }
 anyhow = { workspace = true, optional = true }
+http = { version = "1", optional = true }
 tracing-subscriber = { workspace = true, features = ["json"], optional = true }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "logs", "metrics", "trace"], optional = true }

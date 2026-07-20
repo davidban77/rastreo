@@ -63,6 +63,9 @@ The most useful `values.yaml` knobs are:
 | `otlp.logsEnabled`               | `false`                       | Push logs via OpenTelemetry OTLP. Requires an OTLP-enabled image build. See [OTLP](../reference/otlp.md). |
 | `otlp.endpoint`                  | `""`                          | OTLP collector URL, e.g. `http://otel-collector.observability.svc:4317` (gRPC) or `http://otel-collector.observability.svc:4318` (HTTP+protobuf). Required when either OTLP toggle is on. |
 | `otlp.protocol`                  | `grpc`                        | OTLP transport protocol. `grpc` targets a collector's gRPC port (4317). `http-protobuf` targets the HTTP+protobuf port (4318). See [OTLP · Transport protocol](../reference/otlp.md#transport-protocol). |
+| `otlp.headers`                   | `""`                          | Custom headers on every OTLP export, for authenticating to a hosted collector. The chart renders a `Secret` holding the value. Prefer `otlp.headersExistingSecret` in production. See [Custom OTLP headers](#custom-otlp-headers). |
+| `otlp.headersExistingSecret`     | `""`                          | Name of a pre-existing `Secret` holding the headers value. Takes precedence over `otlp.headers`. See [Custom OTLP headers](#custom-otlp-headers). |
+| `otlp.headersSecretKey`          | `otlp-headers`                | Key within the `Secret` that holds the headers value.     |
 | `config`                         | `{}`                          | Inline YAML mounted at `/etc/rastreo` as a `ConfigMap`.   |
 
 A worked example of `config`:
@@ -132,6 +135,45 @@ You have three ways to supply the token.
     ```bash
     kubectl get secret rastreo-api-token -o jsonpath='{.data.api-token}' | base64 -d
     ```
+
+## Custom OTLP headers
+
+Hosted OTLP collectors — Grafana Cloud, Honeycomb, Dynatrace, or a tenant-scoped Tempo or Mimir — usually need an authentication header on every export. The chart injects that header from a `Secret` and sets `RASTREO_OTLP_HEADERS` on the pod. See [OTLP · Custom headers](../reference/otlp.md#custom-headers) for the header format and the fail-fast behaviour.
+
+The header value is a comma-separated list of `key=value` pairs, for example `authorization=Bearer <token>` or `authorization=Bearer <token>,x-scope-orgid=<tenant>`. A header value is a bearer token or API key, so supply it from a `Secret`. The chart renders the headers env only when an OTLP signal is enabled, so pair these values with `otlp.logsEnabled`, `otlp.metricsEnabled`, or `otlp.tracesEnabled`.
+
+You have two ways to supply the headers.
+
+=== "Existing Secret (production)"
+
+    Create the `Secret` with your own tooling, then point the chart at it with `otlp.headersExistingSecret`. The token never passes through Helm values or your shell history.
+
+    ```bash
+    kubectl create secret generic rastreo-otlp-headers \
+      --from-literal=otlp-headers="authorization=Bearer $OTLP_TOKEN"
+
+    helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
+      --set otlp.logsEnabled=true \
+      --set otlp.endpoint=http://otel-collector.observability.svc:4318 \
+      --set otlp.protocol=http-protobuf \
+      --set otlp.headersExistingSecret=rastreo-otlp-headers
+    ```
+
+    `otlp.headersExistingSecret` takes precedence over `otlp.headers`. The default key inside the `Secret` is `otlp-headers`; set `otlp.headersSecretKey` if your `Secret` uses a different key.
+
+=== "Inline value"
+
+    Pass the headers to the chart with `otlp.headers` and it renders a `Secret` for you. This is the simplest path for a lab, but the value is stored in your release values, so avoid it in production.
+
+    ```yaml
+    otlp:
+      logsEnabled: true
+      endpoint: "http://otel-collector.observability.svc:4318"
+      protocol: http-protobuf
+      headers: "authorization=Bearer <token>,x-scope-orgid=<tenant>"
+    ```
+
+    The chart renders a `Secret` named `<release>-otlp` holding the value and mounts it into the pod as `RASTREO_OTLP_HEADERS`.
 
 ## Restricting scan targets
 

@@ -73,6 +73,7 @@ Both binaries read the same `RASTREO_OTLP_*` variables at startup, and both fail
 | `RASTREO_OTLP_PROTOCOL` | `grpc` | both | OTLP transport: `grpc`, `http-protobuf`, or the alias `http`. Case-insensitive. |
 | `RASTREO_OTLP_SERVICE_NAME` | `rastreo-server` (server) / `rastreo` (CLI) | both | Value of the `service.name` resource attribute on every exported signal. |
 | `RASTREO_OTLP_METRICS_INTERVAL_SECS` | `30` | server | Metric export interval in seconds. The CLI ignores it, because the CLI does not export metrics. |
+| `RASTREO_OTLP_HEADERS` | unset | both | Custom headers on every OTLP request, as comma-separated `key=value` pairs (for example an `authorization` bearer token for a hosted collector). Values are secrets — redacted from logs. See [Custom headers](otlp.md#custom-headers). |
 
 !!! tip "Boolean values"
     The boolean variables (`RASTREO_AUTH_DISABLED`, `RASTREO_OTLP_LOGS_ENABLED`, `RASTREO_OTLP_TRACES_ENABLED`, `RASTREO_OTLP_METRICS_ENABLED`) accept `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`. Any other value fails startup with a clear error.

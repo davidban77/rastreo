@@ -1,13 +1,15 @@
 //! OTLP/tracing bootstrap shared by the `rastreo` CLI and `rastreo-server`. Behind the `otlp`
 //! feature so the OpenTelemetry logs stack and `tracing-subscriber` stay out of the default build.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::Context;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::tonic_types::metadata::MetadataMap;
+use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -17,13 +19,14 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 use crate::observability::otlp_config::{
-    http_endpoint_for_signal, parse_env_bool, parse_env_protocol, parse_env_u64, OtlpProtocol,
+    http_endpoint_for_signal, parse_env_bool, parse_env_headers, parse_env_protocol, parse_env_u64,
+    OtlpProtocol,
 };
 
 const DEFAULT_METRICS_INTERVAL_SECS: u64 = 30;
 
 /// OpenTelemetry OTLP exporter configuration read from `RASTREO_OTLP_*` environment variables.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OtlpConfig {
     pub endpoint: String,
     pub protocol: OtlpProtocol,
@@ -32,6 +35,26 @@ pub struct OtlpConfig {
     pub traces_enabled: bool,
     pub metrics_interval: Duration,
     pub service_name: String,
+    pub headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for OtlpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Header values carry bearer tokens / API keys — render a count only, never the entries.
+        f.debug_struct("OtlpConfig")
+            .field("endpoint", &self.endpoint)
+            .field("protocol", &self.protocol)
+            .field("metrics_enabled", &self.metrics_enabled)
+            .field("logs_enabled", &self.logs_enabled)
+            .field("traces_enabled", &self.traces_enabled)
+            .field("metrics_interval", &self.metrics_interval)
+            .field("service_name", &self.service_name)
+            .field(
+                "headers",
+                &format_args!("<{} redacted>", self.headers.len()),
+            )
+            .finish()
+    }
 }
 
 impl OtlpConfig {
@@ -80,6 +103,7 @@ impl OtlpConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_service_name.to_string());
+        let headers = parse_env_headers("RASTREO_OTLP_HEADERS")?;
         Ok(Some(Self {
             endpoint,
             protocol,
@@ -88,6 +112,7 @@ impl OtlpConfig {
             traces_enabled,
             metrics_interval,
             service_name,
+            headers,
         }))
     }
 }
@@ -142,22 +167,81 @@ pub fn attach_meter(guard: &mut OtlpGuard, meter: SdkMeterProvider) {
     guard.meter = Some(meter);
 }
 
+fn validated_pairs(
+    headers: &[(String, String)],
+) -> anyhow::Result<Vec<(http::HeaderName, http::HeaderValue)>> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let key = http::HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("OTLP header name {name:?} is not a valid HTTP token"))?;
+            // The error never includes `value`: it may be a bearer token or API key.
+            let val = http::HeaderValue::from_str(value).with_context(|| {
+                format!("OTLP header {name:?} has a value that is not valid ASCII")
+            })?;
+            Ok((key, val))
+        })
+        .collect()
+}
+
+fn grpc_metadata(headers: &[(String, String)]) -> anyhow::Result<MetadataMap> {
+    let mut map = http::HeaderMap::with_capacity(headers.len());
+    for (key, value) in validated_pairs(headers)? {
+        map.insert(key, value);
+    }
+    Ok(MetadataMap::from_headers(map))
+}
+
+fn http_header_map(headers: &[(String, String)]) -> anyhow::Result<HashMap<String, String>> {
+    // Validate up front so a bad header fails startup here instead of being silently dropped by the HTTP exporter's own build-time header conversion.
+    validated_pairs(headers)?;
+    Ok(headers.iter().cloned().collect())
+}
+
+/// Attach OTLP headers to a gRPC (tonic) exporter builder; a no-op when `headers` is empty.
+pub fn apply_grpc_headers<B: WithTonicConfig>(
+    builder: B,
+    headers: &[(String, String)],
+) -> anyhow::Result<B> {
+    if headers.is_empty() {
+        return Ok(builder);
+    }
+    Ok(builder.with_metadata(grpc_metadata(headers)?))
+}
+
+/// Attach OTLP headers to an HTTP+protobuf exporter builder; a no-op when `headers` is empty.
+pub fn apply_http_headers<B: WithHttpConfig>(
+    builder: B,
+    headers: &[(String, String)],
+) -> anyhow::Result<B> {
+    if headers.is_empty() {
+        return Ok(builder);
+    }
+    Ok(builder.with_headers(http_header_map(headers)?))
+}
+
 /// Build a `tracing_subscriber::Layer` that ships events to the OTLP log exporter.
 pub fn logs_layer<S>(config: &OtlpConfig) -> anyhow::Result<(impl Layer<S>, SdkLoggerProvider)>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     let exporter = match config.protocol {
-        OtlpProtocol::Grpc => opentelemetry_otlp::LogExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.endpoint)
-            .build()
-            .context("failed to build OTLP gRPC log exporter")?,
-        OtlpProtocol::HttpProtobuf => opentelemetry_otlp::LogExporter::builder()
-            .with_http()
-            .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/logs"))
-            .build()
-            .context("failed to build OTLP HTTP+protobuf log exporter")?,
+        OtlpProtocol::Grpc => apply_grpc_headers(
+            opentelemetry_otlp::LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(&config.endpoint),
+            &config.headers,
+        )?
+        .build()
+        .context("failed to build OTLP gRPC log exporter")?,
+        OtlpProtocol::HttpProtobuf => apply_http_headers(
+            opentelemetry_otlp::LogExporter::builder()
+                .with_http()
+                .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/logs")),
+            &config.headers,
+        )?
+        .build()
+        .context("failed to build OTLP HTTP+protobuf log exporter")?,
     };
     let resource = Resource::builder()
         .with_service_name(config.service_name.clone())
@@ -176,16 +260,22 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     let exporter = match config.protocol {
-        OtlpProtocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.endpoint)
-            .build()
-            .context("failed to build OTLP gRPC span exporter")?,
-        OtlpProtocol::HttpProtobuf => opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/traces"))
-            .build()
-            .context("failed to build OTLP HTTP+protobuf span exporter")?,
+        OtlpProtocol::Grpc => apply_grpc_headers(
+            opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(&config.endpoint),
+            &config.headers,
+        )?
+        .build()
+        .context("failed to build OTLP gRPC span exporter")?,
+        OtlpProtocol::HttpProtobuf => apply_http_headers(
+            opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/traces")),
+            &config.headers,
+        )?
+        .build()
+        .context("failed to build OTLP HTTP+protobuf span exporter")?,
     };
     let resource = Resource::builder()
         .with_service_name(config.service_name.clone())
@@ -277,7 +367,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 8] = [
         "RASTREO_OTLP_ENDPOINT",
         "RASTREO_OTLP_METRICS_ENABLED",
         "RASTREO_OTLP_LOGS_ENABLED",
@@ -285,6 +375,7 @@ mod tests {
         "RASTREO_OTLP_METRICS_INTERVAL_SECS",
         "RASTREO_OTLP_SERVICE_NAME",
         "RASTREO_OTLP_PROTOCOL",
+        "RASTREO_OTLP_HEADERS",
     ];
 
     fn clear() {
@@ -484,6 +575,7 @@ mod tests {
             traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-core-test".to_string(),
+            headers: Vec::new(),
         };
         let (_layer, provider) =
             logs_layer::<tracing_subscriber::Registry>(&cfg).expect("build grpc log layer");
@@ -500,6 +592,7 @@ mod tests {
             traces_enabled: false,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-core-test".to_string(),
+            headers: Vec::new(),
         };
         let (_layer, provider) =
             logs_layer::<tracing_subscriber::Registry>(&cfg).expect("build http log layer");
@@ -515,6 +608,7 @@ mod tests {
             traces_enabled: true,
             metrics_interval: Duration::from_secs(30),
             service_name: "rastreo-core-test".to_string(),
+            headers: Vec::new(),
         }
     }
 
@@ -542,5 +636,136 @@ mod tests {
         let mut guard = OtlpGuard::empty();
         attach_tracer(&mut guard, provider);
         drop(guard);
+    }
+
+    #[test]
+    fn from_env_reads_headers() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            std::env::set_var(
+                "RASTREO_OTLP_HEADERS",
+                "authorization=Bearer t,x-scope-orgid=tenant",
+            );
+        }
+        let cfg = OtlpConfig::from_env("svc", true)
+            .expect("from_env")
+            .expect("some");
+        clear();
+        assert_eq!(
+            cfg.headers,
+            vec![
+                ("authorization".to_string(), "Bearer t".to_string()),
+                ("x-scope-orgid".to_string(), "tenant".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn from_env_rejects_malformed_headers() {
+        let _g = env_guard();
+        clear();
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe {
+            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
+            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            std::env::set_var("RASTREO_OTLP_HEADERS", "authorization");
+        }
+        let err = OtlpConfig::from_env("svc", true).expect_err("must reject");
+        clear();
+        assert!(err.to_string().contains("RASTREO_OTLP_HEADERS"));
+    }
+
+    #[test]
+    fn debug_redacts_header_values() {
+        let cfg = OtlpConfig {
+            endpoint: "http://collector:4317".to_string(),
+            protocol: OtlpProtocol::Grpc,
+            metrics_enabled: false,
+            logs_enabled: true,
+            traces_enabled: false,
+            metrics_interval: Duration::from_secs(30),
+            service_name: "rastreo-core-test".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer supersecret".to_string(),
+            )],
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("supersecret"),
+            "Debug must not leak header values, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("authorization"),
+            "Debug must not leak header names, got {rendered}"
+        );
+        assert!(
+            rendered.contains("<1 redacted>"),
+            "Debug must show a redacted header count, got {rendered}"
+        );
+    }
+
+    #[test]
+    fn validated_pairs_accepts_valid_headers() {
+        let pairs = validated_pairs(&[("authorization".to_string(), "Bearer t".to_string())])
+            .expect("valid");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0.as_str(), "authorization");
+    }
+
+    #[test]
+    fn validated_pairs_rejects_invalid_value_without_leaking_it() {
+        let err = validated_pairs(&[("authorization".to_string(), "bad\nvalue".to_string())])
+            .expect_err("control char rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("bad\nvalue"),
+            "error must not leak the value, got {msg}"
+        );
+    }
+
+    #[test]
+    fn validated_pairs_rejects_invalid_name() {
+        let err = validated_pairs(&[("bad name".to_string(), "v".to_string())])
+            .expect_err("bad name rejected");
+        assert!(format!("{err:#}").contains("bad name"));
+    }
+
+    #[tokio::test]
+    async fn logs_layer_builds_grpc_exporter_with_headers() {
+        let cfg = OtlpConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            protocol: OtlpProtocol::Grpc,
+            metrics_enabled: false,
+            logs_enabled: true,
+            traces_enabled: false,
+            metrics_interval: Duration::from_secs(30),
+            service_name: "rastreo-core-test".to_string(),
+            headers: vec![("authorization".to_string(), "Bearer t".to_string())],
+        };
+        let (_layer, provider) = logs_layer::<tracing_subscriber::Registry>(&cfg)
+            .expect("build grpc log layer with headers");
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn traces_layer_builds_http_exporter_with_headers() {
+        let cfg = OtlpConfig {
+            endpoint: "http://127.0.0.1:1".to_string(),
+            protocol: OtlpProtocol::HttpProtobuf,
+            metrics_enabled: false,
+            logs_enabled: false,
+            traces_enabled: true,
+            metrics_interval: Duration::from_secs(30),
+            service_name: "rastreo-core-test".to_string(),
+            headers: vec![("x-scope-orgid".to_string(), "tenant".to_string())],
+        };
+        let (_layer, provider) = traces_layer::<tracing_subscriber::Registry>(&cfg)
+            .expect("build http span layer with headers");
+        provider.shutdown().expect("shutdown");
     }
 }
