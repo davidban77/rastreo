@@ -1,4 +1,4 @@
-//! Shared OTLP config primitives: `OtlpProtocol` enum, permissive boolean/integer/protocol env parsers, and the HTTP+protobuf signal-path helper. Kept dep-free (`std` + `thiserror`) so it compiles under `--no-default-features` and both binaries can import it without pulling the OpenTelemetry chain.
+//! Shared OTLP config primitives: `OtlpProtocol` enum, permissive boolean/integer/protocol/header env parsers, and the HTTP+protobuf signal-path helper. Kept dep-free (`std` + `thiserror`) so it compiles under `--no-default-features` and both binaries can import it without pulling the OpenTelemetry chain.
 
 /// Error surfaced when parsing OTLP env-var configuration at startup.
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +20,12 @@ pub enum OtlpEnvError {
         #[source]
         source: std::num::ParseIntError,
     },
+
+    #[error(
+        "invalid value for {name}: header entry #{position} is not a valid `key=value` pair \
+             (expected a lowercase HTTP-token name before `=`)"
+    )]
+    MalformedHeaders { name: String, position: usize },
 
     #[error("invalid value for {name}: not valid UTF-8")]
     NotUtf8 { name: String },
@@ -91,6 +97,74 @@ pub fn parse_env_u64(name: &str, default: u64) -> Result<u64, OtlpEnvError> {
             name: name.to_string(),
         }),
     }
+}
+
+/// Parse `name` as OTel-format headers: comma-separated `key=value` entries, split on the
+/// first `=` per entry so values may contain `=`. Names are lowercased and validated as HTTP
+/// tokens so the parsed set applies cleanly to both the gRPC and HTTP exporters. Returns an
+/// empty vector when the variable is unset or blank; rejects an entry with no `=` or an
+/// empty/invalid name.
+pub fn parse_env_headers(name: &str) -> Result<Vec<(String, String)>, OtlpEnvError> {
+    let raw = match std::env::var(name) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return Ok(Vec::new()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(OtlpEnvError::NotUtf8 {
+                name: name.to_string(),
+            })
+        }
+    };
+    let mut headers = Vec::new();
+    // `position` is the 1-based index of the comma-separated entry as the operator typed it.
+    for (index, entry) in raw.split(',').enumerate() {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = match entry.split_once('=') {
+            Some(parts) => parts,
+            None => {
+                return Err(OtlpEnvError::MalformedHeaders {
+                    name: name.to_string(),
+                    position: index + 1,
+                })
+            }
+        };
+        let key = raw_key.trim().to_ascii_lowercase();
+        if key.is_empty() || !is_header_name_token(&key) {
+            return Err(OtlpEnvError::MalformedHeaders {
+                name: name.to_string(),
+                position: index + 1,
+            });
+        }
+        headers.push((key, raw_value.trim().to_string()));
+    }
+    Ok(headers)
+}
+
+fn is_header_name_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 /// Append the OTLP HTTP signal path to a bare endpoint. The `opentelemetry-otlp` SDK
@@ -285,6 +359,228 @@ mod tests {
         unsafe { std::env::remove_var(var) };
         assert!(err.to_string().contains(var));
         assert!(err.to_string().contains("not-a-number"));
+    }
+
+    #[test]
+    fn parse_env_headers_returns_empty_when_unset() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_UNSET";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::remove_var(var) };
+        assert!(parse_env_headers(var).expect("unset").is_empty());
+    }
+
+    #[test]
+    fn parse_env_headers_returns_empty_when_blank() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_BLANK";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "   ") };
+        let out = parse_env_headers(var).expect("blank");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_env_headers_reads_single_header() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_SINGLE";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "authorization=Bearer abc123") };
+        let out = parse_env_headers(var).expect("single");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            out,
+            vec![("authorization".to_string(), "Bearer abc123".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_reads_multiple_headers() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_MULTI";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "authorization=Bearer t,x-scope-orgid=tenant-1") };
+        let out = parse_env_headers(var).expect("multi");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            out,
+            vec![
+                ("authorization".to_string(), "Bearer t".to_string()),
+                ("x-scope-orgid".to_string(), "tenant-1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_splits_on_first_equals_only() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_EQ";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "authorization=Basic dXNlcjpwYXNz==") };
+        let out = parse_env_headers(var).expect("value with =");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            out,
+            vec![(
+                "authorization".to_string(),
+                "Basic dXNlcjpwYXNz==".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_trims_whitespace_around_key_and_value() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_TRIM";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "  authorization  =  Bearer t  ,  x-a = b ") };
+        let out = parse_env_headers(var).expect("trim");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            out,
+            vec![
+                ("authorization".to_string(), "Bearer t".to_string()),
+                ("x-a".to_string(), "b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_lowercases_names() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_CASE";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "Authorization=Bearer t,X-Scope-OrgID=tenant") };
+        let out = parse_env_headers(var).expect("case");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            out,
+            vec![
+                ("authorization".to_string(), "Bearer t".to_string()),
+                ("x-scope-orgid".to_string(), "tenant".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_rejects_entry_without_equals() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_NOEQ";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "authorization") };
+        let err = parse_env_headers(var).expect_err("must reject");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        let msg = err.to_string();
+        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains("#1"), "msg was {msg}");
+        assert!(msg.contains("key=value"), "msg was {msg}");
+        assert!(!msg.contains("authorization"), "msg leaked entry: {msg}");
+    }
+
+    #[test]
+    fn parse_env_headers_rejects_empty_key_without_leaking_value() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_EMPTYKEY";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "=supersecrettoken") };
+        let err = parse_env_headers(var).expect_err("must reject");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        let msg = err.to_string();
+        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains("#1"), "msg was {msg}");
+        assert!(
+            !msg.contains("supersecrettoken"),
+            "error must not leak the header value, msg was {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_rejects_non_token_name() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_BADNAME";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "bad name=value") };
+        let err = parse_env_headers(var).expect_err("must reject");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        let msg = err.to_string();
+        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains("#1"), "msg was {msg}");
+    }
+
+    #[test]
+    fn parse_env_headers_invalid_name_does_not_leak_credential() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_LEAK_INVALID_NAME";
+        // A pasted `Basic <base64>` credential: the pre-`=` substring `Basic dXNlcjpwYXNz`
+        // fails token validation on the space, but must never reach the error.
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "Basic dXNlcjpwYXNz==") };
+        let err = parse_env_headers(var).expect_err("must reject");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        let msg = err.to_string();
+        assert!(msg.contains(var), "msg was {msg}");
+        assert!(
+            !msg.contains("dXNlcjpwYXNz"),
+            "error must not leak the pasted credential, msg was {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_bare_token_does_not_leak_credential() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_LEAK_BARE_TOKEN";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "glc_secretexampletoken") };
+        let err = parse_env_headers(var).expect_err("must reject");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        let msg = err.to_string();
+        assert!(msg.contains(var), "msg was {msg}");
+        assert!(
+            !msg.contains("glc_secretexampletoken"),
+            "error must not leak a bare pasted token, msg was {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_missing_equals_does_not_leak_trailing_secret() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_NOEQ_SECRET";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "authorization mysecrettoken") };
+        let err = parse_env_headers(var).expect_err("must reject");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert!(
+            !err.to_string().contains("mysecrettoken"),
+            "error must not leak a mistyped value, msg was {err}"
+        );
+    }
+
+    #[test]
+    fn parse_env_headers_skips_empty_entries() {
+        let _g = env_guard();
+        let var = "RASTREO_TEST_OTLP_HEADERS_EMPTY_ENTRIES";
+        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
+        unsafe { std::env::set_var(var, "authorization=Bearer t,,") };
+        let out = parse_env_headers(var).expect("trailing comma tolerated");
+        // SAFETY: same guard.
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            out,
+            vec![("authorization".to_string(), "Bearer t".to_string())]
+        );
     }
 
     #[test]

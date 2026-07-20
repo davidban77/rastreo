@@ -11,7 +11,7 @@ use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::Resource;
-use rastreo_core::observability::otlp::attach_meter;
+use rastreo_core::observability::otlp::{apply_grpc_headers, apply_http_headers, attach_meter};
 use rastreo_core::observability::otlp_config::http_endpoint_for_signal;
 
 pub use rastreo_core::observability::otlp::OtlpGuard;
@@ -26,16 +26,22 @@ pub fn init_metrics(
     sink_reachability: Arc<SinkReachability>,
 ) -> anyhow::Result<SdkMeterProvider> {
     let exporter = match config.protocol {
-        OtlpProtocol::Grpc => opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
-            .with_endpoint(&config.endpoint)
-            .build()
-            .context("failed to build OTLP gRPC metric exporter")?,
-        OtlpProtocol::HttpProtobuf => opentelemetry_otlp::MetricExporter::builder()
-            .with_http()
-            .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/metrics"))
-            .build()
-            .context("failed to build OTLP HTTP+protobuf metric exporter")?,
+        OtlpProtocol::Grpc => apply_grpc_headers(
+            opentelemetry_otlp::MetricExporter::builder()
+                .with_tonic()
+                .with_endpoint(&config.endpoint),
+            &config.headers,
+        )?
+        .build()
+        .context("failed to build OTLP gRPC metric exporter")?,
+        OtlpProtocol::HttpProtobuf => apply_http_headers(
+            opentelemetry_otlp::MetricExporter::builder()
+                .with_http()
+                .with_endpoint(http_endpoint_for_signal(&config.endpoint, "/v1/metrics")),
+            &config.headers,
+        )?
+        .build()
+        .context("failed to build OTLP HTTP+protobuf metric exporter")?,
         _ => anyhow::bail!("unsupported OTLP protocol variant: {:?}", config.protocol),
     };
     let reader = PeriodicReader::builder(exporter)

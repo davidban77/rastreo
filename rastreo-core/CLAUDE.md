@@ -54,7 +54,7 @@ src/
 │   └── role_rules.rs    ← Baked-in default RoleRule table
 ├── observability/
 │   ├── mod.rs           ← module root
-│   └── otlp_config.rs   ← OtlpProtocol enum + shared env-var parsers (parse_env_bool / parse_env_u64 / parse_env_protocol) + http_endpoint_for_signal; consumed by rastreo and rastreo-server. No OpenTelemetry deps — pure types + string parsing.
+│   └── otlp_config.rs   ← OtlpProtocol enum + shared env-var parsers (parse_env_bool / parse_env_u64 / parse_env_protocol / parse_env_headers) + http_endpoint_for_signal; consumed by rastreo and rastreo-server. No OpenTelemetry deps — pure types + string parsing.
 ├── pipeline.rs     ← run_discovery + DiscoverySummary
 ├── plan.rs         ← DiscoveryPlan + PlanKnobs (exhaustive dry-run plan render + Display)
 └── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig

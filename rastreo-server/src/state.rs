@@ -1344,7 +1344,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    const ENV_KEYS: [&str; 20] = [
+    const ENV_KEYS: [&str; 21] = [
         "RASTREO_MAX_INFLIGHT_SCANS",
         "RASTREO_SINK_ERROR_QUARANTINE_SECS",
         "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
@@ -1356,6 +1356,7 @@ mod tests {
         "RASTREO_OTLP_METRICS_INTERVAL_SECS",
         "RASTREO_OTLP_SERVICE_NAME",
         "RASTREO_OTLP_PROTOCOL",
+        "RASTREO_OTLP_HEADERS",
         "RASTREO_SINK_CONFIG_PATH",
         "RASTREO_SINK_PROBE_INTERVAL_SECS",
         "RASTREO_SINK_PROBE_TIMEOUT_SECS",

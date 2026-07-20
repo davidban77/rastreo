@@ -32,6 +32,7 @@ Both binaries read the same environment variables at startup and fail-fast on in
 | `RASTREO_OTLP_PROTOCOL` | `grpc` | Transport protocol. Accepts `grpc`, `http-protobuf`, or the alias `http`. Values are case-insensitive. See [Transport protocol](#transport-protocol). |
 | `RASTREO_OTLP_METRICS_INTERVAL_SECS` | `30` | Periodic export interval for metrics, in seconds. **Server-only**; ignored when metrics export is off. |
 | `RASTREO_OTLP_SERVICE_NAME` | `rastreo-server` (server) / `rastreo` (CLI) | Value of the OpenTelemetry resource attribute `service.name` on every exported signal. |
+| `RASTREO_OTLP_HEADERS` | — (none) | Custom headers attached to every OTLP request, for authenticating to a hosted collector. OTel `key=value` format, comma-separated. Values are secrets. See [Custom headers](#custom-headers). |
 
 Configuration is validated at startup. Enabling any exporter without an endpoint, passing a non-boolean value for a flag, or passing a non-numeric interval all fail the process with an actionable error before the HTTP server binds or the CLI runs a scan.
 
@@ -49,6 +50,35 @@ Both binaries compile in two OTLP transports and select one at startup via `RAST
 Values are case-insensitive; `HTTP-PROTOBUF`, `Grpc`, and `GRPC` all parse cleanly. Unknown values fail startup with an actionable error listing the accepted set.
 
 Choose gRPC when the collector accepts it directly (Grafana Alloy's default receiver, most `otelcol` deployments, an in-cluster ClusterIP service). Choose HTTP+protobuf when the collector is behind an ingress controller that terminates TLS and forwards HTTP but not gRPC, when a corporate network filters HTTP/2 keep-alives, or when a managed backend only publishes an HTTP endpoint. Both transports carry the same protobuf payload — the wire format is identical; only the transport layer differs.
+
+## Custom headers
+
+Some managed collectors need an authentication header on every request. Set `RASTREO_OTLP_HEADERS` to attach one or more headers to every OTLP export. Use it to authenticate to a hosted backend — Grafana Cloud, Honeycomb, Dynatrace, or a tenant-scoped Tempo or Mimir.
+
+The value is a comma-separated list of `key=value` pairs. rastreo splits each pair on the first `=`, so a value may itself contain `=` (a base64 token, for example). Header names are lowercased. This mirrors the OpenTelemetry `OTEL_EXPORTER_OTLP_HEADERS` convention. Leave the variable unset to send no custom headers.
+
+A single bearer token:
+
+```bash
+export RASTREO_OTLP_HEADERS="authorization=Bearer <token>"
+```
+
+Multiple headers — a token plus a tenant id — separated by commas:
+
+```bash
+export RASTREO_OTLP_HEADERS="authorization=Bearer <token>,x-scope-orgid=<tenant>"
+```
+
+The headers apply to all three signals — metrics, logs, and traces. They apply to both transports, `grpc` and `http-protobuf`. You set them once and every exported signal carries them.
+
+A malformed value fails startup — the value is never silently dropped. These entries are rejected before the server binds or the CLI runs a scan:
+
+- an entry with no `=`
+- an empty header name
+- a name that is not a valid HTTP header token
+
+!!! warning "Header values are secrets"
+    A header value is usually a bearer token or an API key. rastreo treats it as secret: it never writes a header value to its logs or config output, and a startup error reports only the header name. On Kubernetes, supply the headers from a Secret instead of an inline value — see [Custom OTLP headers on Kubernetes](../deploy/kubernetes.md#custom-otlp-headers).
 
 ## Metrics exported via OTLP (server only)
 
@@ -143,10 +173,6 @@ For the collector configuration, the two most common target stacks are:
 - **OpenTelemetry Collector** — deploy the collector as a Deployment or DaemonSet with an `otlp` receiver, an `otlphttp` or `prometheusremotewrite` exporter for metrics, and a `loki` exporter for logs. The [Collector configuration docs](https://opentelemetry.io/docs/collector/configuration/) walk through the receiver / processor / exporter layout.
 
 The receiver's gRPC listener must be reachable from the rastreo-server pod's network namespace. When the collector runs in the same cluster, a `ClusterIP` service is enough; when it runs off-cluster, add whatever ingress or gateway your platform expects and put the resolvable URL in `endpoint`.
-
-## Follow-ups
-
-- **`RASTREO_OTLP_HEADERS`** — some managed collectors require a bearer token or API key on every request. An env var mapped to the exporter's headers builder is a natural next step for that use case; today rastreo does not set any headers on the exporter.
 
 ## See also
 

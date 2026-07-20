@@ -3399,6 +3399,7 @@ dependencies = [
  "futures-util",
  "hickory-resolver",
  "hmac 0.13.0",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
