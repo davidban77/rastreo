@@ -19,3 +19,4 @@ Topics covered here include the full CLI flag reference, the YAML scenario file 
 - [Identity](identity.md) — merges records that describe the same physical device and populates `alt_ips` / `possible_alias_of`.
 - [Classification](classification.md) — the pipeline stage that assigns canonical `platform`, `os_version`, and `role` values on each `DeviceRecord`.
 - [Topology](topology.md) — turns [LLDP](../probe/lldp.md) neighbor data into `LinkRecord` edges emitted on a second stream, and how they map to NetBox cables and Nautobot interface connections.
+- [Collection profiles](collection-profile.md) — emits a `CollectionProfileRecord` per gNMI endpoint that answered Capabilities, describing how a downstream collector streams telemetry from it. A separate stream, like topology.

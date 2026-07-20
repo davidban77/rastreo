@@ -12,7 +12,7 @@ use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
 use crate::sink::{
     retry_with_backoff, RecordKind, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
-    DEFAULT_LINKS_DESTINATION, SINK_ERROR_CLASS_COUNT,
+    DEFAULT_LINKS_DESTINATION, DEFAULT_PROFILES_DESTINATION, SINK_ERROR_CLASS_COUNT,
 };
 
 const HEADER_SOURCE_SUBJECT: &str = "x-rastreo-source-subject";
@@ -125,6 +125,9 @@ pub struct NatsSink {
     links_subject: String,
     links_buffer: Vec<Vec<u8>>,
     links_buffered_bytes: usize,
+    profiles_subject: String,
+    profiles_buffer: Vec<Vec<u8>>,
+    profiles_buffered_bytes: usize,
 }
 
 impl std::fmt::Debug for NatsSink {
@@ -225,6 +228,9 @@ impl NatsSink {
             links_subject: DEFAULT_LINKS_DESTINATION.to_string(),
             links_buffer: Vec::new(),
             links_buffered_bytes: 0,
+            profiles_subject: DEFAULT_PROFILES_DESTINATION.to_string(),
+            profiles_buffer: Vec::new(),
+            profiles_buffered_bytes: 0,
         })
     }
 
@@ -235,6 +241,11 @@ impl NatsSink {
 
     pub fn with_links_subject(mut self, subject: String) -> Self {
         self.links_subject = subject;
+        self
+    }
+
+    pub fn with_profiles_subject(mut self, subject: String) -> Self {
+        self.profiles_subject = subject;
         self
     }
 
@@ -483,6 +494,45 @@ impl NatsSink {
         }
         Ok(())
     }
+
+    async fn write_profile(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+        buffer_record(
+            &mut self.profiles_buffer,
+            &mut self.profiles_buffered_bytes,
+            data,
+        );
+        if should_flush_after_append(self.profiles_buffered_bytes, self.buffer_threshold) {
+            self.publish_profiles_buffer().await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_profiles_buffer(&mut self) -> Result<(), RastreoError> {
+        if self.profiles_buffer.is_empty() {
+            return Ok(());
+        }
+        let subject = self.profiles_subject.clone();
+        let entries = std::mem::take(&mut self.profiles_buffer);
+        self.profiles_buffered_bytes = 0;
+        for entry in entries {
+            let payload = Bytes::from(entry);
+            let ack = {
+                let ctx = &self.ctx;
+                let servers = &self.servers;
+                let subject = &subject;
+                let payload = &payload;
+                retry_with_backoff(&self.retry, || async move {
+                    ctx.publish(subject.clone(), payload.clone())
+                        .await
+                        .map_err(|e| build_publish_error(subject, servers, e))
+                })
+                .await
+            }?;
+            ack.await
+                .map_err(|e| build_ack_error(&subject, &self.servers, e))?;
+        }
+        Ok(())
+    }
 }
 
 async fn connect_with_credentials(
@@ -533,6 +583,7 @@ impl Sink for NatsSink {
         match kind {
             RecordKind::Device => self.write(data).await,
             RecordKind::Link => self.write_link(data).await,
+            RecordKind::CollectionProfile => self.write_profile(data).await,
         }
     }
 
@@ -544,6 +595,9 @@ impl Sink for NatsSink {
         self.last_write_delivered = true;
         if !self.links_buffer.is_empty() {
             self.publish_links_buffer().await?;
+        }
+        if !self.profiles_buffer.is_empty() {
+            self.publish_profiles_buffer().await?;
         }
         Ok(())
     }

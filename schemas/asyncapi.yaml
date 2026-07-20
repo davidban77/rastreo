@@ -6,12 +6,14 @@ info:
   description: |
     Transport-neutral description of the rastreo discovery streaming API.
     Every scan emits one `DeviceRecord` message per discovered device onto a
-    versioned topic (Kafka) or subject (NATS), and one `LinkRecord` message per
-    deduplicated topology link onto a separate versioned channel. The wire
-    payload is the same JSON Schema (`schemas/device-record-v1.json`,
-    `schemas/link-record-v1.json`) regardless of transport; consumers can
-    validate incoming records against the URL embedded in each record's
-    `schema_id` field.
+    versioned topic (Kafka) or subject (NATS), one `LinkRecord` message per
+    deduplicated topology link onto a separate versioned channel, and one
+    `CollectionProfileRecord` message per gNMI endpoint that advertised
+    capability data onto a third channel. The wire payload is the same JSON
+    Schema (`schemas/device-record-v1.json`, `schemas/link-record-v1.json`,
+    `schemas/collection-profile-record-v1.json`) regardless of transport;
+    consumers can validate incoming records against the URL embedded in each
+    record's `schema_id` field.
   license:
     name: MIT OR Apache-2.0
 
@@ -71,6 +73,26 @@ channels:
       linkRecord:
         $ref: '#/components/messages/linkRecord'
 
+  discoveryProfiles:
+    address: rastreo.discovery.profiles.v1
+    title: CollectionProfileRecord stream
+    description: |
+      Collection profiles, one message per gNMI endpoint that answered with
+      capability data. Each profile describes how to collect telemetry from an
+      endpoint (transport, encoding, advertised models); a device with two
+      management endpoints emits two profiles sharing an `identity_key`. The
+      channel address is used verbatim as the Kafka topic name (`profiles_topic`)
+      and the NATS subject (`profiles_subject`). The `v1` suffix pins the wire
+      schema; a breaking change ships a new channel
+      (`rastreo.discovery.profiles.v2`) and both run in parallel for one release
+      cycle.
+    servers:
+      - $ref: '#/servers/kafka'
+      - $ref: '#/servers/nats'
+    messages:
+      collectionProfileRecord:
+        $ref: '#/components/messages/collectionProfileRecord'
+
   deadLetterRecords:
     address: rastreo.discovery.dlq.v1
     title: Dead-letter DeviceRecord stream
@@ -117,6 +139,20 @@ operations:
     messages:
       - $ref: '#/channels/discoveryLinks/messages/linkRecord'
 
+  emitCollectionProfile:
+    action: send
+    channel:
+      $ref: '#/channels/discoveryProfiles'
+    summary: Emit a single collection profile for a gNMI endpoint.
+    description: |
+      After every device record and link from a scan is emitted, rastreo flushes
+      one message per gNMI endpoint that advertised capability data. Consumers key
+      correlation off `scan_metadata.scan_id` to align profiles with the device
+      records from the same scan, and off `identity_key` to attach a profile to
+      its device.
+    messages:
+      - $ref: '#/channels/discoveryProfiles/messages/collectionProfileRecord'
+
   quarantineDiscoveryRecord:
     action: send
     channel:
@@ -156,6 +192,20 @@ components:
         description: |
           ULID stamped per scan, identical to the device-record stream.
           Consumers use it to correlate links with the devices from the
+          same scan.
+
+    collectionProfileRecord:
+      name: CollectionProfileRecord
+      title: CollectionProfileRecord
+      summary: A single collection profile describing how to collect telemetry from an endpoint.
+      contentType: application/json
+      payload:
+        $ref: './collection-profile-record-v1.json'
+      correlationId:
+        location: $message.payload#/scan_metadata/scan_id
+        description: |
+          ULID stamped per scan, identical to the device-record stream.
+          Consumers use it to correlate profiles with the devices from the
           same scan.
 
     deadLetterRecord:

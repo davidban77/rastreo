@@ -1,4 +1,5 @@
 pub mod classifier;
+pub mod collection_profile;
 pub mod config;
 pub mod encoder;
 pub mod error;
@@ -18,6 +19,7 @@ pub use classifier::{
     create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
     PlatformSignal, RoleRule, RulesClassifier,
 };
+pub use collection_profile::CollectionProfileAssembler;
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{
     ClassifierError, ConfigError, EncoderError, ProbeError, ProbeErrorKind, RastreoError,
@@ -26,9 +28,11 @@ pub use error::{
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
 pub use hints::hint_for_error_kind;
 pub use model::{
-    AltIp, AltIpRole, Confidence, DeviceRecord, IdentityKey, LinkEndpoint, LinkRecord,
-    LldpNeighbor, LldpObservation, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget,
-    ScanMetadata, Signal, Target, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
+    AltIp, AltIpRole, Collection, CollectionProfileRecord, Confidence, DeviceRecord, GnmiEndpoint,
+    IdentityKey, LinkEndpoint, LinkRecord, LldpNeighbor, LldpObservation, ProbeCtx, ProbeFault,
+    ProbeKind, ProbeOutcome, ProfileConfidence, ProfileEndpoint, ResolvedTarget, ScanMetadata,
+    Signal, Subscription, Target, Transport, COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION,
+    COLLECTION_PROFILE_SCHEMA_ID, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
     LINK_CURRENT_SCHEMA_VERSION, LINK_SCHEMA_ID, PROBE_KIND_COUNT,
 };
 pub use pipeline::{

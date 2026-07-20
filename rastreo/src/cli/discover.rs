@@ -692,6 +692,7 @@ fn build_sink_config_for_kind(kind: SinkKind, args: &DiscoverArgs) -> Result<Sin
                 brokers: args.brokers.clone(),
                 topic,
                 links_topic: None,
+                profiles_topic: None,
                 flush_mode,
                 dead_letter: None,
                 tls: None,

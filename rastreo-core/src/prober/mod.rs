@@ -352,6 +352,7 @@ mod tests {
         ) -> Result<ProbeOutcome, RastreoError> {
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,

@@ -273,6 +273,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -303,6 +304,7 @@ mod tests {
             self.completed.fetch_add(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -333,6 +335,7 @@ mod tests {
             tokio::time::sleep(self.delay).await;
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -365,6 +368,7 @@ mod tests {
             tokio::time::sleep(Duration::from_micros(self.delays_us[index])).await;
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -397,6 +401,7 @@ mod tests {
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -433,6 +438,7 @@ mod tests {
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: self.kind,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -472,6 +478,7 @@ mod tests {
             }
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -506,6 +513,7 @@ mod tests {
             }
             Ok(ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind: ProbeKind::TcpConnect,
                 target_ip: target.ip,
                 timestamp: SystemTime::UNIX_EPOCH,

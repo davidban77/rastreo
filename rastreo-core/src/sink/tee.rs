@@ -850,7 +850,14 @@ mod tests {
             .await
             .expect("device");
         tee.write_kind(RecordKind::Link, b"l").await.expect("link");
-        let expected = vec![RecordKind::Device, RecordKind::Link];
+        tee.write_kind(RecordKind::CollectionProfile, b"p")
+            .await
+            .expect("profile");
+        let expected = vec![
+            RecordKind::Device,
+            RecordKind::Link,
+            RecordKind::CollectionProfile,
+        ];
         assert_eq!(*a_kinds.lock().unwrap_or_else(|e| e.into_inner()), expected);
         assert_eq!(*b_kinds.lock().unwrap_or_else(|e| e.into_inner()), expected);
     }

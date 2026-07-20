@@ -270,6 +270,7 @@ mod tests {
     fn outcome_with_oid(oid: &str) -> ProbeOutcome {
         ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::Snmp,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             timestamp: SystemTime::UNIX_EPOCH,

@@ -3,7 +3,7 @@ pub mod ndjson;
 pub use ndjson::NdjsonEncoder;
 
 use crate::error::{EncoderError, RastreoError};
-use crate::model::{DeviceRecord, LinkRecord};
+use crate::model::{CollectionProfileRecord, DeviceRecord, LinkRecord};
 
 pub trait Encoder: Send + Sync {
     fn encode_record(&self, record: &DeviceRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError>;
@@ -12,6 +12,18 @@ pub trait Encoder: Send + Sync {
     /// change; the default mirrors `encode_record`'s one-object-per-line NDJSON framing.
     fn encode_link(&self, link: &LinkRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError> {
         serde_json::to_writer(&mut *buf, link).map_err(EncoderError::SerializationFailed)?;
+        buf.push(b'\n');
+        Ok(())
+    }
+
+    /// Encodes a collection profile. Defaulted like `encode_link`, so existing encoders gain the
+    /// profile stream without change; the default is one-object-per-line NDJSON.
+    fn encode_profile(
+        &self,
+        profile: &CollectionProfileRecord,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), RastreoError> {
+        serde_json::to_writer(&mut *buf, profile).map_err(EncoderError::SerializationFailed)?;
         buf.push(b'\n');
         Ok(())
     }

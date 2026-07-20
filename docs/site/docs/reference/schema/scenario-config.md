@@ -263,8 +263,8 @@ One of:
 - { `type`: `stdout` }
 - { `path`: string, `type`: `file` }
 - { `type`: `memory` }
-- { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `links_topic`: string \| null, `retry`: [`SinkRetry`](#sinkretry), `sasl`: [`KafkaSasl`](#kafkasasl) \| null, `tls`: [`KafkaTls`](#kafkatls) \| null, `topic`: string, `type`: `kafka` }
-- { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `flush_mode`: [`NatsFlushMode`](#natsflushmode), `links_subject`: string \| null, `retry`: [`SinkRetry`](#sinkretry), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
+- { `brokers`: array<string>, `dead_letter`: [`DeadLetterConfig`](#deadletterconfig) \| null, `flush_mode`: [`KafkaFlushMode`](#kafkaflushmode), `links_topic`: string \| null, `profiles_topic`: string \| null, `retry`: [`SinkRetry`](#sinkretry), `sasl`: [`KafkaSasl`](#kafkasasl) \| null, `tls`: [`KafkaTls`](#kafkatls) \| null, `topic`: string, `type`: `kafka` }
+- { `credentials`: [`NatsCredentials`](#natscredentials), `dead_letter`: [`NatsDeadLetterConfig`](#natsdeadletterconfig) \| null, `flush_mode`: [`NatsFlushMode`](#natsflushmode), `links_subject`: string \| null, `profiles_subject`: string \| null, `retry`: [`SinkRetry`](#sinkretry), `servers`: array<string>, `stream`: string, `subject`: string, `type`: `nats` }
 
 ### `SinkRetry` {#sinkretry}
 

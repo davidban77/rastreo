@@ -155,4 +155,41 @@ mod tests {
         let back: LinkRecord = serde_json::from_slice(&buf[..buf.len() - 1]).expect("parse line");
         assert_eq!(back, link);
     }
+
+    #[test]
+    fn encode_profile_writes_one_newline_terminated_json_line() {
+        use crate::model::{
+            Collection, CollectionProfileRecord, ProfileConfidence, ProfileEndpoint, Transport,
+            COLLECTION_PROFILE_SCHEMA_ID,
+        };
+
+        let profile = CollectionProfileRecord {
+            schema_version: CollectionProfileRecord::SCHEMA_VERSION.to_string(),
+            schema_id: COLLECTION_PROFILE_SCHEMA_ID.to_string(),
+            identity_key: "mac:aabbccddeeff".into(),
+            endpoint: ProfileEndpoint {
+                address: "10.0.0.1".into(),
+                port: 57400,
+                transport: Transport::Tls,
+            },
+            confidence: ProfileConfidence::AdvertisedOnly,
+            note: None,
+            collection: Collection::Gnmi {
+                gnmi_version: Some("0.10.0".into()),
+                encoding: "JSON_IETF".into(),
+                supported_models: vec!["openconfig-interfaces".into()],
+                suggested_subscriptions: Vec::new(),
+            },
+            observed_at: SystemTime::UNIX_EPOCH,
+            scan_metadata: ScanMetadata::default(),
+        };
+        let enc = NdjsonEncoder::new();
+        let mut buf = Vec::new();
+        enc.encode_profile(&profile, &mut buf)
+            .expect("encode profile");
+        assert_eq!(buf.last().copied(), Some(b'\n'));
+        let back: CollectionProfileRecord =
+            serde_json::from_slice(&buf[..buf.len() - 1]).expect("parse line");
+        assert_eq!(back, profile);
+    }
 }

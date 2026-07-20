@@ -202,6 +202,28 @@ pub struct LldpNeighbor {
     pub remote_sys_name: Option<String>,
 }
 
+/// Wire transport an endpoint answered over: `tls` for an encrypted channel, `plaintext` for `http`/2.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Transport {
+    Tls,
+    Plaintext,
+}
+
+/// The gNMI endpoint that answered a probe: the port, its transport, and the encodings it advertised.
+/// Carried on the outcome so the collection-profile assembler describes a real endpoint rather than
+/// a fabricated default.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[non_exhaustive]
+pub struct GnmiEndpoint {
+    pub port: u16,
+    pub transport: Transport,
+    pub advertised_encodings: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ProbeOutcome {
@@ -214,6 +236,8 @@ pub struct ProbeOutcome {
     pub fault: Option<ProbeFault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lldp: Option<LldpObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gnmi_endpoint: Option<GnmiEndpoint>,
 }
 
 #[cfg(test)]
@@ -265,6 +289,7 @@ mod tests {
     fn probe_outcome_round_trips_json() {
         let outcome = ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -288,6 +313,7 @@ mod tests {
     fn probe_outcome_round_trips_a_reachable_fault() {
         let outcome = ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::Snmp,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -310,6 +336,7 @@ mod tests {
     fn probe_outcome_omits_fault_from_wire_when_none() {
         let outcome = ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             timestamp: SystemTime::UNIX_EPOCH,

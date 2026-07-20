@@ -1,0 +1,197 @@
+{
+  "$defs": {
+    "Collection": {
+      "description": "Protocol-tagged collection descriptor. The `protocol` tag discriminates the variant, leaving room\nfor `snmp` and other protocols without reshaping the envelope.",
+      "oneOf": [
+        {
+          "properties": {
+            "encoding": {
+              "type": "string"
+            },
+            "gnmi_version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "protocol": {
+              "const": "gnmi",
+              "type": "string"
+            },
+            "suggested_subscriptions": {
+              "items": {
+                "$ref": "#/$defs/Subscription"
+              },
+              "type": "array"
+            },
+            "supported_models": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "protocol",
+            "encoding",
+            "supported_models",
+            "suggested_subscriptions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProfileConfidence": {
+      "description": "How much the profile can be trusted. v1 is always `advertised_only`: the models and any suggested\nsubscriptions are derived from the endpoint's advertised capabilities, not verified against it.",
+      "enum": [
+        "advertised_only",
+        "verified_on_device"
+      ],
+      "type": "string"
+    },
+    "ProfileEndpoint": {
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "transport": {
+          "$ref": "#/$defs/Transport"
+        }
+      },
+      "required": [
+        "address",
+        "port",
+        "transport"
+      ],
+      "type": "object"
+    },
+    "ScanMetadata": {
+      "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",
+      "properties": {
+        "initiated_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "scan_id": {
+          "type": "string"
+        },
+        "scenario_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_config_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "scan_id",
+        "initiated_at"
+      ],
+      "type": "object"
+    },
+    "Subscription": {
+      "description": "A recommended gNMI subscription. Empty in v1; a later revision curates the list from advertised models.",
+      "properties": {
+        "matched_model": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sample_interval_ns": {
+          "description": "`None` for on-change or target-defined modes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "origin",
+        "path",
+        "mode",
+        "matched_model"
+      ],
+      "type": "object"
+    },
+    "Transport": {
+      "description": "Wire transport an endpoint answered over: `tls` for an encrypted channel, `plaintext` for `http`/2.",
+      "enum": [
+        "tls",
+        "plaintext"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://davidban77.github.io/rastreo/schemas/collection-profile-record-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "How to collect telemetry from a discovered endpoint: the endpoint that answered, the confidence\nin the profile, and a protocol-tagged `collection` descriptor. One record per gNMI endpoint, so a\ndevice with two management endpoints yields two profiles sharing an `identity_key`.",
+  "properties": {
+    "collection": {
+      "$ref": "#/$defs/Collection"
+    },
+    "confidence": {
+      "$ref": "#/$defs/ProfileConfidence"
+    },
+    "endpoint": {
+      "$ref": "#/$defs/ProfileEndpoint"
+    },
+    "identity_key": {
+      "type": "string"
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "observed_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "scan_metadata": {
+      "$ref": "#/$defs/ScanMetadata"
+    },
+    "schema_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema_id",
+    "identity_key",
+    "endpoint",
+    "confidence",
+    "collection",
+    "observed_at",
+    "scan_metadata"
+  ],
+  "title": "CollectionProfileRecord",
+  "type": "object"
+}

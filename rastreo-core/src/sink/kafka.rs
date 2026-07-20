@@ -24,7 +24,7 @@ use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
 use crate::sink::{
     retry_with_backoff, RecordKind, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
-    DEFAULT_LINKS_DESTINATION, SINK_ERROR_CLASS_COUNT,
+    DEFAULT_LINKS_DESTINATION, DEFAULT_PROFILES_DESTINATION, SINK_ERROR_CLASS_COUNT,
 };
 
 /// Quarantine topic configuration for records the primary Kafka produce refused.
@@ -342,6 +342,11 @@ pub struct KafkaSink {
     links_client: Option<PartitionClient>,
     links_buffer: Vec<Vec<u8>>,
     links_buffered_bytes: usize,
+    profiles_topic: String,
+    // Lazily connected on the first profile write: a scan with no gNMI capability data never opens it.
+    profiles_client: Option<PartitionClient>,
+    profiles_buffer: Vec<Vec<u8>>,
+    profiles_buffered_bytes: usize,
 }
 
 impl std::fmt::Debug for KafkaSink {
@@ -457,6 +462,10 @@ impl KafkaSink {
             links_client: None,
             links_buffer: Vec::new(),
             links_buffered_bytes: 0,
+            profiles_topic: DEFAULT_PROFILES_DESTINATION.to_string(),
+            profiles_client: None,
+            profiles_buffer: Vec::new(),
+            profiles_buffered_bytes: 0,
         })
     }
 
@@ -467,6 +476,11 @@ impl KafkaSink {
 
     pub fn with_links_topic(mut self, topic: String) -> Self {
         self.links_topic = topic;
+        self
+    }
+
+    pub fn with_profiles_topic(mut self, topic: String) -> Self {
+        self.profiles_topic = topic;
         self
     }
 
@@ -636,6 +650,56 @@ impl KafkaSink {
         self.links_buffered_bytes = 0;
         Ok(())
     }
+
+    async fn write_profile(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+        if self.profiles_client.is_none() {
+            let client = connect_partition_client(
+                &self.brokers,
+                &self.profiles_topic,
+                self.tls_config.as_ref(),
+                self.sasl.as_ref(),
+            )
+            .await?;
+            self.profiles_client = Some(client);
+        }
+        buffer_record(
+            &mut self.profiles_buffer,
+            &mut self.profiles_buffered_bytes,
+            data,
+        );
+        if should_flush_after_append(self.profiles_buffered_bytes, self.buffer_threshold) {
+            self.publish_profiles_buffer().await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_profiles_buffer(&mut self) -> Result<(), RastreoError> {
+        if self.profiles_buffer.is_empty() {
+            return Ok(());
+        }
+        let Some(client) = self.profiles_client.as_ref() else {
+            return Ok(());
+        };
+        let timestamp = Utc::now();
+        let result = {
+            let buffer = &self.profiles_buffer;
+            let topic = &self.profiles_topic;
+            let brokers = &self.brokers;
+            retry_with_backoff(&self.retry, || async move {
+                let records = build_records(buffer, &BTreeMap::new(), timestamp);
+                client
+                    .produce(records, Compression::NoCompression)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| build_produce_error(topic, brokers, e))
+            })
+            .await
+        };
+        result?;
+        self.profiles_buffer.clear();
+        self.profiles_buffered_bytes = 0;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -654,6 +718,7 @@ impl Sink for KafkaSink {
         match kind {
             RecordKind::Device => self.write(data).await,
             RecordKind::Link => self.write_link(data).await,
+            RecordKind::CollectionProfile => self.write_profile(data).await,
         }
     }
 
@@ -664,6 +729,9 @@ impl Sink for KafkaSink {
         }
         if !self.links_buffer.is_empty() {
             self.publish_links_buffer().await?;
+        }
+        if !self.profiles_buffer.is_empty() {
+            self.publish_profiles_buffer().await?;
         }
         Ok(())
     }
@@ -877,6 +945,7 @@ mod tests {
                 brokers,
                 topic,
                 links_topic,
+                profiles_topic,
                 flush_mode,
                 dead_letter,
                 tls,
@@ -886,6 +955,7 @@ mod tests {
                 assert_eq!(brokers, vec!["kafka:9092".to_string()]);
                 assert_eq!(topic, "rastreo.devices");
                 assert!(links_topic.is_none());
+                assert!(profiles_topic.is_none());
                 assert!(dead_letter.is_none());
                 assert!(tls.is_none());
                 assert!(sasl.is_none());
@@ -1417,6 +1487,7 @@ mod tests {
             brokers: vec!["k:9092".into()],
             topic: "t".into(),
             links_topic: None,
+            profiles_topic: None,
             flush_mode: KafkaFlushMode::default(),
             dead_letter: None,
             tls: None,

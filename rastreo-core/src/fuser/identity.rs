@@ -1769,6 +1769,7 @@ mod tests {
         let outcome =
             |octet: u8, kind: ProbeKind, reachable: bool, signals: Vec<Signal>| ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
                 timestamp: SystemTime::UNIX_EPOCH,
@@ -1833,6 +1834,7 @@ mod tests {
         let mac = "aa:bb:cc:11:22:33";
         let outcome = |octet: u8| ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::Snmp,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -2559,6 +2561,7 @@ mod tests {
         ) -> ProbeOutcome {
             ProbeOutcome {
                 lldp: None,
+                gnmi_endpoint: None,
                 kind,
                 target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
                 timestamp: SystemTime::UNIX_EPOCH,

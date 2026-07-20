@@ -385,6 +385,7 @@ mod tests {
     ) -> ProbeOutcome {
         ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
             timestamp: SystemTime::UNIX_EPOCH,
@@ -402,6 +403,7 @@ mod tests {
     ) -> ProbeOutcome {
         ProbeOutcome {
             lldp: None,
+            gnmi_endpoint: None,
             kind: ProbeKind::TcpConnect,
             target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last_octet)),
             timestamp: ts,
