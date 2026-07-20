@@ -19,7 +19,13 @@ Each record carries these fields:
     - `gnmi_version` — the gNMI protocol version the endpoint reported, such as `0.10.0`.
     - `encoding` — the encoding a collector should request. rastreo picks it from what the endpoint advertised, preferring `JSON_IETF`.
     - `supported_models` — the YANG models the endpoint advertised, each rendered as `name version (organization)`.
-    - `suggested_subscriptions` — recommended subscription paths. Empty today. See [Suggested subscriptions](#suggested-subscriptions).
+    - `suggested_subscriptions` — curated OpenConfig telemetry paths, matched from the advertised models (see [Suggested subscriptions](#suggested-subscriptions)). Each entry carries:
+        - `name` — a short label for the path, such as `if_counters`.
+        - `origin` — the model origin. Always `openconfig` for a curated path.
+        - `path` — the gNMI path a collector streams.
+        - `mode` — `sample` for a value read on a fixed timer, `on_change` for a value the device pushes only when it changes.
+        - `sample_interval_ns` — the sample period in nanoseconds. Present only in `sample` mode.
+        - `matched_model` — the advertised model that produced the path, including its version.
 - `observed_at` — when rastreo last saw the endpoint.
 - `scan_metadata` — the same per-scan provenance object stamped on every `DeviceRecord`.
 - `note` — optional free text. Absent today.
@@ -47,7 +53,46 @@ Here is one collection profile from an SR Linux node that answered Capabilities 
       "openconfig-system 2.0.0 (OpenConfig)",
       "srl_nokia-system"
     ],
-    "suggested_subscriptions": []
+    "suggested_subscriptions": [
+      {
+        "name": "if_counters",
+        "origin": "openconfig",
+        "path": "/interfaces/interface/state/counters",
+        "mode": "sample",
+        "sample_interval_ns": 10000000000,
+        "matched_model": "openconfig-interfaces 3.0.0 (OpenConfig)"
+      },
+      {
+        "name": "if_oper_status",
+        "origin": "openconfig",
+        "path": "/interfaces/interface/state/oper-status",
+        "mode": "on_change",
+        "matched_model": "openconfig-interfaces 3.0.0 (OpenConfig)"
+      },
+      {
+        "name": "if_admin_status",
+        "origin": "openconfig",
+        "path": "/interfaces/interface/state/admin-status",
+        "mode": "on_change",
+        "matched_model": "openconfig-interfaces 3.0.0 (OpenConfig)"
+      },
+      {
+        "name": "system_cpu_utilization",
+        "origin": "openconfig",
+        "path": "/system/cpus/cpu/state/total/instant",
+        "mode": "sample",
+        "sample_interval_ns": 10000000000,
+        "matched_model": "openconfig-system 2.0.0 (OpenConfig)"
+      },
+      {
+        "name": "system_memory",
+        "origin": "openconfig",
+        "path": "/system/memory/state",
+        "mode": "sample",
+        "sample_interval_ns": 30000000000,
+        "matched_model": "openconfig-system 2.0.0 (OpenConfig)"
+      }
+    ]
   },
   "observed_at": "2026-07-05T13:47:22Z",
   "scan_metadata": {
@@ -57,6 +102,8 @@ Here is one collection profile from an SR Linux node that answered Capabilities 
   }
 }
 ```
+
+The device also advertised `srl_nokia-system`, a vendor-native model. It stays in `supported_models`, but it produced no curated path, so it adds nothing to `suggested_subscriptions`. Only universal OpenConfig models get suggestions — see [Suggested subscriptions](#suggested-subscriptions).
 
 ## When rastreo emits a profile
 
@@ -81,9 +128,36 @@ Correlate a profile to its device by `identity_key` alone, exactly as you join t
 
 ## Suggested subscriptions
 
-The `suggested_subscriptions` field is part of the record, but rastreo does not populate it yet. The array is empty on every profile today. Until then, a collector builds its subscription paths from `supported_models` or from its own configuration.
+`suggested_subscriptions` lists ready-to-use telemetry paths a collector can stream. rastreo matches the endpoint's advertised models against a curated table of universal OpenConfig `/state` paths and copies each match onto the profile. A collector takes the paths straight from the record — no path list to write by hand.
 
-A later release will curate a list of recommended subscription paths from the advertised models. When a later release adds them, `suggested_subscriptions` carries ready-to-use paths a collector can take straight from the profile.
+Only universal OpenConfig models get suggestions. A vendor-native model such as `srl_nokia-system`, `Cisco-IOS-XR-*`, or `arista-*` still appears in `supported_models`, but its paths are device-specific, so it produces no suggestion. To stream a native path, add it to the collector's config yourself.
+
+Each subscription names a `mode`:
+
+- `sample` — the collector reads the value on a fixed timer. `sample_interval_ns` gives the period in nanoseconds. rastreo uses this for counters and gauges, such as interface counters or CPU load.
+- `on_change` — the device pushes the value only when it changes, and `sample_interval_ns` is absent. rastreo uses this for status values, such as interface oper-status or BGP session state.
+
+`matched_model` carries the exact advertised model and version that produced the path, copied verbatim. Say a device advertises `openconfig-interfaces 2.5.0` while your standard is `3.0.0`. The profile records `2.5.0`, so a consumer sees the version skew and can react.
+
+!!! note "Suggestions are advisory, not verified on-device"
+    The profile's `confidence` is `advertised_only`, so the suggested paths follow from the models the endpoint claims to support. rastreo does not stream them to confirm the device answers. Treat the list as a strong starting point a collector can refine. Some paths subscribe to whole `/state` containers (interface counters, platform components), which stream broadly on a high-port-count or large-chassis device — a collector may narrow them to the specific leaves it needs. And a model-derived path such as BGP neighbor state is suggested whenever the model is advertised, even on a device not running that protocol, where the subtree is simply empty.
+
+### The curated paths
+
+rastreo suggests paths from these OpenConfig models. A device that advertises none of them gets an empty `suggested_subscriptions` list.
+
+| Advertised model | Name | Path | Mode | Interval |
+|---|---|---|---|---|
+| `openconfig-interfaces` | `if_counters` | `/interfaces/interface/state/counters` | `sample` | 10s |
+| `openconfig-interfaces` | `if_oper_status` | `/interfaces/interface/state/oper-status` | `on_change` | — |
+| `openconfig-interfaces` | `if_admin_status` | `/interfaces/interface/state/admin-status` | `on_change` | — |
+| `openconfig-system` | `system_cpu_utilization` | `/system/cpus/cpu/state/total/instant` | `sample` | 10s |
+| `openconfig-system` | `system_memory` | `/system/memory/state` | `sample` | 30s |
+| `openconfig-platform` | `component_state` | `/components/component/state` | `sample` | 30s |
+| `openconfig-network-instance` | `bgp_neighbor_session_state` | `/network-instances/network-instance/protocols/protocol/bgp/neighbors/neighbor/state/session-state` | `on_change` | — |
+| `openconfig-network-instance` | `bgp_neighbor_established_transitions` | `/network-instances/network-instance/protocols/protocol/bgp/neighbors/neighbor/state/established-transitions` | `sample` | 30s |
+
+The `Interval` column is shown as a duration for readability. The record stores it as `sample_interval_ns` in nanoseconds, matching the gNMI protobuf — `10s` is `10000000000`.
 
 ## Where profiles are emitted
 
@@ -134,9 +208,71 @@ A collection profile gives a telemetry collector everything it needs to start a 
 
 - where to connect — `endpoint.address` on `endpoint.port`, over `endpoint.transport`;
 - how to speak — the `encoding` to request;
-- what is available — the YANG trees in `supported_models`.
+- what is available — the YANG trees in `supported_models`;
+- what to stream — the paths in `suggested_subscriptions`.
 
-Telegraf's gnmi input plugin and gNMIc are two collectors that consume gNMI this way. Today you supply the subscription paths yourself. When `suggested_subscriptions` is populated in a later release, a collector can take the paths straight from the profile.
+Telegraf's gnmi input plugin and gNMIc are two collectors that consume gNMI this way. The `suggested_subscriptions` list gives a collector its subscription paths directly — see [Turn a profile into a Telegraf subscription](#turn-a-profile-into-a-telegraf-subscription) for a worked mapping.
+
+## Turn a profile into a Telegraf subscription
+
+Telegraf's gNMI input plugin streams telemetry over gNMI. Its config splits into one connection block, `[[inputs.gnmi]]`, and one `[[inputs.gnmi.subscription]]` block per path. A profile fills in almost all of it.
+
+rastreo supplies the parts it discovered: the endpoint address and port (Telegraf's `addresses`), the `encoding`, and the suggested subscription paths. Your collector or automation supplies the parts rastreo never sees — the `username` and `password`, and the TLS policy (the CA to trust, or whether to skip verification). rastreo redacts credentials, so a profile never carries them.
+
+Take the profile from [What a collection profile is](#what-a-collection-profile-is): an SR Linux node at `198.51.100.11:57400` advertising `openconfig-interfaces` and `openconfig-system`. A lab automation reads it and generates the config below. Each subscription block maps from one entry in `suggested_subscriptions`:
+
+- `name`, `origin`, and `path` copy across unchanged.
+- `mode` becomes Telegraf's `subscription_mode`.
+- `sample_interval_ns` becomes `sample_interval`, converted from nanoseconds to a Telegraf duration string — `10000000000` nanoseconds is `"10s"`. The record stores nanoseconds to match the gNMI protobuf; Telegraf wants a duration string.
+
+```toml title="telegraf.conf"
+[[inputs.gnmi]]
+  addresses = ["198.51.100.11:57400"]
+  # Your automation supplies the credentials; rastreo redacts them.
+  username = "admin"
+  password = "${GNMI_PASSWORD}"
+  encoding = "json_ietf"
+
+  # transport was "tls", so enable TLS and set your own trust policy.
+  enable_tls = true
+  # tls_ca = "/etc/telegraf/ca.pem"
+  insecure_skip_verify = true
+
+  [[inputs.gnmi.subscription]]
+    name = "if_counters"
+    origin = "openconfig"
+    path = "/interfaces/interface/state/counters"
+    subscription_mode = "sample"
+    sample_interval = "10s"
+
+  [[inputs.gnmi.subscription]]
+    name = "if_oper_status"
+    origin = "openconfig"
+    path = "/interfaces/interface/state/oper-status"
+    subscription_mode = "on_change"
+
+  [[inputs.gnmi.subscription]]
+    name = "if_admin_status"
+    origin = "openconfig"
+    path = "/interfaces/interface/state/admin-status"
+    subscription_mode = "on_change"
+
+  [[inputs.gnmi.subscription]]
+    name = "system_cpu_utilization"
+    origin = "openconfig"
+    path = "/system/cpus/cpu/state/total/instant"
+    subscription_mode = "sample"
+    sample_interval = "10s"
+
+  [[inputs.gnmi.subscription]]
+    name = "system_memory"
+    origin = "openconfig"
+    path = "/system/memory/state"
+    subscription_mode = "sample"
+    sample_interval = "30s"
+```
+
+The device's native `srl_nokia-system` model produced no suggested path, so it has no subscription block. Add native paths to the config by hand if you need them.
 
 ## See also
 

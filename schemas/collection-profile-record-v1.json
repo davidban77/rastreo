@@ -101,7 +101,7 @@
       "type": "object"
     },
     "Subscription": {
-      "description": "A recommended gNMI subscription. Empty in v1; a later revision curates the list from advertised models.",
+      "description": "A recommended gNMI subscription a collector can stream, matched from the device's advertised models.",
       "properties": {
         "matched_model": {
           "type": "string"
