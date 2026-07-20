@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,6 +74,8 @@ impl Pacer {
 pub struct BoundedScheduler {
     max_concurrent: usize,
     pacer: Option<Arc<Pacer>>,
+    #[cfg(test)]
+    peak_live_slots: Arc<AtomicUsize>,
 }
 
 impl BoundedScheduler {
@@ -82,6 +86,8 @@ impl BoundedScheduler {
         Self {
             max_concurrent: max_concurrent.max(1),
             pacer: None,
+            #[cfg(test)]
+            peak_live_slots: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -97,6 +103,11 @@ impl BoundedScheduler {
 
     pub fn max_concurrent(&self) -> usize {
         self.max_concurrent
+    }
+
+    #[cfg(test)]
+    fn peak_live_slots(&self) -> usize {
+        self.peak_live_slots.load(Ordering::SeqCst)
     }
 }
 
@@ -125,6 +136,11 @@ fn spawn_probe(
     coord_by_id.insert(handle.id(), (pass_index, target_index));
 }
 
+struct PartialTarget {
+    outcomes: Vec<Option<Result<ProbeOutcome, RastreoError>>>,
+    completed: usize,
+}
+
 #[async_trait::async_trait]
 impl Scheduler for BoundedScheduler {
     async fn run_scan(
@@ -146,10 +162,7 @@ impl Scheduler for BoundedScheduler {
         let mut set: JoinSet<Result<ProbeOutcome, RastreoError>> = JoinSet::new();
         let mut coord_by_id: HashMap<Id, (usize, usize)> =
             HashMap::with_capacity(self.max_concurrent);
-        let mut slots: Vec<Vec<Option<Result<ProbeOutcome, RastreoError>>>> = (0..num_targets)
-            .map(|_| (0..num_probers).map(|_| None).collect())
-            .collect();
-        let mut completed = vec![0usize; num_targets];
+        let mut live: HashMap<usize, PartialTarget> = HashMap::with_capacity(self.max_concurrent);
 
         // Target-outer feed order: a target's whole probe set is scheduled before the next target's,
         // so a cancelled scan leaves the earliest targets fully scanned rather than all targets torn.
@@ -193,11 +206,18 @@ impl Scheduler for BoundedScheduler {
             };
             let mut ready_target: Option<usize> = None;
             if let Some((pass_index, target_index)) = coord_by_id.remove(&id) {
-                slots[target_index][pass_index] = Some(outcome);
-                completed[target_index] += 1;
-                if completed[target_index] == num_probers {
+                // First returning prober of a target allocates its slots, so live storage tracks the working set, not N.
+                let entry = live.entry(target_index).or_insert_with(|| PartialTarget {
+                    outcomes: (0..num_probers).map(|_| None).collect(),
+                    completed: 0,
+                });
+                entry.outcomes[pass_index] = Some(outcome);
+                entry.completed += 1;
+                if entry.completed == num_probers {
                     ready_target = Some(target_index);
                 }
+                #[cfg(test)]
+                self.peak_live_slots.fetch_max(live.len(), Ordering::SeqCst);
             }
             // A live cancel stops new probe starts but lets in-flight probes drain, so a target that
             // already started still reports every prober's outcome instead of a partial record.
@@ -219,7 +239,10 @@ impl Scheduler for BoundedScheduler {
             // window below the cap. `send` awaits when the channel is full, pacing the scan to the
             // consumer; a receiver-dropped error means the consumer gave up, so stop scanning.
             if let Some(target_index) = ready_target {
-                let outcomes = std::mem::take(&mut slots[target_index])
+                let outcomes = live
+                    .remove(&target_index)
+                    .expect("a fully-scanned target has a live slot entry")
+                    .outcomes
                     .into_iter()
                     .enumerate()
                     .map(|(pass_index, slot)| {
@@ -992,6 +1015,44 @@ mod tests {
             cap,
             "in-flight probes across every prober must saturate to and never exceed the cap"
         );
+    }
+
+    #[tokio::test]
+    async fn live_slot_entries_stay_bounded_by_the_window_not_target_count() {
+        let cap = 8;
+        let num_targets = 1000u32;
+        let mk = || -> Arc<dyn Prober> {
+            Arc::new(CountingProber {
+                calls: Arc::new(AtomicUsize::new(0)),
+            })
+        };
+        let probers = vec![mk(), mk(), mk()];
+        let s = BoundedScheduler::new(cap);
+        let targets: Vec<ResolvedTarget> = (0..num_targets)
+            .map(|i| {
+                let ip = IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8));
+                ResolvedTarget {
+                    ip,
+                    original: Target::Ip(ip),
+                    resolved_at: SystemTime::UNIX_EPOCH,
+                }
+            })
+            .collect();
+
+        let scans = collect(&s, probers, targets, ctx(), open_cancel()).await;
+
+        assert_eq!(
+            scans.len(),
+            num_targets as usize,
+            "every target fully scanned"
+        );
+        let peak = s.peak_live_slots();
+        let bound = cap + 1;
+        assert!(
+            peak <= bound,
+            "peak live slot entries {peak} must stay O(window)={bound}, not O(N={num_targets})"
+        );
+        assert!(peak >= 1, "the scan recorded at least one partial target");
     }
 
     #[tokio::test]
