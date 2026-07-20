@@ -43,6 +43,8 @@ mod tests {
             mgmt_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             mac: Some("aa:bb:cc:dd:ee:ff".into()),
             manufacturer: Some("Cisco".into()),
+            model: None,
+            product_family: None,
             platform: Some("IOS-XR".into()),
             os_version: None,
             ssh_version: None,

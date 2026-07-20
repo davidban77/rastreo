@@ -475,7 +475,7 @@
       ]
     },
     "manufacturer": {
-      "description": "Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser. `null` when the OUI is not in the bundled Wireshark manuf database.",
+      "description": "Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser, or from the SNMP `sysObjectID` by the MIB enrichment fuser when the OUI is absent. `null` when neither source matched.",
       "type": [
         "string",
         "null"
@@ -484,6 +484,13 @@
     "mgmt_ip": {
       "description": "Management IP the device was probed on. For multi-IP devices merged by the identity fuser, this is the first target IP that survived resolution.",
       "format": "ip",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "description": "Hardware model resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.",
       "type": [
         "string",
         "null"
@@ -518,6 +525,13 @@
         "$ref": "#/$defs/ProbeKind"
       },
       "type": "array"
+    },
+    "product_family": {
+      "description": "Product family resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "role": {
       "description": "Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open` and `sys_object_id_prefix` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.",

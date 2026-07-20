@@ -16,10 +16,14 @@ use crate::model::scan::ScanMetadata;
 
 pub mod identity;
 pub(crate) mod keys;
+#[cfg(feature = "mib_enrichment")]
+pub mod mib;
 #[cfg(feature = "oui")]
 pub mod oui;
 
 pub use identity::{IdentityFuser, IdentityHints, VrrpGroup};
+#[cfg(feature = "mib_enrichment")]
+pub use mib::{MibEnrichmentFuser, MibTable};
 #[cfg(feature = "oui")]
 pub use oui::{OuiEnrichmentFuser, OuiTable};
 
@@ -168,6 +172,8 @@ impl DirectFuser {
             mgmt_ip: Some(mgmt_ip),
             mac: first_mac,
             manufacturer: None,
+            model: None,
+            product_family: None,
             platform: None,
             os_version: None,
             ssh_version: None,
@@ -218,6 +224,12 @@ pub enum FuserConfig {
         data_path: String,
         inner: Box<FuserConfig>,
     },
+    #[cfg(feature = "mib_enrichment")]
+    MibEnrichment {
+        #[serde(default)]
+        data_path: Option<String>,
+        inner: Box<FuserConfig>,
+    },
     Identity {
         #[serde(default)]
         identity_hints: IdentityHints,
@@ -251,6 +263,11 @@ impl FuserConfig {
             }
             #[cfg(feature = "oui")]
             FuserConfig::OuiEnrichment { inner, .. } => {
+                reject_nested_identity(inner)?;
+                inner.validate()
+            }
+            #[cfg(feature = "mib_enrichment")]
+            FuserConfig::MibEnrichment { inner, .. } => {
                 reject_nested_identity(inner)?;
                 inner.validate()
             }
@@ -288,6 +305,8 @@ fn subtree_contains_identity(config: &FuserConfig) -> bool {
         FuserConfig::Direct { .. } => false,
         #[cfg(feature = "oui")]
         FuserConfig::OuiEnrichment { inner, .. } => subtree_contains_identity(inner),
+        #[cfg(feature = "mib_enrichment")]
+        FuserConfig::MibEnrichment { inner, .. } => subtree_contains_identity(inner),
         FuserConfig::Identity { .. } => true,
     }
 }
@@ -322,6 +341,15 @@ pub fn create_fuser(config: &FuserConfig) -> Result<Box<dyn Fuser>, RastreoError
                 OuiTable::from_path(data_path)?
             };
             Ok(Box::new(OuiEnrichmentFuser::new(inner_fuser, table)))
+        }
+        #[cfg(feature = "mib_enrichment")]
+        FuserConfig::MibEnrichment { data_path, inner } => {
+            let inner_fuser = create_fuser(inner)?;
+            let table = match data_path {
+                Some(path) if !path.is_empty() => MibTable::from_path(path)?,
+                _ => MibTable::from_bundled()?,
+            };
+            Ok(Box::new(MibEnrichmentFuser::new(inner_fuser, table)))
         }
         FuserConfig::Identity {
             identity_hints,
@@ -1255,6 +1283,106 @@ inner:
         match create_fuser(&cfg) {
             Ok(_) => panic!("expected error"),
             Err(e) => assert!(format!("{e}").contains("could not be opened")),
+        }
+    }
+
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn create_fuser_mib_enrichment_with_bundled_data_enriches_record() {
+        let cfg = FuserConfig::MibEnrichment {
+            data_path: None,
+            inner: direct(),
+        };
+        let mut f = create_fuser(&cfg).expect("create");
+        let outcomes = vec![outcome_with_kind(
+            1,
+            ProbeKind::Snmp,
+            true,
+            vec![Signal::SnmpSysObjectId("1.3.6.1.4.1.6527.1.20.26".into())],
+        )];
+        let records = drive_fuser(f.as_mut(), outcomes).expect("ok");
+        assert_eq!(records[0].model.as_deref(), Some("SR Linux"));
+        assert_eq!(records[0].manufacturer.as_deref(), Some("Nokia"));
+    }
+
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn validate_accepts_mib_over_direct() {
+        let cfg = FuserConfig::MibEnrichment {
+            data_path: None,
+            inner: direct(),
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn validate_rejects_identity_nested_in_mib() {
+        let cfg = FuserConfig::MibEnrichment {
+            data_path: None,
+            inner: Box::new(FuserConfig::Identity {
+                identity_hints: IdentityHints::default(),
+                inner: direct(),
+            }),
+        };
+        let err = cfg
+            .validate()
+            .expect_err("identity below mib must be rejected");
+        assert!(err.to_string().contains("outermost fuser"), "got: {err}");
+        assert!(create_fuser(&cfg).is_err());
+    }
+
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn validate_accepts_identity_over_mib_over_direct() {
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(FuserConfig::MibEnrichment {
+                data_path: None,
+                inner: direct(),
+            }),
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn create_fuser_mib_enrichment_returns_error_for_nonexistent_data_path() {
+        let cfg = FuserConfig::MibEnrichment {
+            data_path: Some("/does/not/exist/mib.tsv".into()),
+            inner: direct(),
+        };
+        match create_fuser(&cfg) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(format!("{e}").contains("could not be opened")),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "mib_enrichment"))]
+    #[test]
+    fn fuser_config_deserializes_mib_enrichment_defaults_data_path_to_none() {
+        let yaml = "type: mib_enrichment\ninner:\n  type: direct\n";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            FuserConfig::MibEnrichment { data_path, inner } => {
+                assert!(data_path.is_none());
+                assert!(matches!(*inner, FuserConfig::Direct { .. }));
+            }
+            other => panic!("expected MibEnrichment, got {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "config", feature = "mib_enrichment"))]
+    #[test]
+    fn fuser_config_deserializes_mib_enrichment_with_data_path() {
+        let yaml =
+            "type: mib_enrichment\ndata_path: /etc/rastreo/mib.tsv\ninner:\n  type: direct\n";
+        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match cfg {
+            FuserConfig::MibEnrichment { data_path, .. } => {
+                assert_eq!(data_path.as_deref(), Some("/etc/rastreo/mib.tsv"));
+            }
+            other => panic!("expected MibEnrichment, got {other:?}"),
         }
     }
 }

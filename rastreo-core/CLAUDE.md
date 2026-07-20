@@ -47,6 +47,7 @@ src/
 ├── fuser/
 │   ├── mod.rs       ← Fuser trait + DirectFuser default impl
 │   ├── oui.rs       ← OuiEnrichmentFuser (feature: oui)
+│   ├── mib.rs       ← MibEnrichmentFuser + MibTable (feature: mib_enrichment)
 │   └── identity.rs  ← IdentityFuser (MAC + SnmpSysName + SshHostKey + TlsSubject + TlsSanName + ReverseDnsName correlation)
 ├── classifier/
 │   ├── mod.rs           ← Classifier trait + ClassifierConfig + create_classifier factory + NoopClassifier / RulesClassifier
@@ -75,6 +76,7 @@ src/
 | `tls`    | no      | Enables the TLS handshake prober. `tokio-rustls` (`ring` backend) + `x509-parser` extract the leaf certificate's Subject CN and SANs. Accept-any-cert verifier — fingerprinting, not authenticating. |
 | `nats`   | no      | Enables `NatsSink` (`async-nats` JetStream client with `ring` crypto backend). |
 | `oui`    | no      | Enables the `oui_enrichment` fuser and bundles a compressed Wireshark manuf snapshot (`data/manuf.gz`, ~800 KB in-binary). Populates `DeviceRecord::manufacturer` from a MAC-address OUI lookup. |
+| `mib_enrichment` | no | Enables the `mib_enrichment` fuser and bundles a small compressed sysObjectID seed (`data/mib_identity.gz`). Populates `DeviceRecord::model` / `product_family` (and `manufacturer` when unset) from an exact SNMP `sysObjectID` lookup. The bundled table is a stub; the `data_path` overlay merges a user fleet table on top (user keys win). |
 
 The `config`, `http`, `kafka`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `nats`, and `oui` features each pull in their own dependency chain when enabled. `arp`, `ndp`, and `icmp` share the `pnet_packet` chain — enabling any of them pulls it in (`arp` and `ndp` additionally pull `pnet_datalink` + `ipnetwork` + `socket2`). `ssh`, `tls`, and `nats` all use `ring` as the crypto backend, so enabling any of them brings the `ring` chain in.
 

@@ -311,6 +311,8 @@ mod tests {
             mgmt_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             mac: None,
             manufacturer: None,
+            model: None,
+            product_family: None,
             platform: None,
             os_version: None,
             ssh_version: None,

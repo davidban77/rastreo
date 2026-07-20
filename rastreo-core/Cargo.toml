@@ -34,6 +34,7 @@ arp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2", "
 ndp = ["dep:pnet_datalink", "dep:pnet_packet", "dep:ipnetwork", "dep:socket2", "dep:caps"]
 nats = ["dep:async-nats", "dep:bytes", "chrono/clock"]
 oui = ["dep:flate2"]
+mib_enrichment = ["dep:flate2"]
 ssh = ["dep:russh"]
 icmp = ["dep:socket2", "dep:pnet_packet", "dep:caps"]
 tls = ["dep:rustls", "dep:rustls-pki-types", "dep:tokio-rustls", "dep:x509-parser"]

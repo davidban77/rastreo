@@ -62,6 +62,8 @@ mod tests {
             mgmt_ip: None,
             mac: None,
             manufacturer: None,
+            model: None,
+            product_family: None,
             platform: None,
             os_version: None,
             ssh_version: None,

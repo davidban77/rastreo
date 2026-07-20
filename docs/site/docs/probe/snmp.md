@@ -88,7 +88,7 @@ The prober always queries the same three scalar OIDs from the MIB-II system grou
 | OID | MIB-II name | Signal | Value shape |
 |---|---|---|---|
 | `1.3.6.1.2.1.1.1.0` | `sysDescr` | `SnmpSysDescr(<value>)` | Free-form vendor/OS/version string. Trimmed and capped at 256 bytes. |
-| `1.3.6.1.2.1.1.2.0` | `sysObjectID` | `SnmpSysObjectId(<dotted>)` | Vendor's product OID from the enterprise arc (e.g. `1.3.6.1.4.1.9.1.516` for a Cisco Catalyst 3560). Dotted-decimal string. |
+| `1.3.6.1.2.1.1.2.0` | `sysObjectID` | `SnmpSysObjectId(<dotted>)` | Vendor's product OID from the enterprise arc (e.g. `1.3.6.1.4.1.9.1.516` for a Cisco Catalyst 3750-series switch stack). Dotted-decimal string. |
 | `1.3.6.1.2.1.1.5.0` | `sysName` | `SnmpSysName(<value>)` | Operator-assigned hostname (typically the device's configured `hostname`). Trimmed and capped at 256 bytes. |
 
 There is no configuration knob for extra OIDs today. The three baseline values are what a discovery pipeline needs to fingerprint vendor, model family, and identity; deeper polling of interface, inventory, or environmental tables is the reconciler's job, not the probe's.

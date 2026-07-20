@@ -565,12 +565,28 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
             None
         });
 
-    let (manufacturer, platform, os_version, ssh_version, http_server, http_version, role) = {
+    let (
+        manufacturer,
+        model,
+        product_family,
+        platform,
+        os_version,
+        ssh_version,
+        http_server,
+        http_version,
+        role,
+    ) = {
         let best = records[best_idx].as_ref().expect("record present");
         (
             best.manufacturer
                 .clone()
                 .or_else(|| first_non_none(records, member_indices, |r| r.manufacturer.clone())),
+            best.model
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.model.clone())),
+            best.product_family
+                .clone()
+                .or_else(|| first_non_none(records, member_indices, |r| r.product_family.clone())),
             best.platform
                 .clone()
                 .or_else(|| first_non_none(records, member_indices, |r| r.platform.clone())),
@@ -636,6 +652,8 @@ fn merge_group(records: &mut [Option<DeviceRecord>], member_indices: &[usize]) -
         mgmt_ip,
         mac,
         manufacturer,
+        model,
+        product_family,
         platform,
         os_version,
         ssh_version,
@@ -830,6 +848,8 @@ mod tests {
             mgmt_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, ip_last_octet))),
             mac: mac.map(str::to_string),
             manufacturer: None,
+            model: None,
+            product_family: None,
             platform: None,
             os_version: None,
             ssh_version: None,
@@ -1805,6 +1825,43 @@ mod tests {
         assert_eq!(merged.probe_kinds, vec![ProbeKind::Http, ProbeKind::Snmp]);
     }
 
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn merge_group_carries_model_and_product_family_from_mib_enriched_constituents() {
+        use crate::fuser::{create_fuser, drive_fuser, FuserConfig};
+        const SRLINUX_OID: &str = "1.3.6.1.4.1.6527.1.20.26";
+        let mac = "aa:bb:cc:11:22:33";
+        let outcome = |octet: u8| ProbeOutcome {
+            lldp: None,
+            kind: ProbeKind::Snmp,
+            target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet)),
+            timestamp: SystemTime::UNIX_EPOCH,
+            reachable: true,
+            signals: vec![
+                Signal::Mac(mac.into()),
+                Signal::SnmpSysName("core-sw01".into()),
+                Signal::SnmpSysObjectId(SRLINUX_OID.into()),
+            ],
+            fault: None,
+        };
+        let cfg = FuserConfig::Identity {
+            identity_hints: IdentityHints::default(),
+            inner: Box::new(FuserConfig::MibEnrichment {
+                data_path: None,
+                inner: Box::new(FuserConfig::Direct {
+                    include_unreachable: None,
+                    confidence_baseline: None,
+                    confidence_per_signal: None,
+                }),
+            }),
+        };
+        let mut fuser = create_fuser(&cfg).expect("create");
+        let records = drive_fuser(fuser.as_mut(), vec![outcome(1), outcome(2)]).expect("drive");
+        assert_eq!(records.len(), 1, "shared MAC + sysName = high band merge");
+        assert_eq!(records[0].model.as_deref(), Some("SR Linux"));
+        assert_eq!(records[0].product_family.as_deref(), Some("SR Linux"));
+    }
+
     #[test]
     fn two_records_shared_tls_subject_and_san_merge() {
         let subject = Signal::TlsSubject("router.example.com".into());
@@ -2443,6 +2500,34 @@ mod tests {
                     }
                     Ok(records)
                 }
+                #[cfg(feature = "mib_enrichment")]
+                FuserConfig::MibEnrichment { data_path, inner } => {
+                    let mut records = fuse_many_batch(inner, outcomes)?;
+                    let table = match data_path {
+                        Some(path) if !path.is_empty() => crate::fuser::MibTable::from_path(path)?,
+                        _ => crate::fuser::MibTable::from_bundled()?,
+                    };
+                    for record in &mut records {
+                        let oid = record.signals.iter().find_map(|s| match s {
+                            Signal::SnmpSysObjectId(oid) => Some(oid.clone()),
+                            _ => None,
+                        });
+                        if let Some(entry) = oid.as_deref().and_then(|o| table.lookup(o)) {
+                            if let Some(model) = &entry.model {
+                                record.model = Some(model.clone());
+                            }
+                            if let Some(product_family) = &entry.product_family {
+                                record.product_family = Some(product_family.clone());
+                            }
+                            if record.manufacturer.is_none() {
+                                if let Some(manufacturer) = &entry.manufacturer {
+                                    record.manufacturer = Some(manufacturer.clone());
+                                }
+                            }
+                        }
+                    }
+                    Ok(records)
+                }
                 FuserConfig::Identity {
                     identity_hints,
                     inner,
@@ -2647,6 +2732,33 @@ mod tests {
                         None,
                     )],
                 ),
+                (
+                    "sys_object_id_shared_across_ips",
+                    vec![
+                        oc(
+                            1,
+                            ProbeKind::Snmp,
+                            true,
+                            vec![
+                                Signal::Mac(mac_a.into()),
+                                sysname.clone(),
+                                Signal::SnmpSysObjectId("1.3.6.1.4.1.6527.1.20.26".into()),
+                            ],
+                            None,
+                        ),
+                        oc(
+                            2,
+                            ProbeKind::Snmp,
+                            true,
+                            vec![
+                                Signal::Mac(mac_a.into()),
+                                sysname.clone(),
+                                Signal::SnmpSysObjectId("1.3.6.1.4.1.8072.3.2.10".into()),
+                            ],
+                            None,
+                        ),
+                    ],
+                ),
             ]
         }
 
@@ -2698,6 +2810,26 @@ mod tests {
                         identity_hints: IdentityHints::default(),
                         inner: Box::new(FuserConfig::OuiEnrichment {
                             data_path: String::new(),
+                            inner: Box::new(direct_config()),
+                        }),
+                    },
+                ));
+            }
+            #[cfg(feature = "mib_enrichment")]
+            {
+                out.push((
+                    "mib(direct)".to_string(),
+                    FuserConfig::MibEnrichment {
+                        data_path: None,
+                        inner: Box::new(direct_config()),
+                    },
+                ));
+                out.push((
+                    "identity(mib(direct))".to_string(),
+                    FuserConfig::Identity {
+                        identity_hints: IdentityHints::default(),
+                        inner: Box::new(FuserConfig::MibEnrichment {
+                            data_path: None,
                             inner: Box::new(direct_config()),
                         }),
                     },
