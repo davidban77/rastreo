@@ -69,7 +69,7 @@ pub enum Collection {
     },
 }
 
-/// A recommended gNMI subscription. Empty in v1; a later revision curates the list from advertised models.
+/// A recommended gNMI subscription a collector can stream, matched from the device's advertised models.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct Subscription {
@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn suggested_subscriptions_is_empty_in_v1() {
+    fn empty_suggested_subscriptions_serialize_as_a_present_array() {
         let json = serde_json::to_value(sample()).expect("serialize");
         assert_eq!(
             json["collection"]["suggested_subscriptions"]

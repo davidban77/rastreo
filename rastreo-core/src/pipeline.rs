@@ -2828,14 +2828,24 @@ mod tests {
 
             let value: serde_json::Value = serde_json::to_value(p).expect("serialize");
             assert_eq!(value["collection"]["protocol"], "gnmi");
+            let subs = value["collection"]["suggested_subscriptions"]
+                .as_array()
+                .expect("array");
             assert_eq!(
-                value["collection"]["suggested_subscriptions"]
-                    .as_array()
-                    .expect("array")
-                    .len(),
-                0,
-                "suggested subscriptions are curated separately; this stream ships them empty"
+                subs.len(),
+                3,
+                "openconfig-interfaces expands to its curated paths"
             );
+            assert!(subs.iter().all(|s| s["origin"] == "openconfig"
+                && s["matched_model"] == "openconfig-interfaces 3.0.0 (OpenConfig)"));
+            assert!(subs
+                .iter()
+                .any(|s| s["path"] == "/interfaces/interface/state/counters"
+                    && s["mode"] == "sample"));
+            assert!(subs
+                .iter()
+                .any(|s| s["path"] == "/interfaces/interface/state/oper-status"
+                    && s["mode"] == "on_change"));
 
             let crate::model::Collection::Gnmi {
                 encoding,

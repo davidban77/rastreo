@@ -1,3 +1,5 @@
+pub(crate) mod openconfig_paths;
+
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -121,7 +123,9 @@ impl CollectionProfileAssembler {
                     gnmi_version: obs.gnmi_version.clone(),
                     encoding: recommended_encoding(&obs.endpoint.advertised_encodings),
                     supported_models: obs.supported_models.clone(),
-                    suggested_subscriptions: Vec::new(),
+                    suggested_subscriptions: openconfig_paths::suggested_subscriptions(
+                        &obs.supported_models,
+                    ),
                 },
                 observed_at: obs.observed_at,
                 scan_metadata: (*self.scan_metadata).clone(),
@@ -254,9 +258,47 @@ mod tests {
             supported_models,
             &vec!["openconfig-interfaces 3.0.0 (OpenConfig)".to_string()]
         );
+        let paths: Vec<&str> = suggested_subscriptions
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        assert!(paths.contains(&"/interfaces/interface/state/counters"));
+        assert!(paths.contains(&"/interfaces/interface/state/oper-status"));
+        for sub in suggested_subscriptions {
+            assert_eq!(sub.origin, "openconfig");
+            assert_eq!(
+                sub.matched_model,
+                "openconfig-interfaces 3.0.0 (OpenConfig)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_only_model_lists_the_model_but_suggests_nothing() {
+        let mut a = assembler();
+        a.observe_outcomes(&[gnmi_outcome(
+            1,
+            vec![Signal::GnmiSupportedModel(
+                "srl_nokia-interfaces 2024-03-31".into(),
+            )],
+            endpoint(57400, Transport::Tls, &["JSON_IETF"]),
+        )]);
+        a.observe_record(&record("dev-a", 1, &[]));
+
+        let profiles = a.finish();
+        assert_eq!(profiles.len(), 1);
+        let Collection::Gnmi {
+            supported_models,
+            suggested_subscriptions,
+            ..
+        } = &profiles[0].collection;
+        assert_eq!(
+            supported_models,
+            &vec!["srl_nokia-interfaces 2024-03-31".to_string()]
+        );
         assert!(
             suggested_subscriptions.is_empty(),
-            "suggested subscriptions are curated separately"
+            "native models are carried but not curated"
         );
     }
 

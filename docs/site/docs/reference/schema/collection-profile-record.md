@@ -67,7 +67,7 @@ Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID
 
 ### `Subscription` {#subscription}
 
-A recommended gNMI subscription. Empty in v1; a later revision curates the list from advertised models.
+A recommended gNMI subscription a collector can stream, matched from the device's advertised models.
 
 | Field | Type | Required | Description |
 |---|---|---|---|

@@ -1453,6 +1453,26 @@ mod tests {
     }
 
     #[test]
+    fn model_signal_render_still_matches_the_openconfig_path_table_key() {
+        let model = ModelData {
+            name: "openconfig-interfaces".to_string(),
+            organization: "OpenConfig".to_string(),
+            version: "3.0.0".to_string(),
+        };
+        let Some(Signal::GnmiSupportedModel(rendered)) = model_signal(&model) else {
+            panic!("model_signal must render a supported-model signal");
+        };
+        let subs = crate::collection_profile::openconfig_paths::suggested_subscriptions(
+            std::slice::from_ref(&rendered),
+        );
+        assert!(
+            !subs.is_empty(),
+            "model_signal's render format must keep matching the path table key: {rendered}"
+        );
+        assert_eq!(subs[0].matched_model, rendered);
+    }
+
+    #[test]
     fn render_typed_value_joins_a_leaf_list_of_scalars() {
         use proto::gnmi::typed_value::Value;
         let array = proto::gnmi::ScalarArray {
