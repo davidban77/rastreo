@@ -13,6 +13,11 @@ const HIGH_BAND_THRESHOLD: f64 = 0.8;
 const MEDIUM_BAND_THRESHOLD: f64 = 0.4;
 const MERGE_CONFIDENCE_BONUS: f64 = 0.1;
 
+// A correlation key shared by more than this many records is a shared/default value (cloned-VM
+// host key, CN=localhost cert, wildcard PTR), not one device's handful of IPs — a false signal
+// we neither enumerate (O(B²) blow-up) nor merge on.
+const MAX_CORRELATION_BUCKET: usize = 256;
+
 const WEIGHT_SHARED_MAC: f64 = 0.5;
 const WEIGHT_SHARED_SYSNAME: f64 = 0.5;
 const WEIGHT_SHARED_HOST_KEY: f64 = 0.8;
@@ -119,7 +124,16 @@ impl IdentityFuser {
         }
 
         let mut candidates: HashSet<(usize, usize)> = HashSet::new();
-        for indices in buckets.values() {
+        for (key, indices) in &buckets {
+            if indices.len() > MAX_CORRELATION_BUCKET {
+                tracing::debug!(
+                    bucket_kind = key.kind(),
+                    size = indices.len(),
+                    cap = MAX_CORRELATION_BUCKET,
+                    "correlation key shared by too many records; skipping as a shared/default value"
+                );
+                continue;
+            }
             for a in 0..indices.len() {
                 for b in (a + 1)..indices.len() {
                     candidates.insert((indices[a], indices[b]));
@@ -266,6 +280,19 @@ enum BucketKey {
     TlsSubject(String),
     TlsSanName(String),
     ReverseDnsName(String),
+}
+
+impl BucketKey {
+    fn kind(&self) -> &'static str {
+        match self {
+            BucketKey::Mac(_) => "mac",
+            BucketKey::SysName(_) => "sys_name",
+            BucketKey::SshHostKey(_) => "ssh_host_key",
+            BucketKey::TlsSubject(_) => "tls_subject",
+            BucketKey::TlsSanName(_) => "tls_san_name",
+            BucketKey::ReverseDnsName(_) => "reverse_dns_name",
+        }
+    }
 }
 
 type ContributionFn = fn(&IdentityHints, &DeviceRecord, &DeviceRecord) -> f64;
@@ -2446,6 +2473,65 @@ mod tests {
                 &format!("seed {seed} (vrrp hints)"),
             );
         }
+    }
+
+    fn distinct_ssh_key_records(count: u32, host_key: &str) -> Vec<DeviceRecord> {
+        (0..count)
+            .map(|i| {
+                let ip = IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32 + i));
+                let mut r = base_record(0, None, vec![Signal::SshHostKey(host_key.into())], 0.3);
+                r.mgmt_ip = Some(ip);
+                r.identity_key = IdentityKey::new(format!("ip:{ip}")).expect("valid key");
+                r
+            })
+            .collect()
+    }
+
+    #[test]
+    fn oversized_bucket_skipped_prevents_false_mega_merge() {
+        let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+        let records = distinct_ssh_key_records(1000, host_key);
+        let f = make_fuser(IdentityHints::default());
+
+        let capped = f.correlate(records.clone());
+        assert_eq!(
+            capped.len(),
+            1000,
+            "an over-shared host key is a false signal: distinct devices must not collapse",
+        );
+
+        let uncapped = f.correlate_bruteforce(records);
+        assert_eq!(
+            uncapped.len(),
+            1,
+            "without the cap the giant bucket unions every record into one device",
+        );
+    }
+
+    #[test]
+    fn bucket_at_cap_merges() {
+        let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+        let records = distinct_ssh_key_records(MAX_CORRELATION_BUCKET as u32, host_key);
+        let out = correlate(records);
+        assert_eq!(
+            out.len(),
+            1,
+            "a bucket exactly at the cap is still enumerated"
+        );
+        assert_eq!(out[0].alt_ips.len(), MAX_CORRELATION_BUCKET - 1);
+    }
+
+    #[test]
+    fn bucket_over_cap_by_one_stays_separate() {
+        let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+        let records = distinct_ssh_key_records(MAX_CORRELATION_BUCKET as u32 + 1, host_key);
+        let out = correlate(records);
+        assert_eq!(
+            out.len(),
+            MAX_CORRELATION_BUCKET + 1,
+            "one over the cap skips the bucket: no pairwise edges, no merge",
+        );
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
     }
 
     mod differential {
