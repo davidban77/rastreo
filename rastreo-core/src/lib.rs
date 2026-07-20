@@ -49,7 +49,7 @@ pub use prober::SshProber;
 #[cfg(feature = "tls")]
 pub use prober::TlsProber;
 pub use prober::{Prober, ProberConfig, ReverseDnsProber, TcpConnectProber};
-pub use resolver::{GuardedResolver, HickoryResolver, Resolver};
+pub use resolver::{GuardedResolver, HickoryResolver, ResolvedPlan, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{
     FileSink, MemorySink, MemorySinkHandle, RecordKind, Sink, SinkConfig, SinkError,

@@ -31,7 +31,7 @@ pub trait Scheduler: Send + Sync {
     async fn run_scan(
         &self,
         probers: Vec<Arc<dyn Prober>>,
-        targets: Vec<ResolvedTarget>,
+        targets: Box<dyn Iterator<Item = ResolvedTarget> + Send>,
         ctx: ProbeCtx,
         cancel: watch::Receiver<bool>,
         results: mpsc::Sender<TargetScan>,
@@ -76,6 +76,8 @@ pub struct BoundedScheduler {
     pacer: Option<Arc<Pacer>>,
     #[cfg(test)]
     peak_live_slots: Arc<AtomicUsize>,
+    #[cfg(test)]
+    peak_target_slots: Arc<AtomicUsize>,
 }
 
 impl BoundedScheduler {
@@ -88,6 +90,8 @@ impl BoundedScheduler {
             pacer: None,
             #[cfg(test)]
             peak_live_slots: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            peak_target_slots: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -109,6 +113,53 @@ impl BoundedScheduler {
     fn peak_live_slots(&self) -> usize {
         self.peak_live_slots.load(Ordering::SeqCst)
     }
+
+    #[cfg(test)]
+    fn peak_target_slots(&self) -> usize {
+        self.peak_target_slots.load(Ordering::SeqCst)
+    }
+}
+
+/// Target-outer probe-start generator over a lazy target stream: hands out a target's whole prober
+/// set before pulling the next target, assigning each pulled target a monotonic `target_index`.
+struct Feed {
+    targets: Box<dyn Iterator<Item = ResolvedTarget> + Send>,
+    num_probers: usize,
+    next_target_index: usize,
+    // The target currently being fed out, paired with the next prober pass to hand out for it.
+    current: Option<(usize, usize)>,
+}
+
+impl Feed {
+    fn new(targets: Box<dyn Iterator<Item = ResolvedTarget> + Send>, num_probers: usize) -> Self {
+        Self {
+            targets,
+            num_probers,
+            next_target_index: 0,
+            current: None,
+        }
+    }
+
+    // Pulls the next `(pass_index, target_index)` in target-outer order, inserting a freshly-pulled
+    // target's Arc into `target_map` before its first prober is handed out. `None` ends the scan.
+    fn next(
+        &mut self,
+        target_map: &mut HashMap<usize, Arc<ResolvedTarget>>,
+    ) -> Option<(usize, usize)> {
+        loop {
+            if let Some((target_index, next_pass)) = self.current {
+                if next_pass < self.num_probers {
+                    self.current = Some((target_index, next_pass + 1));
+                    return Some((next_pass, target_index));
+                }
+            }
+            let target = self.targets.next()?;
+            let target_index = self.next_target_index;
+            self.next_target_index += 1;
+            target_map.insert(target_index, Arc::new(target));
+            self.current = Some((target_index, 0));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -118,12 +169,12 @@ fn spawn_probe(
     pass_index: usize,
     target_index: usize,
     prober: &Arc<dyn Prober>,
-    targets: &Arc<Vec<ResolvedTarget>>,
+    target: &Arc<ResolvedTarget>,
     ctx: &ProbeCtx,
     pacer: &Option<Arc<Pacer>>,
 ) {
     let prober = Arc::clone(prober);
-    let targets = Arc::clone(targets);
+    let target = Arc::clone(target);
     let ctx = ctx.clone();
     let pacer = pacer.clone();
 
@@ -131,7 +182,7 @@ fn spawn_probe(
         if let Some(pacer) = pacer {
             pacer.wait_for_slot().await;
         }
-        prober.probe(&targets[target_index], &ctx).await
+        prober.probe(&target, &ctx).await
     });
     coord_by_id.insert(handle.id(), (pass_index, target_index));
 }
@@ -146,45 +197,51 @@ impl Scheduler for BoundedScheduler {
     async fn run_scan(
         &self,
         probers: Vec<Arc<dyn Prober>>,
-        targets: Vec<ResolvedTarget>,
+        targets: Box<dyn Iterator<Item = ResolvedTarget> + Send>,
         ctx: ProbeCtx,
         cancel: watch::Receiver<bool>,
         results: mpsc::Sender<TargetScan>,
     ) {
-        let num_targets = targets.len();
         let num_probers = probers.len();
-        if num_targets == 0 || num_probers == 0 {
+        if num_probers == 0 {
             return;
         }
-        let targets = Arc::new(targets);
 
         // JoinSet aborts every spawned probe on drop, bounding an abandoned scan to the request-timeout instead of leaking detached tasks.
         let mut set: JoinSet<Result<ProbeOutcome, RastreoError>> = JoinSet::new();
         let mut coord_by_id: HashMap<Id, (usize, usize)> =
             HashMap::with_capacity(self.max_concurrent);
         let mut live: HashMap<usize, PartialTarget> = HashMap::with_capacity(self.max_concurrent);
+        // Each pulled target lives here from its first spawned probe until its last completes, so the
+        // scheduler's own target storage stays bounded by the concurrency window, not the target count.
+        let mut target_map: HashMap<usize, Arc<ResolvedTarget>> =
+            HashMap::with_capacity(self.max_concurrent);
 
-        // Target-outer feed order: a target's whole probe set is scheduled before the next target's,
-        // so a cancelled scan leaves the earliest targets fully scanned rather than all targets torn.
-        let mut work = (0..num_targets).flat_map(move |t| (0..num_probers).map(move |p| (p, t)));
+        // Target-outer feed: pull one target, spawn its whole probe set, then pull the next, so a
+        // cancelled scan leaves the earliest targets fully scanned rather than all targets torn. An
+        // empty stream yields nothing here, so the join loop never runs and the scan returns early.
+        let mut feed = Feed::new(targets, num_probers);
 
         for _ in 0..self.max_concurrent {
             if *cancel.borrow() {
                 break;
             }
-            match work.next() {
-                Some((pass_index, target_index)) => spawn_probe(
-                    &mut set,
-                    &mut coord_by_id,
-                    pass_index,
-                    target_index,
-                    &probers[pass_index],
-                    &targets,
-                    &ctx,
-                    &self.pacer,
-                ),
-                None => break,
-            }
+            let Some((pass_index, target_index)) = feed.next(&mut target_map) else {
+                break;
+            };
+            #[cfg(test)]
+            self.peak_target_slots
+                .fetch_max(target_map.len(), Ordering::SeqCst);
+            spawn_probe(
+                &mut set,
+                &mut coord_by_id,
+                pass_index,
+                target_index,
+                &probers[pass_index],
+                &target_map[&target_index],
+                &ctx,
+                &self.pacer,
+            );
         }
 
         while let Some(joined) = set.join_next_with_id().await {
@@ -215,6 +272,8 @@ impl Scheduler for BoundedScheduler {
                 entry.completed += 1;
                 if entry.completed == num_probers {
                     ready_target = Some(target_index);
+                    // Last prober done: no future spawn references this target, so drop its Arc.
+                    target_map.remove(&target_index);
                 }
                 #[cfg(test)]
                 self.peak_live_slots.fetch_max(live.len(), Ordering::SeqCst);
@@ -222,14 +281,17 @@ impl Scheduler for BoundedScheduler {
             // A live cancel stops new probe starts but lets in-flight probes drain, so a target that
             // already started still reports every prober's outcome instead of a partial record.
             if !*cancel.borrow() {
-                if let Some((pass_index, target_index)) = work.next() {
+                if let Some((pass_index, target_index)) = feed.next(&mut target_map) {
+                    #[cfg(test)]
+                    self.peak_target_slots
+                        .fetch_max(target_map.len(), Ordering::SeqCst);
                     spawn_probe(
                         &mut set,
                         &mut coord_by_id,
                         pass_index,
                         target_index,
                         &probers[pass_index],
-                        &targets,
+                        &target_map[&target_index],
                         &ctx,
                         &self.pacer,
                     );
@@ -579,7 +641,7 @@ mod tests {
     ) -> Vec<TargetScan> {
         let cap = s.max_concurrent().max(1);
         let (tx, mut rx) = mpsc::channel(cap);
-        let scan = s.run_scan(probers, targets, ctx, cancel, tx);
+        let scan = s.run_scan(probers, Box::new(targets.into_iter()), ctx, cancel, tx);
         tokio::pin!(scan);
         let mut out = Vec::new();
         let mut done = false;
@@ -841,7 +903,13 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let dropped = tokio::time::timeout(
             Duration::from_millis(50),
-            s.run_scan(one(prober), targets, ctx(), open_cancel(), tx),
+            s.run_scan(
+                one(prober),
+                Box::new(targets.into_iter()),
+                ctx(),
+                open_cancel(),
+                tx,
+            ),
         )
         .await;
         assert!(
@@ -1046,13 +1114,25 @@ mod tests {
             num_targets as usize,
             "every target fully scanned"
         );
-        let peak = s.peak_live_slots();
         let bound = cap + 1;
+        let live_peak = s.peak_live_slots();
         assert!(
-            peak <= bound,
-            "peak live slot entries {peak} must stay O(window)={bound}, not O(N={num_targets})"
+            live_peak <= bound,
+            "peak live slot entries {live_peak} must stay O(window)={bound}, not O(N={num_targets})"
         );
-        assert!(peak >= 1, "the scan recorded at least one partial target");
+        assert!(
+            live_peak >= 1,
+            "the scan recorded at least one partial target"
+        );
+        let target_peak = s.peak_target_slots();
+        assert!(
+            target_peak <= bound,
+            "peak target-map entries {target_peak} must stay O(window)={bound}, not O(N={num_targets})"
+        );
+        assert!(
+            target_peak >= 1,
+            "the scan held at least one in-window target"
+        );
     }
 
     #[tokio::test]

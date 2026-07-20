@@ -116,7 +116,13 @@ async fn run_scan_collect(
 ) -> Vec<TargetScan> {
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let (tx, mut rx) = mpsc::channel(scheduler.max_concurrent().max(1));
-    let scan = scheduler.run_scan(vec![prober], targets, ctx, cancel_rx, tx);
+    let scan = scheduler.run_scan(
+        vec![prober],
+        Box::new(targets.into_iter()),
+        ctx,
+        cancel_rx,
+        tx,
+    );
     tokio::pin!(scan);
     let mut out = Vec::new();
     let mut done = false;
