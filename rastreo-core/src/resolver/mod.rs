@@ -79,6 +79,22 @@ impl ResolvedPlan {
             .fold(0usize, |sum, spec| sum.saturating_add(spec.hosts()))
     }
 
+    /// The eager DNS resolutions a resume must replay verbatim: each `DnsName` target paired with the
+    /// addresses it resolved to. CIDR/range/single-IP specs re-expand deterministically and carry no pin.
+    pub fn dns_pins(&self) -> Vec<(Target, Vec<IpAddr>)> {
+        self.specs
+            .iter()
+            .filter_map(|spec| match spec {
+                PlannedSpec::Resolved { ips, original }
+                    if matches!(original, Target::DnsName(_)) =>
+                {
+                    Some((original.clone(), ips.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn into_stream(self) -> Box<dyn Iterator<Item = ResolvedTarget> + Send> {
         let now = self.resolved_at;
         Box::new(
@@ -746,6 +762,47 @@ mod tests {
         ];
         let plan = rt().block_on(r.plan(&targets)).expect("plan");
         assert!(plan.find_overlaps().is_empty());
+    }
+
+    #[test]
+    fn dns_pins_returns_only_dns_name_resolutions() {
+        let dns = Target::DnsName("router-1.lab".to_string());
+        let plan = ResolvedPlan {
+            specs: vec![
+                PlannedSpec::Resolved {
+                    ips: vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 6)],
+                    original: dns.clone(),
+                },
+                // An IP target the default plan() resolved eagerly re-expands deterministically; no pin.
+                PlannedSpec::Resolved {
+                    ips: vec![ipv4(10, 0, 0, 9)],
+                    original: Target::Ip(ipv4(10, 0, 0, 9)),
+                },
+                PlannedSpec::Block {
+                    first: ipv4(10, 0, 1, 1),
+                    last: ipv4(10, 0, 1, 3),
+                    original: Target::Cidr("10.0.1.0/30".parse().expect("cidr")),
+                },
+            ],
+            resolved_at: std::time::SystemTime::now(),
+        };
+        let pins = plan.dns_pins();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].0, dns);
+        assert_eq!(pins[0].1, vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 6)]);
+    }
+
+    #[test]
+    fn dns_pins_empty_when_no_dns_targets() {
+        let plan = ResolvedPlan {
+            specs: vec![PlannedSpec::Block {
+                first: ipv4(10, 0, 0, 1),
+                last: ipv4(10, 0, 0, 1),
+                original: Target::Ip(ipv4(10, 0, 0, 1)),
+            }],
+            resolved_at: std::time::SystemTime::now(),
+        };
+        assert!(plan.dns_pins().is_empty());
     }
 
     #[test]

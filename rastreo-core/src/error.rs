@@ -189,6 +189,12 @@ pub enum ResumeError {
     )]
     UnknownVersion { found: u32, expected: u32 },
 
+    #[error(
+        "a checkpoint already exists at {}; remove it to start a fresh scan",
+        .path.display()
+    )]
+    CheckpointExists { path: PathBuf },
+
     #[error("checkpoint could not be written to {}: {source}", .path.display())]
     Persist {
         path: PathBuf,

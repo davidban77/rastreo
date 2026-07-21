@@ -38,6 +38,8 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` a
 | `--rate <N>` | u32 | unset | Maximum number of probes started per second. Minimum 1. Unset means probes start as fast as concurrency allows. |
 | `--retries <N>` | u32 | `0` | Retransmit attempts for the connectionless probers — UDP, SNMP, DNS, and reverse DNS. `0` is single-shot (default). Range 0–1024. It divides `--timeout-ms` across attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. With `--file`, it overrides the scenario `retries`. See [Discover · CLI](../discover/cli.md#retries-on-lossy-links). |
 | `--timeout-ms <MS>` | u64 | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum 1. |
+| `--checkpoint <PATH>` | path | — | Write a resume checkpoint to this file during the scan. The scenario must be resume-safe — a durable sink (`file`, `kafka`, `nats`), no `identity` fuser, no `lldp` / `gnmi` prober — or the scan is refused before probing. Removed on success, kept on cancellation. See [Discover · CLI](../discover/cli.md#checkpoints). |
+| `--checkpoint-interval <N>` | usize | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. |
 | `-v`, `--verbose` | counter | — | See top-level flags above. |
 | `-q`, `--quiet` | flag | — | See top-level flags above. |
 
