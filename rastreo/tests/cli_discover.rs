@@ -1465,3 +1465,37 @@ async fn sink_flag_overrides_yaml_sink() {
         "stdout must be empty when sink overridden to file"
     );
 }
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn resume_refuses_a_multi_scenario_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: file\n    path: \"/tmp/rastreo-resume-refuse.ndjson\"\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n  - signal_type: discover\n    name: second\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [80]\n";
+    let path = write_yaml(&dir, "multi.yml", yaml);
+    let checkpoint = dir.path().join("scan.checkpoint");
+
+    let bin = env!("CARGO_BIN_EXE_rastreo");
+    let output = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["discover", "--file"])
+            .arg(&path)
+            .arg("--checkpoint")
+            .arg(&checkpoint)
+            .arg("--resume")
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        !output.status.success(),
+        "resuming a multi-scenario file must be refused"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("--resume supports a single-scenario run")
+            && stderr.contains("2 scenarios"),
+        "stderr must explain the single-scenario limitation: {stderr}"
+    );
+}

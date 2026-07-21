@@ -124,6 +124,11 @@ pub struct DiscoverArgs {
     /// Targets between checkpoint writes. Defaults to 5000. Requires --checkpoint.
     #[arg(long, value_parser = parse_checkpoint_interval, requires = "checkpoint")]
     pub checkpoint_interval: Option<usize>,
+
+    /// Resume a scan from the checkpoint at --checkpoint <path>: skip the already-done targets, restore
+    /// the original scan identity, and continue. The checkpoint must exist and still match the scenario.
+    #[arg(long, requires = "checkpoint")]
+    pub resume: bool,
 }
 
 fn parse_checkpoint_interval(s: &str) -> Result<usize, String> {
@@ -388,6 +393,7 @@ fn checkpoint_config(args: &DiscoverArgs) -> Option<CheckpointConfig> {
         interval: args
             .checkpoint_interval
             .unwrap_or(DEFAULT_CHECKPOINT_INTERVAL),
+        resume: args.resume,
     })
 }
 
@@ -488,6 +494,15 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
         return Err(anyhow!(
             "scenario file '{}' has no scenarios",
             path.display()
+        ));
+    }
+
+    // One checkpoint path cannot represent several scenarios' progress, so resume is single-scenario only.
+    if args.resume && file.scenarios.len() > 1 {
+        return Err(anyhow!(
+            "--resume supports a single-scenario run; '{}' has {} scenarios",
+            path.display(),
+            file.scenarios.len()
         ));
     }
 
@@ -868,6 +883,7 @@ mod tests {
             dry_run_format: DryRunFormat::Text,
             checkpoint: None,
             checkpoint_interval: None,
+            resume: false,
         }
     }
 
@@ -1127,6 +1143,54 @@ mod tests {
         a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
         a.checkpoint_interval = Some(250);
         assert_eq!(checkpoint_config(&a).expect("set").interval, 250);
+    }
+
+    #[test]
+    fn checkpoint_config_carries_resume_flag() {
+        let mut a = args(&["127.0.0.1"], &[80]);
+        a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
+        a.resume = true;
+        assert!(checkpoint_config(&a).expect("set").resume);
+    }
+
+    #[test]
+    fn checkpoint_config_defaults_resume_to_false() {
+        let mut a = args(&["127.0.0.1"], &[80]);
+        a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
+        assert!(!checkpoint_config(&a).expect("set").resume);
+    }
+
+    #[test]
+    fn discover_accepts_resume_with_checkpoint() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--checkpoint",
+            "/tmp/ck.json",
+            "--resume",
+        ])
+        .expect("--resume with --checkpoint should parse");
+        assert!(parsed.resume);
+    }
+
+    #[test]
+    fn discover_rejects_resume_without_checkpoint() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--resume",
+        ]);
+        let err = result.expect_err("--resume without --checkpoint should be rejected");
+        assert!(
+            err.to_string().contains("--checkpoint"),
+            "clap error should name the missing --checkpoint: {err}"
+        );
     }
 
     #[test]

@@ -18,7 +18,8 @@ pub mod topology;
 
 pub use checkpoint::{
     checkpoint_preflight, fuser_supports_resume, probers_support_resume, resume_eligibility,
-    resume_fingerprint, Checkpoint, CheckpointConfig, CheckpointWriter, CHECKPOINT_VERSION,
+    resume_fingerprint, resume_preflight, Checkpoint, CheckpointConfig, CheckpointWriter,
+    CHECKPOINT_VERSION,
 };
 pub use classifier::{
     create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,

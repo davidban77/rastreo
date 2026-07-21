@@ -32,6 +32,21 @@ impl ScanMetadata {
             source_config_hash,
         }
     }
+
+    /// Rebuilds scan metadata for a resumed scan, reusing the prior run's `scan_id` and
+    /// `initiated_at` so resumed records group with the pre-crash records under one logical scan.
+    pub fn resumed(
+        scenario: &DiscoverScenarioConfig,
+        scan_id: String,
+        initiated_at: SystemTime,
+    ) -> Self {
+        Self {
+            scan_id,
+            scenario_name: scenario.base.name.clone(),
+            initiated_at,
+            source_config_hash: hash_scenario(scenario),
+        }
+    }
 }
 
 impl Default for ScanMetadata {
@@ -52,7 +67,7 @@ impl Default for ScanMetadata {
 // `Serialize` and none has a fallible impl on well-formed data. NaN / Inf floats
 // round-trip through serde_json as `null`; downstream `create_fuser` validation
 // rejects them before they can collide with a real `None`.
-fn hash_scenario(scenario: &DiscoverScenarioConfig) -> Option<String> {
+pub(crate) fn hash_scenario(scenario: &DiscoverScenarioConfig) -> Option<String> {
     let bytes =
         serde_json::to_vec(scenario).expect("DiscoverScenarioConfig serialization is infallible");
     let mut hasher = Sha256::new();
@@ -149,6 +164,27 @@ mod tests {
         let a = ScanMetadata::new(&scenario_with_name(None));
         let b = ScanMetadata::new(&scenario_with_name(None));
         assert_ne!(a.scan_id, b.scan_id, "ULIDs must be unique per call");
+    }
+
+    #[test]
+    fn scan_metadata_resumed_reuses_scan_id_and_initiated_at() {
+        let scenario = scenario_with_name(Some("lab"));
+        let initiated_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let meta = ScanMetadata::resumed(
+            &scenario,
+            "01J000000000000000000000AA".to_string(),
+            initiated_at,
+        );
+        assert_eq!(meta.scan_id, "01J000000000000000000000AA");
+        assert_eq!(meta.initiated_at, initiated_at);
+        assert_eq!(meta.scenario_name.as_deref(), Some("lab"));
+    }
+
+    #[test]
+    fn scan_metadata_resumed_recomputes_source_config_hash_from_current_scenario() {
+        let scenario = scenario_with_name(Some("lab"));
+        let resumed = ScanMetadata::resumed(&scenario, "id".to_string(), SystemTime::UNIX_EPOCH);
+        assert_eq!(resumed.source_config_hash, hash_scenario(&scenario));
     }
 
     #[test]

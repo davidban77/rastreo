@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use hickory_resolver::TokioResolver;
 use ipnet::IpNet;
 
-use crate::error::{RastreoError, ResolverError};
+use crate::error::{RastreoError, ResolverError, ResumeError};
 use crate::model::{ResolvedTarget, Target};
 
 mod guarded;
@@ -93,6 +93,56 @@ impl ResolvedPlan {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Rebuild a plan for a resume: `DnsName` specs replay the checkpoint's pinned addresses (DNS is
+    /// not stable, so it is never re-resolved), while IP/CIDR/Range specs re-expand deterministically —
+    /// identical numeric-ascending order to the original run. Mismatched pins refuse as a stale checkpoint.
+    pub fn from_pinned(
+        targets: &[Target],
+        dns_pins: &[(Target, Vec<IpAddr>)],
+    ) -> Result<ResolvedPlan, RastreoError> {
+        let resolved_at = SystemTime::now();
+        let mut specs = Vec::with_capacity(targets.len());
+        let mut pins = dns_pins.iter();
+        for target in targets {
+            let spec = match target {
+                Target::Ip(ip) => PlannedSpec::Block {
+                    first: *ip,
+                    last: *ip,
+                    original: target.clone(),
+                },
+                Target::Cidr(net) => {
+                    let (first, last, _) = cidr_bounds(net);
+                    PlannedSpec::Block {
+                        first,
+                        last,
+                        original: target.clone(),
+                    }
+                }
+                Target::Range { start, end } => {
+                    let (first, last, _) = range_bounds(*start, *end)?;
+                    PlannedSpec::Block {
+                        first,
+                        last,
+                        original: target.clone(),
+                    }
+                }
+                Target::DnsName(_) => {
+                    let (pinned_target, ips) =
+                        pins.next().ok_or(ResumeError::FingerprintMismatch)?;
+                    if pinned_target != target {
+                        return Err(ResumeError::FingerprintMismatch.into());
+                    }
+                    PlannedSpec::Resolved {
+                        ips: ips.clone(),
+                        original: target.clone(),
+                    }
+                }
+            };
+            specs.push(spec);
+        }
+        Ok(ResolvedPlan { specs, resolved_at })
     }
 
     pub fn into_stream(self) -> Box<dyn Iterator<Item = ResolvedTarget> + Send> {
@@ -189,6 +239,75 @@ impl PlannedSpec {
                 }))
             }
         }
+    }
+}
+
+// Contiguous [first, last] block for a CIDR plus its host count. `/32` is a single host, `/31` is
+// the RFC 3021 point-to-point pair, wider IPv4 nets exclude network+broadcast, IPv6 spans the whole
+// block. The count saturates so a `::/0` sweep can be rejected on size without overflowing.
+fn cidr_bounds(net: &IpNet) -> (IpAddr, IpAddr, u128) {
+    match net {
+        IpNet::V4(n) => match n.prefix_len() {
+            32 => (IpAddr::V4(n.network()), IpAddr::V4(n.network()), 1),
+            31 => {
+                let base = n.network().to_bits();
+                (
+                    IpAddr::V4(Ipv4Addr::from_bits(base)),
+                    IpAddr::V4(Ipv4Addr::from_bits(base + 1)),
+                    2,
+                )
+            }
+            _ => {
+                let hosts = (n.broadcast().to_bits() - n.network().to_bits() - 1) as u128;
+                (
+                    IpAddr::V4(Ipv4Addr::from_bits(n.network().to_bits() + 1)),
+                    IpAddr::V4(Ipv4Addr::from_bits(n.broadcast().to_bits() - 1)),
+                    hosts,
+                )
+            }
+        },
+        IpNet::V6(n) => {
+            let span = u128::from(n.broadcast()) - u128::from(n.network());
+            (
+                IpAddr::V6(n.network()),
+                IpAddr::V6(n.broadcast()),
+                span.saturating_add(1),
+            )
+        }
+    }
+}
+
+// Inclusive [start, end] block for an explicit range plus its host count, validating the endpoints
+// share a family and are ordered. The count saturates so a full sweep can be size-rejected safely.
+fn range_bounds(start: IpAddr, end: IpAddr) -> Result<(IpAddr, IpAddr, u128), RastreoError> {
+    match (start, end) {
+        (IpAddr::V4(s), IpAddr::V4(e)) => {
+            let (s_bits, e_bits) = (s.to_bits() as u128, e.to_bits() as u128);
+            if s_bits > e_bits {
+                return Err(ResolverError::InvalidRange {
+                    start: s.to_string(),
+                    end: e.to_string(),
+                }
+                .into());
+            }
+            Ok((start, end, e_bits - s_bits + 1))
+        }
+        (IpAddr::V6(s), IpAddr::V6(e)) => {
+            let (s_bits, e_bits) = (u128::from(s), u128::from(e));
+            if s_bits > e_bits {
+                return Err(ResolverError::InvalidRange {
+                    start: s.to_string(),
+                    end: e.to_string(),
+                }
+                .into());
+            }
+            Ok((start, end, (e_bits - s_bits).saturating_add(1)))
+        }
+        (s, e) => Err(ResolverError::MixedFamilyRange {
+            start: s.to_string(),
+            end: e.to_string(),
+        }
+        .into()),
     }
 }
 
@@ -317,42 +436,8 @@ impl HickoryResolver {
     }
 
     fn plan_cidr(&self, net: &IpNet, original: &Target) -> Result<PlannedSpec, RastreoError> {
-        let limit = self.host_limit as u128;
-        let (first, last, hosts) = match net {
-            ipnet::IpNet::V4(n) => match n.prefix_len() {
-                32 => (IpAddr::V4(n.network()), IpAddr::V4(n.network()), 1u128),
-                // RFC 3021 — /31 point-to-point links use both addresses, no network/broadcast.
-                31 => {
-                    let base = n.network().to_bits();
-                    (
-                        IpAddr::V4(Ipv4Addr::from_bits(base)),
-                        IpAddr::V4(Ipv4Addr::from_bits(base + 1)),
-                        2,
-                    )
-                }
-                _ => {
-                    let hosts = (n.broadcast().to_bits() - n.network().to_bits() - 1) as u128;
-                    (
-                        IpAddr::V4(Ipv4Addr::from_bits(n.network().to_bits() + 1)),
-                        IpAddr::V4(Ipv4Addr::from_bits(n.broadcast().to_bits() - 1)),
-                        hosts,
-                    )
-                }
-            },
-            ipnet::IpNet::V6(n) => {
-                let span = u128::from(n.broadcast()) - u128::from(n.network());
-                if span >= limit {
-                    return Err(ResolverError::CidrTooLarge {
-                        cidr: net.to_string(),
-                        hosts: span.saturating_add(1),
-                        limit: self.host_limit,
-                    }
-                    .into());
-                }
-                (IpAddr::V6(n.network()), IpAddr::V6(n.broadcast()), span + 1)
-            }
-        };
-        if hosts > limit {
+        let (first, last, hosts) = cidr_bounds(net);
+        if hosts > self.host_limit as u128 {
             return Err(ResolverError::CidrTooLarge {
                 cidr: net.to_string(),
                 hosts,
@@ -373,64 +458,21 @@ impl HickoryResolver {
         end: IpAddr,
         original: &Target,
     ) -> Result<PlannedSpec, RastreoError> {
-        match (start, end) {
-            (IpAddr::V4(s), IpAddr::V4(e)) => {
-                // Widen to u128 so the host count can't overflow for a full /0 sweep.
-                let (s_bits, e_bits) = (s.to_bits() as u128, e.to_bits() as u128);
-                if s_bits > e_bits {
-                    return Err(ResolverError::InvalidRange {
-                        start: s.to_string(),
-                        end: e.to_string(),
-                    }
-                    .into());
-                }
-                let hosts = e_bits - s_bits + 1;
-                if hosts > self.host_limit as u128 {
-                    return Err(ResolverError::RangeTooLarge {
-                        start: s.to_string(),
-                        end: e.to_string(),
-                        hosts,
-                        limit: self.host_limit,
-                    }
-                    .into());
-                }
-                Ok(PlannedSpec::Block {
-                    first: start,
-                    last: end,
-                    original: original.clone(),
-                })
+        let (first, last, hosts) = range_bounds(start, end)?;
+        if hosts > self.host_limit as u128 {
+            return Err(ResolverError::RangeTooLarge {
+                start: start.to_string(),
+                end: end.to_string(),
+                hosts,
+                limit: self.host_limit,
             }
-            (IpAddr::V6(s), IpAddr::V6(e)) => {
-                let (s_bits, e_bits) = (u128::from(s), u128::from(e));
-                if s_bits > e_bits {
-                    return Err(ResolverError::InvalidRange {
-                        start: s.to_string(),
-                        end: e.to_string(),
-                    }
-                    .into());
-                }
-                let span = e_bits - s_bits;
-                if span >= self.host_limit as u128 {
-                    return Err(ResolverError::RangeTooLarge {
-                        start: s.to_string(),
-                        end: e.to_string(),
-                        hosts: span.saturating_add(1),
-                        limit: self.host_limit,
-                    }
-                    .into());
-                }
-                Ok(PlannedSpec::Block {
-                    first: start,
-                    last: end,
-                    original: original.clone(),
-                })
-            }
-            (s, e) => Err(ResolverError::MixedFamilyRange {
-                start: s.to_string(),
-                end: e.to_string(),
-            }
-            .into()),
+            .into());
         }
+        Ok(PlannedSpec::Block {
+            first,
+            last,
+            original: original.clone(),
+        })
     }
 
     async fn lookup_dns(&self, name: &str) -> Result<Vec<IpAddr>, RastreoError> {
@@ -880,6 +922,73 @@ mod tests {
                 IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 4)),
             ]
         );
+    }
+
+    #[test]
+    fn from_pinned_replays_pinned_dns_addresses_without_resolving() {
+        let dns = Target::DnsName("router-1.lab".to_string());
+        let pins = vec![(dns.clone(), vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 6)])];
+        let plan = ResolvedPlan::from_pinned(&[dns], &pins).expect("from_pinned");
+        let ips: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
+        assert_eq!(ips, vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 6)]);
+    }
+
+    #[test]
+    fn from_pinned_reexpands_ip_cidr_and_range_identically_to_plan() {
+        let targets = vec![
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+            Target::Ip(ipv4(192, 168, 1, 5)),
+            Target::Range {
+                start: ipv4(10, 0, 1, 1),
+                end: ipv4(10, 0, 1, 3),
+            },
+        ];
+        let via_plan: Vec<IpAddr> = rt()
+            .block_on(resolver().plan(&targets))
+            .expect("plan")
+            .into_stream()
+            .map(|rt| rt.ip)
+            .collect();
+        let via_pinned: Vec<IpAddr> = ResolvedPlan::from_pinned(&targets, &[])
+            .expect("from_pinned")
+            .into_stream()
+            .map(|rt| rt.ip)
+            .collect();
+        assert_eq!(
+            via_pinned, via_plan,
+            "a resumed plan re-expands IP/CIDR/Range specs identically to the original resolution"
+        );
+    }
+
+    #[test]
+    fn from_pinned_missing_dns_pin_refuses_as_stale_checkpoint() {
+        let dns = Target::DnsName("router-1.lab".to_string());
+        assert!(matches!(
+            ResolvedPlan::from_pinned(&[dns], &[]),
+            Err(RastreoError::Resume(ResumeError::FingerprintMismatch))
+        ));
+    }
+
+    #[test]
+    fn from_pinned_mismatched_dns_pin_refuses() {
+        let target = Target::DnsName("router-1.lab".to_string());
+        let pins = vec![(
+            Target::DnsName("other.lab".to_string()),
+            vec![ipv4(10, 0, 0, 5)],
+        )];
+        assert!(matches!(
+            ResolvedPlan::from_pinned(&[target], &pins),
+            Err(RastreoError::Resume(ResumeError::FingerprintMismatch))
+        ));
+    }
+
+    #[test]
+    fn from_pinned_total_hosts_counts_the_full_target_set() {
+        let dns = Target::DnsName("hosts.lab".to_string());
+        let pins = vec![(dns.clone(), vec![ipv4(10, 0, 0, 1), ipv4(10, 0, 0, 2)])];
+        let targets = vec![dns, Target::Cidr("10.0.1.0/30".parse().expect("cidr"))];
+        let plan = ResolvedPlan::from_pinned(&targets, &pins).expect("from_pinned");
+        assert_eq!(plan.total_hosts(), 4, "2 pinned DNS ips + 2 CIDR hosts");
     }
 
     #[test]

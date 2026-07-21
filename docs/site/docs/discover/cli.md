@@ -115,6 +115,7 @@ Each scenario prints its own status line to stderr, and the CLI runs every scena
 | `--dry-run-format <text\|json>` | `text` | Output format for `--dry-run`. `text` is the human-readable plan. `json` emits a machine-readable JSON array of plan objects, one per scenario, ready to pipe to `jq`. Only meaningful with `--dry-run`. See [Machine-readable output](#machine-readable-output) below. |
 | `--checkpoint <PATH>` | — | Write a resume checkpoint to this file during the scan, so a scan that dies can be resumed later. The scenario must be resume-safe or the scan is refused before probing. See [Checkpoints](#checkpoints). |
 | `--checkpoint-interval <N>` | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. See [Checkpoints](#checkpoints). |
+| `--resume` | off | Continue an interrupted scan from the checkpoint at `--checkpoint <PATH>`: skip the targets already written and probe the rest. Requires `--checkpoint`. Works for a single scenario only. See [Resuming](#resuming). |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
 | `-q`, `--quiet` | — | Drop the log level to `error`. Mutually exclusive in spirit with `-v`. |
 
@@ -348,8 +349,47 @@ rastreo discover \
 
 rastreo writes the checkpoint every 5000 targets by default. `--checkpoint-interval <N>` sets how many targets pass between writes. A smaller number checkpoints more often and loses less work on a crash. A larger number writes less often. The minimum is 1.
 
-!!! note "Resuming from a checkpoint arrives in a later release"
-    Today `--checkpoint` only *writes* the file. Reading a checkpoint back to continue an interrupted scan comes in a later release. The written file already carries everything a resume needs.
+### Resuming
+
+`--resume` continues a scan from its checkpoint. Point it at the same `--checkpoint <PATH>` the interrupted run wrote. rastreo skips the targets already written to the sink and probes only the rest.
+
+```bash
+rastreo discover \
+  --target 10.0.0.0/16 \
+  --port 22,443 \
+  --sink file \
+  --output /var/log/scan.ndjson \
+  --checkpoint /var/log/scan.checkpoint \
+  --resume
+```
+
+The resumed run keeps the original scan's id, so records from both runs group under one logical scan. The progress line continues from where the last run stopped. A scan interrupted at 2 of 14 targets resumes at `targets 2/14`, not `0/12`. When the resumed scan finishes, rastreo removes the checkpoint, exactly as a fresh scan does on completion.
+
+The eligibility rules in [Which scans can checkpoint](#which-scans-can-checkpoint) still apply. `--resume` re-checks them and refuses an ineligible scenario before probing.
+
+**The checkpoint must match the scan.** A checkpoint is tied to two things: the ordered target list and the sink destination. rastreo refuses to resume when either changed, because the new records would describe a different scan or reach the wrong destination:
+
+```text
+Error: resume error: checkpoint does not match the current scenario: the target sequence or append destination changed, so resuming would produce a different scan or append to the wrong destination
+```
+
+Changing only a performance knob is allowed. `--concurrency`, `--rate`, `--timeout-ms`, and `--retries` do not change which targets are scanned or where their records go. A resume with a different value for one of them warns, then continues.
+
+**A missing checkpoint is an error.** `--resume` needs an existing checkpoint to continue from. When the file is absent, rastreo refuses rather than start over from zero:
+
+```text
+Error: resume error: no checkpoint to resume at /var/log/scan.checkpoint; --resume requires an existing checkpoint at this path
+```
+
+!!! info "One target may be scanned twice"
+    Resume restarts at the last checkpointed target, not the one after it. So exactly one target — the boundary — may be scanned in both runs. Its record is a harmless duplicate that a consumer keying on [`identity_key`](identity.md) collapses. This is deliberate. It guarantees no scanned target is ever skipped, even if the process died while writing that target's record.
+
+!!! note "`--resume` runs one scenario at a time"
+    Resume works for a single-scenario run: the flag-driven `--target` / `--port` form, or a `--file` with exactly one scenario. A multi-scenario file is refused, because one checkpoint path cannot record several scenarios' progress.
+
+    ```text
+    Error: --resume supports a single-scenario run; 'scan.yml' has 2 scenarios
+    ```
 
 ### Which scans can checkpoint
 
@@ -384,7 +424,7 @@ This protects against the process dying: a crash, a scan timeout, or `Ctrl-C`. T
 
 ### It will not overwrite an existing checkpoint
 
-If a file already exists at the `--checkpoint` path, the scan refuses to start and leaves the file untouched. This protects a checkpoint from an earlier run you may still want. Remove the file to start fresh:
+If a file already exists at the `--checkpoint` path, the scan refuses to start and leaves the file untouched. This protects a checkpoint from an earlier run you may still want. To continue that run instead of starting over, resume it with [`--resume`](#resuming). Remove the file to start fresh:
 
 ```text
 Error: resume error: a checkpoint already exists at /var/log/scan.checkpoint; remove it to start a fresh scan

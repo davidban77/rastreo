@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::Instrument;
 
-use crate::checkpoint::{resume_fingerprint, CheckpointConfig, CheckpointWriter};
+use crate::checkpoint::{resume_fingerprint, Checkpoint, CheckpointConfig, CheckpointWriter};
 use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
 use crate::collection_profile::CollectionProfileAssembler;
 use crate::config::DiscoverScenarioConfig;
@@ -133,7 +133,7 @@ pub async fn run_discovery_with_components(
     sink: Box<dyn Sink>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (_tx, rx) = watch::channel(false);
-    run_discovery_core(scenario, resolver, sink, rx, None, None).await
+    run_discovery_core(scenario, resolver, sink, rx, None, None, None).await
 }
 
 /// Same as [`run_discovery_with_components`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
@@ -144,7 +144,7 @@ pub async fn run_discovery_with_components_with_progress(
     progress: watch::Sender<DiscoveryProgress>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (_tx, rx) = watch::channel(false);
-    run_discovery_core(scenario, resolver, sink, rx, Some(progress), None).await
+    run_discovery_core(scenario, resolver, sink, rx, Some(progress), None, None).await
 }
 
 /// Same as [`run_discovery`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
@@ -153,7 +153,7 @@ pub async fn run_discovery_cancellable(
     cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(scenario, resolver, sink, cancel, None, None).await
+    run_discovery_core(scenario, resolver, sink, cancel, None, None, None).await
 }
 
 /// Same as [`run_discovery_cancellable`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
@@ -163,24 +163,41 @@ pub async fn run_discovery_cancellable_with_progress(
     progress: watch::Sender<DiscoveryProgress>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(scenario, resolver, sink, cancel, Some(progress), None).await
+    run_discovery_core(scenario, resolver, sink, cancel, Some(progress), None, None).await
 }
 
-/// Same as [`run_discovery_cancellable_with_progress`], plus optional resume checkpointing. When
-/// `checkpoint` is set, the scenario is first vetted with [`checkpoint_preflight`] — an ineligible
-/// scenario or an occupied checkpoint path refuses the scan before any component is built — and the
-/// scan then writes a resume checkpoint at the configured target-count cadence.
+/// Same as [`run_discovery_cancellable_with_progress`], plus optional resume checkpointing. Without
+/// `resume`, an ineligible scenario or an occupied checkpoint path refuses the scan pre-flight, then
+/// the scan writes checkpoints at the configured cadence. With `resume`, an existing checkpoint at the
+/// path is consumed — the done prefix is skipped, the prior scan identity is restored, and the scan
+/// continues writing checkpoints from where it stopped.
 pub async fn run_discovery_cancellable_with_progress_and_checkpoint(
     scenario: &DiscoverScenarioConfig,
     cancel: watch::Receiver<bool>,
     progress: watch::Sender<DiscoveryProgress>,
     checkpoint: Option<CheckpointConfig>,
 ) -> Result<DiscoverySummary, RastreoError> {
-    if let Some(config) = &checkpoint {
-        crate::checkpoint::checkpoint_preflight(scenario, &config.path)?;
-    }
+    let resume_from = match &checkpoint {
+        Some(config) if config.resume => {
+            Some(crate::checkpoint::resume_preflight(scenario, &config.path)?)
+        }
+        Some(config) => {
+            crate::checkpoint::checkpoint_preflight(scenario, &config.path)?;
+            None
+        }
+        None => None,
+    };
     let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(scenario, resolver, sink, cancel, Some(progress), checkpoint).await
+    run_discovery_core(
+        scenario,
+        resolver,
+        sink,
+        cancel,
+        Some(progress),
+        checkpoint,
+        resume_from,
+    )
+    .await
 }
 
 async fn default_components(
@@ -199,7 +216,7 @@ pub async fn run_discovery_with_components_cancellable(
     sink: Box<dyn Sink>,
     cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
-    run_discovery_core(scenario, resolver, sink, cancel, None, None).await
+    run_discovery_core(scenario, resolver, sink, cancel, None, None, None).await
 }
 
 async fn run_discovery_core(
@@ -209,6 +226,7 @@ async fn run_discovery_core(
     cancel: watch::Receiver<bool>,
     progress: Option<watch::Sender<DiscoveryProgress>>,
     checkpoint: Option<CheckpointConfig>,
+    resume_from: Option<Checkpoint>,
 ) -> Result<DiscoverySummary, RastreoError> {
     scenario.base.ensure_no_retired_fields()?;
     scenario.base.ensure_retries_within_bound()?;
@@ -217,15 +235,32 @@ async fn run_discovery_core(
     }
 
     let start = Instant::now();
-    let scan_metadata = Arc::new(ScanMetadata::new(scenario));
 
     // Constant spans per scan: root + one per stage. Probe tasks are never spanned so a /16 stays zero-alloc.
     let scan_span = tracing::info_span!("scan", targets = tracing::field::Empty);
 
-    let plan = resolver
-        .plan(&scenario.targets)
-        .instrument(tracing::info_span!(parent: &scan_span, "resolve"))
-        .await?;
+    // A resume rebuilds the plan from the checkpoint's pins (never re-resolving DNS) and restores the
+    // prior run's scan identity, so resumed records group with the pre-crash records under one scan_id.
+    let (scan_metadata, plan, resume_base) = match &resume_from {
+        Some(checkpoint) => {
+            let scan_metadata = Arc::new(ScanMetadata::resumed(
+                scenario,
+                checkpoint.scan_id.clone(),
+                checkpoint.initiated_at,
+            ));
+            let plan = ResolvedPlan::from_pinned(&scenario.targets, &checkpoint.dns_pins)?;
+            (scan_metadata, plan, checkpoint.highest_flushed_index)
+        }
+        None => {
+            let scan_metadata = Arc::new(ScanMetadata::new(scenario));
+            let plan = resolver
+                .plan(&scenario.targets)
+                .instrument(tracing::info_span!(parent: &scan_span, "resolve"))
+                .await?;
+            (scan_metadata, plan, 0usize)
+        }
+    };
+
     // Pre-flight count = the number of targets the stream yields (dedup dropped), so progress shows a
     // real denominator without materializing the address space.
     let targets_resolved = plan.total_hosts();
@@ -276,6 +311,7 @@ async fn run_discovery_core(
     }
 
     // Built before `into_stream` consumes the plan: the DNS pins a resume replays are read off it here.
+    // `resume_base` offsets recorded checkpoint indices to the global position of the continued scan.
     let checkpoint_writer = checkpoint.map(|config| {
         CheckpointWriter::new(
             config,
@@ -283,13 +319,23 @@ async fn run_discovery_core(
             resume_fingerprint(scenario),
             plan.dns_pins(),
         )
+        .with_resume_base(resume_base)
     });
+
+    // Skip the K already-done targets but re-probe the boundary target K itself (skip(K), not
+    // skip(K+1)): K's records are durable, yet a torn final flush could have lost it — a boundary
+    // duplicate is upserted downstream by identity_key, a gap loses a host for good.
+    let stream: Box<dyn Iterator<Item = ResolvedTarget> + Send> = if resume_base > 0 {
+        Box::new(plan.into_stream().skip(resume_base))
+    } else {
+        plan.into_stream()
+    };
 
     let reorder_peak = AtomicUsize::new(0);
     stream_discovery(
         &scheduler,
         probers,
-        plan.into_stream(),
+        stream,
         ctx,
         cancel,
         fuser.as_mut(),
@@ -299,6 +345,7 @@ async fn run_discovery_core(
         &scan_metadata,
         targets_resolved,
         start,
+        resume_base,
         &reorder_peak,
         &scan_span,
         progress.as_ref(),
@@ -426,6 +473,9 @@ async fn stream_discovery(
     scan_metadata: &Arc<ScanMetadata>,
     targets_resolved: usize,
     start: Instant,
+    // A resumed run's scheduler restarts `target_index` at 0; `resume_base` maps local counts back to
+    // the global position for progress reporting (the writer offsets its own recorded indices).
+    resume_base: usize,
     // Test instrumentation: records the reorder buffer's peak size for the bound assertions.
     reorder_peak: &AtomicUsize,
     scan_span: &tracing::Span,
@@ -455,10 +505,12 @@ async fn stream_discovery(
     let mut profile_assembler = CollectionProfileAssembler::new(Arc::clone(scan_metadata));
 
     // Latest-wins send; a dropped receiver just means nobody is watching, so ignore the error.
+    // `resume_base` shifts local completion counts to the global position, so a resumed run reports
+    // K/N .. N rather than 0/(N-K).
     let publish = |completed: usize, records: usize, attempts: usize| {
         if let Some(tx) = progress {
             let _ = tx.send(DiscoveryProgress {
-                targets_completed: completed,
+                targets_completed: resume_base + completed,
                 targets_total: targets_resolved,
                 records_emitted: records,
                 probe_attempts: attempts,
@@ -840,10 +892,10 @@ fn finalize_checkpoint(
         return Ok(());
     };
     if cancelled {
-        // next_expected == 0: no target finished, and no periodic checkpoint was ever written, so
-        // there is nothing durable to resume from — leave the path empty.
+        // next_expected == 0: no target finished this run. Leave the path as-is — for a fresh scan
+        // that means empty, for a resume the existing checkpoint still records the prior prefix.
         if next_expected > 0 {
-            writer.write_at(next_expected - 1)?;
+            writer.write_at(writer.record_index(next_expected))?;
         }
     } else {
         writer.delete()?;
@@ -2665,6 +2717,7 @@ mod tests {
             &scan_metadata,
             2,
             Instant::now(),
+            0,
             &peak,
             &scan_span,
             None,
@@ -2875,6 +2928,7 @@ mod tests {
                 scan_metadata,
                 targets_resolved,
                 start,
+                0,
                 &peak,
                 &scan_span,
                 None,
@@ -2949,6 +3003,7 @@ mod tests {
                 scan_metadata,
                 targets_resolved,
                 start,
+                0,
                 peak,
                 &scan_span,
                 None,
@@ -3930,9 +3985,10 @@ mod tests {
         let config = CheckpointConfig {
             path: path.clone(),
             interval: 5,
+            resume: false,
         };
 
-        let summary = run_discovery_core(&scenario, resolver, sink, rx, None, Some(config))
+        let summary = run_discovery_core(&scenario, resolver, sink, rx, None, Some(config), None)
             .await
             .expect("checkpointing run");
 
@@ -4009,8 +4065,9 @@ mod tests {
         let config = CheckpointConfig {
             path: path.clone(),
             interval: 1000,
+            resume: false,
         };
-        let summary = run_discovery_core(&scenario, resolver, sink, rx, None, Some(config))
+        let summary = run_discovery_core(&scenario, resolver, sink, rx, None, Some(config), None)
             .await
             .expect("cancelled run returns a summary");
 
@@ -4064,6 +4121,7 @@ mod tests {
         let config = CheckpointConfig {
             path: path.clone(),
             interval: 5,
+            resume: false,
         };
 
         let err = run_discovery_cancellable_with_progress_and_checkpoint(
@@ -4079,5 +4137,272 @@ mod tests {
             RastreoError::Resume(crate::error::ResumeError::IdentityFuserNotResumable)
         ));
         assert!(!path.exists(), "a refused scan writes no checkpoint");
+    }
+
+    // A resumed scan restores the crashed scan's identity, so records emitted after resume carry the
+    // same scan_id/initiated_at the checkpoint recorded — downstream groups the logical scan by it.
+    const RESUMED_SCAN_ID: &str = "01JRESUME0000000000000000A";
+    const RESUMED_INITIATED_SECS: u64 = 1_700_000_000;
+
+    fn loopback_ips(n: usize) -> Vec<IpAddr> {
+        (1..=n as u8)
+            .map(|i| IpAddr::V4(Ipv4Addr::new(127, 0, 0, i)))
+            .collect()
+    }
+
+    // Distinct dark loopback IPs behind one DNS target; include_unreachable emits one record per IP so
+    // every target is identifiable by its mgmt_ip in the sink.
+    fn resume_dns_scenario(out: &std::path::Path) -> DiscoverScenarioConfig {
+        use crate::prober::UdpProtocol;
+        DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(150),
+                max_concurrent: Some(8),
+                fuser: Some(FuserConfig::Direct {
+                    include_unreachable: Some(true),
+                    confidence_baseline: None,
+                    confidence_per_signal: None,
+                }),
+                sink: Some(SinkConfig::File {
+                    path: out.to_path_buf(),
+                }),
+                ..Default::default()
+            },
+            targets: vec![Target::DnsName("hosts.lab".to_string())],
+            probers: vec![ProberConfig::Udp {
+                ports: vec![1],
+                protocol: UdpProtocol::Ntp,
+            }],
+        }
+    }
+
+    fn resume_checkpoint(
+        scenario: &DiscoverScenarioConfig,
+        all_ips: &[IpAddr],
+        highest_flushed_index: usize,
+    ) -> Checkpoint {
+        Checkpoint {
+            checkpoint_version: crate::checkpoint::CHECKPOINT_VERSION,
+            scan_id: RESUMED_SCAN_ID.to_string(),
+            initiated_at: std::time::UNIX_EPOCH + Duration::from_secs(RESUMED_INITIATED_SECS),
+            resume_fingerprint: resume_fingerprint(scenario),
+            source_config_hash: crate::model::scan::hash_scenario(scenario),
+            dns_pins: vec![(Target::DnsName("hosts.lab".to_string()), all_ips.to_vec())],
+            highest_flushed_index,
+        }
+    }
+
+    fn records_from(path: &std::path::Path) -> Vec<DeviceRecord> {
+        std::fs::read(path)
+            .expect("read output")
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice(l).expect("parse record"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn resume_skips_done_prefix_reprobes_boundary_and_preserves_scan_id() {
+        const N: usize = 8;
+        const K: usize = 3;
+        let all_ips = loopback_ips(N);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("out.ndjson");
+        let cp_path = dir.path().join("scan.checkpoint");
+        let scenario = resume_dns_scenario(&out);
+
+        // Seed the pre-crash durable prefix: probe just targets 0..=K to the output file. from_pinned
+        // never re-resolves "hosts.lab" (unresolvable by the system resolver), so the resume below
+        // succeeding at all proves it replayed the pinned addresses instead.
+        let seed_resolver: Arc<dyn Resolver> = Arc::new(FixedIpsResolver {
+            ips: all_ips[..=K].to_vec(),
+        });
+        let seed_sink = create_sink(&SinkConfig::File { path: out.clone() })
+            .await
+            .expect("seed sink");
+        run_discovery_with_components(&scenario, seed_resolver, seed_sink)
+            .await
+            .expect("seed run");
+        assert_eq!(records_from(&out).len(), K + 1, "seed wrote targets 0..=K");
+
+        resume_checkpoint(&scenario, &all_ips, K)
+            .write(&cp_path)
+            .expect("seed checkpoint");
+
+        let (progress_tx, _progress_rx) = watch::channel(DiscoveryProgress::default());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let config = CheckpointConfig {
+            path: cp_path.clone(),
+            interval: 1000,
+            resume: true,
+        };
+        let summary = run_discovery_cancellable_with_progress_and_checkpoint(
+            &scenario,
+            cancel_rx,
+            progress_tx,
+            Some(config),
+        )
+        .await
+        .expect("resume run");
+
+        assert_eq!(
+            summary.records_emitted,
+            N - K,
+            "the resume re-probes the boundary K plus every later target"
+        );
+        assert!(
+            !cp_path.exists(),
+            "a completed resume deletes the checkpoint"
+        );
+
+        let records = records_from(&out);
+        assert_eq!(
+            records.len(),
+            N + 1,
+            "seed prefix plus the resumed remainder"
+        );
+
+        let mut counts: BTreeMap<IpAddr, usize> = BTreeMap::new();
+        for r in &records {
+            *counts.entry(r.mgmt_ip.expect("mgmt_ip")).or_default() += 1;
+        }
+        for ip in &all_ips {
+            assert!(counts.contains_key(ip), "no gap: {ip} must be covered");
+        }
+        let dupes: Vec<(&IpAddr, &usize)> = counts.iter().filter(|(_, c)| **c > 1).collect();
+        assert_eq!(dupes.len(), 1, "exactly one boundary duplicate: {counts:?}");
+        assert_eq!(
+            *dupes[0].0, all_ips[K],
+            "the duplicate is the boundary target K"
+        );
+        assert_eq!(*dupes[0].1, 2);
+
+        let resumed: Vec<&DeviceRecord> = records
+            .iter()
+            .filter(|r| r.scan_metadata.scan_id == RESUMED_SCAN_ID)
+            .collect();
+        assert_eq!(
+            resumed.len(),
+            N - K,
+            "resumed records carry the checkpoint's scan_id"
+        );
+        let want_initiated = std::time::UNIX_EPOCH + Duration::from_secs(RESUMED_INITIATED_SECS);
+        assert!(resumed
+            .iter()
+            .all(|r| r.scan_metadata.initiated_at == want_initiated));
+        let resumed_ips: std::collections::BTreeSet<IpAddr> =
+            resumed.iter().map(|r| r.mgmt_ip.expect("ip")).collect();
+        let expected_ips: std::collections::BTreeSet<IpAddr> =
+            all_ips[K..].iter().copied().collect();
+        assert_eq!(
+            resumed_ips, expected_ips,
+            "the resume covers exactly the boundary target and every later one"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_run_records_global_checkpoint_indices_and_progress() {
+        const N: usize = 8;
+        const K: usize = 3;
+        let all_ips = loopback_ips(N);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("ignored.ndjson");
+        let cp_path = dir.path().join("scan.checkpoint");
+        let scenario = resume_dns_scenario(&out);
+        let checkpoint = resume_checkpoint(&scenario, &all_ips, K);
+        checkpoint.write(&cp_path).expect("seed checkpoint");
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink: Box<dyn Sink> = Box::new(CheckpointObservingSink {
+            delegate: crate::sink::MemorySink::new(),
+            checkpoint_path: cp_path.clone(),
+            observed: Arc::clone(&observed),
+        });
+        // The resume rebuilds the plan from the pins, so the resolver is never consulted.
+        let resolver: Arc<dyn Resolver> = Arc::new(FixedIpsResolver {
+            ips: all_ips.clone(),
+        });
+        let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let config = CheckpointConfig {
+            path: cp_path.clone(),
+            interval: 1,
+            resume: false,
+        };
+        let summary = run_discovery_core(
+            &scenario,
+            resolver,
+            sink,
+            cancel_rx,
+            Some(progress_tx),
+            Some(config),
+            Some(checkpoint),
+        )
+        .await
+        .expect("resumed run");
+
+        assert_eq!(summary.records_emitted, N - K);
+
+        let indices: Vec<usize> = observed
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|c| c.highest_flushed_index)
+            .collect();
+        assert!(!indices.is_empty(), "the continued run wrote checkpoints");
+        assert!(
+            indices.iter().all(|&i| i >= K),
+            "global indices never drop below the resume base K={K}: {indices:?}"
+        );
+        assert!(
+            indices.windows(2).all(|w| w[0] <= w[1]),
+            "highest_flushed_index never regresses: {indices:?}"
+        );
+        assert!(
+            indices.iter().any(|&i| i > K),
+            "the continued checkpoint advances the global index past K: {indices:?}"
+        );
+        assert!(
+            !cp_path.exists(),
+            "a completed resume deletes the checkpoint"
+        );
+
+        let final_progress = progress_rx.borrow().clone();
+        assert_eq!(
+            final_progress.targets_total, N,
+            "denominator is the full target count"
+        );
+        assert_eq!(
+            final_progress.targets_completed, N,
+            "progress reports the global position K/N .. N, never 0/(N-K)"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_entry_refuses_when_no_checkpoint_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("out.ndjson");
+        let cp_path = dir.path().join("absent.checkpoint");
+        let scenario = resume_dns_scenario(&out);
+
+        let (progress_tx, _progress_rx) = watch::channel(DiscoveryProgress::default());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let config = CheckpointConfig {
+            path: cp_path.clone(),
+            interval: 5,
+            resume: true,
+        };
+        let err = run_discovery_cancellable_with_progress_and_checkpoint(
+            &scenario,
+            cancel_rx,
+            progress_tx,
+            Some(config),
+        )
+        .await
+        .expect_err("--resume with no checkpoint is refused");
+        assert!(matches!(
+            err,
+            RastreoError::Resume(crate::error::ResumeError::NoCheckpointToResume { .. })
+        ));
     }
 }

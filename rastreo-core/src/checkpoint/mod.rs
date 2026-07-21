@@ -80,6 +80,8 @@ impl Checkpoint {
 pub struct CheckpointConfig {
     pub path: PathBuf,
     pub interval: usize,
+    /// Consume an existing checkpoint at `path` and continue from it, rather than refusing to clobber it.
+    pub resume: bool,
 }
 
 /// Writes resume checkpoints for one scan at a target-count cadence. Holds the immutable per-scan
@@ -92,6 +94,7 @@ pub struct CheckpointWriter {
     resume_fingerprint: String,
     source_config_hash: Option<String>,
     dns_pins: Vec<(Target, Vec<IpAddr>)>,
+    resume_base: usize,
     last_checkpoint_at: usize,
 }
 
@@ -110,8 +113,22 @@ impl CheckpointWriter {
             resume_fingerprint,
             source_config_hash: scan_metadata.source_config_hash.clone(),
             dns_pins,
+            resume_base: 0,
             last_checkpoint_at: 0,
         }
+    }
+
+    /// Offset recorded indices by the targets a prior run already made durable, so a resumed run's
+    /// checkpoints record the global position even though its scheduler restarts `target_index` at 0.
+    pub fn with_resume_base(mut self, base: usize) -> Self {
+        self.resume_base = base;
+        self
+    }
+
+    /// Global durable index for a local completed-count: the resumed run holds `resume_base` durable
+    /// targets from the prior run before its own local `next_expected` begin.
+    pub(crate) fn record_index(&self, local_next_expected: usize) -> usize {
+        self.resume_base + local_next_expected - 1
     }
 
     fn due(&self, next_expected: usize) -> bool {
@@ -129,7 +146,7 @@ impl CheckpointWriter {
             return Ok(());
         }
         sink.flush().await?;
-        self.write_at(next_expected - 1)?;
+        self.write_at(self.record_index(next_expected))?;
         self.last_checkpoint_at = next_expected;
         Ok(())
     }
@@ -177,6 +194,32 @@ pub fn checkpoint_preflight(
         });
     }
     Ok(())
+}
+
+/// Load and validate the checkpoint at `path` for a resume: a missing checkpoint refuses (`--resume`
+/// needs one), the scenario is re-vetted resume-safe, and the hard fingerprint must match the target
+/// sequence and sink destination. A changed perf/prober knob only warns — at-least-once tolerates it.
+pub fn resume_preflight(
+    scenario: &DiscoverScenarioConfig,
+    path: &Path,
+) -> Result<Checkpoint, ResumeError> {
+    if !path.exists() {
+        return Err(ResumeError::NoCheckpointToResume {
+            path: path.to_path_buf(),
+        });
+    }
+    let checkpoint = Checkpoint::load(path)?;
+    resume_eligibility(scenario)?;
+    if resume_fingerprint(scenario) != checkpoint.resume_fingerprint {
+        return Err(ResumeError::FingerprintMismatch);
+    }
+    if checkpoint.source_config_hash != crate::model::scan::hash_scenario(scenario) {
+        tracing::warn!(
+            path = %path.display(),
+            "resuming with a changed scenario config; a prober, fuser, or timeout knob differs — tolerated by at-least-once delivery"
+        );
+    }
+    Ok(checkpoint)
 }
 
 /// `false` iff the tree contains an identity fuser, whose cross-scan correlation a partial-prefix resume cannot reconstruct.
@@ -855,6 +898,7 @@ mod tests {
             CheckpointConfig {
                 path: path.to_path_buf(),
                 interval,
+                resume: false,
             },
             &metadata,
             "sha256:deadbeef".to_string(),
@@ -1041,5 +1085,138 @@ mod tests {
     fn checkpoint_writer_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<CheckpointWriter>();
+    }
+
+    #[tokio::test]
+    async fn with_resume_base_records_the_global_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let mut writer = test_writer(&path, 1).with_resume_base(10);
+        let mut sink = FlushCountingSink::default();
+        writer
+            .maybe_checkpoint(&mut sink, 5)
+            .await
+            .expect("checkpoint");
+        assert_eq!(
+            Checkpoint::load(&path).expect("load").highest_flushed_index,
+            14,
+            "global index is resume_base + local_next_expected - 1 = 10 + 5 - 1"
+        );
+    }
+
+    #[test]
+    fn record_index_offsets_local_count_by_resume_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let writer = test_writer(&path, 1).with_resume_base(7);
+        assert_eq!(
+            writer.record_index(1),
+            7,
+            "the boundary target K re-emits at K"
+        );
+        assert_eq!(writer.record_index(4), 10);
+    }
+
+    fn write_matching_checkpoint(scenario: &DiscoverScenarioConfig, path: &Path, index: usize) {
+        Checkpoint {
+            checkpoint_version: CHECKPOINT_VERSION,
+            scan_id: "01J000000000000000000000AA".to_string(),
+            initiated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            resume_fingerprint: resume_fingerprint(scenario),
+            source_config_hash: crate::model::scan::hash_scenario(scenario),
+            dns_pins: Vec::new(),
+            highest_flushed_index: index,
+        }
+        .write(path)
+        .expect("seed checkpoint");
+    }
+
+    #[test]
+    fn resume_preflight_missing_checkpoint_refuses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("absent.checkpoint");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        match resume_preflight(&s, &path) {
+            Err(ResumeError::NoCheckpointToResume { path: p }) => assert_eq!(p, path),
+            other => panic!("expected NoCheckpointToResume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_preflight_corrupt_checkpoint_yields_typed_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        std::fs::write(&path, b"not a checkpoint").expect("seed garbage");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        assert!(matches!(
+            resume_preflight(&s, &path),
+            Err(ResumeError::CorruptCheckpoint { .. })
+        ));
+    }
+
+    #[test]
+    fn resume_preflight_unknown_version_yields_typed_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let mut cp = sample_checkpoint();
+        cp.checkpoint_version = CHECKPOINT_VERSION + 1;
+        cp.write(&path).expect("write");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        assert!(matches!(
+            resume_preflight(&s, &path),
+            Err(ResumeError::UnknownVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn resume_preflight_ineligible_scenario_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(Some(identity_over(direct())), Vec::new(), Some(file_sink()));
+        write_matching_checkpoint(&s, &path, 3);
+        assert!(matches!(
+            resume_preflight(&s, &path),
+            Err(ResumeError::IdentityFuserNotResumable)
+        ));
+    }
+
+    #[test]
+    fn resume_preflight_fingerprint_mismatch_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let original = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        write_matching_checkpoint(&original, &path, 3);
+
+        let mut changed = original.clone();
+        changed.targets = vec![ip(1), ip(2)];
+        assert!(matches!(
+            resume_preflight(&changed, &path),
+            Err(ResumeError::FingerprintMismatch)
+        ));
+    }
+
+    #[test]
+    fn resume_preflight_perf_knob_change_proceeds_with_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let original = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        write_matching_checkpoint(&original, &path, 3);
+
+        let mut changed = original.clone();
+        changed.base.max_concurrent = Some(999);
+        let checkpoint = resume_preflight(&changed, &path)
+            .expect("a changed perf knob is advisory only; resume proceeds");
+        assert_eq!(checkpoint.highest_flushed_index, 3);
+    }
+
+    #[test]
+    fn resume_preflight_returns_the_checkpoint_on_a_clean_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        write_matching_checkpoint(&s, &path, 41);
+        let checkpoint = resume_preflight(&s, &path).expect("clean match resumes");
+        assert_eq!(checkpoint.highest_flushed_index, 41);
+        assert_eq!(checkpoint.scan_id, "01J000000000000000000000AA");
     }
 }

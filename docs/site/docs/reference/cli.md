@@ -40,6 +40,7 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` a
 | `--timeout-ms <MS>` | u64 | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum 1. |
 | `--checkpoint <PATH>` | path | — | Write a resume checkpoint to this file during the scan. The scenario must be resume-safe — a durable sink (`file`, `kafka`, `nats`), no `identity` fuser, no `lldp` / `gnmi` prober — or the scan is refused before probing. Removed on success, kept on cancellation. See [Discover · CLI](../discover/cli.md#checkpoints). |
 | `--checkpoint-interval <N>` | usize | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. |
+| `--resume` | flag | — | Resume from the checkpoint at `--checkpoint <PATH>`: skip the already-flushed targets, restore the original scan identity, and continue. The checkpoint must exist and still match the scenario's targets and sink destination, or the resume is refused before probing. Single-scenario runs only. Requires `--checkpoint`. See [Discover · CLI](../discover/cli.md#resuming). |
 | `-v`, `--verbose` | counter | — | See top-level flags above. |
 | `-q`, `--quiet` | flag | — | See top-level flags above. |
 
