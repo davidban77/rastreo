@@ -113,6 +113,8 @@ Each scenario prints its own status line to stderr, and the CLI runs every scena
 | `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
 | `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
 | `--dry-run-format <text\|json>` | `text` | Output format for `--dry-run`. `text` is the human-readable plan. `json` emits a machine-readable JSON array of plan objects, one per scenario, ready to pipe to `jq`. Only meaningful with `--dry-run`. See [Machine-readable output](#machine-readable-output) below. |
+| `--checkpoint <PATH>` | — | Write a resume checkpoint to this file during the scan, so a scan that dies can be resumed later. The scenario must be resume-safe or the scan is refused before probing. See [Checkpoints](#checkpoints). |
+| `--checkpoint-interval <N>` | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. See [Checkpoints](#checkpoints). |
 | `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
 | `-q`, `--quiet` | — | Drop the log level to `error`. Mutually exclusive in spirit with `-v`. |
 
@@ -330,6 +332,70 @@ The last line is the run summary; [Runtime hints](#runtime-hints) explains its f
 On `SIGINT` (ctrl-c) or `SIGTERM`, `rastreo discover` finishes any in-flight probes that have already started, fuses the outcomes collected so far, emits the resulting records to the sink, and flushes the sink before exiting. The summary line on stderr reads `discovery cancelled:` instead of `discovery complete:` when this path runs. The exit code is still `0` for a clean shutdown — non-zero is reserved for errors.
 
 Records that hadn't been emitted yet at the moment of cancellation are still written if they came from outcomes the pipeline had already gathered. Records from probers that hadn't started yet are not produced — `--target 10.0.0.0/24 --port 22,80,443 ...` cancelled after the `22` sweep gives you records for port 22 only.
+
+## Checkpoints
+
+A wide scan can run for hours. A crash, a scan timeout, or a `SIGKILL` can stop the process partway. Without a checkpoint, you lose all progress and the next run starts from zero. `--checkpoint <PATH>` writes a small file that records how far the scan reached. A later run can continue from that point instead of scanning everything again.
+
+```bash
+rastreo discover \
+  --target 10.0.0.0/16 \
+  --port 22,443 \
+  --sink file \
+  --output /var/log/scan.ndjson \
+  --checkpoint /var/log/scan.checkpoint
+```
+
+rastreo writes the checkpoint every 5000 targets by default. `--checkpoint-interval <N>` sets how many targets pass between writes. A smaller number checkpoints more often and loses less work on a crash. A larger number writes less often. The minimum is 1.
+
+!!! note "Resuming from a checkpoint arrives in a later release"
+    Today `--checkpoint` only *writes* the file. Reading a checkpoint back to continue an interrupted scan comes in a later release. The written file already carries everything a resume needs.
+
+### Which scans can checkpoint
+
+A checkpoint is only offered for a scan that can be resumed correctly. rastreo checks three things before probing and refuses the scan if any fails:
+
+| Part | Eligible | Not eligible |
+|---|---|---|
+| [Fuser](enrichment.md) | `direct`, `oui_enrichment`, `mib_enrichment` | `identity` |
+| [Probers](../probe/index.md) | every prober except the two on the right | `lldp`, `gnmi` |
+| [Sink](sinks.md) | `file`, `kafka`, `nats` | `stdout`, `memory` |
+
+Each rule guards against a resume that would produce a different result:
+
+- **Fuser** — the [`identity`](identity.md) fuser correlates records across the whole scan to merge one device seen on several addresses. A resume replays only the targets left, so it cannot rebuild that whole-scan state. The `direct`, `oui_enrichment`, and `mib_enrichment` fusers emit each record on its own and resume cleanly.
+- **Probers** — the [`lldp`](../probe/lldp.md) and [`gnmi`](../probe/gnmi.md) probers build a second output stream — [topology links](topology.md) or [collection profiles](collection-profile.md) — from whole-scan state a checkpoint cannot replay.
+- **Sink** — a resume appends new records where the previous run stopped. The `file`, `kafka`, and `nats` sinks have a durable destination to append to. The `stdout` and `memory` sinks do not.
+
+An ineligible scenario is refused before any probe runs, with an error naming the reason:
+
+```text
+Error: resume error: scenario is not resume-safe: the stdout sink has no durable append destination to resume into
+```
+
+### What a checkpoint protects against
+
+Before each checkpoint write, rastreo flushes the sink. Every record up to that point leaves the process and reaches the operating system first. The checkpoint then records that position. Because the flush happens first, the checkpoint never claims more progress than the sink actually holds.
+
+This protects against the process dying: a crash, a scan timeout, or `Ctrl-C`. The records are safe with the operating system, and the checkpoint matches them.
+
+!!! warning "Not protected: power loss and kernel panic"
+    The flush hands records to the operating system, not all the way to the physical disk. A sudden power loss or a kernel panic can still lose records the system had buffered but not yet written to disk. A checkpoint protects against a process dying, not against the machine dying.
+
+### It will not overwrite an existing checkpoint
+
+If a file already exists at the `--checkpoint` path, the scan refuses to start and leaves the file untouched. This protects a checkpoint from an earlier run you may still want. Remove the file to start fresh:
+
+```text
+Error: resume error: a checkpoint already exists at /var/log/scan.checkpoint; remove it to start a fresh scan
+```
+
+A file at the path that is not a valid checkpoint is refused the same way, with a `corrupt` message. rastreo never overwrites it.
+
+### Lifecycle
+
+- The scan **removes** the checkpoint when it finishes successfully. A completed scan has nothing left to resume, and a leftover file would block the next run.
+- The scan **keeps** the checkpoint when it is cancelled or killed. That file is the record of how far the scan got.
 
 ## Runtime hints
 

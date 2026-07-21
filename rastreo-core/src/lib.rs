@@ -17,8 +17,8 @@ pub mod sink;
 pub mod topology;
 
 pub use checkpoint::{
-    fuser_supports_resume, probers_support_resume, resume_eligibility, resume_fingerprint,
-    Checkpoint, CHECKPOINT_VERSION,
+    checkpoint_preflight, fuser_supports_resume, probers_support_resume, resume_eligibility,
+    resume_fingerprint, Checkpoint, CheckpointConfig, CheckpointWriter, CHECKPOINT_VERSION,
 };
 pub use classifier::{
     create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
@@ -42,7 +42,8 @@ pub use model::{
 };
 pub use pipeline::{
     resolve_scenario_targets, run_discovery, run_discovery_cancellable,
-    run_discovery_cancellable_with_progress, run_discovery_with_components,
+    run_discovery_cancellable_with_progress,
+    run_discovery_cancellable_with_progress_and_checkpoint, run_discovery_with_components,
     run_discovery_with_components_cancellable, run_discovery_with_components_with_progress,
     DiscoveryProgress, DiscoverySummary, ProbeKindSummary, ResolvedScenarioTarget,
 };

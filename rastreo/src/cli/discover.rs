@@ -17,9 +17,10 @@ use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
-    hint_for_error_kind, resolve_scenario_targets, run_discovery_cancellable_with_progress,
-    ConfigError, DiscoveryPlan, DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs,
-    ProberConfig, RastreoError, ResolvedScenarioTarget, SinkConfig, Target,
+    hint_for_error_kind, resolve_scenario_targets,
+    run_discovery_cancellable_with_progress_and_checkpoint, CheckpointConfig, ConfigError,
+    DiscoveryPlan, DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs, ProberConfig,
+    RastreoError, ResolvedScenarioTarget, SinkConfig, Target,
 };
 use tokio::sync::watch;
 
@@ -29,6 +30,7 @@ const ETA_MIN_COMPLETED: usize = 3;
 
 const DEFAULT_CONCURRENCY: u32 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
+const DEFAULT_CHECKPOINT_INTERVAL: usize = 5000;
 
 #[derive(Parser, Debug)]
 pub struct DiscoverArgs {
@@ -114,6 +116,22 @@ pub struct DiscoverArgs {
     /// Format for --dry-run output: `text` (default, human-readable) or `json` (a machine-readable array of plans). Only meaningful with --dry-run.
     #[arg(long, value_enum, default_value_t = DryRunFormat::Text)]
     pub dry_run_format: DryRunFormat,
+
+    /// Write a resume checkpoint to this path during the scan. The scenario must be resume-safe (durable sink, no identity fuser, no LLDP/gNMI prober) or the scan is refused before probing. The file is removed on successful completion and kept on cancellation.
+    #[arg(long)]
+    pub checkpoint: Option<PathBuf>,
+
+    /// Targets between checkpoint writes. Defaults to 5000. Requires --checkpoint.
+    #[arg(long, value_parser = parse_checkpoint_interval, requires = "checkpoint")]
+    pub checkpoint_interval: Option<usize>,
+}
+
+fn parse_checkpoint_interval(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        Ok(_) => Err("must be at least 1".to_string()),
+        Err(e) => Err(format!("not a positive integer: {e}")),
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -348,13 +366,29 @@ fn dry_run_exit_status(all: &[Vec<ResolvedScenarioTarget>]) -> Result<()> {
 async fn run_discovery_reporting_progress(
     scenario: &DiscoverScenarioConfig,
     cancel: watch::Receiver<bool>,
+    checkpoint: Option<CheckpointConfig>,
 ) -> std::result::Result<DiscoverySummary, RastreoError> {
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
     let is_tty = std::io::stderr().is_terminal();
     let display = tokio::spawn(progress_display_loop(progress_rx, is_tty));
-    let result = run_discovery_cancellable_with_progress(scenario, cancel, progress_tx).await;
+    let result = run_discovery_cancellable_with_progress_and_checkpoint(
+        scenario,
+        cancel,
+        progress_tx,
+        checkpoint,
+    )
+    .await;
     let _ = display.await;
     result
+}
+
+fn checkpoint_config(args: &DiscoverArgs) -> Option<CheckpointConfig> {
+    args.checkpoint.as_ref().map(|path| CheckpointConfig {
+        path: path.clone(),
+        interval: args
+            .checkpoint_interval
+            .unwrap_or(DEFAULT_CHECKPOINT_INTERVAL),
+    })
 }
 
 async fn progress_display_loop(mut rx: watch::Receiver<DiscoveryProgress>, is_tty: bool) {
@@ -418,7 +452,7 @@ fn finalize_progress_line(is_tty: bool) {
 
 async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
     let scenario = build_scenario(args)?;
-    match run_discovery_reporting_progress(&scenario, cancel).await {
+    match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args)).await {
         Ok(summary) => {
             print_summary("discovery", &summary);
             print_runtime_hints(&summary);
@@ -485,7 +519,8 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
             continue;
         }
 
-        match run_discovery_reporting_progress(&cfg, cancel.clone()).await {
+        match run_discovery_reporting_progress(&cfg, cancel.clone(), checkpoint_config(args)).await
+        {
             Ok(summary) => {
                 print_summary(&label, &summary);
                 print_runtime_hints(&summary);
@@ -831,6 +866,8 @@ mod tests {
             timeout_ms: None,
             dry_run: false,
             dry_run_format: DryRunFormat::Text,
+            checkpoint: None,
+            checkpoint_interval: None,
         }
     }
 
@@ -1030,6 +1067,66 @@ mod tests {
         ])
         .expect("--concurrency 1 should parse");
         assert_eq!(parsed.concurrency, Some(1));
+    }
+
+    #[test]
+    fn discover_rejects_checkpoint_interval_zero() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--checkpoint",
+            "/tmp/ck.json",
+            "--checkpoint-interval",
+            "0",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected --checkpoint-interval 0 to be rejected"
+        );
+    }
+
+    #[test]
+    fn discover_rejects_checkpoint_interval_without_checkpoint() {
+        let result = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--port",
+            "80",
+            "--checkpoint-interval",
+            "100",
+        ]);
+        let err =
+            result.expect_err("--checkpoint-interval without --checkpoint should be rejected");
+        assert!(
+            err.to_string().contains("--checkpoint"),
+            "clap error should name the missing --checkpoint: {err}"
+        );
+    }
+
+    #[test]
+    fn checkpoint_config_is_none_without_the_flag() {
+        assert!(checkpoint_config(&args(&["127.0.0.1"], &[80])).is_none());
+    }
+
+    #[test]
+    fn checkpoint_config_defaults_interval_when_only_path_set() {
+        let mut a = args(&["127.0.0.1"], &[80]);
+        a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
+        let config = checkpoint_config(&a).expect("checkpoint set");
+        assert_eq!(config.path, PathBuf::from("/tmp/ck.json"));
+        assert_eq!(config.interval, DEFAULT_CHECKPOINT_INTERVAL);
+    }
+
+    #[test]
+    fn checkpoint_config_uses_explicit_interval() {
+        let mut a = args(&["127.0.0.1"], &[80]);
+        a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
+        a.checkpoint_interval = Some(250);
+        assert_eq!(checkpoint_config(&a).expect("set").interval, 250);
     }
 
     #[test]

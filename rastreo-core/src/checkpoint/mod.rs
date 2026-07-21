@@ -5,12 +5,12 @@ use std::time::SystemTime;
 use sha2::{Digest, Sha256};
 
 use crate::config::DiscoverScenarioConfig;
-use crate::error::ResumeError;
+use crate::error::{RastreoError, ResumeError};
 use crate::fuser::{subtree_contains_identity, FuserConfig};
 use crate::model::scan::hex_lower;
-use crate::model::Target;
+use crate::model::{ScanMetadata, Target};
 use crate::prober::ProberConfig;
-use crate::sink::SinkConfig;
+use crate::sink::{Sink, SinkConfig};
 
 /// Schema version of the on-disk checkpoint; [`Checkpoint::load`] refuses any other value.
 pub const CHECKPOINT_VERSION: u32 = 1;
@@ -72,6 +72,111 @@ impl Checkpoint {
         }
         Ok(checkpoint)
     }
+}
+
+/// The caller's checkpoint request: where to write and the target-count cadence. Built from the CLI
+/// flags, then finalized into a [`CheckpointWriter`] once the scan's identity and DNS pins are known.
+#[derive(Debug, Clone)]
+pub struct CheckpointConfig {
+    pub path: PathBuf,
+    pub interval: usize,
+}
+
+/// Writes resume checkpoints for one scan at a target-count cadence. Holds the immutable per-scan
+/// template; each write stamps the current durable prefix onto it.
+pub struct CheckpointWriter {
+    path: PathBuf,
+    interval: usize,
+    scan_id: String,
+    initiated_at: SystemTime,
+    resume_fingerprint: String,
+    source_config_hash: Option<String>,
+    dns_pins: Vec<(Target, Vec<IpAddr>)>,
+    last_checkpoint_at: usize,
+}
+
+impl CheckpointWriter {
+    pub fn new(
+        config: CheckpointConfig,
+        scan_metadata: &ScanMetadata,
+        resume_fingerprint: String,
+        dns_pins: Vec<(Target, Vec<IpAddr>)>,
+    ) -> Self {
+        Self {
+            path: config.path,
+            interval: config.interval.max(1),
+            scan_id: scan_metadata.scan_id.clone(),
+            initiated_at: scan_metadata.initiated_at,
+            resume_fingerprint,
+            source_config_hash: scan_metadata.source_config_hash.clone(),
+            dns_pins,
+            last_checkpoint_at: 0,
+        }
+    }
+
+    fn due(&self, next_expected: usize) -> bool {
+        next_expected.saturating_sub(self.last_checkpoint_at) >= self.interval
+    }
+
+    /// At the cadence boundary, flush the sink to durability BEFORE recording the reached index — a
+    /// checkpoint ahead of the flushed records would drop a record on resume. No-op below the cadence.
+    pub async fn maybe_checkpoint(
+        &mut self,
+        sink: &mut dyn Sink,
+        next_expected: usize,
+    ) -> Result<(), RastreoError> {
+        if next_expected == 0 || !self.due(next_expected) {
+            return Ok(());
+        }
+        sink.flush().await?;
+        self.write_at(next_expected - 1)?;
+        self.last_checkpoint_at = next_expected;
+        Ok(())
+    }
+
+    /// Persist a checkpoint recording `highest_flushed_index` as the last durably-flushed target.
+    pub(crate) fn write_at(&self, highest_flushed_index: usize) -> Result<(), ResumeError> {
+        Checkpoint {
+            checkpoint_version: CHECKPOINT_VERSION,
+            scan_id: self.scan_id.clone(),
+            initiated_at: self.initiated_at,
+            resume_fingerprint: self.resume_fingerprint.clone(),
+            source_config_hash: self.source_config_hash.clone(),
+            dns_pins: self.dns_pins.clone(),
+            highest_flushed_index,
+        }
+        .write(&self.path)
+    }
+
+    /// Remove the checkpoint on full completion — nothing remains to resume, and a leftover file would
+    /// refuse-to-clobber the next run. An already-absent file is the desired state.
+    pub fn delete(&self) -> Result<(), ResumeError> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(ResumeError::Persist {
+                path: self.path.clone(),
+                source,
+            }),
+        }
+    }
+}
+
+/// Refuse a checkpoint request that would be a lie: a non-resumable scenario, or a path already
+/// holding a checkpoint (valid or corrupt) this run must not clobber. Only a free path proceeds.
+pub fn checkpoint_preflight(
+    scenario: &DiscoverScenarioConfig,
+    path: &Path,
+) -> Result<(), ResumeError> {
+    resume_eligibility(scenario)?;
+    if path.exists() {
+        // Loading validates it; either way a file is here and must not be overwritten.
+        Checkpoint::load(path)?;
+        return Err(ResumeError::CheckpointExists {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// `false` iff the tree contains an identity fuser, whose cross-scan correlation a partial-prefix resume cannot reconstruct.
@@ -737,5 +842,204 @@ mod tests {
             ScanMetadata::new(&b).source_config_hash,
             "the advisory whole-scenario hash DOES move on a perf knob, unlike the hard fingerprint"
         );
+    }
+
+    fn test_writer(path: &Path, interval: usize) -> CheckpointWriter {
+        let metadata = ScanMetadata {
+            scan_id: "01J000000000000000000000AA".to_string(),
+            scenario_name: None,
+            initiated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            source_config_hash: Some("sha256:cafef00d".to_string()),
+        };
+        CheckpointWriter::new(
+            CheckpointConfig {
+                path: path.to_path_buf(),
+                interval,
+            },
+            &metadata,
+            "sha256:deadbeef".to_string(),
+            vec![(
+                Target::DnsName("router-1.lab".to_string()),
+                vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))],
+            )],
+        )
+    }
+
+    struct FlushFailsSink;
+
+    #[async_trait::async_trait]
+    impl Sink for FlushFailsSink {
+        async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            Err(RastreoError::Sink(crate::sink::SinkError::new(
+                crate::sink::SinkErrorClass::FlushFailure,
+                std::io::Error::other("flush boom"),
+            )))
+        }
+    }
+
+    #[derive(Default)]
+    struct FlushCountingSink {
+        flushes: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl Sink for FlushCountingSink {
+        async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn maybe_checkpoint_flushes_before_writing_so_a_failed_flush_leaves_no_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let mut writer = test_writer(&path, 1);
+        let mut sink = FlushFailsSink;
+        let err = writer
+            .maybe_checkpoint(&mut sink, 3)
+            .await
+            .expect_err("the pre-write flush error must surface");
+        assert!(matches!(err, RastreoError::Sink(_)));
+        assert!(
+            !path.exists(),
+            "flush precedes the checkpoint write; a failed flush must leave nothing on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_checkpoint_records_reached_index_after_flushing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let mut writer = test_writer(&path, 1);
+        let mut sink = FlushCountingSink::default();
+        writer
+            .maybe_checkpoint(&mut sink, 5)
+            .await
+            .expect("checkpoint");
+        assert_eq!(sink.flushes, 1, "the sink is flushed once at the boundary");
+        let cp = Checkpoint::load(&path).expect("load");
+        assert_eq!(cp.highest_flushed_index, 4, "K is next_expected - 1");
+        assert_eq!(cp.scan_id, "01J000000000000000000000AA");
+        assert_eq!(cp.resume_fingerprint, "sha256:deadbeef");
+        assert_eq!(cp.dns_pins.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn maybe_checkpoint_is_a_noop_below_the_interval() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let mut writer = test_writer(&path, 5);
+        let mut sink = FlushCountingSink::default();
+        for n in 1..=4 {
+            writer.maybe_checkpoint(&mut sink, n).await.expect("noop");
+        }
+        assert_eq!(sink.flushes, 0, "no flush below the cadence");
+        assert!(!path.exists(), "no checkpoint below the cadence");
+        writer
+            .maybe_checkpoint(&mut sink, 5)
+            .await
+            .expect("boundary");
+        assert_eq!(
+            Checkpoint::load(&path).expect("load").highest_flushed_index,
+            4
+        );
+        writer
+            .maybe_checkpoint(&mut sink, 6)
+            .await
+            .expect("still noop");
+        assert_eq!(sink.flushes, 1, "6 is below the next boundary of 10");
+    }
+
+    #[test]
+    fn delete_removes_the_checkpoint_and_is_ok_when_already_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let writer = test_writer(&path, 1);
+        writer.write_at(7).expect("write");
+        assert!(path.exists());
+        writer.delete().expect("delete");
+        assert!(!path.exists());
+        writer
+            .delete()
+            .expect("delete on a missing file is a no-op");
+    }
+
+    #[test]
+    fn checkpoint_preflight_refuses_identity_fuser() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(Some(identity_over(direct())), Vec::new(), Some(file_sink()));
+        assert!(matches!(
+            checkpoint_preflight(&s, &path),
+            Err(ResumeError::IdentityFuserNotResumable)
+        ));
+    }
+
+    #[test]
+    fn checkpoint_preflight_refuses_non_durable_sink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(None, Vec::new(), Some(SinkConfig::Stdout));
+        assert!(matches!(
+            checkpoint_preflight(&s, &path),
+            Err(ResumeError::SinkNotResumable { .. })
+        ));
+    }
+
+    #[cfg(feature = "gnmi")]
+    #[test]
+    fn checkpoint_preflight_refuses_second_stream_prober() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(Some(*direct()), vec![gnmi_prober(false)], Some(file_sink()));
+        assert!(matches!(
+            checkpoint_preflight(&s, &path),
+            Err(ResumeError::SecondStreamProberNotResumable { kind: "gnmi" })
+        ));
+    }
+
+    #[test]
+    fn checkpoint_preflight_allows_eligible_scenario_on_a_fresh_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        checkpoint_preflight(&s, &path).expect("eligible scenario on a fresh path proceeds");
+    }
+
+    #[test]
+    fn checkpoint_preflight_refuses_to_clobber_an_existing_valid_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        sample_checkpoint().write(&path).expect("seed checkpoint");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        match checkpoint_preflight(&s, &path) {
+            Err(ResumeError::CheckpointExists { path: p }) => assert_eq!(p, path),
+            other => panic!("expected CheckpointExists, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn checkpoint_preflight_refuses_to_clobber_a_corrupt_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        std::fs::write(&path, b"not a checkpoint").expect("seed garbage");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        assert!(matches!(
+            checkpoint_preflight(&s, &path),
+            Err(ResumeError::CorruptCheckpoint { .. })
+        ));
+    }
+
+    #[test]
+    fn checkpoint_writer_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CheckpointWriter>();
     }
 }

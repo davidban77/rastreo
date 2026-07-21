@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::Instrument;
 
+use crate::checkpoint::{resume_fingerprint, CheckpointConfig, CheckpointWriter};
 use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
 use crate::collection_profile::CollectionProfileAssembler;
 use crate::config::DiscoverScenarioConfig;
@@ -132,7 +133,7 @@ pub async fn run_discovery_with_components(
     sink: Box<dyn Sink>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (_tx, rx) = watch::channel(false);
-    run_discovery_core(scenario, resolver, sink, rx, None).await
+    run_discovery_core(scenario, resolver, sink, rx, None, None).await
 }
 
 /// Same as [`run_discovery_with_components`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
@@ -143,7 +144,7 @@ pub async fn run_discovery_with_components_with_progress(
     progress: watch::Sender<DiscoveryProgress>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (_tx, rx) = watch::channel(false);
-    run_discovery_core(scenario, resolver, sink, rx, Some(progress)).await
+    run_discovery_core(scenario, resolver, sink, rx, Some(progress), None).await
 }
 
 /// Same as [`run_discovery`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
@@ -152,7 +153,7 @@ pub async fn run_discovery_cancellable(
     cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(scenario, resolver, sink, cancel, None).await
+    run_discovery_core(scenario, resolver, sink, cancel, None, None).await
 }
 
 /// Same as [`run_discovery_cancellable`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
@@ -162,7 +163,24 @@ pub async fn run_discovery_cancellable_with_progress(
     progress: watch::Sender<DiscoveryProgress>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(scenario, resolver, sink, cancel, Some(progress)).await
+    run_discovery_core(scenario, resolver, sink, cancel, Some(progress), None).await
+}
+
+/// Same as [`run_discovery_cancellable_with_progress`], plus optional resume checkpointing. When
+/// `checkpoint` is set, the scenario is first vetted with [`checkpoint_preflight`] — an ineligible
+/// scenario or an occupied checkpoint path refuses the scan before any component is built — and the
+/// scan then writes a resume checkpoint at the configured target-count cadence.
+pub async fn run_discovery_cancellable_with_progress_and_checkpoint(
+    scenario: &DiscoverScenarioConfig,
+    cancel: watch::Receiver<bool>,
+    progress: watch::Sender<DiscoveryProgress>,
+    checkpoint: Option<CheckpointConfig>,
+) -> Result<DiscoverySummary, RastreoError> {
+    if let Some(config) = &checkpoint {
+        crate::checkpoint::checkpoint_preflight(scenario, &config.path)?;
+    }
+    let (resolver, sink) = default_components(scenario).await?;
+    run_discovery_core(scenario, resolver, sink, cancel, Some(progress), checkpoint).await
 }
 
 async fn default_components(
@@ -181,7 +199,7 @@ pub async fn run_discovery_with_components_cancellable(
     sink: Box<dyn Sink>,
     cancel: watch::Receiver<bool>,
 ) -> Result<DiscoverySummary, RastreoError> {
-    run_discovery_core(scenario, resolver, sink, cancel, None).await
+    run_discovery_core(scenario, resolver, sink, cancel, None, None).await
 }
 
 async fn run_discovery_core(
@@ -190,6 +208,7 @@ async fn run_discovery_core(
     mut sink: Box<dyn Sink>,
     cancel: watch::Receiver<bool>,
     progress: Option<watch::Sender<DiscoveryProgress>>,
+    checkpoint: Option<CheckpointConfig>,
 ) -> Result<DiscoverySummary, RastreoError> {
     scenario.base.ensure_no_retired_fields()?;
     scenario.base.ensure_retries_within_bound()?;
@@ -256,6 +275,16 @@ async fn run_discovery_core(
         probers.push(Arc::from(create_prober(prober_config)?));
     }
 
+    // Built before `into_stream` consumes the plan: the DNS pins a resume replays are read off it here.
+    let checkpoint_writer = checkpoint.map(|config| {
+        CheckpointWriter::new(
+            config,
+            &scan_metadata,
+            resume_fingerprint(scenario),
+            plan.dns_pins(),
+        )
+    });
+
     let reorder_peak = AtomicUsize::new(0);
     stream_discovery(
         &scheduler,
@@ -273,6 +302,7 @@ async fn run_discovery_core(
         &reorder_peak,
         &scan_span,
         progress.as_ref(),
+        checkpoint_writer,
     )
     .await
 }
@@ -401,6 +431,8 @@ async fn stream_discovery(
     scan_span: &tracing::Span,
     // watch, not mpsc: a progress consumer wants the latest snapshot, never a backlog.
     progress: Option<&watch::Sender<DiscoveryProgress>>,
+    // None = no checkpointing, zero overhead on the hot path.
+    mut checkpoint: Option<CheckpointWriter>,
 ) -> Result<DiscoverySummary, RastreoError> {
     let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
     let sink_type = sink.kind();
@@ -473,6 +505,15 @@ async fn stream_discovery(
                     next_expected += 1;
                     targets_completed += 1;
                     publish(targets_completed, records_emitted, acc.probe_attempts);
+                    // Flush-then-checkpoint at the cadence; a set emit_err froze the flushed prefix,
+                    // so stop checkpointing and leave the last good checkpoint in place.
+                    if emit_err.is_none() {
+                        if let Some(writer) = checkpoint.as_mut() {
+                            if let Err(e) = writer.maybe_checkpoint(sink, next_expected).await {
+                                emit_err = Some(e);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -574,6 +615,15 @@ async fn stream_discovery(
         tracing::info!(records_emitted, "discovery cancelled; sink closed");
     }
 
+    // Finalize on a clean drain only: a mid-scan sink error (emit or flush) or a close failure leaves
+    // the last good checkpoint untouched. A completed scan deletes it (nothing to resume); a cancelled
+    // scan records a final checkpoint over the full flushed prefix that close() just made durable.
+    let checkpoint_err = if emit_err.is_none() && close_err.is_none() {
+        finalize_checkpoint(checkpoint.as_ref(), acc.cancelled, next_expected).err()
+    } else {
+        None
+    };
+
     let dlq_records_by_type_and_class = sink.dlq_records_by_type_and_class();
     let dlq_records = dlq_records_by_type_and_class
         .iter()
@@ -584,6 +634,9 @@ async fn stream_discovery(
         return Err(e);
     }
     if let Some(e) = close_err {
+        return Err(e);
+    }
+    if let Some(e) = checkpoint_err {
         return Err(e);
     }
 
@@ -776,6 +829,26 @@ async fn finish_discovery_ref(
 
 fn stamp_scan_metadata(record: &mut DeviceRecord, scan_metadata: &Arc<ScanMetadata>) {
     record.scan_metadata = Arc::clone(scan_metadata);
+}
+
+fn finalize_checkpoint(
+    writer: Option<&CheckpointWriter>,
+    cancelled: bool,
+    next_expected: usize,
+) -> Result<(), RastreoError> {
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    if cancelled {
+        // next_expected == 0: no target finished, and no periodic checkpoint was ever written, so
+        // there is nothing durable to resume from — leave the path empty.
+        if next_expected > 0 {
+            writer.write_at(next_expected - 1)?;
+        }
+    } else {
+        writer.delete()?;
+    }
+    Ok(())
 }
 
 // The mitigation for the dropped cross-target dedup: overlapping specs yield duplicate probes/records,
@@ -2595,6 +2668,7 @@ mod tests {
             &peak,
             &scan_span,
             None,
+            None,
         )
         .await
         .expect("stream summary");
@@ -2804,6 +2878,7 @@ mod tests {
                 &peak,
                 &scan_span,
                 None,
+                None,
             )
             .await;
             (result, handle.ndjson_lines())
@@ -2876,6 +2951,7 @@ mod tests {
                 start,
                 peak,
                 &scan_span,
+                None,
                 None,
             )
             .await
@@ -3764,5 +3840,244 @@ mod tests {
                 "with {TARGETS} targets * {PORTS} ports the shared budget should saturate to {CAP}"
             );
         }
+    }
+
+    struct FixedIpsResolver {
+        ips: Vec<IpAddr>,
+    }
+
+    #[async_trait::async_trait]
+    impl Resolver for FixedIpsResolver {
+        async fn resolve(
+            &self,
+            target: &Target,
+        ) -> Result<Vec<crate::model::ResolvedTarget>, RastreoError> {
+            let now = std::time::SystemTime::now();
+            Ok(self
+                .ips
+                .iter()
+                .map(|&ip| crate::model::ResolvedTarget {
+                    ip,
+                    original: target.clone(),
+                    resolved_at: now,
+                })
+                .collect())
+        }
+    }
+
+    // Loads and stashes the on-disk checkpoint after each write, so a completing scan's periodic
+    // checkpoints stay observable even though the final one is deleted.
+    struct CheckpointObservingSink {
+        delegate: crate::sink::MemorySink,
+        checkpoint_path: std::path::PathBuf,
+        observed: Arc<std::sync::Mutex<Vec<crate::checkpoint::Checkpoint>>>,
+    }
+
+    impl CheckpointObservingSink {
+        fn capture(&self) {
+            if let Ok(cp) = crate::checkpoint::Checkpoint::load(&self.checkpoint_path) {
+                self.observed.lock().expect("lock").push(cp);
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sink::Sink for CheckpointObservingSink {
+        async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+            self.delegate.write(data).await?;
+            self.capture();
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            self.delegate.flush().await
+        }
+    }
+
+    fn dns_scenario(port: u16, max_concurrent: u32, timeout_ms: u64) -> DiscoverScenarioConfig {
+        DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                timeout_ms: Some(timeout_ms),
+                max_concurrent: Some(max_concurrent),
+                sink: Some(crate::sink::SinkConfig::Memory),
+                ..Default::default()
+            },
+            targets: vec![Target::DnsName("hosts.lab".to_string())],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpointing_scan_writes_advancing_checkpoints_and_deletes_on_completion() {
+        let port = open_loopback_port().await;
+        let scenario = dns_scenario(port, 2, 500);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink: Box<dyn Sink> = Box::new(CheckpointObservingSink {
+            delegate: mem,
+            checkpoint_path: path.clone(),
+            observed: Arc::clone(&observed),
+        });
+
+        let resolver: Arc<dyn Resolver> = Arc::new(FixedIpsResolver {
+            ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST); 12],
+        });
+        let (_tx, rx) = watch::channel(false);
+        let config = CheckpointConfig {
+            path: path.clone(),
+            interval: 5,
+        };
+
+        let summary = run_discovery_core(&scenario, resolver, sink, rx, None, Some(config))
+            .await
+            .expect("checkpointing run");
+
+        assert_eq!(
+            summary.records_emitted, 12,
+            "all 12 loopback probes reachable"
+        );
+        assert!(!summary.cancelled);
+        assert!(!path.exists(), "a completed scan deletes its checkpoint");
+
+        let observed = observed.lock().expect("lock");
+        assert!(
+            !observed.is_empty(),
+            "periodic checkpoints must have been written mid-scan"
+        );
+
+        let indices: Vec<usize> = observed.iter().map(|c| c.highest_flushed_index).collect();
+        assert!(
+            indices.windows(2).all(|w| w[0] <= w[1]),
+            "highest_flushed_index never regresses: {indices:?}"
+        );
+        assert_eq!(
+            *indices.iter().max().expect("some observed"),
+            9,
+            "last boundary at next_expected=10 records K=9"
+        );
+        assert!(
+            indices.contains(&4),
+            "first boundary at next_expected=5 records K=4"
+        );
+
+        let expected_fingerprint = crate::checkpoint::resume_fingerprint(&scenario);
+        let lines = handle.ndjson_lines();
+        let record: DeviceRecord = serde_json::from_str(&lines[0]).expect("parse record");
+        let scan_id = record.scan_metadata.scan_id.clone();
+        for cp in observed.iter() {
+            assert_eq!(
+                cp.scan_id, scan_id,
+                "checkpoint scan_id matches emitted records"
+            );
+            assert_eq!(cp.resume_fingerprint, expected_fingerprint);
+            assert_eq!(cp.dns_pins.len(), 1);
+            assert_eq!(cp.dns_pins[0].0, Target::DnsName("hosts.lab".to_string()));
+            assert_eq!(cp.dns_pins[0].1, vec![IpAddr::V4(Ipv4Addr::LOCALHOST); 12]);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_checkpointing_scan_leaves_a_final_checkpoint() {
+        let port = open_loopback_port().await;
+        let scenario = dns_scenario(port, 4, 400);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+
+        let sink: Box<dyn Sink> = Box::new(crate::sink::MemorySink::new());
+        // Loopback completes instantly; the three TEST-NET-2 addresses stay in flight past the 50ms
+        // cancel, so the scan is still running when it is cancelled — a partial, resumable prefix.
+        let resolver: Arc<dyn Resolver> = Arc::new(FixedIpsResolver {
+            ips: vec![
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+                IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3)),
+            ],
+        });
+
+        let (tx, rx) = watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = tx.send(true);
+        });
+
+        let config = CheckpointConfig {
+            path: path.clone(),
+            interval: 1000,
+        };
+        let summary = run_discovery_core(&scenario, resolver, sink, rx, None, Some(config))
+            .await
+            .expect("cancelled run returns a summary");
+
+        assert!(summary.cancelled, "cancel signaled mid-scan");
+        assert!(
+            summary.records_emitted >= 1,
+            "the reachable loopback target emitted a record"
+        );
+        assert!(
+            path.exists(),
+            "a cancelled scan leaves a final checkpoint to resume from"
+        );
+        let cp = crate::checkpoint::Checkpoint::load(&path).expect("load final checkpoint");
+        assert!(
+            cp.highest_flushed_index < summary.targets_resolved,
+            "the final checkpoint records a partial prefix, not the whole scan"
+        );
+        assert_eq!(cp.dns_pins.len(), 1);
+        assert_eq!(cp.dns_pins[0].1.len(), 4);
+        assert_eq!(
+            cp.resume_fingerprint,
+            crate::checkpoint::resume_fingerprint(&scenario)
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_entry_refuses_ineligible_scenario_before_probing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                fuser: Some(FuserConfig::Identity {
+                    identity_hints: crate::fuser::IdentityHints::default(),
+                    inner: Box::new(FuserConfig::Direct {
+                        include_unreachable: None,
+                        confidence_baseline: None,
+                        confidence_per_signal: None,
+                    }),
+                }),
+                sink: Some(crate::sink::SinkConfig::File {
+                    path: dir.path().join("out.ndjson"),
+                }),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![9] }],
+        };
+
+        let (progress_tx, _progress_rx) = watch::channel(DiscoveryProgress::default());
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let config = CheckpointConfig {
+            path: path.clone(),
+            interval: 5,
+        };
+
+        let err = run_discovery_cancellable_with_progress_and_checkpoint(
+            &scenario,
+            cancel_rx,
+            progress_tx,
+            Some(config),
+        )
+        .await
+        .expect_err("an identity-fuser scenario is refused pre-flight");
+        assert!(matches!(
+            err,
+            RastreoError::Resume(crate::error::ResumeError::IdentityFuserNotResumable)
+        ));
+        assert!(!path.exists(), "a refused scan writes no checkpoint");
     }
 }
