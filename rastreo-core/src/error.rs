@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -24,6 +25,9 @@ pub enum RastreoError {
 
     #[error("classifier error: {0}")]
     Classifier(#[from] ClassifierError),
+
+    #[error("resume error: {0}")]
+    Resume(#[from] ResumeError),
 }
 
 impl RastreoError {
@@ -148,6 +152,49 @@ pub enum ClassifierError {
     },
     #[error("invalid role rule: {0}")]
     InvalidRoleRule(String),
+}
+
+/// Why a scan cannot be resumed from a checkpoint, or why an on-disk checkpoint was rejected.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ResumeError {
+    #[error(
+        "scenario is not resume-safe: the identity fuser correlates records across the whole scan, which cannot be reconstructed from a partial checkpoint prefix"
+    )]
+    IdentityFuserNotResumable,
+
+    #[error(
+        "scenario is not resume-safe: the {kind} prober feeds a second stream that cannot be replayed from a checkpoint"
+    )]
+    SecondStreamProberNotResumable { kind: &'static str },
+
+    #[error(
+        "scenario is not resume-safe: the {sink} sink has no durable append destination to resume into"
+    )]
+    SinkNotResumable { sink: String },
+
+    #[error(
+        "checkpoint does not match the current scenario: the target sequence or append destination changed, so resuming would produce a different scan or append to the wrong destination"
+    )]
+    FingerprintMismatch,
+
+    #[error(
+        "checkpoint at {} is unreadable or corrupt; delete it to restart the scan from zero",
+        .path.display()
+    )]
+    CorruptCheckpoint { path: PathBuf },
+
+    #[error(
+        "checkpoint has version {found}, but this build understands version {expected}; delete the checkpoint file to restart the scan from zero"
+    )]
+    UnknownVersion { found: u32, expected: u32 },
+
+    #[error("checkpoint could not be written to {}: {source}", .path.display())]
+    Persist {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
@@ -331,6 +378,46 @@ mod tests {
         assert_send_sync::<RuntimeError>();
         assert_send_sync::<ClassifierError>();
         assert_send_sync::<SinkError>();
+        assert_send_sync::<ResumeError>();
+    }
+
+    #[test]
+    fn resume_error_converts_via_from() {
+        let r = ResumeError::IdentityFuserNotResumable;
+        let err: RastreoError = r.into();
+        assert!(matches!(err, RastreoError::Resume(_)));
+    }
+
+    #[test]
+    fn resume_error_display_flows_through_umbrella() {
+        let err =
+            RastreoError::Resume(ResumeError::SecondStreamProberNotResumable { kind: "gnmi" });
+        let msg = format!("{err}");
+        assert!(msg.contains("resume error"));
+        assert!(msg.contains("gnmi"));
+    }
+
+    #[test]
+    fn resume_unknown_version_display_names_both_versions() {
+        let err = ResumeError::UnknownVersion {
+            found: 7,
+            expected: 1,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains('7') && msg.contains('1'), "msg was: {msg}");
+    }
+
+    #[test]
+    fn resume_corrupt_checkpoint_display_names_the_path() {
+        let err = ResumeError::CorruptCheckpoint {
+            path: PathBuf::from("/var/lib/rastreo/scan.checkpoint"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("/var/lib/rastreo/scan.checkpoint"),
+            "msg: {msg}"
+        );
+        assert!(msg.contains("restart"), "msg: {msg}");
     }
 
     fn bad_regex_error() -> regex::Error {

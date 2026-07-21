@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod classifier;
 pub mod collection_profile;
 pub mod config;
@@ -15,6 +16,10 @@ pub mod scheduler;
 pub mod sink;
 pub mod topology;
 
+pub use checkpoint::{
+    fuser_supports_resume, probers_support_resume, resume_eligibility, resume_fingerprint,
+    Checkpoint, CHECKPOINT_VERSION,
+};
 pub use classifier::{
     create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
     PlatformSignal, RoleRule, RulesClassifier,
@@ -23,7 +28,7 @@ pub use collection_profile::CollectionProfileAssembler;
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{
     ClassifierError, ConfigError, EncoderError, ProbeError, ProbeErrorKind, RastreoError,
-    ResolverError, RuntimeError,
+    ResolverError, ResumeError, RuntimeError,
 };
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
 pub use hints::hint_for_error_kind;
