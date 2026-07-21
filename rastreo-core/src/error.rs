@@ -179,6 +179,12 @@ pub enum ResumeError {
     FingerprintMismatch,
 
     #[error(
+        "no checkpoint to resume at {}; --resume requires an existing checkpoint at this path",
+        .path.display()
+    )]
+    NoCheckpointToResume { path: PathBuf },
+
+    #[error(
         "checkpoint at {} is unreadable or corrupt; delete it to restart the scan from zero",
         .path.display()
     )]
