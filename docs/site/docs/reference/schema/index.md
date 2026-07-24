@@ -72,15 +72,17 @@ For consumers running against a lab or air-gapped environment, the schema files 
 
 ## JSON Schema dialect
 
-All five published schemas use JSON Schema **draft 2020-12**:
+All published schemas use JSON Schema **draft 2020-12**:
 
 - `device-record-v1.json`
+- `link-record-v1.json`
+- `collection-profile-record-v1.json`
 - `scan-metadata-v1.json`
 - `scenario-v1.json`
 - `discovery-plan-v1.json`
 - `dlq-envelope-v1.json`
 
-If you previously validated against the draft-07 versions, the four schemas generated from the Rust types differ in the schema text in four ways:
+If you previously validated against the draft-07 versions, the schemas generated from the Rust types differ in the schema text in four ways:
 
 - The `$schema` URI is now `https://json-schema.org/draft/2020-12/schema`.
 - Reusable definitions live under `$defs` instead of `definitions`. Internal references use `#/$defs/X` instead of `#/definitions/X`.
@@ -117,11 +119,14 @@ The `schema_id` URL is the discovery mechanism today; a future release may add o
 
 ```
 schemas/
-├── asyncapi.yaml            # AsyncAPI 3.0 description of the streaming surface
-├── device-record-v1.json    # JSON Schema for DeviceRecord
-├── discovery-plan-v1.json   # JSON Schema for DiscoveryPlan
-├── scan-metadata-v1.json    # JSON Schema for ScanMetadata
-└── scenario-v1.json         # JSON Schema for ScenarioFile (YAML scenario input)
+├── asyncapi.yaml                      # AsyncAPI 3.0 description of the streaming surface
+├── collection-profile-record-v1.json # JSON Schema for CollectionProfileRecord
+├── device-record-v1.json             # JSON Schema for DeviceRecord
+├── discovery-plan-v1.json            # JSON Schema for DiscoveryPlan
+├── dlq-envelope-v1.json              # JSON Schema for DlqEnvelope (hand-written)
+├── link-record-v1.json               # JSON Schema for LinkRecord
+├── scan-metadata-v1.json             # JSON Schema for ScanMetadata
+└── scenario-v1.json                  # JSON Schema for ScenarioFile (YAML scenario input)
 ```
 
 Regenerate everything (JSON Schemas + this doc section) locally with `task schema:all`. The CI drift-check job re-runs the same command and fails if the committed files diverge from what the Rust type derives produce.

@@ -62,7 +62,7 @@ Each NDJSON line is one `DeviceRecord`. The fields you will see on a TCP-only sc
 | `platform` | Platform fingerprint. `null` until a fingerprinting prober populates it. |
 | `role` | Device role from the classifier. `null` until a role classifier runs. |
 | `confidence` | Fuser confidence score in the range `0.0` to `1.0`. With the default `DirectFuser`, a single observed signal yields `0.2`. |
-| `last_seen` | When the last probe touched this device, as seconds and nanoseconds since the Unix epoch. |
+| `last_seen` | When the last probe touched this device, as an RFC 3339 UTC timestamp. |
 | `signals` | Observed signals. For a TCP-connect probe, each open port becomes an `OpenPort` entry. |
 
 ## Pipe into jq

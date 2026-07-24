@@ -22,10 +22,11 @@ The verbosity ladder is: no flag = `info`, `-v` = `debug`, `-vv` or more = `trac
 
 ## rastreo discover
 
-Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` and `--port` are required; everything else has a default.
+Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` and `--port` are required unless `--file` is set; everything else has a default.
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
+| `-f`, `--file <PATH>` | path | — | Load a YAML scenario file instead of building the scan from flags. Accepts a filesystem path, or an `@name` [catalog](../discover/catalog.md) reference resolved via the catalog search path. Mutually exclusive with `--target` / `--port`. Requires the `config` build feature (on by default). See [Discover · CLI](../discover/cli.md#yaml-driven-mode). |
 | `--target <TARGET>...` | string | — (required) | Target to probe. Accepts a single IP, a CIDR block (`10.0.0.0/24`), an IP range (`10.0.0.1-10.0.0.5`), or a DNS name. Repeatable; multiple values per flag accepted. See [Targets](../discover/targets.md). |
 | `-p`, `--port <PORT>` | u16 | — (required) | TCP port to probe. Repeatable; comma-separated values accepted (`-p 22,80,443`). |
 | `--sink <SINK>` | enum | `stdout` | Output destination. Values: `stdout`, `file`. `kafka` is available only when the binary is built with the `kafka` Cargo feature. See [Sinks](../discover/sinks.md). |
