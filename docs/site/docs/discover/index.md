@@ -4,9 +4,9 @@ description: The rastreo discover CLI subcommand, the four target forms it accep
 
 # Discover
 
-This section is the user-level reference for running a discovery scan. It covers the `rastreo discover` CLI subcommand — every flag it accepts, the two modes it supports (flag-driven and YAML scenario files), the four target forms (IP, CIDR, range, DNS), the output sinks records can be written to, and the enrichment fusers that populate vendor information on the records.
+This section is the user-level reference for running a discovery scan. It covers the `rastreo discover` CLI subcommand — every flag it accepts, the two modes it supports (flag-driven and YAML [scenario](../reference/glossary.md#scenario) files), the four target forms (IP, CIDR, range, DNS), the output [sinks](../reference/glossary.md#sink) records can be written to, and the enrichment [fusers](../reference/glossary.md#fuser) that populate vendor information on the records.
 
-Topics covered here include the full CLI flag reference, the YAML scenario file that unlocks every prober from the CLI, the target syntax with worked examples, the three output sinks rastreo can emit to today (stdout, file, Kafka), and OUI vendor enrichment from MAC addresses.
+Topics covered here include the full CLI flag reference, the YAML scenario file that unlocks every [prober](../reference/glossary.md#prober) from the CLI, the target syntax with worked examples, the three output sinks rastreo can emit to today (stdout, file, Kafka), and OUI vendor enrichment from MAC addresses.
 
 ## Pages in this section
 
