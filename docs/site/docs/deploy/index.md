@@ -13,3 +13,7 @@ Topics covered here include CLI invocation patterns, the `rastreo-server` REST A
 - [Docker](docker.md) — build and run the bundled multi-arch image, and walk through the local compose stack.
 - [Kubernetes](kubernetes.md) — install `rastreo-server` on a cluster with the bundled Helm chart.
 - [rastreo-server](server.md) — the HTTP API: routes, request and response shape, and configuration flags.
+
+## See also
+
+- [Glossary](../reference/glossary.md) — rastreo and networking terms used across the docs.

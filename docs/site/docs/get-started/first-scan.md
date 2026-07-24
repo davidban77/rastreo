@@ -57,13 +57,13 @@ Each NDJSON line is one `DeviceRecord`. The fields you will see on a TCP-only sc
 |---|---|
 | `identity_key` | Stable dedup key. For IP targets, this is `ip:<address>`. |
 | `mgmt_ip` | Management IP if known. For a TCP-connect probe against an IP target, this is the target address. |
-| `mac` | MAC address. `null` until an ARP-style prober populates it. |
+| `mac` | MAC address. `null` until an ARP-style [prober](../reference/glossary.md#prober) populates it. |
 | `manufacturer` | OUI vendor name. `null` until MAC enrichment is available. |
 | `platform` | Platform fingerprint. `null` until a fingerprinting prober populates it. |
 | `role` | Device role from the classifier. `null` until a role classifier runs. |
-| `confidence` | Fuser confidence score in the range `0.0` to `1.0`. With the default `DirectFuser`, a single observed signal yields `0.2`. |
+| `confidence` | [Fuser](../reference/glossary.md#fuser) confidence score in the range `0.0` to `1.0`. With the default `DirectFuser`, a single observed signal yields `0.2`. |
 | `last_seen` | When the last probe touched this device, as an RFC 3339 UTC timestamp. |
-| `signals` | Observed signals. For a TCP-connect probe, each open port becomes an `OpenPort` entry. |
+| `signals` | Observed [signals](../reference/glossary.md#signal). For a TCP-connect probe, each open port becomes an `OpenPort` entry. |
 
 ## Pipe into jq
 
@@ -78,3 +78,4 @@ rastreo discover --target 1.1.1.1 --port 443 | jq -r '.signals[].OpenPort'
 
 - [CLI](../discover/cli.md) — every flag `rastreo discover` accepts, with examples.
 - [Sinks](../discover/sinks.md) — send records to a file or a Kafka topic instead of stdout.
+- [Glossary](../reference/glossary.md) — the terms on this page, defined in one place.
