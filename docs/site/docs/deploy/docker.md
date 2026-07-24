@@ -1,10 +1,10 @@
 ---
-description: Build and run rastreo with Docker — multi-arch musl-static image, the bundled compose stack (Kafka + nginx targets + rastreo-server), and how to run the CLI inside the image.
+description: Build and run rastreo with Docker — multi-arch musl-static image, the bundled compose stack (Kafka, NATS, nginx/SSH/TLS targets, and rastreo-server), and how to run the CLI inside the image.
 ---
 
 # Docker
 
-The repository ships a multi-arch `Dockerfile` that builds static musl binaries for `linux/amd64` and `linux/arm64`. The image bundles both `rastreo` and `rastreo-server` in a `FROM scratch` runtime layer, runs as non-root (UID 65532), and weighs about 4 MB. The repository also ships a `docker-compose.yml` for local development that brings up Kafka, three nginx target hosts, and `rastreo-server` on a private bridge network.
+The repository ships a multi-arch `Dockerfile` that builds static musl binaries for `linux/amd64` and `linux/arm64`. The image bundles both `rastreo` and `rastreo-server` in a `FROM scratch` runtime layer, runs as non-root (UID 65532), and weighs about 4 MB. The repository also ships a `docker-compose.yml` for local development. It brings up Kafka, NATS, `rastreo-server`, and a set of probe target hosts (nginx, SSH, and TLS) on a private bridge network.
 
 ## Build
 
@@ -20,10 +20,16 @@ For a multi-arch build, use `docker buildx` and pass the platforms you want. The
 docker buildx build --platform linux/amd64,linux/arm64 -t rastreo .
 ```
 
-The default build does not include the `kafka` Cargo feature, so the produced image's `rastreo` binary will reject `--sink kafka`. To enable Kafka, edit the Dockerfile and append `--features kafka` to the final `cargo build` invocation, or maintain a Dockerfile overlay for the build configuration you want.
+The image builds with the full feature set — `kafka`, `nats`, `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `gnmi`, `lldp`, and `oui`. Both binaries accept every sink and prober with no rebuild. `--sink kafka` and `--sink nats` work in the published image with no extra steps.
 
-!!! warning "Kafka requires the `kafka` build feature"
-    The image does not enable the `kafka` feature by default. To produce an image whose `rastreo` CLI accepts `--sink kafka`, change the `cargo build --release --target "${RUST_TARGET}" -p rastreo -p rastreo-server` line in the Dockerfile to add `--features kafka`. The same applies to `cargo install --path rastreo --features kafka` outside Docker.
+!!! tip "Changing the feature set"
+    The Dockerfile takes a `FEATURES` build argument that defaults to the full set above. Override it to add or drop features, for example to build the OpenTelemetry variant:
+
+    ```bash
+    docker build \
+      --build-arg FEATURES=kafka,nats,http,snmp,arp,ndp,oui,ssh,icmp,tls,gnmi,lldp,otlp \
+      -t rastreo .
+    ```
 
 ## Run the CLI
 
@@ -46,17 +52,20 @@ curl http://localhost:8080/healthz
 
 ## The compose stack
 
-`docker compose up -d` brings up the full local development stack. The stack is a single bridge network (`rastreo-net`, subnet `10.50.0.0/24`) with four services.
+`docker compose up -d` brings up the full local development stack. The stack is a single bridge network (`rastreo-net`, subnet `10.50.0.0/24`) with eight services.
 
 | Service          | Address                | Ports               | Role                                                    |
 |------------------|------------------------|---------------------|---------------------------------------------------------|
-| `kafka`          | `10.50.0.2`            | `9092` (host)       | Single-node Kafka (`apache/kafka:4.2.0`). Dual listener — see below. |
+| `kafka`          | `10.50.0.2`            | `9092` (host)       | Single-node Kafka (`apache/kafka:4.3.1`). Dual listener — see below. |
+| `nats`           | `10.50.0.4`            | `4222`, `8222` (host) | Single-node NATS with JetStream (`nats:2.14-alpine`). `4222` is the client port; `8222` serves the monitoring endpoint. |
 | `rastreo-server` | `10.50.0.3`            | `8080` (host)       | The HTTP control plane, built from this repo's Dockerfile. |
 | `target-1`       | `10.50.0.10`           | `80` (internal)     | `nginx:1.31-alpine`. HTTP listener for probe experiments. |
 | `target-2`       | `10.50.0.11`           | `80` (internal)     | `nginx:1.31-alpine`. HTTP listener for probe experiments. |
 | `target-3`       | `10.50.0.12`           | `80` (internal)     | `nginx:1.31-alpine`. HTTP listener for probe experiments. |
+| `target-ssh`     | `10.50.0.20`           | `2222` (internal)   | `linuxserver/openssh-server:10.2_p1-r0-ls229`. SSH listener for the `ssh` prober. |
+| `target-tls`     | `10.50.0.30`           | `443` (internal)    | `nginx:1.31-alpine` with a self-signed certificate. HTTPS listener for the `tls` and `https` probers. |
 
-The Kafka broker advertises two listeners: `EXTERNAL://localhost:9092` (reachable from the host) and `INTERNAL://kafka:29092` (reachable from other containers on `rastreo-net`). A CLI running on the host points at `localhost:9092`; a CLI inside a container on `rastreo-net` points at `kafka:29092`. Mixing the two is the most common cause of broker-unreachable failures — see [Troubleshooting](../integrate/troubleshooting.md#kafka-broker-unreachable).
+The Kafka broker advertises two listeners: `EXTERNAL://localhost:9092` (reachable from the host) and `INTERNAL://kafka:29092` (reachable from other containers on `rastreo-net`). A CLI running on the host points at `localhost:9092`; a CLI inside a container on `rastreo-net` points at `kafka:29092`. Mixing the two is the most common cause of broker-unreachable failures — see [Troubleshooting](../integrate/troubleshooting.md#kafka-broker-unreachable). NATS follows the same split: `localhost:4222` from the host, `nats:4222` from inside the network.
 
 ```bash
 docker compose up -d
@@ -65,7 +74,7 @@ curl http://localhost:8080/healthz
 docker compose down -v
 ```
 
-The three nginx target hosts sit on the bridge network and are not exposed on the host. To probe them, run the CLI from inside a container on `rastreo-net`.
+The target hosts sit on the bridge network and are not exposed on the host. To probe them, run the CLI from inside a container on `rastreo-net`.
 
 ```bash
 docker compose exec rastreo-server /rastreo discover --target 10.50.0.10 --port 80

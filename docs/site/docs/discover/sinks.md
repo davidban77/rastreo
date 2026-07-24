@@ -48,7 +48,7 @@ rastreo discover \
   --port 80 \
   --sink kafka \
   --brokers localhost:9092 \
-  --topic rastreo.devices
+  --topic rastreo.discovery.records.v1
 ```
 
 `--sink kafka` requires both `--brokers` and `--topic`; either missing is rejected before any probe runs.
@@ -71,7 +71,7 @@ The wait doubles after each failed attempt and stops growing at `backoff_max_ms`
 sink:
   type: kafka
   brokers: [kafka-0.internal:9092]
-  topic: rastreo.discovery.records
+  topic: rastreo.discovery.records.v1
   retry:
     max_attempts: 5
     backoff_initial_ms: 100
@@ -93,7 +93,7 @@ The Kafka sink can quarantine records the primary topic refused instead of dropp
 sink:
   type: kafka
   brokers: [kafka-0.internal:9092]
-  topic: rastreo.discovery.records
+  topic: rastreo.discovery.records.v1
   dead_letter:
     topic: rastreo.discovery.dlq
     include_error_metadata: true
@@ -103,7 +103,7 @@ DLQ messages default to carrying a small header envelope so downstream consumers
 
 | Header | Value | Encoding |
 |---|---|---|
-| `x-rastreo-source-topic` | Primary topic name (e.g. `rastreo.discovery.records`) | UTF-8 bytes |
+| `x-rastreo-source-topic` | Primary topic name (e.g. `rastreo.discovery.records.v1`) | UTF-8 bytes |
 | `x-rastreo-error-class` | `produce_failure` — the class of a failed Kafka produce | UTF-8 bytes |
 | `x-rastreo-dlq-timestamp` | RFC 3339 UTC timestamp of the DLQ publish | UTF-8 bytes |
 
@@ -131,18 +131,23 @@ The NATS sink publishes `DeviceRecord` events to a NATS JetStream subject. Each 
     cargo install --path rastreo --features nats
     ```
 
-```yaml
-# scenario.yaml
-targets:
-  - 192.0.2.0/24
-probers:
-  - type: tcp_connect
-    ports: [80, 443]
-sink:
-  type: nats
-  servers: ["nats://nats:4222"]
-  subject: rastreo.discovery.records.v1
-  stream: rastreo
+```yaml title="scenario.yaml"
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: nats-scan
+    targets:
+      - Cidr: "192.0.2.0/24"
+    probers:
+      - type: tcp_connect
+        ports: [80, 443]
+    sink:
+      type: nats
+      servers: ["nats://nats:4222"]
+      subject: rastreo.discovery.records.v1
+      stream: rastreo
 ```
 
 ```bash
