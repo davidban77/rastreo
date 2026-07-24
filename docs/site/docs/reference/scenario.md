@@ -331,6 +331,7 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 | `brokers` | array of string | yes | Kafka broker `host:port` list. |
 | `topic` | string | yes | Topic name for the `DeviceRecord` stream. |
 | `links_topic` | string | no | Topic for the `LinkRecord` stream. Defaults to `rastreo.discovery.links.v1`. Used only when an [LLDP prober](../probe/lldp.md) produces links. See [Topology](../discover/topology.md#where-links-are-emitted). |
+| `profiles_topic` | string | no | Topic for the `CollectionProfileRecord` stream. Defaults to `rastreo.discovery.profiles.v1`. Used only when a [gNMI prober](../probe/gnmi.md) produces collection profiles. See [CollectionProfileRecord](schema/collection-profile-record.md). |
 | `flush_mode` | object | no | Defaults to `batched` with a 64 KiB threshold. See below. |
 | `dead_letter` | object | no | Optional quarantine topic for records the primary produce refused. Omit to preserve the pre-existing "return error, retain buffer" behavior on produce failure. |
 | `tls` | object | no | Optional TLS for the broker connection. `verify` defaults to `false`. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
@@ -386,6 +387,7 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
 | `servers` | array of string | yes | NATS server URLs, e.g. `["nats://nats-01:4222"]`. |
 | `subject` | string | yes | Subject to publish the `DeviceRecord` stream to. |
 | `links_subject` | string | no | Subject for the `LinkRecord` stream. Defaults to `rastreo.discovery.links.v1`. Used only when an [LLDP prober](../probe/lldp.md) produces links. See [Topology](../discover/topology.md#where-links-are-emitted). |
+| `profiles_subject` | string | no | Subject for the `CollectionProfileRecord` stream. Defaults to `rastreo.discovery.profiles.v1`. Used only when a [gNMI prober](../probe/gnmi.md) produces collection profiles. See [CollectionProfileRecord](schema/collection-profile-record.md). |
 | `stream` | string | yes | JetStream stream name bound to the subject. |
 | `credentials` | object | no | Auth details. Defaults to anonymous. See below. |
 | `flush_mode` | object | no | Flush mode. Defaults to `per_record`. See below. |
@@ -514,7 +516,7 @@ Longest-prefix wins on lookup: a /36 MA-S allocation takes precedence over a /28
 
 `mib_enrichment` wraps another fuser: it delegates fusion to `inner`, then matches the returned record's SNMP `sysObjectID` against a table and populates `DeviceRecord.model` and `DeviceRecord.product_family`. It also sets `manufacturer` when the record does not already have one. Records without a `SnmpSysObjectId` signal, or whose OID is not in the table, are returned unchanged. `mib_enrichment` never sets `platform` — the classifier owns that field.
 
-Requires the `mib_enrichment` build feature. The bundled table is a small seed; set `data_path` to merge your fleet's OIDs on top of it (your entries win on collision). Lookup is an exact match on the full dotted OID — no prefix matching. See the [Enrichment page](../discover/enrichment.md#mib_enrichment) for the overlay file format and worked examples.
+Requires the `mib_enrichment` build feature, which is not in the default binaries or the published Docker image — so `mib_enrichment` is absent from the published [scenario JSON schema](schema/scenario-config.md), and a default build rejects it. The bundled table is a small seed; set `data_path` to merge your fleet's OIDs on top of it (your entries win on collision). Lookup is an exact match on the full dotted OID — no prefix matching. See the [Enrichment page](../discover/enrichment.md#mib_enrichment) for the overlay file format and worked examples.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -604,6 +606,9 @@ Each `PlatformRule` has:
 | `pattern` | string | yes | Regex pattern. Validated when the classifier is built; a bad pattern is rejected before the scan starts. |
 | `platform` | string | yes | Canonical platform label assigned on match (e.g. `cisco_ios`, `linux`, `nginx`). |
 | `os_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.os_version`. When absent, `os_version` stays `null` even on a platform match. |
+| `ssh_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.ssh_version`. Only meaningful for `signal: ssh_banner`. |
+| `http_server_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_server`. Only meaningful for `signal: http_banner`. |
+| `http_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_version`. Only meaningful for `signal: http_banner`. |
 
 Each `RoleRule` is an internally-tagged object. Two variants exist.
 

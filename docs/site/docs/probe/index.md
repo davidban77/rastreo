@@ -1,5 +1,5 @@
 ---
-description: Reference for each prober. rastreo ships the TCP-connect, HTTP, DNS, reverse DNS, UDP, SNMP, ARP, NDP, SSH, ICMP, TLS, and gNMI probers, each with its own configuration schema, observable signals, and build feature.
+description: Reference for each prober. rastreo ships the TCP-connect, HTTP, DNS, reverse DNS, UDP, SNMP, ARP, NDP, SSH, ICMP, TLS, gNMI, and LLDP probers, each with its own configuration schema, observable signals, and build feature.
 ---
 
 # Probe

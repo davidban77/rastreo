@@ -37,7 +37,7 @@ A target that does not answer is a normal discovery result, so it never raises t
 
 ### probe_kind taxonomy
 
-The `probe_kind` label carries the snake_case name of the probe that produced the row. The taxonomy is closed at the crate boundary — every prober built into rastreo maps to exactly one label. Bounded (11 today): `tcp_connect`, `udp`, `http`, `dns`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `reverse_dns`. Adding a new prober requires updating the enum and its label table in the same change; consumers can query on the label without a hardcoded list.
+The `probe_kind` label carries the snake_case name of the probe that produced the row. The taxonomy is closed at the crate boundary — every prober built into rastreo maps to exactly one label. The full set: `tcp_connect`, `udp`, `http`, `dns`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `reverse_dns`, `gnmi`, `lldp`. Adding a new prober requires updating the enum and its label table in the same change; consumers can query on the label without a hardcoded list.
 
 ### error_class taxonomy
 
@@ -99,7 +99,7 @@ The dashboard has UID `rastreo-server` so bookmarked URLs stay stable across upg
 
 ## Alerts
 
-The chart bundles a `PrometheusRule` template with four packaged alerts. Enable delivery with:
+The chart bundles a `PrometheusRule` template with the packaged alerts listed below. Enable delivery with:
 
 ```yaml
 alerts:

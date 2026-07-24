@@ -73,7 +73,7 @@ rastreo --version
 rastreo discover --help
 ```
 
-`rastreo --version` prints a version line such as `rastreo 0.3.0`. `rastreo discover --help` prints the full flag reference for the discovery subcommand — see [CLI](../discover/cli.md) for the same surface in long form.
+`rastreo --version` prints a version line such as `rastreo 0.8.0`. `rastreo discover --help` prints the full flag reference for the discovery subcommand — see [CLI](../discover/cli.md) for the same surface in long form.
 
 ## See also
 
