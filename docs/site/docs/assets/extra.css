@@ -9,12 +9,65 @@
   text-decoration: underline;
 }
 
-/* Slightly lighter code-fence background in light mode for less visual weight. */
-:root {
+/* Light scheme — vivid brand green header, deeper green for readable body links. */
+[data-md-color-scheme="default"] {
+  /* Deep brand green so white header/nav text meets WCAG AA (5.3:1); the vivid
+     #33a521 lives on in the logo and as the lighter hover shade below. */
+  --md-primary-fg-color: #1f7a1a;
+  --md-primary-fg-color--light: #33a521;
+  --md-primary-fg-color--dark: #17610f;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: hsla(0, 0%, 100%, 0.7);
+  --md-accent-fg-color: #22861d;
+  --md-typeset-a-color: #1f7a1a;
+  /* Lighter code-fence background for less visual weight. */
   --md-code-bg-color: hsla(0, 0%, 96%, 1);
 }
 
-/* Slightly deeper code-fence background in dark mode to separate from page chrome. */
+/* Dark scheme — calm slate chrome, brand green as the accent and link color. */
 [data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #1e2b37;
+  --md-primary-fg-color--light: #2c3e4f;
+  --md-primary-fg-color--dark: #16202a;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: hsla(0, 0%, 100%, 0.7);
+  --md-accent-fg-color: #7ad168;
+  --md-typeset-a-color: #63c74d;
+  /* Deeper code-fence background to separate from page chrome. */
   --md-code-bg-color: hsla(232, 15%, 18%, 1);
+}
+
+/* Primary button — white label on a deep green so it clears WCAG AA on white. */
+[data-md-color-scheme="default"] .md-typeset .md-button--primary {
+  background-color: #1f7a1a;
+  border-color: #1f7a1a;
+}
+
+/* In dark mode, lift the primary button off the slate page with a bright green fill. */
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary {
+  background-color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+  color: #1e2b37;
+}
+
+/* The outline (secondary) button must use a visible color in dark mode, not the slate primary. */
+[data-md-color-scheme="slate"] .md-typeset .md-button:not(.md-button--primary) {
+  color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+/* Landing hero tagline — a real <h1> so Material does not inject a "Home" heading. */
+.md-typeset .rastreo-hero__tagline {
+  max-width: 40rem;
+  margin: 0.4rem auto 1.2rem;
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.5;
+  color: var(--md-default-fg-color);
+  text-align: center;
+}
+
+/* No permalink pilcrow on the hero tagline. */
+.md-typeset .rastreo-hero__tagline .headerlink {
+  display: none;
 }

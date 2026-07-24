@@ -6,7 +6,8 @@ hide:
 ---
 
 <p align="center" markdown>
-  ![rastreo banner](assets/rastreo-banner.png){ width="300" }
+  ![rastreo](assets/rastreo-banner-light.png#only-light){ width="300" }
+  ![rastreo](assets/rastreo-banner-dark.png#only-dark){ width="300" }
 </p>
 
 <p align="center" markdown>
@@ -15,9 +16,9 @@ hide:
   [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-f97316)](https://github.com/davidban77/rastreo/blob/main/LICENSE-MIT)
 </p>
 
-<p align="center" markdown>
-  **Point rastreo at a network. Get back a clean, structured list of every device that answers — and what each one is.**
-</p>
+<h1 class="rastreo-hero__tagline" markdown="span">
+Point rastreo at a network. Get back a clean, structured list of every device that answers — and what each one is.
+</h1>
 
 rastreo scans a range of addresses and finds every device that answers. For each device, it works out:
 
