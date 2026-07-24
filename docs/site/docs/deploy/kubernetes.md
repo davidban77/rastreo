@@ -10,20 +10,38 @@ The repository ships a Helm chart at `helm/rastreo/` that installs `rastreo-serv
 
 The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. The current published chart version is `0.8.0`. <!-- x-release-please-version --> An install with no `--version` pulls the latest published chart. To pin an upgrade intentionally, add `--version` with that version.
 
+The chart is fail-closed: `POST /scans` requires a bearer token, so an install with no token source stops before it creates anything. The production-safe path keeps the token in a `Secret` you manage and points the chart at it.
+
 ```bash
-helm install rastreo oci://ghcr.io/davidban77/charts/rastreo
+kubectl create secret generic rastreo-api-token \
+  --from-literal=api-token="$(openssl rand -hex 32)"
+
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
+  --set auth.existingSecret=rastreo-api-token
 ```
 
-Or install from the checked-out source tree without pulling from the registry:
+For a quick lab install, let the chart generate the `Secret` from an inline token instead.
 
 ```bash
-helm install rastreo ./helm/rastreo
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
+  --set auth.token="$(openssl rand -hex 32)"
 ```
 
-Use `--values myvalues.yaml` to override defaults without forking the chart.
+See [Authentication](#authentication) for all three token options, including how to run the endpoint unauthenticated on a trusted network.
+
+Or install from the checked-out source tree without pulling from the registry. The same token source applies.
 
 ```bash
-helm install rastreo oci://ghcr.io/davidban77/charts/rastreo --values myvalues.yaml
+helm install rastreo ./helm/rastreo \
+  --set auth.existingSecret=rastreo-api-token
+```
+
+Use `--values myvalues.yaml` to override defaults without forking the chart. Set a token source in the file or on the command line.
+
+```bash
+helm install rastreo oci://ghcr.io/davidban77/charts/rastreo \
+  --values myvalues.yaml \
+  --set auth.existingSecret=rastreo-api-token
 ```
 
 ## Key values

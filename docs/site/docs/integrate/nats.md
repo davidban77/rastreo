@@ -18,17 +18,23 @@ In `batched` mode, the sink still publishes one message per record, but it does 
 
 Point rastreo at a NATS server, a subject, and the JetStream stream that binds the subject:
 
-```yaml
-targets:
-  - 10.50.0.0/24
-probers:
-  - type: tcp_connect
-    ports: [22, 80, 443]
-sink:
-  type: nats
-  servers: ["nats://nats:4222"]
-  subject: rastreo.discovery.records.v1
-  stream: rastreo
+```yaml title="scenario.yaml"
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: nats-scan
+    targets:
+      - Cidr: "10.50.0.0/24"
+    probers:
+      - type: tcp_connect
+        ports: [22, 80, 443]
+    sink:
+      type: nats
+      servers: ["nats://nats:4222"]
+      subject: rastreo.discovery.records.v1
+      stream: rastreo
 ```
 
 Run with the `nats` feature enabled:
@@ -139,11 +145,13 @@ Retry covers the synchronous publish only. A JetStream ack rejection is not retr
 
 The JetStream stream that binds the subject must be created out of band. rastreo does not create it — the stream lifetime is typically longer than any single rastreo scan, and stream retention / storage policy is deployment-specific.
 
+Bind the stream to the wildcard subject `rastreo.discovery.>`. One stream then captures every subject a scan uses: the device records on `subject`, plus the topology links that the LLDP prober publishes on a second subject under the same `rastreo.discovery.` prefix. A filter that names only `rastreo.discovery.records.v1` refuses those later publishes — see [Topology links on a second subject](#topology-links-on-a-second-subject) below.
+
 Using the `nats` CLI:
 
 ```
 nats stream add rastreo \
-  --subjects 'rastreo.discovery.records.v1' \
+  --subjects 'rastreo.discovery.>' \
   --storage file \
   --retention limits \
   --max-age 720h \
@@ -185,16 +193,10 @@ asyncio.run(main())
 
 When a scan runs the [LLDP prober](../probe/lldp.md), rastreo discovers links between devices and publishes them as `LinkRecord`s on a **second subject**, separate from the device stream. Device records go to `subject`; link records go to `links_subject`, which defaults to `rastreo.discovery.links.v1`.
 
-!!! warning "The JetStream stream must capture both subjects"
-    A JetStream stream only stores messages on the subjects its filter covers. The [Stream setup](#stream-setup) example binds only the device subject, so link publishes to `rastreo.discovery.links.v1` would be refused at ack time once LLDP data appears. rastreo checks that the stream exists, not that both subjects fall inside its filter, so this failure surfaces mid-scan.
+!!! warning "If you bound the stream to only the device subject"
+    A JetStream stream stores messages only on the subjects its filter covers. The wildcard `rastreo.discovery.>` in [Stream setup](#stream-setup) covers the link subject, so a stream created that way needs no change. A stream bound to only `rastreo.discovery.records.v1` is the failure case: link publishes to `rastreo.discovery.links.v1` are refused at ack time once LLDP data appears. rastreo checks that the stream exists, not that both subjects fall inside its filter, so this surfaces mid-scan.
 
-    Bind the stream to a subject filter that covers both, for example the wildcard `rastreo.discovery.>`:
-
-    ```
-    nats stream add rastreo \
-      --subjects 'rastreo.discovery.>' \
-      --storage file --retention limits --replicas 1
-    ```
+    The fix is to widen the stream's subject filter to the wildcard `rastreo.discovery.>` — edit the existing stream, or delete and recreate it with the [Stream setup](#stream-setup) command above.
 
     A refused link publish goes to the dead-letter queue with error class `ack_rejection` when one is configured — see [Dead-letter queue](../discover/sinks.md#dead-letter-queue_1).
 

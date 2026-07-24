@@ -18,6 +18,14 @@ A single Kafka message value looks like this:
 
 The trailing `\n` is a single byte at the end of the value. A JSON parser ignores trailing whitespace, so a consumer passes the whole value straight to `json.loads`.
 
+!!! note "Create the topic before the first production run"
+    The Kafka sink produces to `topic`; it does not create it. The bundled compose broker has auto-create enabled, so a lab run needs no setup. Many production brokers disable auto-create, so create the topic first — it is single-partition, so one partition is enough:
+
+    ```bash
+    kafka-topics.sh --create --topic rastreo.discovery.records.v1 \
+      --bootstrap-server localhost:9092 --partitions 1
+    ```
+
 ## Choosing a mode
 
 Both modes put one `DeviceRecord` in each Kafka message. They differ only in how the sink groups the network round-trips.
@@ -50,7 +58,7 @@ Enable verification against the standard public root certificates. They are bund
 sink:
   type: kafka
   brokers: ["broker.internal:9093"]
-  topic: rastreo.discovery.records
+  topic: rastreo.discovery.records.v1
   tls:
     verify: true
 ```
@@ -61,7 +69,7 @@ Verify against a private certificate authority by pointing `ca_cert` at a PEM fi
 sink:
   type: kafka
   brokers: ["broker.internal:9093"]
-  topic: rastreo.discovery.records
+  topic: rastreo.discovery.records.v1
   tls:
     verify: true
     ca_cert: !file /run/secrets/kafka-ca.pem
@@ -83,7 +91,7 @@ Never write the `password` inline. Use a `${VAR}` environment reference or the `
 sink:
   type: kafka
   brokers: ["broker.internal:9092"]
-  topic: rastreo.discovery.records
+  topic: rastreo.discovery.records.v1
   sasl:
     mechanism: scram_sha_512
     username: rastreo-writer
@@ -111,7 +119,7 @@ Confluent Cloud authenticates with a cluster API key as the username and an API 
 sink:
   type: kafka
   brokers: ["pkc-xxxxx.us-east-1.aws.confluent.cloud:9092"]
-  topic: rastreo.discovery.records
+  topic: rastreo.discovery.records.v1
   tls:
     verify: true
   sasl:
@@ -142,7 +150,7 @@ consumer = Consumer({
     "group.id": "rastreo-reconciler",
     "auto.offset.reset": "earliest",
 })
-consumer.subscribe(["rastreo.devices"])
+consumer.subscribe(["rastreo.discovery.records.v1"])
 
 while True:
     msg = consumer.poll(1.0)
@@ -190,7 +198,7 @@ Managed brokers — Confluent Cloud, Amazon MSK — drop and re-establish connec
 sink:
   type: kafka
   brokers: ["broker.internal:9092"]
-  topic: rastreo.discovery.records
+  topic: rastreo.discovery.records.v1
   retry:
     max_attempts: 5
     backoff_initial_ms: 100
