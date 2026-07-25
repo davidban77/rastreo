@@ -29,6 +29,7 @@ pub trait Encoder: Send + Sync {
     }
 }
 
+/// The output wire format for records.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]

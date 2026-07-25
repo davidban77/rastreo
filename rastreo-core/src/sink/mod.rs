@@ -227,6 +227,7 @@ pub trait Sink: Send + Sync {
     }
 }
 
+/// Where discovered records are sent (stdout, file, Kafka, NATS).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]

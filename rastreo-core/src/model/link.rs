@@ -11,15 +11,19 @@ pub const LINK_SCHEMA_ID: &str = "https://davidban77.github.io/rastreo/schemas/l
 pub const LINK_CURRENT_SCHEMA_VERSION: &str = "v1";
 
 /// One end of a discovered link. `identity_key` correlates the endpoint to a probed device; it is
-/// `None` for a neighbor rastreo learned via LLDP but never probed ("known-unknown").
+/// absent (null) for a neighbor rastreo learned via LLDP but never probed ("known-unknown").
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct LinkEndpoint {
+    /// Identity of the probed device at this endpoint; absent (null) for a neighbor learned via LLDP but never probed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_key: Option<String>,
+    /// LLDP chassis ID of the endpoint.
     pub chassis_id: String,
+    /// LLDP system name of the endpoint, when advertised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sys_name: Option<String>,
+    /// LLDP port ID at this endpoint (e.g. `Gi0/1`), not a TCP port number.
     pub port: String,
 }
 
@@ -28,15 +32,21 @@ pub struct LinkEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct LinkRecord {
+    /// Schema version tag; always `LINK_CURRENT_SCHEMA_VERSION` for records emitted by this build.
     pub schema_version: String,
+    /// Canonical schema URL; always `LINK_SCHEMA_ID` for records emitted by this build.
     pub schema_id: String,
+    /// One end of the link; the `a`/`b` ordering is not significant.
     pub a: LinkEndpoint,
+    /// The other end of the link.
     pub b: LinkEndpoint,
     /// Discovery mechanism that produced the link (`lldp` today; leaves room for `cdp`/`gnmi`).
     pub discovered_via: String,
+    /// RFC 3339 UTC timestamp of when the link was observed.
     #[serde(with = "crate::model::serde_iso8601")]
     #[schemars(schema_with = "crate::model::serde_iso8601::date_time_schema")]
     pub observed_at: SystemTime,
+    /// Provenance stamped by the pipeline at scan entry.
     pub scan_metadata: ScanMetadata,
 }
 

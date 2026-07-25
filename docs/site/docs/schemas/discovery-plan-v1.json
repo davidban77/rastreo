@@ -3,9 +3,11 @@
     "PlannedTarget": {
       "properties": {
         "resolution": {
-          "$ref": "#/$defs/TargetResolution"
+          "$ref": "#/$defs/TargetResolution",
+          "description": "IPs the target resolved to, or the resolution error."
         },
         "target": {
+          "description": "The target as written in the scenario.",
           "type": "string"
         }
       },
@@ -53,11 +55,13 @@
   "description": "Structured plan of a single discovery scenario — what a dry-run would probe, without executing it.",
   "properties": {
     "max_concurrent": {
+      "description": "Effective in-flight probe cap for this run.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
     },
     "probe_rate": {
+      "description": "Effective probes-per-second cap; `null` when unlimited.",
       "format": "uint32",
       "minimum": 0,
       "type": [
@@ -66,34 +70,41 @@
       ]
     },
     "probers": {
+      "description": "Human-readable summary of each configured prober.",
       "items": {
         "type": "string"
       },
       "type": "array"
     },
     "retries": {
+      "description": "Effective retransmit attempts for connectionless probers.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
     },
     "scenario": {
+      "description": "Name of the scenario this plan describes.",
       "type": "string"
     },
     "sink": {
+      "description": "Human-readable summary of the configured sink.",
       "type": "string"
     },
     "targets": {
+      "description": "Each configured target with the IPs it resolved to, or its resolution error.",
       "items": {
         "$ref": "#/$defs/PlannedTarget"
       },
       "type": "array"
     },
     "timeout_ms": {
+      "description": "Effective per-probe timeout in milliseconds.",
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
     },
     "total_probes": {
+      "description": "Total probes the scan would run: unique resolved IPs times probers.",
       "format": "uint",
       "minimum": 0,
       "type": "integer"

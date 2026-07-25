@@ -1,22 +1,26 @@
 {
   "$id": "https://davidban77.github.io/rastreo/schemas/scan-metadata-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",
+  "description": "Per-scan provenance stamped on every emitted record. `scan_id` is a ULID; consumers can sort and correlate records by it.",
   "properties": {
     "initiated_at": {
+      "description": "RFC 3339 UTC timestamp of when the scan started.",
       "format": "date-time",
       "type": "string"
     },
     "scan_id": {
+      "description": "ULID identifying this scan.",
       "type": "string"
     },
     "scenario_name": {
+      "description": "Name of the scenario that produced this scan; absent (null) for an unnamed scenario.",
       "type": [
         "string",
         "null"
       ]
     },
     "source_config_hash": {
+      "description": "`sha256:…` digest of the canonicalized scenario config that produced this scan.",
       "type": [
         "string",
         "null"

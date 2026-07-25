@@ -18,21 +18,32 @@ const IP_LIST_CUTOFF: usize = 6;
 #[derive(Debug, Clone, serde::Serialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DiscoveryPlan {
+    /// Name of the scenario this plan describes.
     pub scenario: String,
+    /// Each configured target with the IPs it resolved to, or its resolution error.
     pub targets: Vec<PlannedTarget>,
+    /// Human-readable summary of each configured prober.
     pub probers: Vec<String>,
+    /// Human-readable summary of the configured sink.
     pub sink: String,
+    /// Effective in-flight probe cap for this run.
     pub max_concurrent: u32,
+    /// Effective probes-per-second cap; `null` when unlimited.
     pub probe_rate: Option<u32>,
+    /// Effective retransmit attempts for connectionless probers.
     pub retries: u32,
+    /// Effective per-probe timeout in milliseconds.
     pub timeout_ms: u64,
+    /// Total probes the scan would run: unique resolved IPs times probers.
     pub total_probes: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, JsonSchema)]
 #[non_exhaustive]
 pub struct PlannedTarget {
+    /// The target as written in the scenario.
     pub target: String,
+    /// IPs the target resolved to, or the resolution error.
     pub resolution: TargetResolution,
 }
 

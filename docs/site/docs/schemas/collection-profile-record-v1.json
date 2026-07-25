@@ -6,9 +6,11 @@
         {
           "properties": {
             "encoding": {
+              "description": "Recommended encoding for subscriptions, chosen from the endpoint's advertised encodings.",
               "type": "string"
             },
             "gnmi_version": {
+              "description": "gNMI protocol version the endpoint advertised, when reported.",
               "type": [
                 "string",
                 "null"
@@ -19,12 +21,14 @@
               "type": "string"
             },
             "suggested_subscriptions": {
+              "description": "Subscriptions matched from the advertised models that a collector can stream.",
               "items": {
                 "$ref": "#/$defs/Subscription"
               },
               "type": "array"
             },
             "supported_models": {
+              "description": "YANG models the endpoint advertised support for.",
               "items": {
                 "type": "string"
               },
@@ -52,6 +56,7 @@
     "ProfileEndpoint": {
       "properties": {
         "address": {
+          "description": "IP address the endpoint answered on.",
           "type": "string"
         },
         "port": {
@@ -72,22 +77,26 @@
       "type": "object"
     },
     "ScanMetadata": {
-      "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",
+      "description": "Per-scan provenance stamped on every emitted record. `scan_id` is a ULID; consumers can sort and correlate records by it.",
       "properties": {
         "initiated_at": {
+          "description": "RFC 3339 UTC timestamp of when the scan started.",
           "format": "date-time",
           "type": "string"
         },
         "scan_id": {
+          "description": "ULID identifying this scan.",
           "type": "string"
         },
         "scenario_name": {
+          "description": "Name of the scenario that produced this scan; absent (null) for an unnamed scenario.",
           "type": [
             "string",
             "null"
           ]
         },
         "source_config_hash": {
+          "description": "`sha256:…` digest of the canonicalized scenario config that produced this scan.",
           "type": [
             "string",
             "null"
@@ -104,22 +113,26 @@
       "description": "A recommended gNMI subscription a collector can stream, matched from the device's advertised models.",
       "properties": {
         "matched_model": {
+          "description": "Advertised model this subscription was matched from.",
           "type": "string"
         },
         "mode": {
+          "description": "Subscription mode (e.g. `sample`, `on_change`, `target_defined`).",
           "type": "string"
         },
         "name": {
           "type": "string"
         },
         "origin": {
+          "description": "gNMI path origin (e.g. `openconfig`).",
           "type": "string"
         },
         "path": {
+          "description": "gNMI path to subscribe to.",
           "type": "string"
         },
         "sample_interval_ns": {
-          "description": "`None` for on-change or target-defined modes.",
+          "description": "Absent (null) for on-change or target-defined modes.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -151,34 +164,42 @@
   "description": "How to collect telemetry from a discovered endpoint: the endpoint that answered, the confidence\nin the profile, and a protocol-tagged `collection` descriptor. One record per gNMI endpoint, so a\ndevice with two management endpoints yields two profiles sharing an `identity_key`.",
   "properties": {
     "collection": {
-      "$ref": "#/$defs/Collection"
+      "$ref": "#/$defs/Collection",
+      "description": "Protocol-tagged descriptor of what to collect and how."
     },
     "confidence": {
       "$ref": "#/$defs/ProfileConfidence"
     },
     "endpoint": {
-      "$ref": "#/$defs/ProfileEndpoint"
+      "$ref": "#/$defs/ProfileEndpoint",
+      "description": "The endpoint that returned the capability data."
     },
     "identity_key": {
+      "description": "Identity of the device this profile belongs to; shared across the device's endpoints.",
       "type": "string"
     },
     "note": {
+      "description": "Optional human-readable note about the profile; omitted when unset.",
       "type": [
         "string",
         "null"
       ]
     },
     "observed_at": {
+      "description": "RFC 3339 UTC timestamp of when the capability data was observed.",
       "format": "date-time",
       "type": "string"
     },
     "scan_metadata": {
-      "$ref": "#/$defs/ScanMetadata"
+      "$ref": "#/$defs/ScanMetadata",
+      "description": "Provenance stamped by the pipeline at scan entry."
     },
     "schema_id": {
+      "description": "Canonical schema URL; always `COLLECTION_PROFILE_SCHEMA_ID` for records emitted by this build.",
       "type": "string"
     },
     "schema_version": {
+      "description": "Schema version tag; always `COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION` for records emitted by this build.",
       "type": "string"
     }
   },

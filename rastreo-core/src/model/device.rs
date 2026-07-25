@@ -96,9 +96,10 @@ pub enum AltIpRole {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct AltIp {
+    /// Additional IP address merged into the device.
     pub address: IpAddr,
 
-    /// Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. `None` when the identity fuser can't infer a role from available signals.
+    /// Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. Absent (null) when the identity fuser can't infer a role from available signals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<AltIpRole>,
 
@@ -143,13 +144,13 @@ pub struct DeviceRecord {
     /// Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.
     #[serde(default)]
     pub os_version: Option<String>,
-    /// SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` populates `Some("OpenSSH_8.9p1")`. `None` when no `SshBanner` rule with `ssh_version_capture` matched.
+    /// SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` holds `"OpenSSH_8.9p1"`; absent (null) when no `SshBanner` rule with `ssh_version_capture` matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_version: Option<String>,
-    /// Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some("nginx")`. `None` when no `HttpBanner` rule with `http_server_capture` matched.
+    /// Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `"nginx"`; absent (null) when no `HttpBanner` rule with `http_server_capture` matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_server: Option<String>,
-    /// Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some("1.24.0")`. `None` when no `HttpBanner` rule with `http_version_capture` matched.
+    /// Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `"1.24.0"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
     /// Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open` and `sys_object_id_prefix` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.
@@ -172,7 +173,7 @@ pub struct DeviceRecord {
     /// Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alt_ips: Vec<AltIp>,
-    /// When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.
+    /// This record may be the same device as another (referenced by its `identity_key`), but the evidence wasn't strong enough to merge them (unlike the high-confidence `alt_ips` merge).
     #[serde(default)]
     pub possible_alias_of: Option<IdentityKey>,
     /// Provenance stamped by the pipeline at scan entry.

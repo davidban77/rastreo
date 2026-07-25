@@ -58,16 +58,16 @@ pub struct PlatformRule {
     pub signal: PlatformSignal,
     pub pattern: String,
     pub platform: String,
-    /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`.
+    /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. When absent, or when the group is not present in the actual match, `os_version` stays null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_version_capture: Option<String>,
-    /// Named regex capture group whose matched text populates `DeviceRecord::ssh_version`. Only meaningful for `signal: SshBanner`.
+    /// Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_version_capture: Option<String>,
-    /// Named regex capture group whose matched text populates `DeviceRecord::http_server`. Only meaningful for `signal: HttpBanner`.
+    /// Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_server_capture: Option<String>,
-    /// Named regex capture group whose matched text populates `DeviceRecord::http_version`. Only meaningful for `signal: HttpBanner`.
+    /// Named regex capture group whose matched text populates the record's `http_version`. Only meaningful for `signal: http_banner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version_capture: Option<String>,
 }
@@ -83,6 +83,7 @@ pub enum RoleRule {
     PortsOpen { ports: Vec<u16>, role: String },
 }
 
+/// Rules that assign `platform` and `role` to a record.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
