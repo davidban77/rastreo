@@ -175,8 +175,7 @@ fn build_outcome(
     signals: Vec<Signal>,
     last_fault: Option<ProbeFault>,
 ) -> ProbeOutcome {
-    // Silence on one port is not evidence against a fault on another, but a port that answered is.
-    let fault = if any_reachable { None } else { last_fault };
+    let fault = crate::prober::surfaced_fault(any_reachable, last_fault);
     ProbeOutcome {
         lldp: None,
         gnmi_endpoint: None,

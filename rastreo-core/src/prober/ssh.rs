@@ -185,10 +185,8 @@ fn build_outcome(
     signals: Vec<Signal>,
     last_fault: Option<ProbeFault>,
 ) -> ProbeOutcome {
-    // An open port emits `OpenPort` before anything else, so signals are empty exactly when no
-    // port answered. Silence on one port is not evidence against a fault on another.
     let reachable = !signals.is_empty();
-    let fault = if reachable { None } else { last_fault };
+    let fault = crate::prober::surfaced_fault(reachable, last_fault);
     ProbeOutcome {
         lldp: None,
         gnmi_endpoint: None,
