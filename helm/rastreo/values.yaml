@@ -84,7 +84,7 @@ readiness: {}
   # scanErrorQuarantineSeconds: 30
 
 # Server-side sink reachability probe. When `sink.config` is set the chart
-# renders a ConfigMap containing the YAML, mounts it at /etc/rastreo/sink.yaml,
+# renders a ConfigMap containing the YAML, mounts it at /etc/rastreo/sink/sink.yaml,
 # and the server periodically probes the resulting sink. `/readyz` reports the
 # cached result on `sink_reachable` and gates on `sink_unreachable`; `/metrics`
 # exposes `rastreo_server_sink_reachable{sink_type}` and
@@ -225,15 +225,6 @@ podSecurity:
   # Without it, those probers record a clean fault and the scan continues
   # (exit 0) — they do not crash.
   netRaw: false
-
-# Optional inline configuration mounted at /etc/rastreo as a ConfigMap.
-# Each key becomes a file under the mount path. Leave empty to skip the ConfigMap.
-# Example:
-#   config:
-#     rastreo.yaml: |
-#       targets:
-#         - 10.0.0.0/24
-config: {}
 
 # Horizontal Pod Autoscaler configuration.
 autoscaling:

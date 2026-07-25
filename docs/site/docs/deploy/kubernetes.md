@@ -84,21 +84,6 @@ The most useful `values.yaml` knobs are:
 | `otlp.headers`                   | `""`                          | Custom headers on every OTLP export, for authenticating to a hosted collector. The chart renders a `Secret` holding the value. Prefer `otlp.headersExistingSecret` in production. See [Custom OTLP headers](#custom-otlp-headers). |
 | `otlp.headersExistingSecret`     | `""`                          | Name of a pre-existing `Secret` holding the headers value. Takes precedence over `otlp.headers`. See [Custom OTLP headers](#custom-otlp-headers). |
 | `otlp.headersSecretKey`          | `otlp-headers`                | Key within the `Secret` that holds the headers value.     |
-| `config`                         | `{}`                          | Inline YAML mounted at `/etc/rastreo` as a `ConfigMap`.   |
-
-A worked example of `config`:
-
-```yaml
-config:
-  rastreo.yaml: |
-    targets:
-      - 10.0.0.0/24
-    probers:
-      - type: tcp_connect
-        ports: [22, 80, 443]
-```
-
-Each key under `config` becomes a file at `/etc/rastreo/<key>`. The Deployment template adds a checksum annotation so pods restart when the ConfigMap changes.
 
 !!! note "The result cap and the memory limit move together"
     `server.maxResultBytes` caps the `POST /scans` response at 32 MiB by default. Peak memory at response time is roughly 3× that cap, so the default fits under `resources.limits.memory` of `256Mi`. If you raise `server.maxResultBytes`, raise `resources.limits.memory` by the same proportion. A scan too large to return in one response still streams every record to a server-configured sink — see [rastreo-server · Bounded response size](server.md#bounded-response-size).

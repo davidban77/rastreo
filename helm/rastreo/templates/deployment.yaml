@@ -15,14 +15,9 @@ spec:
     metadata:
       labels:
         {{- include "rastreo.selectorLabels" . | nindent 8 }}
-      {{- if or .Values.config (and .Values.sink .Values.sink.config) }}
+      {{- if and .Values.sink .Values.sink.config }}
       annotations:
-        {{- if .Values.config }}
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- end }}
-        {{- if and .Values.sink .Values.sink.config }}
         checksum/sink-config: {{ include (print $.Template.BasePath "/configmap-sink.yaml") . | sha256sum }}
-        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "rastreo.serviceAccountName" . }}
@@ -171,31 +166,17 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- $hasSinkConfig := and .Values.sink (and .Values.sink.config (gt (len .Values.sink.config) 0)) }}
-          {{- if or .Values.config $hasSinkConfig }}
+          {{- if $hasSinkConfig }}
           volumeMounts:
-            {{- if .Values.config }}
-            - name: config
-              mountPath: /etc/rastreo
-              readOnly: true
-            {{- end }}
-            {{- if $hasSinkConfig }}
             - name: sink-config
               mountPath: /etc/rastreo/sink
               readOnly: true
-            {{- end }}
           {{- end }}
-      {{- if or .Values.config $hasSinkConfig }}
+      {{- if $hasSinkConfig }}
       volumes:
-        {{- if .Values.config }}
-        - name: config
-          configMap:
-            name: {{ include "rastreo.fullname" . }}-config
-        {{- end }}
-        {{- if $hasSinkConfig }}
         - name: sink-config
           configMap:
             name: {{ include "rastreo.fullname" . }}-sink
-        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
