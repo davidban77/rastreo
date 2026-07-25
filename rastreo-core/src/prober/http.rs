@@ -149,10 +149,8 @@ fn build_outcome(
     signals: Vec<Signal>,
     last_fault: Option<ProbeFault>,
 ) -> ProbeOutcome {
-    // A port that answered emits `OpenPort`, so no signals means nothing answered — the only state
-    // in which a connect fault is all this probe has to report.
     let reachable = !signals.is_empty();
-    let fault = if reachable { None } else { last_fault };
+    let fault = crate::prober::surfaced_fault(reachable, last_fault);
     ProbeOutcome {
         lldp: None,
         gnmi_endpoint: None,

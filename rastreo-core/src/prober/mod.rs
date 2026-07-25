@@ -70,7 +70,7 @@ pub use udp::{UdpProber, UdpProtocol};
 use std::time::Duration;
 
 use crate::error::RastreoError;
-use crate::model::{ProbeCtx, ProbeKind, ProbeOutcome, ResolvedTarget};
+use crate::model::{ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget};
 
 const MIN_ATTEMPT_SLICE: Duration = Duration::from_millis(1);
 
@@ -78,6 +78,15 @@ const MIN_ATTEMPT_SLICE: Duration = Duration::from_millis(1);
 /// `MIN_ATTEMPT_SLICE` so no `u32` value can divide by zero or busy-spin the retransmit loop.
 pub(crate) fn per_attempt_timeout(timeout: Duration, retries: u32) -> Duration {
     (timeout / retries.saturating_add(1)).max(MIN_ATTEMPT_SLICE)
+}
+
+/// The multi-port fault-latch rule: a latched per-port fault surfaces only when nothing answered; an answer on any port suppresses it.
+pub(crate) fn surfaced_fault(reachable: bool, latched: Option<ProbeFault>) -> Option<ProbeFault> {
+    if reachable {
+        None
+    } else {
+        latched
+    }
 }
 
 #[async_trait::async_trait]
@@ -335,6 +344,37 @@ mod tests {
             per_attempt_timeout(Duration::from_millis(2), u32::MAX),
             MIN_ATTEMPT_SLICE
         );
+    }
+
+    #[test]
+    fn an_answer_on_one_port_suppresses_a_fault_latched_on_another() {
+        let sibling_fault = ProbeFault::new(
+            crate::error::ProbeErrorKind::Other,
+            "connect failed on a sibling port".to_string(),
+        );
+        assert!(
+            surfaced_fault(true, Some(sibling_fault)).is_none(),
+            "an answer on any port makes the record truthful — the latched fault is dropped"
+        );
+    }
+
+    #[test]
+    fn a_latched_fault_surfaces_when_nothing_answered() {
+        let fault = ProbeFault::new(
+            crate::error::ProbeErrorKind::PermissionDenied,
+            "socket denied".to_string(),
+        );
+        let surfaced =
+            surfaced_fault(false, Some(fault)).expect("absence surfaces the latched fault");
+        assert_eq!(
+            surfaced.kind,
+            crate::error::ProbeErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn absence_without_a_latched_fault_is_no_fault() {
+        assert!(surfaced_fault(false, None).is_none());
     }
 
     struct MockProber;

@@ -325,20 +325,6 @@ impl Prober for DnsProber {
             }
         }
 
-        if !any_reachable {
-            // Silence on one port is not evidence against a fault on another, but an answer is.
-            return Ok(ProbeOutcome {
-                lldp: None,
-                gnmi_endpoint: None,
-                kind: ProbeKind::Dns,
-                target_ip: target.ip,
-                timestamp: SystemTime::now(),
-                reachable: false,
-                signals: Vec::new(),
-                fault: last_fault,
-            });
-        }
-
         Ok(ProbeOutcome {
             lldp: None,
             gnmi_endpoint: None,
@@ -346,8 +332,8 @@ impl Prober for DnsProber {
             target_ip: target.ip,
             timestamp: SystemTime::now(),
             reachable: any_reachable,
+            fault: crate::prober::surfaced_fault(any_reachable, last_fault),
             signals,
-            fault: None,
         })
     }
 }
@@ -1323,6 +1309,25 @@ mod tests {
             .expect("probe ok");
         assert!(outcome.reachable);
         assert_eq!(outcome.signals.len(), 1);
+        assert!(outcome.fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn dns_answering_port_suppresses_a_fault_latched_on_another() {
+        let responding = spawn_udp_dns_server("127.0.0.1:0", a_record_responder())
+            .await
+            .expect("bind");
+        let garbage = spawn_garbage_udp_server().await;
+        let prober = make_prober(
+            vec![responding, garbage],
+            DnsQueryType::A,
+            DnsTransport::Udp,
+        );
+        let outcome = prober
+            .probe(&loopback_target(), &ctx_with_timeout(2_000))
+            .await
+            .expect("probe ok");
+        assert!(outcome.reachable);
         assert!(outcome.fault.is_none());
     }
 

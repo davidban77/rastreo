@@ -148,7 +148,7 @@ impl Prober for ReverseDnsProber {
             timestamp: SystemTime::now(),
             reachable,
             signals,
-            fault: if reachable { None } else { fault },
+            fault: crate::prober::surfaced_fault(reachable, fault),
         })
     }
 }

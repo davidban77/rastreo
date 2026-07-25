@@ -267,41 +267,33 @@ fn assemble_outcome(
     decode_failed_port: Option<u16>,
     last_fault: Option<ProbeFault>,
 ) -> ProbeOutcome {
-    if let Some(observation) = observation {
-        return ProbeOutcome {
-            kind: ProbeKind::Lldp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: true,
-            signals: Vec::new(),
-            fault: None,
-            lldp: Some(observation),
-            gnmi_endpoint: None,
-        };
+    // A reply we cannot parse is still an answer: keep the device (reachable) with the decode fault.
+    if observation.is_none() {
+        if let Some(port) = decode_failed_port {
+            return ProbeOutcome {
+                kind: ProbeKind::Lldp,
+                target_ip,
+                timestamp: SystemTime::now(),
+                reachable: true,
+                signals: Vec::new(),
+                fault: Some(ProbeFault::new(
+                    ProbeErrorKind::DecodeFailed,
+                    format!("lldp reply on port {port} could not be decoded"),
+                )),
+                lldp: None,
+                gnmi_endpoint: None,
+            };
+        }
     }
-    if let Some(port) = decode_failed_port {
-        return ProbeOutcome {
-            kind: ProbeKind::Lldp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: true,
-            signals: Vec::new(),
-            fault: Some(ProbeFault::new(
-                ProbeErrorKind::DecodeFailed,
-                format!("lldp reply on port {port} could not be decoded"),
-            )),
-            lldp: None,
-            gnmi_endpoint: None,
-        };
-    }
+    let reachable = observation.is_some();
     ProbeOutcome {
         kind: ProbeKind::Lldp,
         target_ip,
         timestamp: SystemTime::now(),
-        reachable: false,
+        reachable,
         signals: Vec::new(),
-        fault: last_fault,
-        lldp: None,
+        fault: crate::prober::surfaced_fault(reachable, last_fault),
+        lldp: observation,
         gnmi_endpoint: None,
     }
 }
@@ -716,6 +708,30 @@ mod tests {
         let obs = assemble_observation(local, &[], &[]);
         assert!(obs.neighbors.is_empty());
         assert_eq!(obs.local_chassis_id, "aabbccddeeff");
+    }
+
+    #[test]
+    fn assemble_outcome_drops_a_latched_fault_when_a_session_answered() {
+        let obs = assemble_observation(
+            LocalChassis {
+                id: "aabbccddeeff".into(),
+                subtype: CHASSIS_SUBTYPE_MAC,
+            },
+            &[],
+            &[],
+        );
+        let outcome = assemble_outcome(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Some(obs),
+            None,
+            Some(ProbeFault::new(
+                ProbeErrorKind::PermissionDenied,
+                "lldp egress denied on port 1161",
+            )),
+        );
+        assert!(outcome.reachable);
+        assert!(outcome.fault.is_none());
+        assert!(outcome.lldp.is_some());
     }
 
     #[test]

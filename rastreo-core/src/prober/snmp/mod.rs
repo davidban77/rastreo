@@ -273,36 +273,23 @@ fn assemble_outcome(
     decode_failed_port: Option<u16>,
     last_fault: Option<ProbeFault>,
 ) -> ProbeOutcome {
-    if any_reachable {
-        return ProbeOutcome {
-            lldp: None,
-            gnmi_endpoint: None,
-            kind: ProbeKind::Snmp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: true,
-            signals,
-            fault: None,
-        };
-    }
-
-    // Silence on one port is not evidence against a fault on another, but an answer is: an agent
-    // that answered with something we cannot parse answered — the device is kept (reachable) with
-    // the decode fault recorded and no signals.
-    if let Some(port) = decode_failed_port {
-        return ProbeOutcome {
-            lldp: None,
-            gnmi_endpoint: None,
-            kind: ProbeKind::Snmp,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: true,
-            signals: Vec::new(),
-            fault: Some(ProbeFault::new(
-                ProbeErrorKind::DecodeFailed,
-                format!("snmp reply on port {port} could not be decoded"),
-            )),
-        };
+    // A reply we cannot parse is still an answer: keep the device (reachable) with the decode fault.
+    if !any_reachable {
+        if let Some(port) = decode_failed_port {
+            return ProbeOutcome {
+                lldp: None,
+                gnmi_endpoint: None,
+                kind: ProbeKind::Snmp,
+                target_ip,
+                timestamp: SystemTime::now(),
+                reachable: true,
+                signals: Vec::new(),
+                fault: Some(ProbeFault::new(
+                    ProbeErrorKind::DecodeFailed,
+                    format!("snmp reply on port {port} could not be decoded"),
+                )),
+            };
+        }
     }
 
     ProbeOutcome {
@@ -311,9 +298,9 @@ fn assemble_outcome(
         kind: ProbeKind::Snmp,
         target_ip,
         timestamp: SystemTime::now(),
-        reachable: false,
-        signals: Vec::new(),
-        fault: last_fault,
+        reachable: any_reachable,
+        fault: crate::prober::surfaced_fault(any_reachable, last_fault),
+        signals,
     }
 }
 
@@ -720,6 +707,22 @@ mod tests {
             outcome.fault.expect("latched fault must surface").kind,
             ProbeErrorKind::PermissionDenied
         );
+    }
+
+    #[test]
+    fn assemble_outcome_drops_a_latched_fault_when_a_port_answered() {
+        let outcome = assemble_outcome(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            true,
+            vec![Signal::SnmpSysName("router".to_string())],
+            None,
+            Some(ProbeFault::new(
+                ProbeErrorKind::PermissionDenied,
+                "snmp egress denied on port 1161",
+            )),
+        );
+        assert!(outcome.reachable);
+        assert!(outcome.fault.is_none());
     }
 
     #[test]

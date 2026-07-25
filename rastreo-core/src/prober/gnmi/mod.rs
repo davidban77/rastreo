@@ -934,32 +934,22 @@ fn assemble_outcome(target_ip: IpAddr, results: Vec<PortResult>) -> ProbeOutcome
         }
     }
 
-    if answered {
-        return ProbeOutcome {
-            lldp,
-            gnmi_endpoint,
-            kind: ProbeKind::Gnmi,
-            target_ip,
-            timestamp: SystemTime::now(),
-            reachable: true,
-            signals,
-            fault: None,
-        };
-    }
-
-    if let Some(status) = status {
-        return status_to_outcome(target_ip, &status);
+    // A gRPC status is a response: keep the device (reachable) with a kinded fault, never absence.
+    if !answered {
+        if let Some(status) = status {
+            return status_to_outcome(target_ip, &status);
+        }
     }
 
     ProbeOutcome {
-        lldp: None,
-        gnmi_endpoint: None,
+        lldp,
+        gnmi_endpoint,
         kind: ProbeKind::Gnmi,
         target_ip,
         timestamp: SystemTime::now(),
-        reachable: false,
-        signals: Vec::new(),
-        fault,
+        reachable: answered,
+        fault: crate::prober::surfaced_fault(answered, fault),
+        signals,
     }
 }
 
@@ -1550,6 +1540,33 @@ mod tests {
         assert!(outcome.reachable);
         assert!(outcome.fault.is_none(), "an answer outranks a status fault");
         assert_eq!(outcome.signals.len(), 1);
+    }
+
+    #[test]
+    fn assemble_drops_a_latched_connect_fault_when_a_port_answered() {
+        let outcome = assemble_outcome(
+            TARGET,
+            vec![
+                PortResult::Answered(
+                    vec![Signal::GnmiVersion("0.10.0".to_string())],
+                    None,
+                    GnmiEndpoint {
+                        port: 57400,
+                        transport: Transport::Tls,
+                        advertised_encodings: vec!["JSON_IETF".to_string()],
+                    },
+                ),
+                PortResult::Fault(ProbeFault::new(
+                    ProbeErrorKind::PermissionDenied,
+                    "gnmi connect denied on port 6030",
+                )),
+            ],
+        );
+        assert!(outcome.reachable);
+        assert!(
+            outcome.fault.is_none(),
+            "an answer outranks a latched connect fault on another port"
+        );
     }
 
     #[test]
