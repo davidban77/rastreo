@@ -16,15 +16,15 @@ Structured plan of a single discovery scenario — what a dry-run would probe, w
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `max_concurrent` | uint32 | yes | — |
-| `probe_rate` | uint32 \| null | no | — |
-| `probers` | array<string> | yes | — |
-| `retries` | uint32 | yes | — |
-| `scenario` | string | yes | — |
-| `sink` | string | yes | — |
-| `targets` | array<[`PlannedTarget`](#plannedtarget)> | yes | — |
-| `timeout_ms` | uint64 | yes | — |
-| `total_probes` | uint | yes | — |
+| `max_concurrent` | uint32 | yes | Effective in-flight probe cap for this run. |
+| `probe_rate` | uint32 \| null | no | Effective probes-per-second cap; `null` when unlimited. |
+| `probers` | array<string> | yes | Human-readable summary of each configured prober. |
+| `retries` | uint32 | yes | Effective retransmit attempts for connectionless probers. |
+| `scenario` | string | yes | Name of the scenario this plan describes. |
+| `sink` | string | yes | Human-readable summary of the configured sink. |
+| `targets` | array<[`PlannedTarget`](#plannedtarget)> | yes | Each configured target with the IPs it resolved to, or its resolution error. |
+| `timeout_ms` | uint64 | yes | Effective per-probe timeout in milliseconds. |
+| `total_probes` | uint | yes | Total probes the scan would run: unique resolved IPs times probers. |
 
 ## Definitions
 
@@ -32,8 +32,8 @@ Structured plan of a single discovery scenario — what a dry-run would probe, w
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `resolution` | [`TargetResolution`](#targetresolution) | yes | — |
-| `target` | string | yes | — |
+| `resolution` | [`TargetResolution`](#targetresolution) | yes | IPs the target resolved to, or the resolution error. |
+| `target` | string | yes | The target as written in the scenario. |
 
 ### `TargetResolution` {#targetresolution}
 

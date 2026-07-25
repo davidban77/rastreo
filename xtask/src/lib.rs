@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use schemars::schema_for;
 use serde_json::Value;
 
@@ -227,6 +227,15 @@ fn render_schema_file(schema_path: &Path, out_path: &Path, source_of_truth: &str
     let schema: Value = serde_json::from_str(&raw)
         .with_context(|| format!("parse JSON in {}", schema_path.display()))?;
     let markdown = render_schema(&schema, source_of_truth);
+    let gaps = enum_render_gaps(&schema, &markdown);
+    if !gaps.is_empty() {
+        return Err(anyhow!(
+            "{}: enum(s) rendered without a value list: {}. The renderer must emit every enum's \
+             values (see render_definition's enum branch).",
+            out_path.display(),
+            gaps.join(", ")
+        ));
+    }
     fs::write(out_path, markdown).with_context(|| format!("write {}", out_path.display()))?;
     println!("Wrote {}", out_path.display());
     Ok(())
@@ -373,9 +382,62 @@ fn render_definition(name: &str, def: &Value, defs: &Definitions<'_>) -> String 
         return out;
     }
 
+    if let Some(values) = enum_string_values(def) {
+        out.push_str("One of:\n\n");
+        for value in values {
+            out.push_str(&format!("- `{value}`\n"));
+        }
+        out.push('\n');
+        return out;
+    }
+
     let ty = format_type(def, defs);
     out.push_str(&format!("Type: {ty}\n\n"));
     out
+}
+
+fn enum_string_values(spec: &Value) -> Option<Vec<&str>> {
+    let values: Vec<&str> = spec
+        .get("enum")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    (!values.is_empty()).then_some(values)
+}
+
+// Names of enum nodes whose value list is missing from the rendered markdown — the drift guard.
+fn enum_render_gaps(schema: &Value, rendered: &str) -> Vec<String> {
+    let mut gaps = Vec::new();
+    walk_enum_gaps(schema, "<root>", rendered, &mut gaps);
+    gaps
+}
+
+fn walk_enum_gaps(node: &Value, label: &str, rendered: &str, gaps: &mut Vec<String>) {
+    if let Some(values) = enum_string_values(node) {
+        if values.iter().any(|v| !rendered.contains(&format!("`{v}`"))) {
+            gaps.push(label.to_string());
+        }
+    }
+    match node {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if (key == "$defs" || key == "definitions") && child.is_object() {
+                    for (name, def) in child.as_object().expect("checked is_object") {
+                        walk_enum_gaps(def, name, rendered, gaps);
+                    }
+                    continue;
+                }
+                walk_enum_gaps(child, key, rendered, gaps);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                walk_enum_gaps(child, label, rendered, gaps);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn format_variant(v: &Value, defs: &Definitions<'_>) -> String {
@@ -922,13 +984,13 @@ mod tests {
             .unwrap_or(md.len());
         let table = &md[table_start..table_end];
         for line in table.lines() {
-            if line.contains("`identity_key`") {
+            if line.contains("| `identity_key` |") {
                 assert!(
                     line.contains("| yes |"),
                     "identity_key must be required: {line}"
                 );
             }
-            if line.contains("`mgmt_ip`") {
+            if line.contains("| `mgmt_ip` |") {
                 assert!(line.contains("| no |"), "mgmt_ip must be optional: {line}");
             }
         }
@@ -1145,6 +1207,98 @@ mod tests {
             "allOf": [{"$ref": "#/definitions/T"}]
         });
         assert_eq!(extract_description(&spec).as_deref(), Some("outer"));
+    }
+
+    #[test]
+    fn render_definition_shows_plain_enum_values() {
+        let def = json!({"type": "string", "enum": ["advertised_only", "verified_on_device"]});
+        let out = render_definition("ProfileConfidence", &def, &Vec::new());
+        assert!(out.contains("One of:"), "got: {out}");
+        assert!(out.contains("`advertised_only`"), "got: {out}");
+        assert!(out.contains("`verified_on_device`"), "got: {out}");
+        assert!(
+            !out.contains("Type: string"),
+            "enum must not render as bare string: {out}"
+        );
+    }
+
+    #[test]
+    fn collection_profile_render_shows_enum_values() {
+        let md = render_schema(
+            &collection_profile_schema_value(),
+            "rastreo-core/src/model/collection_profile.rs",
+        );
+        for value in [
+            "`advertised_only`",
+            "`verified_on_device`",
+            "`tls`",
+            "`plaintext`",
+        ] {
+            assert!(
+                md.contains(value),
+                "profile render missing enum value {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_render_shows_enum_values() {
+        let md = render_schema(&scenario_schema_value(), "rastreo-core/src/config/mod.rs");
+        for value in ["`v1`", "`v2c`", "`v3`", "`a`", "`aaaa`", "`cname`"] {
+            assert!(
+                md.contains(value),
+                "scenario render missing enum value {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn enum_render_gaps_flags_value_less_enum() {
+        let schema = json!({
+            "$defs": { "Kind": { "type": "string", "enum": ["alpha", "beta"] } }
+        });
+        let missing = "### `Kind`\n\nType: string\n";
+        assert_eq!(enum_render_gaps(&schema, missing), vec!["Kind".to_string()]);
+
+        let present = "### `Kind`\n\nOne of:\n\n- `alpha`\n- `beta`\n";
+        assert!(enum_render_gaps(&schema, present).is_empty());
+    }
+
+    #[test]
+    fn every_enum_definition_renders_with_values() {
+        let cases: [(Value, &str); 6] = [
+            (device_schema_value(), "rastreo-core/src/model/device.rs"),
+            (link_schema_value(), "rastreo-core/src/model/link.rs"),
+            (
+                collection_profile_schema_value(),
+                "rastreo-core/src/model/collection_profile.rs",
+            ),
+            (scan_schema_value(), "rastreo-core/src/model/scan.rs"),
+            (scenario_schema_value(), "rastreo-core/src/config/mod.rs"),
+            (discovery_plan_schema_value(), "rastreo-core/src/plan.rs"),
+        ];
+        for (schema, sot) in &cases {
+            let md = render_schema(schema, sot);
+            let gaps = enum_render_gaps(schema, &md);
+            assert!(
+                gaps.is_empty(),
+                "{sot} rendered value-less enum(s): {gaps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scenario_config_description_is_input_not_emitted() {
+        let md = render_schema(&scenario_schema_value(), "rastreo-core/src/config/mod.rs");
+        let desc = md
+            .lines()
+            .find(|l| l.starts_with("description:"))
+            .expect("front matter description");
+        assert!(!desc.contains("emitted by rastreo"), "wrong tense: {desc}");
+        assert!(
+            desc.contains("scenario file"),
+            "expected input framing: {desc}"
+        );
     }
 
     #[test]

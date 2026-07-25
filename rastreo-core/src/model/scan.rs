@@ -6,15 +6,19 @@ use ulid::Ulid;
 
 use crate::config::DiscoverScenarioConfig;
 
-/// Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.
+/// Per-scan provenance stamped on every emitted record. `scan_id` is a ULID; consumers can sort and correlate records by it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ScanMetadata {
+    /// ULID identifying this scan.
     pub scan_id: String,
+    /// Name of the scenario that produced this scan; absent (null) for an unnamed scenario.
     pub scenario_name: Option<String>,
+    /// RFC 3339 UTC timestamp of when the scan started.
     #[serde(with = "crate::model::serde_iso8601")]
     #[schemars(schema_with = "crate::model::serde_iso8601::date_time_schema")]
     pub initiated_at: SystemTime,
+    /// `sha256:…` digest of the canonicalized scenario config that produced this scan.
     pub source_config_hash: Option<String>,
 }
 

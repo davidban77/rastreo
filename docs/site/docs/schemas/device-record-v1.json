@@ -4,6 +4,7 @@
       "description": "Additional IP merged into a `DeviceRecord` by the identity fuser, carrying the role hint and the probe kinds that responded on that IP.",
       "properties": {
         "address": {
+          "description": "Additional IP address merged into the device.",
           "format": "ip",
           "type": "string"
         },
@@ -23,7 +24,7 @@
               "type": "null"
             }
           ],
-          "description": "Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. `None` when the identity fuser can't infer a role from available signals."
+          "description": "Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. Absent (null) when the identity fuser can't infer a role from available signals."
         }
       },
       "required": [
@@ -90,22 +91,26 @@
       "type": "string"
     },
     "ScanMetadata": {
-      "description": "Per-scan provenance stamped on every emitted `DeviceRecord`. `scan_id` is a ULID; consumers can sort and correlate records by it.",
+      "description": "Per-scan provenance stamped on every emitted record. `scan_id` is a ULID; consumers can sort and correlate records by it.",
       "properties": {
         "initiated_at": {
+          "description": "RFC 3339 UTC timestamp of when the scan started.",
           "format": "date-time",
           "type": "string"
         },
         "scan_id": {
+          "description": "ULID identifying this scan.",
           "type": "string"
         },
         "scenario_name": {
+          "description": "Name of the scenario that produced this scan; absent (null) for an unnamed scenario.",
           "type": [
             "string",
             "null"
           ]
         },
         "source_config_hash": {
+          "description": "`sha256:…` digest of the canonicalized scenario config that produced this scan.",
           "type": [
             "string",
             "null"
@@ -445,14 +450,14 @@
       "type": "number"
     },
     "http_server": {
-      "description": "Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some(\"nginx\")`. `None` when no `HttpBanner` rule with `http_server_capture` matched.",
+      "description": "Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `\"nginx\"`; absent (null) when no `HttpBanner` rule with `http_server_capture` matched.",
       "type": [
         "string",
         "null"
       ]
     },
     "http_version": {
-      "description": "Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` populates `Some(\"1.24.0\")`. `None` when no `HttpBanner` rule with `http_version_capture` matched.",
+      "description": "Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `\"1.24.0\"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.",
       "type": [
         "string",
         "null"
@@ -513,7 +518,7 @@
     },
     "possible_alias_of": {
       "default": null,
-      "description": "When set, this record is a medium-confidence alias of another record identified by the given `IdentityKey`.",
+      "description": "This record may be the same device as another (referenced by its `identity_key`), but the evidence wasn't strong enough to merge them (unlike the high-confidence `alt_ips` merge).",
       "type": [
         "string",
         "null"
@@ -566,7 +571,7 @@
       "type": "array"
     },
     "ssh_version": {
-      "description": "SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` populates `Some(\"OpenSSH_8.9p1\")`. `None` when no `SshBanner` rule with `ssh_version_capture` matched.",
+      "description": "SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` holds `\"OpenSSH_8.9p1\"`; absent (null) when no `SshBanner` rule with `ssh_version_capture` matched.",
       "type": [
         "string",
         "null"

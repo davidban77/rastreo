@@ -1,12 +1,13 @@
 ---
-description: Wire schema for ScenarioFile emitted by rastreo.
+description: The YAML scenario file rastreo accepts via `rastreo discover --file`. Declares the shared defaults and the list of discovery scenarios to run.
 ---
 
 # ScenarioFile
 
 <!-- GENERATED FILE — do not edit by hand. Regenerate with `task schema:render`. -->
 
-Wire schema for ScenarioFile emitted by rastreo.
+The YAML scenario file rastreo accepts via `rastreo discover --file`. Declares the shared
+defaults and the list of discovery scenarios to run.
 
 - Schema ID: `https://davidban77.github.io/rastreo/schemas/scenario-v1.json`
 - JSON Schema draft: `https://json-schema.org/draft/2020-12/schema`
@@ -16,10 +17,10 @@ Wire schema for ScenarioFile emitted by rastreo.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `defaults` | [`BaseProbeConfig`](#baseprobeconfig) | no | — |
+| `defaults` | [`BaseProbeConfig`](#baseprobeconfig) | no | Defaults applied to every scenario unless the scenario overrides them. |
 | `kind` | [`ScenarioKind`](#scenariokind) | yes | — |
 | `scenarios` | array<[`ScenarioEntry`](#scenarioentry)> | yes | — |
-| `version` | uint8 | yes | — |
+| `version` | uint8 | yes | Scenario file format version. |
 
 ## Definitions
 
@@ -38,6 +39,8 @@ Wire schema for ScenarioFile emitted by rastreo.
 | `timeout_ms` | uint64 \| null | no | — |
 
 ### `ClassifierConfig` {#classifierconfig}
+
+Rules that assign `platform` and `role` to a record.
 
 One of:
 
@@ -61,6 +64,9 @@ Quarantine topic configuration for records the primary Kafka produce refused.
 
 ### `DiscoverScenarioConfig` {#discoverscenarioconfig}
 
+A single discovery scenario: the targets to probe, the probers to run, and any per-scenario
+overrides of the shared defaults.
+
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `classifier` | [`ClassifierConfig`](#classifierconfig) \| null | no | — |
@@ -77,19 +83,34 @@ Quarantine topic configuration for records the primary Kafka produce refused.
 
 ### `DnsQueryType` {#dnsquerytype}
 
-Type: string
+One of:
+
+- `a`
+- `aaaa`
+- `mx`
+- `txt`
+- `ptr`
+- `ns`
+- `cname`
 
 ### `DnsTransport` {#dnstransport}
 
-Type: string
+One of:
+
+- `udp`
+- `tcp`
 
 ### `EncoderConfig` {#encoderconfig}
+
+The output wire format for records.
 
 One of:
 
 - { `type`: `ndjson` }
 
 ### `FuserConfig` {#fuserconfig}
+
+How probe signals are merged into device records.
 
 One of:
 
@@ -99,7 +120,11 @@ One of:
 
 ### `HttpScheme` {#httpscheme}
 
-Type: string
+One of:
+
+- `auto`
+- `http`
+- `https`
 
 ### `IdentityHints` {#identityhints}
 
@@ -201,19 +226,24 @@ A single regex-based platform-detection rule.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `http_server_capture` | string \| null | no | Named regex capture group whose matched text populates `DeviceRecord::http_server`. Only meaningful for `signal: HttpBanner`. |
-| `http_version_capture` | string \| null | no | Named regex capture group whose matched text populates `DeviceRecord::http_version`. Only meaningful for `signal: HttpBanner`. |
-| `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`. |
+| `http_server_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`. |
+| `http_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_version`. Only meaningful for `signal: http_banner`. |
+| `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. When absent, or when the group is not present in the actual match, `os_version` stays null. |
 | `pattern` | string | yes | — |
 | `platform` | string | yes | — |
 | `signal` | [`PlatformSignal`](#platformsignal) | yes | — |
-| `ssh_version_capture` | string \| null | no | Named regex capture group whose matched text populates `DeviceRecord::ssh_version`. Only meaningful for `signal: SshBanner`. |
+| `ssh_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`. |
 
 ### `PlatformSignal` {#platformsignal}
 
 Which probe-emitted signal a `PlatformRule` matches against.
 
-Type: string
+One of:
+
+- `snmp_sys_descr`
+- `ssh_banner`
+- `http_banner`
+- `snmp_sys_name`
 
 ### `ProberConfig` {#proberconfig}
 
@@ -244,7 +274,11 @@ One of:
 
 ### `SaslMechanism` {#saslmechanism}
 
-Type: string
+One of:
+
+- `plain`
+- `scram_sha_256`
+- `scram_sha_512`
 
 ### `ScenarioEntry` {#scenarioentry}
 
@@ -254,9 +288,13 @@ One of:
 
 ### `ScenarioKind` {#scenariokind}
 
-Type: string
+One of:
+
+- `discovery`
 
 ### `SinkConfig` {#sinkconfig}
+
+Where discovered records are sent (stdout, file, Kafka, NATS).
 
 One of:
 
@@ -281,7 +319,11 @@ immediate-DLQ behavior), `3` (the default) is the initial attempt plus two retri
 
 ### `SnmpVersion` {#snmpversion}
 
-Type: string
+One of:
+
+- `v1`
+- `v2c`
+- `v3`
 
 ### `Target` {#target}
 
@@ -294,7 +336,12 @@ One of:
 
 ### `UdpProtocol` {#udpprotocol}
 
-Type: string
+One of:
+
+- `ntp`
+- `sip_options`
+- `memcached_stats`
+- `stun_binding`
 
 ### `UsmAuth` {#usmauth}
 

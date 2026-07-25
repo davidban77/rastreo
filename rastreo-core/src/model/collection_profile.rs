@@ -18,17 +18,25 @@ pub const COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION: &str = "v1";
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct CollectionProfileRecord {
+    /// Schema version tag; always `COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION` for records emitted by this build.
     pub schema_version: String,
+    /// Canonical schema URL; always `COLLECTION_PROFILE_SCHEMA_ID` for records emitted by this build.
     pub schema_id: String,
+    /// Identity of the device this profile belongs to; shared across the device's endpoints.
     pub identity_key: String,
+    /// The endpoint that returned the capability data.
     pub endpoint: ProfileEndpoint,
     pub confidence: ProfileConfidence,
+    /// Optional human-readable note about the profile; omitted when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Protocol-tagged descriptor of what to collect and how.
     pub collection: Collection,
+    /// RFC 3339 UTC timestamp of when the capability data was observed.
     #[serde(with = "crate::model::serde_iso8601")]
     #[schemars(schema_with = "crate::model::serde_iso8601::date_time_schema")]
     pub observed_at: SystemTime,
+    /// Provenance stamped by the pipeline at scan entry.
     pub scan_metadata: ScanMetadata,
 }
 
@@ -39,6 +47,7 @@ impl CollectionProfileRecord {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ProfileEndpoint {
+    /// IP address the endpoint answered on.
     pub address: String,
     pub port: u16,
     pub transport: Transport,
@@ -61,10 +70,14 @@ pub enum ProfileConfidence {
 #[non_exhaustive]
 pub enum Collection {
     Gnmi {
+        /// gNMI protocol version the endpoint advertised, when reported.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gnmi_version: Option<String>,
+        /// Recommended encoding for subscriptions, chosen from the endpoint's advertised encodings.
         encoding: String,
+        /// YANG models the endpoint advertised support for.
         supported_models: Vec<String>,
+        /// Subscriptions matched from the advertised models that a collector can stream.
         suggested_subscriptions: Vec<Subscription>,
     },
 }
@@ -74,12 +87,16 @@ pub enum Collection {
 #[non_exhaustive]
 pub struct Subscription {
     pub name: String,
+    /// gNMI path origin (e.g. `openconfig`).
     pub origin: String,
+    /// gNMI path to subscribe to.
     pub path: String,
+    /// Subscription mode (e.g. `sample`, `on_change`, `target_defined`).
     pub mode: String,
-    /// `None` for on-change or target-defined modes.
+    /// Absent (null) for on-change or target-defined modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_interval_ns: Option<u64>,
+    /// Advertised model this subscription was matched from.
     pub matched_model: String,
 }
 

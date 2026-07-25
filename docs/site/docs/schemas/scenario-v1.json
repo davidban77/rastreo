@@ -87,6 +87,7 @@
       "type": "object"
     },
     "ClassifierConfig": {
+      "description": "Rules that assign `platform` and `role` to a record.",
       "oneOf": [
         {
           "properties": {
@@ -153,6 +154,7 @@
       "type": "object"
     },
     "DiscoverScenarioConfig": {
+      "description": "A single discovery scenario: the targets to probe, the probers to run, and any per-scenario\noverrides of the shared defaults.",
       "properties": {
         "classifier": {
           "anyOf": [
@@ -274,6 +276,7 @@
       "type": "string"
     },
     "EncoderConfig": {
+      "description": "The output wire format for records.",
       "oneOf": [
         {
           "properties": {
@@ -290,6 +293,7 @@
       ]
     },
     "FuserConfig": {
+      "description": "How probe signals are merged into device records.",
       "oneOf": [
         {
           "properties": {
@@ -643,21 +647,21 @@
       "description": "A single regex-based platform-detection rule.",
       "properties": {
         "http_server_capture": {
-          "description": "Named regex capture group whose matched text populates `DeviceRecord::http_server`. Only meaningful for `signal: HttpBanner`.",
+          "description": "Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`.",
           "type": [
             "string",
             "null"
           ]
         },
         "http_version_capture": {
-          "description": "Named regex capture group whose matched text populates `DeviceRecord::http_version`. Only meaningful for `signal: HttpBanner`.",
+          "description": "Named regex capture group whose matched text populates the record's `http_version`. Only meaningful for `signal: http_banner`.",
           "type": [
             "string",
             "null"
           ]
         },
         "os_version_capture": {
-          "description": "Named regex capture group (e.g. `version` for `(?P<version>\\d+\\.\\d+)`) whose matched text populates `DeviceRecord::os_version`. When absent, or when the group is not present in the actual match, `os_version` stays `None`.",
+          "description": "Named regex capture group (e.g. `version` for `(?P<version>\\d+\\.\\d+)`) whose matched text populates the record's `os_version`. When absent, or when the group is not present in the actual match, `os_version` stays null.",
           "type": [
             "string",
             "null"
@@ -673,7 +677,7 @@
           "$ref": "#/$defs/PlatformSignal"
         },
         "ssh_version_capture": {
-          "description": "Named regex capture group whose matched text populates `DeviceRecord::ssh_version`. Only meaningful for `signal: SshBanner`.",
+          "description": "Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`.",
           "type": [
             "string",
             "null"
@@ -1183,6 +1187,7 @@
       "type": "string"
     },
     "SinkConfig": {
+      "description": "Where discovered records are sent (stdout, file, Kafka, NATS).",
       "oneOf": [
         {
           "properties": {
@@ -1727,6 +1732,7 @@
   },
   "$id": "https://davidban77.github.io/rastreo/schemas/scenario-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The YAML scenario file rastreo accepts via `rastreo discover --file`. Declares the shared\ndefaults and the list of discovery scenarios to run.",
   "properties": {
     "defaults": {
       "$ref": "#/$defs/BaseProbeConfig",
@@ -1740,7 +1746,8 @@
         "retries": null,
         "sink": null,
         "timeout_ms": null
-      }
+      },
+      "description": "Defaults applied to every scenario unless the scenario overrides them."
     },
     "kind": {
       "$ref": "#/$defs/ScenarioKind"
@@ -1752,6 +1759,7 @@
       "type": "array"
     },
     "version": {
+      "description": "Scenario file format version.",
       "format": "uint8",
       "maximum": 255,
       "minimum": 0,

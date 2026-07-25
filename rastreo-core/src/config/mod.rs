@@ -40,10 +40,14 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
     Ok(file)
 }
 
+/// The YAML scenario file rastreo accepts via `rastreo discover --file`. Declares the shared
+/// defaults and the list of discovery scenarios to run.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct ScenarioFile {
+    /// Scenario file format version.
     pub version: u8,
     pub kind: ScenarioKind,
+    /// Defaults applied to every scenario unless the scenario overrides them.
     #[serde(default)]
     pub defaults: BaseProbeConfig,
     pub scenarios: Vec<ScenarioEntry>,
@@ -110,6 +114,8 @@ pub enum ScenarioEntry {
     Discover(DiscoverScenarioConfig),
 }
 
+/// A single discovery scenario: the targets to probe, the probers to run, and any per-scenario
+/// overrides of the shared defaults.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DiscoverScenarioConfig {

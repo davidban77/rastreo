@@ -206,6 +206,7 @@ impl Fuser for DirectFuser {
     }
 }
 
+/// How probe signals are merged into device records.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
