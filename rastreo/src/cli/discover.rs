@@ -17,10 +17,9 @@ use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
-    hint_for_error_kind, resolve_scenario_targets,
-    run_discovery_cancellable_with_progress_and_checkpoint, CheckpointConfig, ConfigError,
+    hint_for_error_kind, resolve_scenario_targets, run_discovery, CheckpointConfig, ConfigError,
     DiscoveryPlan, DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs, ProberConfig,
-    RastreoError, ResolvedScenarioTarget, SinkConfig, Target,
+    RastreoError, ResolvedScenarioTarget, RunOptions, SinkConfig, Target,
 };
 use tokio::sync::watch;
 
@@ -376,13 +375,13 @@ async fn run_discovery_reporting_progress(
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
     let is_tty = std::io::stderr().is_terminal();
     let display = tokio::spawn(progress_display_loop(progress_rx, is_tty));
-    let result = run_discovery_cancellable_with_progress_and_checkpoint(
-        scenario,
-        cancel,
-        progress_tx,
-        checkpoint,
-    )
-    .await;
+    let mut opts = RunOptions::new(scenario)
+        .cancel(cancel)
+        .progress(progress_tx);
+    if let Some(cp) = checkpoint {
+        opts = opts.checkpoint(cp);
+    }
+    let result = run_discovery(opts).await;
     let _ = display.await;
     result
 }

@@ -90,11 +90,96 @@ fn serialize_duration_as_millis<S: serde::Serializer>(
     serializer.serialize_u128(d.as_millis())
 }
 
-pub async fn run_discovery(
-    scenario: &DiscoverScenarioConfig,
-) -> Result<DiscoverySummary, RastreoError> {
-    let (_tx, rx) = watch::channel(false);
-    run_discovery_cancellable(scenario, rx).await
+/// Knobs for [`run_discovery`]; only the scenario is required, each setter overrides its default.
+#[must_use]
+pub struct RunOptions<'a> {
+    scenario: &'a DiscoverScenarioConfig,
+    resolver: Option<Arc<dyn Resolver>>,
+    sink: Option<Box<dyn Sink>>,
+    cancel: Option<watch::Receiver<bool>>,
+    progress: Option<watch::Sender<DiscoveryProgress>>,
+    checkpoint: Option<CheckpointConfig>,
+}
+
+impl<'a> RunOptions<'a> {
+    pub fn new(scenario: &'a DiscoverScenarioConfig) -> Self {
+        Self {
+            scenario,
+            resolver: None,
+            sink: None,
+            cancel: None,
+            progress: None,
+            checkpoint: None,
+        }
+    }
+
+    pub fn resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    pub fn sink(mut self, sink: Box<dyn Sink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    pub fn cancel(mut self, cancel: watch::Receiver<bool>) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    pub fn progress(mut self, progress: watch::Sender<DiscoveryProgress>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    pub fn checkpoint(mut self, checkpoint: CheckpointConfig) -> Self {
+        self.checkpoint = Some(checkpoint);
+        self
+    }
+}
+
+/// Run a discovery scan; unset [`RunOptions`] knobs default to the system resolver, the scenario's sink, and a never-firing cancel.
+pub async fn run_discovery(opts: RunOptions<'_>) -> Result<DiscoverySummary, RastreoError> {
+    let RunOptions {
+        scenario,
+        resolver,
+        sink,
+        cancel,
+        progress,
+        checkpoint,
+    } = opts;
+
+    // Preflight is read-only and must precede sink construction, which opens files and dials brokers.
+    let resume_from = match &checkpoint {
+        Some(config) if config.resume => {
+            Some(crate::checkpoint::resume_preflight(scenario, &config.path)?)
+        }
+        Some(config) => {
+            crate::checkpoint::checkpoint_preflight(scenario, &config.path)?;
+            None
+        }
+        None => None,
+    };
+    let resolver = match resolver {
+        Some(r) => r,
+        None => Arc::new(HickoryResolver::from_system()?),
+    };
+    let sink = match sink {
+        Some(s) => s,
+        None => create_sink(&scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout)).await?,
+    };
+    let cancel = cancel.unwrap_or_else(|| watch::channel(false).1);
+    run_discovery_core(
+        scenario,
+        resolver,
+        sink,
+        cancel,
+        progress,
+        checkpoint,
+        resume_from,
+    )
+    .await
 }
 
 /// Per-target resolution outcome, preserving which input `Target` produced which IPs (or which error). Used by the `--dry-run` planner to attribute expansions back to the original YAML / CLI entry.
@@ -125,98 +210,6 @@ pub async fn resolve_scenario_targets(
         out.push(ResolvedScenarioTarget::new(target.clone(), result));
     }
     out
-}
-
-pub async fn run_discovery_with_components(
-    scenario: &DiscoverScenarioConfig,
-    resolver: Arc<dyn Resolver>,
-    sink: Box<dyn Sink>,
-) -> Result<DiscoverySummary, RastreoError> {
-    let (_tx, rx) = watch::channel(false);
-    run_discovery_core(scenario, resolver, sink, rx, None, None, None).await
-}
-
-/// Same as [`run_discovery_with_components`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
-pub async fn run_discovery_with_components_with_progress(
-    scenario: &DiscoverScenarioConfig,
-    resolver: Arc<dyn Resolver>,
-    sink: Box<dyn Sink>,
-    progress: watch::Sender<DiscoveryProgress>,
-) -> Result<DiscoverySummary, RastreoError> {
-    let (_tx, rx) = watch::channel(false);
-    run_discovery_core(scenario, resolver, sink, rx, Some(progress), None, None).await
-}
-
-/// Same as [`run_discovery`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
-pub async fn run_discovery_cancellable(
-    scenario: &DiscoverScenarioConfig,
-    cancel: watch::Receiver<bool>,
-) -> Result<DiscoverySummary, RastreoError> {
-    let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(scenario, resolver, sink, cancel, None, None, None).await
-}
-
-/// Same as [`run_discovery_cancellable`], but publishes a running [`DiscoveryProgress`] snapshot on each target drain for a caller-supplied watch consumer.
-pub async fn run_discovery_cancellable_with_progress(
-    scenario: &DiscoverScenarioConfig,
-    cancel: watch::Receiver<bool>,
-    progress: watch::Sender<DiscoveryProgress>,
-) -> Result<DiscoverySummary, RastreoError> {
-    let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(scenario, resolver, sink, cancel, Some(progress), None, None).await
-}
-
-/// Same as [`run_discovery_cancellable_with_progress`], plus optional resume checkpointing. Without
-/// `resume`, an ineligible scenario or an occupied checkpoint path refuses the scan pre-flight, then
-/// the scan writes checkpoints at the configured cadence. With `resume`, an existing checkpoint at the
-/// path is consumed — the done prefix is skipped, the prior scan identity is restored, and the scan
-/// continues writing checkpoints from where it stopped.
-pub async fn run_discovery_cancellable_with_progress_and_checkpoint(
-    scenario: &DiscoverScenarioConfig,
-    cancel: watch::Receiver<bool>,
-    progress: watch::Sender<DiscoveryProgress>,
-    checkpoint: Option<CheckpointConfig>,
-) -> Result<DiscoverySummary, RastreoError> {
-    let resume_from = match &checkpoint {
-        Some(config) if config.resume => {
-            Some(crate::checkpoint::resume_preflight(scenario, &config.path)?)
-        }
-        Some(config) => {
-            crate::checkpoint::checkpoint_preflight(scenario, &config.path)?;
-            None
-        }
-        None => None,
-    };
-    let (resolver, sink) = default_components(scenario).await?;
-    run_discovery_core(
-        scenario,
-        resolver,
-        sink,
-        cancel,
-        Some(progress),
-        checkpoint,
-        resume_from,
-    )
-    .await
-}
-
-async fn default_components(
-    scenario: &DiscoverScenarioConfig,
-) -> Result<(Arc<dyn Resolver>, Box<dyn Sink>), RastreoError> {
-    let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system()?);
-    let sink_config = scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout);
-    let sink = create_sink(&sink_config).await?;
-    Ok((resolver, sink))
-}
-
-/// Same as [`run_discovery_with_components`], but stops scanning new targets when `cancel` flips to true; each already-started target's probers complete atomically, so finished targets still emit complete records. The sink is closed on every exit path.
-pub async fn run_discovery_with_components_cancellable(
-    scenario: &DiscoverScenarioConfig,
-    resolver: Arc<dyn Resolver>,
-    sink: Box<dyn Sink>,
-    cancel: watch::Receiver<bool>,
-) -> Result<DiscoverySummary, RastreoError> {
-    run_discovery_core(scenario, resolver, sink, cancel, None, None, None).await
 }
 
 async fn run_discovery_core(
@@ -980,9 +973,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let err = run_discovery_with_components(scenario, resolver, Box::new(mem))
-            .await
-            .expect_err("retired rate_limit must error");
+        let err = run_discovery(
+            RunOptions::new(scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect_err("retired rate_limit must error");
         match err {
             RastreoError::Config(ConfigError::InvalidValue(msg)) => {
                 assert!(msg.contains("max_concurrent"), "msg: {msg}");
@@ -995,7 +992,9 @@ mod tests {
     #[tokio::test]
     async fn run_discovery_empty_probers_returns_config_error() {
         let scenario = scenario_with_probers(Vec::new());
-        let err = run_discovery(&scenario).await.expect_err("empty probers");
+        let err = run_discovery(RunOptions::new(&scenario))
+            .await
+            .expect_err("empty probers");
         match err {
             RastreoError::Config(ConfigError::InvalidValue(msg)) => {
                 assert!(msg.contains("probers"), "unexpected message: {msg}");
@@ -1026,7 +1025,9 @@ mod tests {
             probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
         };
 
-        let summary = run_discovery(&scenario).await.expect("run_discovery");
+        let summary = run_discovery(RunOptions::new(&scenario))
+            .await
+            .expect("run_discovery");
         assert_eq!(summary.targets_resolved, 1);
         assert_eq!(summary.probe_attempts, 1);
         assert!(summary.error_counts.is_empty());
@@ -1072,7 +1073,9 @@ mod tests {
             }],
         };
 
-        let summary = run_discovery(&scenario).await.expect("run_discovery");
+        let summary = run_discovery(RunOptions::new(&scenario))
+            .await
+            .expect("run_discovery");
         assert_eq!(summary.targets_resolved, 1);
         assert_eq!(summary.probe_attempts, 1);
         assert_eq!(summary.records_emitted, 0);
@@ -1082,7 +1085,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_discovery_with_components_uses_provided_resolver() {
+    async fn run_discovery_uses_provided_resolver() {
         use crate::model::ResolvedTarget;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1125,16 +1128,16 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
         let sink: Box<dyn Sink> = Box::new(mem);
-        let _summary = run_discovery_with_components(&scenario, resolver_dyn, sink)
+        let _summary = run_discovery(RunOptions::new(&scenario).resolver(resolver_dyn).sink(sink))
             .await
-            .expect("run_discovery_with_components");
+            .expect("run_discovery");
 
         assert!(resolver.calls.load(Ordering::SeqCst) >= 1);
         assert!(!handle.bytes().is_empty());
     }
 
     #[tokio::test]
-    async fn run_discovery_with_components_uses_provided_sink() {
+    async fn run_discovery_uses_provided_sink() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -1153,9 +1156,13 @@ mod tests {
             probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
         };
 
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
         assert_eq!(summary.records_emitted, 1);
         let lines = handle.ndjson_lines();
         assert_eq!(lines.len(), 1);
@@ -1212,9 +1219,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
         assert_eq!(summary.sink_type, Some(crate::sink::SinkType::Memory));
         assert_eq!(summary.dlq_records, 0);
         assert_eq!(summary.probes_by_kind.len(), 1);
@@ -1287,9 +1298,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("returns summary");
 
         assert_eq!(summary.probe_attempts, 2);
         assert!(
@@ -1347,9 +1362,13 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("returns summary");
 
         assert_eq!(
             summary.records_emitted, 1,
@@ -1398,9 +1417,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("returns summary");
 
         assert_eq!(
             summary
@@ -1459,9 +1482,13 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("returns summary");
 
         assert!(summary.error_counts.is_empty());
         assert_eq!(
@@ -1508,9 +1535,13 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("returns summary");
 
         assert_eq!(summary.records_emitted, 1);
         let lines = handle.ndjson_lines();
@@ -1529,9 +1560,13 @@ mod tests {
         let scenario = scenario_for_port(port);
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
         assert_eq!(summary.records_emitted, 1);
         assert!(
             summary.first_probe_error.is_none(),
@@ -1577,9 +1612,13 @@ mod tests {
             TeeChild::Owned(Box::new(kafka)),
         ]);
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(tee))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(tee)),
+        )
+        .await
+        .expect("run_discovery");
 
         assert_eq!(summary.sink_type, Some(SinkType::Tee));
         assert_eq!(summary.records_emitted, 1);
@@ -1611,7 +1650,9 @@ mod tests {
             probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
         };
 
-        let summary = run_discovery(&scenario).await.expect("run_discovery");
+        let summary = run_discovery(RunOptions::new(&scenario))
+            .await
+            .expect("run_discovery");
         assert_eq!(summary.records_emitted, 1);
     }
 
@@ -1711,9 +1752,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
         assert_eq!(
             summary.targets_resolved, 3,
             "the /30 (2 hosts) plus one IP stream 3 targets"
@@ -1742,9 +1787,13 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
 
         assert_eq!(
             summary.targets_resolved, 2,
@@ -1774,9 +1823,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
-        let err = run_discovery_with_components(&scenario, guard, Box::new(mem))
-            .await
-            .expect_err("the aggregate cap must reject the scan");
+        let err = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(guard)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect_err("the aggregate cap must reject the scan");
         assert!(matches!(
             err,
             RastreoError::Resolver(crate::error::ResolverError::AggregateHostCapExceeded { .. })
@@ -1806,9 +1859,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
-        let err = run_discovery_with_components(&scenario, guard, Box::new(mem))
-            .await
-            .expect_err("an out-of-allow-list target must reject the scan");
+        let err = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(guard)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect_err("an out-of-allow-list target must reject the scan");
         assert!(matches!(
             err,
             RastreoError::Resolver(crate::error::ResolverError::TargetNotAllowed { .. })
@@ -1829,9 +1886,14 @@ mod tests {
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
         let (_tx, rx) = watch::channel(false);
 
-        let err = run_discovery_with_components_cancellable(&scenario, resolver, sink, rx)
-            .await
-            .expect_err("write must error");
+        let err = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(sink)
+                .cancel(rx),
+        )
+        .await
+        .expect_err("write must error");
         match &err {
             RastreoError::Sink(e) => {
                 assert!(format!("{e}").contains("simulated"), "unexpected msg: {e}");
@@ -1860,10 +1922,14 @@ mod tests {
         let mem_handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
 
-        let summary =
-            run_discovery_with_components_cancellable(&scenario, resolver, Box::new(mem), rx)
-                .await
-                .expect("cancellation path returns Ok summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem))
+                .cancel(rx),
+        )
+        .await
+        .expect("cancellation path returns Ok summary");
         assert!(summary.cancelled, "cancelled flag must be set");
         assert_eq!(summary.records_emitted, 0);
         assert_eq!(summary.probe_attempts, 0);
@@ -1887,10 +1953,14 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary =
-            run_discovery_with_components_cancellable(&scenario, resolver, Box::new(mem), rx)
-                .await
-                .expect("cancellation returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem))
+                .cancel(rx),
+        )
+        .await
+        .expect("cancellation returns summary");
         assert!(summary.cancelled);
         assert_eq!(summary.probe_attempts, 0);
         assert!(summary.error_counts.is_empty());
@@ -1930,10 +2000,14 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let mem_handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary =
-            run_discovery_with_components_cancellable(&scenario, resolver, Box::new(mem), rx)
-                .await
-                .expect("returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem))
+                .cancel(rx),
+        )
+        .await
+        .expect("returns summary");
 
         assert!(summary.cancelled, "cancelled flag must be true");
         assert_eq!(
@@ -1998,9 +2072,14 @@ mod tests {
             flushes: Arc::clone(&flushes),
         });
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components_cancellable(&scenario, resolver, sink, rx)
-            .await
-            .expect("cancel mid-emit returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(sink)
+                .cancel(rx),
+        )
+        .await
+        .expect("cancel mid-emit returns summary");
 
         assert_eq!(
             summary.records_emitted, 1,
@@ -2045,9 +2124,14 @@ mod tests {
         let sink = Box::new(FailingSink::new(usize::MAX));
         let handle = sink.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components_cancellable(&scenario, resolver, sink, rx)
-            .await
-            .expect("returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(sink)
+                .cancel(rx),
+        )
+        .await
+        .expect("returns summary");
 
         assert!(
             summary.cancelled,
@@ -2071,9 +2155,13 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
         assert!(!summary.cancelled);
         assert_eq!(summary.records_emitted, 1);
     }
@@ -2110,10 +2198,14 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary =
-            run_discovery_with_components_with_progress(&scenario, resolver, Box::new(mem), tx)
-                .await
-                .expect("progress run returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem))
+                .progress(tx),
+        )
+        .await
+        .expect("progress run returns summary");
 
         let seq = capture.await.expect("capture task joins");
         assert!(
@@ -2141,20 +2233,20 @@ mod tests {
         let scenario = two_loopback_targets(port);
 
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let without = run_discovery_with_components(
-            &scenario,
-            Arc::clone(&resolver),
-            Box::new(crate::sink::MemorySink::new()),
+        let without = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(Arc::clone(&resolver))
+                .sink(Box::new(crate::sink::MemorySink::new())),
         )
         .await
         .expect("no-progress run");
 
         let (tx, _rx) = watch::channel(DiscoveryProgress::default());
-        let with = run_discovery_with_components_with_progress(
-            &scenario,
-            resolver,
-            Box::new(crate::sink::MemorySink::new()),
-            tx,
+        let with = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(crate::sink::MemorySink::new()))
+                .progress(tx),
         )
         .await
         .expect("progress run");
@@ -2175,10 +2267,14 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary =
-            run_discovery_with_components_with_progress(&scenario, resolver, Box::new(mem), tx)
-                .await
-                .expect("a dropped progress receiver must not fail the scan");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem))
+                .progress(tx),
+        )
+        .await
+        .expect("a dropped progress receiver must not fail the scan");
         assert_eq!(summary.targets_resolved, 2);
         // Only 127.0.0.1 holds the open port; 127.0.0.2 is refused, so exactly one record.
         assert_eq!(summary.records_emitted, 1);
@@ -2217,10 +2313,14 @@ mod tests {
 
         let mem = crate::sink::MemorySink::new();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary =
-            run_discovery_with_components_with_progress(&scenario, resolver, Box::new(mem), tx)
-                .await
-                .expect("identity progress run returns summary");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem))
+                .progress(tx),
+        )
+        .await
+        .expect("identity progress run returns summary");
 
         let seq = capture.await.expect("capture task joins");
         let last = seq.last().expect("at least the final snapshot is captured");
@@ -2292,9 +2392,9 @@ mod tests {
         let sink = Box::new(BatchingSink::new());
         let handle = sink.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, sink)
+        let summary = run_discovery(RunOptions::new(&scenario).resolver(resolver).sink(sink))
             .await
-            .expect("run_discovery_with_components");
+            .expect("run_discovery");
         assert_eq!(summary.records_emitted, 1);
         assert_eq!(
             handle.closes.load(Ordering::SeqCst),
@@ -2316,9 +2416,9 @@ mod tests {
         let sink = Box::new(BatchingSink::new());
         let handle = sink.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, sink)
+        let summary = run_discovery(RunOptions::new(&scenario).resolver(resolver).sink(sink))
             .await
-            .expect("run_discovery_with_components");
+            .expect("run_discovery");
         assert_eq!(summary.records_emitted, 1);
         let committed = handle.committed.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
@@ -2411,9 +2511,13 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
         assert_eq!(summary.records_emitted, 1);
         let lines = handle.ndjson_lines();
         assert_eq!(lines.len(), 1);
@@ -2448,9 +2552,13 @@ mod tests {
         let mem = crate::sink::MemorySink::new();
         let handle = mem.handle();
         let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
-        let summary = run_discovery_with_components(&scenario, resolver, Box::new(mem))
-            .await
-            .expect("run_discovery_with_components");
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
         assert!(summary.records_emitted >= 1);
 
         let lines = handle.ndjson_lines();
@@ -4124,11 +4232,11 @@ mod tests {
             resume: false,
         };
 
-        let err = run_discovery_cancellable_with_progress_and_checkpoint(
-            &scenario,
-            cancel_rx,
-            progress_tx,
-            Some(config),
+        let err = run_discovery(
+            RunOptions::new(&scenario)
+                .cancel(cancel_rx)
+                .progress(progress_tx)
+                .checkpoint(config),
         )
         .await
         .expect_err("an identity-fuser scenario is refused pre-flight");
@@ -4220,9 +4328,13 @@ mod tests {
         let seed_sink = create_sink(&SinkConfig::File { path: out.clone() })
             .await
             .expect("seed sink");
-        run_discovery_with_components(&scenario, seed_resolver, seed_sink)
-            .await
-            .expect("seed run");
+        run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(seed_resolver)
+                .sink(seed_sink),
+        )
+        .await
+        .expect("seed run");
         assert_eq!(records_from(&out).len(), K + 1, "seed wrote targets 0..=K");
 
         resume_checkpoint(&scenario, &all_ips, K)
@@ -4236,11 +4348,11 @@ mod tests {
             interval: 1000,
             resume: true,
         };
-        let summary = run_discovery_cancellable_with_progress_and_checkpoint(
-            &scenario,
-            cancel_rx,
-            progress_tx,
-            Some(config),
+        let summary = run_discovery(
+            RunOptions::new(&scenario)
+                .cancel(cancel_rx)
+                .progress(progress_tx)
+                .checkpoint(config),
         )
         .await
         .expect("resume run");
@@ -4392,11 +4504,11 @@ mod tests {
             interval: 5,
             resume: true,
         };
-        let err = run_discovery_cancellable_with_progress_and_checkpoint(
-            &scenario,
-            cancel_rx,
-            progress_tx,
-            Some(config),
+        let err = run_discovery(
+            RunOptions::new(&scenario)
+                .cancel(cancel_rx)
+                .progress(progress_tx)
+                .checkpoint(config),
         )
         .await
         .expect_err("--resume with no checkpoint is refused");

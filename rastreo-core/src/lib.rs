@@ -42,11 +42,8 @@ pub use model::{
     LINK_CURRENT_SCHEMA_VERSION, LINK_SCHEMA_ID, PROBE_KIND_COUNT,
 };
 pub use pipeline::{
-    resolve_scenario_targets, run_discovery, run_discovery_cancellable,
-    run_discovery_cancellable_with_progress,
-    run_discovery_cancellable_with_progress_and_checkpoint, run_discovery_with_components,
-    run_discovery_with_components_cancellable, run_discovery_with_components_with_progress,
-    DiscoveryProgress, DiscoverySummary, ProbeKindSummary, ResolvedScenarioTarget,
+    resolve_scenario_targets, run_discovery, DiscoveryProgress, DiscoverySummary, ProbeKindSummary,
+    ResolvedScenarioTarget, RunOptions,
 };
 pub use plan::{DiscoveryPlan, PlanKnobs, PlannedTarget, TargetResolution};
 #[cfg(feature = "icmp")]
