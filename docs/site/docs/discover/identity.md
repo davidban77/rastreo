@@ -4,7 +4,7 @@ description: The identity fuser merges per-IP DeviceRecords for the same device 
 
 # Identity
 
-A single network device often owns multiple IPs — a management IP, one per SVI, a loopback, a VRRP virtual IP shared with a peer. Every prober in rastreo targets IPs, so without an identity pass each of those IPs produces its own `DeviceRecord` and a downstream reconciler (Nautobot, NetBox, Infrahub) has to figure out on its own that they belong to the same device. That's what `identity` does: it runs after per-IP fusion and merges records that share identity signals into one record whose `mgmt_ip` is the primary address and whose `alt_ips` list the secondary addresses.
+A single network device often answers on several IP addresses at once. It has a management address, one address per network interface, and sometimes a shared "virtual" address that two redundant routers answer on together (a failover protocol called VRRP). Every prober in rastreo targets IPs, so without an identity pass each of those IPs produces its own `DeviceRecord` and a downstream reconciler (Nautobot, NetBox, Infrahub) has to figure out on its own that they belong to the same device. That's what `identity` does: it runs after per-IP fusion and merges records that share identity signals into one record whose `mgmt_ip` is the primary address and whose `alt_ips` list the secondary addresses.
 
 The identity fuser is a *wrapper fuser*: it delegates the per-IP fusion to an inner fuser (typically `direct`, optionally wrapped by `oui_enrichment`), then runs union-find over the resulting records to group those that share identity signals.
 
@@ -54,7 +54,7 @@ The identity fuser weights pairs of records based on the identity signals they s
 |---|---|---|---|
 | `SshHostKey` | +0.8 | Yes | Byte-exact equality on the OpenSSH-format host key emitted by the [SSH prober](../probe/ssh.md). Host keys are device-unique in practice, so two records that share one land at the high band on that signal alone. Empty strings do not count. |
 | Non-virtual MAC | +0.5 | No | MAC comes from `record.mac`. Virtual MACs (VRRP / HSRP / CARP) are excluded — see [Virtual MAC detection](#virtual-mac-detection) below. |
-| `ReverseDnsName` | +0.5 | No | Any single overlap in the two records' PTR-name lists counts once. Case-insensitive match (DNS names are case-insensitive per RFC 1035; matches the `SnmpSysName` behavior). A hostname shared across two IPs strongly suggests the same device; combined with any other agreeing signal (MAC / sysname / TLS SAN) it reaches the high band. |
+| `ReverseDnsName` | +0.5 | No | Any single overlap in the two records' PTR-name lists (PTR records are the DNS entries that map an IP back to a name) counts once. Case-insensitive match (DNS names are case-insensitive per RFC 1035; matches the `SnmpSysName` behavior). A hostname shared across two IPs strongly suggests the same device; combined with any other agreeing signal (MAC / sysname / TLS SAN) it reaches the high band. |
 | `SnmpSysName` | +0.5 | No | Case-insensitive equality on the `sysName` value from any SNMP prober outcome. Empty strings do not count. |
 | `TlsSanName` | +0.5 | No | Any single overlap in the two records' SAN lists counts once. DNS names and IP-prefixed entries (`ip:10.0.0.1`) match uniformly by byte-exact equality. |
 | `TlsSubject` | +0.3 | No | Byte-exact match on the Subject Common Name. Alone contributes to the low band; combined with a shared `TlsSanName` (+0.5) it reaches the high band. |

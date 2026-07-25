@@ -4,7 +4,7 @@ description: The Kafka wire contract — one message per DeviceRecord, batched v
 
 # Kafka
 
-The Kafka sink publishes `DeviceRecord` events to a topic on a single partition. Each Kafka message carries exactly one `DeviceRecord`, encoded as JSON. Two flush modes control how the sink groups the network round-trips: `batched` (the default) and `per_record`. Both put one record in each message — the mode changes throughput, not the wire framing.
+Kafka is a message broker: rastreo writes records to it and exits, and one or more consumers read those records later, independently, each at its own pace. The Kafka sink publishes `DeviceRecord` events to a *topic* — a named, durable channel on the broker. Kafka splits a topic into *partitions*, the unit it uses for message ordering and parallel reads; rastreo publishes to a single partition so records stay in strict order. Each Kafka message carries exactly one `DeviceRecord`, encoded as JSON. Two flush modes control how the sink groups the network round-trips: `batched` (the default) and `per_record`. Both put one record in each message — the mode changes throughput, not the wire framing.
 
 ## Wire contract
 
@@ -30,7 +30,7 @@ The trailing `\n` is a single byte at the end of the value. A JSON parser ignore
 
 Both modes put one `DeviceRecord` in each Kafka message. They differ only in how the sink groups the network round-trips.
 
-`batched` (the default) buffers records in memory until the buffered bytes reach `threshold_bytes` (default 65536, override with `--kafka-batch-threshold <BYTES>`). At the threshold, the sink sends the buffered records in one produce request. That request still carries N separate messages — one per record. When the scan ends, the sink sends any remaining buffered records in one final produce request. Choose it for large scans: fewer produce requests lower broker overhead and raise throughput.
+`batched` (the default) buffers records in memory until the buffered bytes reach `threshold_bytes` (default 65536, override with `--kafka-batch-threshold <BYTES>`). At the threshold, the sink sends the buffered records in one *produce request* — the single network call that delivers a batch of messages to the broker. That request still carries N separate messages — one per record. When the scan ends, the sink sends any remaining buffered records in one final produce request. Choose it for large scans: fewer produce requests lower broker overhead and raise throughput.
 
 `per_record` (opt in with `--kafka-flush-per-record`) sends one produce request per record, with no buffering. Choose it when records must reach downstream systems as soon as they are discovered, for example low-latency reconciliation, or when a tool keys off Kafka offsets one-to-one with records.
 
@@ -39,7 +39,7 @@ Both modes put one `DeviceRecord` in each Kafka message. They differ only in how
 
 ## TLS and SASL authentication
 
-Managed Kafka services — Confluent Cloud, Amazon MSK, or any broker on a `SASL_SSL` listener — require an encrypted connection and credentials. The Kafka sink accepts two optional, independent config blocks for this: `tls` for the encrypted connection and `sasl` for the credentials. Both are scenario-only. There are no CLI flags for them, so a secured broker needs a scenario file (`--file`) or a `POST /scans` request body.
+Managed Kafka services — Confluent Cloud, Amazon MSK, or any broker on a `SASL_SSL` listener — require an encrypted connection and login credentials. Those credentials travel over SASL, Kafka's username-and-password authentication scheme. The Kafka sink accepts two optional, independent config blocks for this: `tls` for the encrypted connection and `sasl` for the credentials. Both are scenario-only. There are no CLI flags for them, so a secured broker needs a scenario file (`--file`) or a `POST /scans` request body.
 
 ### TLS
 
