@@ -6,7 +6,18 @@ description: The rastreo discover CLI subcommand, the four target forms it accep
 
 This section is the user-level reference for running a discovery scan. It covers the `rastreo discover` CLI subcommand — every flag it accepts, the two modes it supports (flag-driven and YAML [scenario](../reference/glossary.md#scenario) files), the four target forms (IP, CIDR, range, DNS), the output [sinks](../reference/glossary.md#sink) records can be written to, and the enrichment [fusers](../reference/glossary.md#fuser) that populate vendor information on the records.
 
-Topics covered here include the full CLI flag reference, the YAML scenario file that unlocks every [prober](../reference/glossary.md#prober) from the CLI, the target syntax with worked examples, the three output sinks rastreo can emit to today (stdout, file, Kafka), and OUI vendor enrichment from MAC addresses.
+Topics covered here include the full CLI flag reference, the YAML scenario file that unlocks every [prober](../reference/glossary.md#prober) from the CLI, the target syntax with worked examples, the four output sinks rastreo can emit to today (stdout, file, Kafka, NATS), and OUI vendor enrichment from MAC addresses.
+
+Every scan runs the same pipeline. You give it targets, and one record per device comes out the end:
+
+```mermaid
+flowchart LR
+    T([Targets]) --> P[Probe]
+    P --> F[Fuse & enrich]
+    F --> C[Classify]
+    C --> E[Encode]
+    E --> S[Emit to sink]
+```
 
 ## Pages in this section
 
@@ -14,7 +25,7 @@ Topics covered here include the full CLI flag reference, the YAML scenario file 
 - [Catalog](catalog.md) — `@name` references and the search order across `~/.config/rastreo/catalog/`, `/etc/rastreo/catalog/`, and `RASTREO_CATALOG_DIR`.
 - [Validate](validate.md) — lint a scenario file offline before a real scan, including secured Kafka and NATS sink configs with no broker running.
 - [Targets](targets.md) — the four target forms (IP, CIDR, range, DNS) and how the CLI detects each one.
-- [Sinks](sinks.md) — stdout, file, and Kafka output, plus the NDJSON contract.
+- [Sinks](sinks.md) — stdout, file, Kafka, and NATS output, plus the NDJSON contract.
 - [Enrichment](enrichment.md) — OUI vendor lookup from MAC addresses, SNMP `sysObjectID` model lookup, the bundled seed tables, and how to override each.
 - [Identity](identity.md) — merges records that describe the same physical device and populates `alt_ips` / `possible_alias_of`.
 - [Classification](classification.md) — the pipeline stage that assigns canonical `platform`, `os_version`, and `role` values on each `DeviceRecord`.

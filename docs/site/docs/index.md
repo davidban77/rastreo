@@ -151,8 +151,17 @@ discovery complete: targets_resolved=1 probe_attempts=1 probe_errors=0 records_e
 
 Every scan runs the same short pipeline. You give it targets, and one record per device comes out the other end.
 
-```text
-targets → probe → merge & enrich → classify → emit  (Kafka · file · stdout)
+```mermaid
+flowchart LR
+    T([Targets]) --> P[Probe]
+    P --> F[Fuse & enrich]
+    F --> C[Classify]
+    C --> E[Encode]
+    E --> M[Emit]
+    M --> stdout[stdout]
+    M --> file[file]
+    M --> kafka[Kafka]
+    M --> nats[NATS]
 ```
 
 In plain words: it resolves your targets, probes each one, merges the answers, classifies the device, then emits the record.
