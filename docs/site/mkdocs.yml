@@ -112,11 +112,10 @@ nav:
       - get-started/index.md
       - Install: get-started/install.md
       - First scan: get-started/first-scan.md
+      - First scenario: get-started/first-scenario.md
   - Discover:
       - discover/index.md
       - Running scans: discover/cli.md
-      - Catalog: discover/catalog.md
-      - Validate: discover/validate.md
       - Targets: discover/targets.md
       - Sinks: discover/sinks.md
       - Enrichment: discover/enrichment.md
@@ -124,6 +123,8 @@ nav:
       - Classification: discover/classification.md
       - Topology: discover/topology.md
       - Collection profiles: discover/collection-profile.md
+      - Catalog: discover/catalog.md
+      - Validate: discover/validate.md
   - Probe:
       - probe/index.md
       - TCP-connect: probe/tcp-connect.md

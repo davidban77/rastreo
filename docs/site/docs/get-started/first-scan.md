@@ -76,6 +76,7 @@ rastreo discover --target 1.1.1.1 --port 443 | jq -r '.signals[].OpenPort'
 
 ## See also
 
+- [First scenario](first-scenario.md) — write this same scan as a reusable YAML file, then add a prober and a file sink.
 - [CLI](../discover/cli.md) — every flag `rastreo discover` accepts, with examples.
 - [Sinks](../discover/sinks.md) — send records to a file or a Kafka topic instead of stdout.
 - [Glossary](../reference/glossary.md) — the terms on this page, defined in one place.
