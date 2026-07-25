@@ -111,6 +111,23 @@ fuser:
 
 The `virtual_mac` field is validated when the config loads — an unparseable MAC is rejected as invalid.
 
+## Capping over-shared correlation values
+
+The identity fuser groups records by the correlation values they share — a MAC, a `sysName`, an SSH host key, a TLS Subject or SAN, a reverse-DNS name — and only weighs pairs inside the same group. Usually a shared value means "the same device answers on both IPs." But some values are shared by design and mean nothing on their own: a `CN=localhost` certificate copied onto every host, an SSH host key cloned from a golden VM image, a wildcard PTR record. Correlating on one of those would fold hundreds of unrelated devices into a single bogus record — a false mega-merge.
+
+To prevent that, any correlation value shared by more than `identity_hints.max_correlation_bucket` records is treated as a shared/default value and skipped: it contributes no candidate pairs and no merges. The default is **256** — large enough to cover a genuinely multi-homed device, small enough to reject the shared-default cases above. When a scan hits the cap, the fuser emits one summary line at `info` level naming this field, so you can tell correlation was capped and by how much.
+
+Raise the cap only when you know one real device answers on more than 256 addresses that share a true signal — for example a core switch with hundreds of loopbacks behind one MAC or host key. Lower it to be stricter about which shared values you trust.
+
+```yaml
+fuser:
+  type: identity
+  identity_hints:
+    max_correlation_bucket: 512
+  inner:
+    type: direct
+```
+
 ## Merged record semantics
 
 When a group of records merges into one:

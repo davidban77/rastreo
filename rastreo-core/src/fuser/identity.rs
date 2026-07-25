@@ -13,11 +13,6 @@ const HIGH_BAND_THRESHOLD: f64 = 0.8;
 const MEDIUM_BAND_THRESHOLD: f64 = 0.4;
 const MERGE_CONFIDENCE_BONUS: f64 = 0.1;
 
-// A correlation key shared by more than this many records is a shared/default value (cloned-VM
-// host key, CN=localhost cert, wildcard PTR), not one device's handful of IPs — a false signal
-// we neither enumerate (O(B²) blow-up) nor merge on.
-const MAX_CORRELATION_BUCKET: usize = 256;
-
 const WEIGHT_SHARED_MAC: f64 = 0.5;
 const WEIGHT_SHARED_SYSNAME: f64 = 0.5;
 const WEIGHT_SHARED_HOST_KEY: f64 = 0.8;
@@ -31,11 +26,28 @@ const VRRP_V2_IPV4_PREFIX: [u8; 5] = [0x00, 0x00, 0x5E, 0x00, 0x01];
 const VRRP_V3_IPV6_PREFIX: [u8; 5] = [0x00, 0x00, 0x5E, 0x00, 0x02];
 const HSRP_PREFIX: [u8; 5] = [0x00, 0x00, 0x0C, 0x07, 0xAC];
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct IdentityHints {
     #[serde(default)]
     pub vrrp_groups: Vec<VrrpGroup>,
+    /// Cap on how many records may share one correlation value (MAC, sysName, SSH host key, TLS subject/SAN, reverse-DNS) before it is treated as a shared/default value and skipped rather than merged; raise it only when a genuine device answers on more IPs that share a real signal (default 256).
+    #[serde(default = "default_max_correlation_bucket")]
+    pub max_correlation_bucket: usize,
+}
+
+/// Default correlation-bucket cap: a value shared by more than this many records is skipped as shared/default.
+pub fn default_max_correlation_bucket() -> usize {
+    256
+}
+
+impl Default for IdentityHints {
+    fn default() -> Self {
+        Self {
+            vrrp_groups: Vec::new(),
+            max_correlation_bucket: default_max_correlation_bucket(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -49,7 +61,10 @@ pub struct VrrpGroup {
 
 impl IdentityHints {
     pub fn new(vrrp_groups: Vec<VrrpGroup>) -> Self {
-        Self { vrrp_groups }
+        Self {
+            vrrp_groups,
+            max_correlation_bucket: default_max_correlation_bucket(),
+        }
     }
 }
 
@@ -123,15 +138,14 @@ impl IdentityFuser {
             }
         }
 
+        let cap = self.hints.max_correlation_bucket;
         let mut candidates: HashSet<(usize, usize)> = HashSet::new();
-        for (key, indices) in &buckets {
-            if indices.len() > MAX_CORRELATION_BUCKET {
-                tracing::debug!(
-                    bucket_kind = key.kind(),
-                    size = indices.len(),
-                    cap = MAX_CORRELATION_BUCKET,
-                    "correlation key shared by too many records; skipping as a shared/default value"
-                );
+        let mut skipped_keys = 0usize;
+        let mut largest_skipped = 0usize;
+        for indices in buckets.values() {
+            if indices.len() > cap {
+                skipped_keys += 1;
+                largest_skipped = largest_skipped.max(indices.len());
                 continue;
             }
             for a in 0..indices.len() {
@@ -139,6 +153,15 @@ impl IdentityFuser {
                     candidates.insert((indices[a], indices[b]));
                 }
             }
+        }
+
+        if skipped_keys > 0 {
+            tracing::info!(
+                skipped_keys,
+                largest_bucket = largest_skipped,
+                cap,
+                "correlation capped: shared/default values over the bucket cap were skipped; raise identity_hints.max_correlation_bucket if a large bucket is a legitimate device"
+            );
         }
 
         let mut out = Vec::new();
@@ -280,19 +303,6 @@ enum BucketKey {
     TlsSubject(String),
     TlsSanName(String),
     ReverseDnsName(String),
-}
-
-impl BucketKey {
-    fn kind(&self) -> &'static str {
-        match self {
-            BucketKey::Mac(_) => "mac",
-            BucketKey::SysName(_) => "sys_name",
-            BucketKey::SshHostKey(_) => "ssh_host_key",
-            BucketKey::TlsSubject(_) => "tls_subject",
-            BucketKey::TlsSanName(_) => "tls_san_name",
-            BucketKey::ReverseDnsName(_) => "reverse_dns_name",
-        }
-    }
 }
 
 type ContributionFn = fn(&IdentityHints, &DeviceRecord, &DeviceRecord) -> f64;
@@ -1316,6 +1326,7 @@ mod tests {
                 virtual_mac: mac.into(),
                 members: vec![],
             }],
+            ..Default::default()
         };
         let f = IdentityFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
         let records = vec![
@@ -1353,6 +1364,7 @@ mod tests {
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 ],
             }],
+            ..Default::default()
         };
         let f = IdentityFuser::new(Box::new(DirectFuser::new()), hints).expect("new");
         let records = vec![
@@ -1381,6 +1393,7 @@ mod tests {
                 virtual_mac: "not-a-mac".into(),
                 members: vec![],
             }],
+            ..Default::default()
         };
         match IdentityFuser::new(Box::new(DirectFuser::new()), hints) {
             Ok(_) => panic!("must reject invalid MAC"),
@@ -1454,6 +1467,7 @@ mod tests {
                 virtual_mac: "00:00:5e:00:01".to_string(),
                 members: Vec::new(),
             }],
+            ..Default::default()
         };
         let result = IdentityFuser::new(Box::new(DirectFuser::new()), hints);
         match result {
@@ -1503,6 +1517,13 @@ mod tests {
     fn identity_hints_new_accepts_empty_vec() {
         let hints = IdentityHints::new(Vec::new());
         assert!(hints.vrrp_groups.is_empty());
+    }
+
+    #[test]
+    fn identity_hints_default_and_new_use_the_default_cap() {
+        assert_eq!(default_max_correlation_bucket(), 256);
+        assert_eq!(IdentityHints::default().max_correlation_bucket, 256);
+        assert_eq!(IdentityHints::new(Vec::new()).max_correlation_bucket, 256);
     }
 
     #[test]
@@ -2199,6 +2220,7 @@ mod tests {
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 ],
             }],
+            ..Default::default()
         };
         let a = base_record(
             1,
@@ -2233,6 +2255,7 @@ mod tests {
                 virtual_mac: mac.into(),
                 members: vec![],
             }],
+            ..Default::default()
         };
         let a = base_record(1, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
         let b = base_record(2, Some(mac), vec![Signal::Mac(mac.into())], 0.3);
@@ -2345,6 +2368,7 @@ mod tests {
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
                 ],
             }],
+            ..Default::default()
         })
     }
 
@@ -2510,28 +2534,138 @@ mod tests {
 
     #[test]
     fn bucket_at_cap_merges() {
+        let cap = default_max_correlation_bucket();
         let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
-        let records = distinct_ssh_key_records(MAX_CORRELATION_BUCKET as u32, host_key);
+        let records = distinct_ssh_key_records(cap as u32, host_key);
         let out = correlate(records);
         assert_eq!(
             out.len(),
             1,
             "a bucket exactly at the cap is still enumerated"
         );
-        assert_eq!(out[0].alt_ips.len(), MAX_CORRELATION_BUCKET - 1);
+        assert_eq!(out[0].alt_ips.len(), cap - 1);
     }
 
     #[test]
     fn bucket_over_cap_by_one_stays_separate() {
+        let cap = default_max_correlation_bucket();
         let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
-        let records = distinct_ssh_key_records(MAX_CORRELATION_BUCKET as u32 + 1, host_key);
+        let records = distinct_ssh_key_records(cap as u32 + 1, host_key);
         let out = correlate(records);
         assert_eq!(
             out.len(),
-            MAX_CORRELATION_BUCKET + 1,
+            cap + 1,
             "one over the cap skips the bucket: no pairwise edges, no merge",
         );
         assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    #[test]
+    fn raised_cap_merges_bucket_that_default_would_skip() {
+        let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+        let over_default = default_max_correlation_bucket() + 44;
+        let records = distinct_ssh_key_records(over_default as u32, host_key);
+
+        let default_out = correlate(records.clone());
+        assert_eq!(
+            default_out.len(),
+            over_default,
+            "default cap skips the over-size bucket: no merge",
+        );
+
+        let raised = make_fuser(IdentityHints {
+            max_correlation_bucket: over_default,
+            ..Default::default()
+        });
+        let out = raised.correlate(records);
+        assert_eq!(out.len(), 1, "a raised cap enumerates the larger bucket");
+        assert_eq!(out[0].alt_ips.len(), over_default - 1);
+    }
+
+    #[test]
+    fn lowered_cap_skips_bucket_the_default_would_merge() {
+        let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+        let records = distinct_ssh_key_records(4, host_key);
+
+        let merged = correlate(records.clone());
+        assert_eq!(merged.len(), 1, "default cap merges the small bucket");
+
+        let lowered = make_fuser(IdentityHints {
+            max_correlation_bucket: 3,
+            ..Default::default()
+        });
+        let out = lowered.correlate(records);
+        assert_eq!(out.len(), 4, "a bucket over the lowered cap is skipped");
+        assert!(out.iter().all(|r| r.possible_alias_of.is_none()));
+    }
+
+    struct CapturingSubscriber(std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>);
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::TRACE)
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Visitor(String);
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!("{}={value:?} ", field.name()));
+                }
+            }
+            let mut visitor = Visitor(String::new());
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("lock")
+                .push((*event.metadata().level(), visitor.0));
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn oversized_bucket_emits_one_info_line_naming_the_knob() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber(std::sync::Arc::clone(&captured));
+
+        let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+        let records =
+            distinct_ssh_key_records(default_max_correlation_bucket() as u32 + 5, host_key);
+        let f = make_fuser(IdentityHints::default());
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = f.correlate(records);
+        });
+
+        let events = captured.lock().expect("lock");
+        let info: Vec<&(tracing::Level, String)> = events
+            .iter()
+            .filter(|(level, _)| *level == tracing::Level::INFO)
+            .collect();
+        assert_eq!(info.len(), 1, "one aggregate info line per correlate pass");
+        assert!(
+            info[0].1.contains("identity_hints.max_correlation_bucket"),
+            "the line must name the knob to raise: {}",
+            info[0].1,
+        );
     }
 
     mod differential {

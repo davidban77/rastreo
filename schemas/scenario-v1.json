@@ -355,6 +355,7 @@
             "identity_hints": {
               "$ref": "#/$defs/IdentityHints",
               "default": {
+                "max_correlation_bucket": 256,
                 "vrrp_groups": []
               }
             },
@@ -384,6 +385,13 @@
     },
     "IdentityHints": {
       "properties": {
+        "max_correlation_bucket": {
+          "default": 256,
+          "description": "Cap on how many records may share one correlation value (MAC, sysName, SSH host key, TLS subject/SAN, reverse-DNS) before it is treated as a shared/default value and skipped rather than merged; raise it only when a genuine device answers on more IPs that share a real signal (default 256).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "vrrp_groups": {
           "default": [],
           "items": {

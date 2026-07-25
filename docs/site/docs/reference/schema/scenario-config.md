@@ -130,6 +130,7 @@ One of:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `max_correlation_bucket` | uint | no | Cap on how many records may share one correlation value (MAC, sysName, SSH host key, TLS subject/SAN, reverse-DNS) before it is treated as a shared/default value and skipped rather than merged; raise it only when a genuine device answers on more IPs that share a real signal (default 256). |
 | `vrrp_groups` | array<[`VrrpGroup`](#vrrpgroup)> | no | — |
 
 ### `IpNet` {#ipnet}
