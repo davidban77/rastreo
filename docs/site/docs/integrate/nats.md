@@ -4,7 +4,15 @@ description: The NATS JetStream wire contract — auth methods, per-record vs ba
 
 # NATS
 
-The NATS sink publishes `DeviceRecord` events to a JetStream subject. Each NATS message carries exactly one `DeviceRecord`, encoded as JSON. Choose NATS when you want a lightweight persistent transport with at-least-once delivery, a smaller operational surface than Kafka, or when your downstream reconcilers already speak NATS. The message payload is the same JSON `DeviceRecord` as the Kafka sink; only the transport differs.
+NATS is a lightweight message broker — a single binary rastreo writes records to, so one or more consumers can read them later, each at its own pace. Choose NATS when you want durable delivery with a smaller operational surface than Kafka, or when your consumers already speak NATS.
+
+Three NATS terms are load-bearing on this page:
+
+- A **subject** is the named channel a message is published on.
+- **JetStream** is NATS's persistence layer — the part that stores messages instead of dropping them once delivered.
+- A **stream** is the stored buffer that captures every message published on the subjects it is bound to.
+
+To run the NATS sink you need a running NATS server, a subject to publish on, and a JetStream stream that stores that subject. The NATS sink publishes `DeviceRecord` events to a JetStream subject; each message carries exactly one `DeviceRecord`, encoded as JSON. The payload is the same JSON `DeviceRecord` as the Kafka sink — only the transport differs.
 
 ## Wire contract
 
@@ -88,7 +96,7 @@ sink:
     token: bearer-token-value
 ```
 
-JWT + nkey via a `.creds` file on disk. This is the canonical NGS / operator-issued credential format:
+JWT + nkey via a `.creds` file — the credential file a NATS administrator gives you for a hosted or operator-managed cluster (for example Synadia's NGS service):
 
 ```yaml
 sink:
@@ -101,7 +109,7 @@ sink:
     creds_file: /etc/rastreo/nats.creds
 ```
 
-Password and token values are redacted in Debug output and in `source_config_hash`. Rotating a credential still changes the hash so consumers can detect config changes, but plaintext never leaves the `Password` newtype. The `creds_file` value is a filesystem path — not a secret — and is serialized verbatim.
+Password and token values are redacted in logs and in `source_config_hash`. Rotating a credential still changes the hash, so consumers can detect config changes — but the plaintext is never logged or serialized. The `creds_file` value is a filesystem path, not a secret, and is written verbatim.
 
 ## Delivery modes
 

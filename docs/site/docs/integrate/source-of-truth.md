@@ -4,11 +4,11 @@ description: How downstream consumers reconcile rastreo records into a source of
 
 # Source of truth reconciliation
 
-rastreo discovers devices and emits `DeviceRecord` events; reconciling those events into a source of truth (NetBox, Nautobot, Infrahub, or anything else) is the job of an independent consumer. rastreo does not ship consumer code, and the consumer is intentionally outside the core scope. The page below describes the contract a consumer is expected to honour and gives one short sketch per target system to anchor the pattern.
+rastreo discovers devices and emits `DeviceRecord` events. A *source of truth* is the inventory system your network team treats as the intended state of the network. NetBox and Nautobot are open-source web apps for exactly that — device tables, IP address management, and more; Nautobot began as a fork of NetBox. Infrahub is a newer, graph-based one. rastreo does not write to any of them directly. *Reconciling* the events into a source of truth is the job of an independent consumer you run. It compares what rastreo observed against what the inventory records, then creates or updates entries so the inventory matches reality. rastreo does not ship that consumer, and it is intentionally outside the core scope. This page describes the contract a consumer honours and gives one short sketch per target system.
 
 ## The reconciliation pattern
 
-A consumer reads `DeviceRecord` events from the Kafka topic (or an NDJSON file, or stdin), groups by `identity_key`, and upserts each unique key into the source of truth. The same `identity_key` may arrive any number of times across scans — the consumer must be idempotent.
+A consumer reads `DeviceRecord` events from the Kafka topic (or an NDJSON file, or stdin), groups by `identity_key`, and upserts each unique key into the source of truth. The same `identity_key` may arrive any number of times across scans, so the consumer must be *idempotent*: processing the same record twice leaves the same result as processing it once.
 
 The minimum upsert flow is:
 
@@ -87,7 +87,18 @@ If your reconciler doesn't need the role hint, `AltIp.address` alone is enough f
 
 ## NetBox
 
-NetBox exposes a REST API at `/api/dcim/devices/`. Map `identity_key` to a NetBox custom field (for example `rastreo_identity_key`) and use it as the idempotency key. Look up the device by the custom field; if it exists, `PATCH` the changed fields; otherwise `POST` a new device.
+NetBox stores devices in a table called `dcim.Device`, reachable over its REST API at `/api/dcim/devices/`. To hold rastreo's identity key, add a *custom field* — a user-defined extra column you create once in the NetBox admin UI — named `rastreo_identity_key`. The consumer uses that field as the idempotency key: look the device up by it, `PATCH` the changed fields if it exists, or `POST` a new device if it does not.
+
+NetBox does not let you `PATCH` a device by identity key directly — you `PATCH` by NetBox's numeric device `id`. So the upsert is two calls. First look the device up by the custom field; the query returns the matching device and its `id`:
+
+```bash
+curl -G https://netbox.example.com/api/dcim/devices/ \
+  --data-urlencode "cf_rastreo_identity_key=ip:10.50.0.10" \
+  -H "Authorization: Token $NETBOX_TOKEN"
+# -> {"count": 1, "results": [{"id": 123, ...}]}   # 0 results means create instead
+```
+
+Then `PATCH` that `id` (here `123`) with the fields the record carries:
 
 ```bash
 curl -X PATCH https://netbox.example.com/api/dcim/devices/123/ \

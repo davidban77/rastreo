@@ -4,9 +4,9 @@ description: Executable reference implementations of source-of-truth reconcilers
 
 # Reference consumers
 
-Reference consumers are self-contained, copy-shaped implementations of the [source-of-truth reconciliation pattern](source-of-truth.md). They live in the rastreo repository under `examples/` so you can read every line, fork them, or wire them into your own environment without pulling a heavy dependency.
+Reference consumers are self-contained implementations of the [source-of-truth reconciliation pattern](source-of-truth.md) that you can read and copy. They live in the rastreo repository under `examples/`, so you can read every line, fork one, or adapt it to your own environment without pulling in a heavy dependency.
 
-Each reference consumer targets one source of truth, reads `DeviceRecord` events from Kafka, and upserts them idempotently. Priorities in order: readability first, correctness second, minimum code third. None of them ship a dead-letter queue, backoff/retry loop, or metrics endpoint — those are production concerns and the references point at where each would go.
+Each reference consumer targets one source of truth, reads `DeviceRecord` events from Kafka, and upserts them idempotently. Priorities in order: readability first, correctness second, minimum code third. None of them include a dead-letter queue (a side channel where records that repeatedly fail to deliver are parked instead of dropped — see [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue)), a retry-with-backoff loop, or a metrics endpoint. Those are production concerns, and each reference points at where they would go.
 
 !!! info "The reference consumers read the device stream only"
     A scan that runs the [LLDP prober](../probe/lldp.md) also emits `LinkRecord` topology edges on a second Kafka topic (or NATS subject) — `rastreo.discovery.links.v1` by default. The three reference consumers below reconcile the device stream only. Reconciling links into NetBox cables or Nautobot interface connections is a separate consumer; see [Topology](../discover/topology.md#mapping-to-a-source-of-truth) for the mapping.
@@ -18,6 +18,38 @@ Each reference consumer targets one source of truth, reads `DeviceRecord` events
 | [NetBox](https://github.com/davidban77/rastreo/tree/main/examples/netbox-consumer) | NetBox 4.x | `examples/netbox-consumer/` | Python 3.12, `confluent-kafka` + `pynetbox` |
 | [Nautobot](https://github.com/davidban77/rastreo/tree/main/examples/nautobot-consumer) | Nautobot 2.x | `examples/nautobot-consumer/` | Python 3.12, `confluent-kafka` + `pynautobot` |
 | [Infrahub](https://github.com/davidban77/rastreo/tree/main/examples/infrahub-consumer) | Infrahub 1.x | `examples/infrahub-consumer/` | Python 3.12, `confluent-kafka` + `infrahub-sdk` |
+
+## Run the NetBox consumer
+
+The NetBox consumer is a small Python program. To run it you need:
+
+- Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+- A Kafka broker rastreo can publish to and the consumer can read.
+- A NetBox instance and an API token with device read and write.
+- The custom fields the consumer looks for, created once on the NetBox device table. The example ships a `netbox-custom-fields.yaml` and a UI walkthrough for this step.
+
+From `examples/netbox-consumer/`:
+
+```bash
+uv sync                 # install dependencies
+cp .env.example .env    # then fill in the required values (see the table below)
+uv run python -m netbox_consumer
+```
+
+The consumer runs in the foreground, reads the topic, and logs one JSON line per record. Stop it with Ctrl-C. Set `DRY_RUN=true` in `.env` to log the NetBox call it would make without writing anything — a safe way to watch a live topic on the first run.
+
+The required variables — `.env.example` documents these plus the optional settings (topic, consumer group, TLS, log level) with their defaults:
+
+| Variable | What it is |
+|---|---|
+| `KAFKA_BROKERS` | Comma-separated broker list, for example `localhost:9092`. |
+| `NETBOX_URL` | NetBox base URL, with no trailing `/api`. |
+| `NETBOX_TOKEN` | A NetBox API token with device read and write. |
+| `NETBOX_DEFAULT_DEVICE_TYPE` | Device type assigned to devices the consumer creates — must already exist in your NetBox. |
+| `NETBOX_DEFAULT_SITE` | Site assigned to new devices — must already exist in your NetBox. |
+| `NETBOX_DEFAULT_DEVICE_ROLE` | Device role assigned to new devices — must already exist in your NetBox. |
+
+The [example's README](https://github.com/davidban77/rastreo/tree/main/examples/netbox-consumer) lists every variable and a docker-compose path that brings up Kafka and the consumer together. The Nautobot and Infrahub consumers follow the same shape: install with `uv sync`, copy `.env.example`, set the broker plus the source-of-truth URL and token, then run the module.
 
 The NetBox reference demonstrates:
 
