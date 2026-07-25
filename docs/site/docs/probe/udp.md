@@ -4,7 +4,19 @@ description: The UDP prober — speaks protocol-specific payloads over UDP (NTP,
 
 # UDP prober
 
-The UDP prober speaks one protocol at a time against configured ports on every resolved target. Unlike TCP, an unanswered UDP datagram cannot distinguish "port closed" from "packet lost", so a bytes-only "did anything reply?" prober would produce noisy results. The prober therefore drives one of four protocols end-to-end: NTP, SIP OPTIONS, memcached `stats`, or STUN Binding. Each protocol builds its own request, parses its own response, and emits a typed signal that reflects what the server actually reported (stratum and reference ID, SIP `Server:` header, memcached version, or observed public address).
+The UDP prober speaks one protocol at a time against configured ports on every resolved target. Unlike TCP, an unanswered UDP datagram cannot tell "port closed" apart from "packet lost", so a plain "did anything reply?" prober would produce noisy results. The prober therefore drives one of four services end-to-end: NTP, SIP, memcached, or STUN. Each builds its own request, parses its own response, and emits a typed signal with what the server reported.
+
+**Use it when** you want to identify a specific UDP service — NTP, SIP, memcached, or STUN — and read its version or details.<br>
+**You get** a typed signal naming the service and what it reported (clock quality, software version, or observed public address).
+
+## What the four services are
+
+The prober speaks one of four UDP services. Each runs on different gear, so the one you pick is also a guess about what kind of device you expect:
+
+- **NTP** (Network Time Protocol) — keeps device clocks in sync. Common on routers, firewalls, switches, and domain controllers.
+- **SIP** (Session Initiation Protocol) — sets up voice and video calls. Runs on VoIP phones, phone systems (PBXes), and SIP proxies.
+- **memcached** — an in-memory cache that speeds up web applications. Runs on application and database servers.
+- **STUN** (Session Traversal Utilities for NAT) — helps a device behind a NAT router learn its own public address. Runs on VoIP and video-conferencing infrastructure.
 
 ## Configuration
 

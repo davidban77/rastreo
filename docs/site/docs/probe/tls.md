@@ -4,7 +4,10 @@ description: The TLS prober — opens a TCP connection to each configured port, 
 
 # TLS prober
 
-The TLS prober **fingerprints** a TLS server. It does not authenticate one. It opens a TCP connection to each configured port, completes a TLS handshake that accepts any server certificate, then reads the leaf certificate's Subject Common Name and Subject Alternative Names as identity signals. It also records how the connection was negotiated: the TLS version, the cipher suite, and the application protocol the server selected. The result is a compact fingerprint of the device answering on that port: the name it claims, plus every alias baked into the certificate, plus how it agreed to speak TLS. No client data is sent, and no trust check is performed.
+The TLS prober **fingerprints** a TLS server. It does not authenticate one. It opens a TCP connection to each configured port, completes a TLS handshake that accepts any server certificate, then reads the leaf certificate — the server's own certificate, the one carrying its identity. From that certificate it takes two identity signals: the Subject Common Name (CN), the primary name the certificate claims to be, and the Subject Alternative Names (SANs), the extra names it also claims. It also records how the connection was negotiated: the TLS version, the cipher suite, and the application protocol the server selected. The result is a compact fingerprint of the device answering on that port: the name it claims, plus every alias baked into the certificate, plus how it agreed to speak TLS. No client data is sent, and no trust check is performed.
+
+**Use it when** you want the names a TLS service claims, to help identify the device behind it.<br>
+**You get** the certificate's main name and every alternative name it lists, plus how the connection was negotiated. It reads the certificate; it does not check that the certificate is trusted.
 
 !!! warning "Accepts any certificate — by design"
     The prober **does not** verify the certificate chain, the expiration date, or the name match. Self-signed lab appliances, expired firewall management planes, and internally-issued enterprise CAs all produce signals identically. This is intentional: rastreo probes unknown networks where a strict-verification handshake would refuse to reach the very devices that most need fingerprinting. Treat `TlsSubject` and `TlsSanName` as **unverified claims**, useful for correlation, not for authentication. See [Certificate handling](#certificate-handling) for the full rationale.
@@ -88,7 +91,7 @@ The prober completes a TLS handshake but skips every trust check: the chain, the
 
 Consumers that need to distinguish "the cert names a host" from "the cert names an IP" can match on the `ip:` prefix.
 
-**SNI.** The handshake sends the target's IP address as the SNI value. Servers that key certificate selection by SNI hostname (typical of virtual-hosted TLS reverse proxies) fall back to their default certificate on an IP-only SNI. A per-probe SNI override is not yet supported. To probe named vhosts, run one scenario per SNI value and target the IP behind it.
+**SNI.** SNI (Server Name Indication) is the hostname a client announces at the start of a TLS handshake, so a server hosting many sites can present the matching certificate. The prober sends the target's IP address as the SNI value, not a hostname. Servers that pick a certificate by SNI hostname (typical of virtual-hosted TLS reverse proxies) fall back to their default certificate on an IP-only SNI. A per-probe SNI override is not yet supported. To probe named vhosts, run one scenario per SNI value and target the IP behind it.
 
 **Chain handling.** Only the leaf certificate is parsed. Intermediates and roots the server returns are dropped after the handshake completes. Recording a chain fingerprint or CA subject is a possible future extension; it will add signals, not replace them.
 

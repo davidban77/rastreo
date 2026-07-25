@@ -4,11 +4,14 @@ description: The SNMP prober — issues an SNMP v1, v2c, or v3 GetRequest for th
 
 # SNMP prober
 
-The SNMP prober speaks Simple Network Management Protocol against configured UDP ports on every resolved target. It issues a single `GetRequest` for three high-signal object identifiers from the RFC 1213 MIB-II system group — `sysDescr`, `sysObjectID`, `sysName` — and emits each returned varbind as a typed signal. Those three values are enough to identify the vendor line, the specific product family, and the operator-assigned hostname for the vast majority of managed network devices: routers, switches, wireless controllers, UPSes, printers, and SNMP-enabled Linux hosts.
+The SNMP prober speaks Simple Network Management Protocol against configured UDP ports on every resolved target. It issues a single `GetRequest` for three values from the MIB-II system group — the standard set of basic identity fields every SNMP device exposes. The three are `sysDescr`, `sysObjectID`, and `sysName`, and the prober emits each returned value as a typed signal. (Each returned value is a *varbind*: one queried name paired with its answer.) Those three values identify the vendor line, the product family, and the operator-assigned hostname for the vast majority of managed network devices: routers, switches, wireless controllers, UPSes, printers, and SNMP-enabled Linux hosts.
+
+**Use it when** you want a network device's vendor, model, and hostname. Almost every router, switch, and printer already speaks SNMP.<br>
+**You get** up to three signals: a free-form description, a model identifier, and the device's configured hostname.
 
 ## Configuration
 
-Add an `snmp` entry to a scenario's `probers` array. Every field has a default, so the minimum shape is `{"type": "snmp"}` — that probes UDP 161 with SNMPv2c and community `public`.
+Add an `snmp` entry to a scenario's `probers` array. Every field has a default, so the minimum shape is `{"type": "snmp"}` — that probes UDP 161 with SNMPv2c and community `public`. The **community** is the shared read password that SNMP v1 and v2c use, and `public` is the near-universal factory default. SNMPv3 replaces it with per-user credentials — see [SNMPv3 credentials](#snmpv3-credentials).
 
 ```yaml
 probers:
@@ -23,8 +26,8 @@ probers:
 | `type` | string | yes | — | Must be `"snmp"`. |
 | `ports` | array of u16 | no | `[161]` | Ports to probe. Sorted and deduplicated at construction. |
 | `version` | string | no | `v2c` | One of `v1`, `v2c`, `v3`. See [Versions supported](#versions-supported). |
-| `community` | string | no | `public` | SNMP community string. Used on `v1` and `v2c`. Ignored on `v3`. See [Security notes](#security-notes). |
-| `credentials` | object | no | `{}` | USM credentials. Used on `v3`. Ignored on `v1` and `v2c`. See [SNMPv3 credentials](#snmpv3-credentials). |
+| `community` | string | no | `public` | The shared read password on `v1` and `v2c`; `public` is the common default. Ignored on `v3`. See [Security notes](#security-notes). |
+| `credentials` | object | no | `{}` | USM credentials — SNMPv3's per-user username and password. Used on `v3`. Ignored on `v1` and `v2c`. See [SNMPv3 credentials](#snmpv3-credentials). |
 
 The prober issues one `GetRequest` per port. It uses an ephemeral UDP socket per port, encodes the request via BER, sends the datagram, waits for a response until the scenario-level `timeout_ms` expires, decodes the response, and maps each returned varbind to a `Signal`. Datagrams received from a peer that isn't the target address are ignored — the prober keeps waiting until the target answers or the timeout fires.
 

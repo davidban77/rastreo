@@ -126,6 +126,7 @@ nav:
       - Collection profiles: discover/collection-profile.md
   - Probe:
       - probe/index.md
+      - TCP-connect: probe/tcp-connect.md
       - HTTP: probe/http.md
       - DNS: probe/dns.md
       - Reverse DNS: probe/reverse-dns.md

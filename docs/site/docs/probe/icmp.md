@@ -4,7 +4,10 @@ description: The ICMP prober — sends ICMP Echo Requests (IPv4 or IPv6, chosen 
 
 # ICMP prober
 
-The ICMP prober sends ICMP Echo Requests to any reachable IP target and records the minimum round-trip time observed. It speaks ICMP (RFC 792) for IPv4 targets and ICMPv6 (RFC 4443) for IPv6 targets, waits for matching Echo Replies, and emits the result as an `IcmpEchoRttMicros(<microseconds>)` signal. Downstream reconcilers receive one canonical "device is X µs away" value alongside whatever fingerprinting signals the other probers produced.
+The ICMP prober sends ICMP Echo Requests to any reachable IP target and records the minimum round-trip time observed — how long a packet takes to reach the target and come back. This is the same check the `ping` command runs. It speaks ICMP (RFC 792) for IPv4 targets and ICMPv6 (RFC 4443) for IPv6 targets, waits for matching Echo Replies, and emits the result as an `IcmpEchoRttMicros(<microseconds>)` signal. Downstream reconcilers receive one canonical "device is X µs away" value alongside whatever fingerprinting signals the other probers produced.
+
+**Use it when** you want a simple "is this host up?" answer, plus how far away it is. It works across the whole network.<br>
+**You get** an `IcmpEchoRttMicros` signal — the round-trip time in microseconds — for any host that replies.
 
 ICMP is a reachability probe that works across subnets, unlike ARP or NDP which only work on the local link. Routers forward it, most endpoints answer it, and many firewalls that drop everything else still permit it. It is a good baseline probe to attach to any scenario that needs a simple "is this device up?" answer.
 
@@ -56,7 +59,7 @@ The prober prefers an unprivileged path and falls back to a privileged one only 
 
 - **macOS**: unprivileged `SOCK_DGRAM` ICMP always works. No setup required.
 - **Linux (unprivileged path)**: the prober tries `SOCK_DGRAM` with `IPPROTO_ICMP` or `IPPROTO_ICMPV6` first. The kernel permits this only when the process's group ID falls inside the range in `/proc/sys/net/ipv4/ping_group_range`. Most distributions ship this as `1 0` — an empty range — which disables the unprivileged path for every user. Widen the range with `sysctl -w net.ipv4.ping_group_range="0 2147483647"` to open it up to everyone, or set a narrower range to a specific group.
-- **Linux (privileged fallback)**: when the unprivileged path is refused with a permission-denied error, the prober falls back to a `SOCK_RAW` socket, which requires the `CAP_NET_RAW` capability. If neither path is available the probe returns a `permission_denied` fault (`"icmp: raw socket unavailable: ..."`).
+- **Linux (privileged fallback)**: when the unprivileged path is refused with a permission-denied error, the prober falls back to a `SOCK_RAW` socket, which requires the [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw) capability — a Linux permission that lets a non-root process open low-level raw sockets. If neither path is available the probe returns a `permission_denied` fault (`"icmp: raw socket unavailable: ..."`).
 
 The release Docker image ships both binaries with `CAP_NET_RAW` set as a permitted-only file capability. Each binary raises it to effective in-process before the `SOCK_RAW` fallback, so that path works without widening `ping_group_range`, and the image execs cleanly under a hardened, non-root `securityContext`. For the fallback to open its socket the container still needs `NET_RAW` granted at runtime — pass `--cap-add=NET_RAW` (already set on the bundled `docker-compose.yml`).
 

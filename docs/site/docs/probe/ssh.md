@@ -6,6 +6,9 @@ description: The SSH prober — opens a TCP connection to each configured port, 
 
 The SSH prober captures two observable facts from every SSH server it can reach. The first is the pre-negotiation identification banner, for example `SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3`. The second is the server's host public key in OpenSSH single-line format, for example `ssh-ed25519 AAAAC3Nz…`. The banner tells you which SSH implementation and version answers on that port. The host key is a stable per-device identifier. The [identity fuser](../discover/identity.md#signals-used-for-identity-fusion) consumes it as a high-weight correlation signal: two IPs that present the same host key auto-merge into a single record. The prober never attempts authentication. It disconnects immediately after the key exchange completes.
 
+**Use it when** you want to fingerprint an SSH server, or tie together several IPs that turn out to be the same box.<br>
+**You get** the server's banner (software and version) and its host key, a stable per-device identifier. No login is attempted.
+
 !!! note "Offers legacy SSH crypto — by design"
     The prober also offers legacy key-exchange, cipher, and MAC algorithms. This lets it capture host keys from legacy gear — older Cisco IOS, NX-OS, and JunOS that support only old SSH crypto. It offers them after the modern ones, so a modern server still negotiates modern crypto. The prober only reads a public host key and never authenticates, so accepting weak crypto to finish the handshake exposes no secret. See [Legacy algorithms](#legacy-algorithms) for the full list and the rationale.
 

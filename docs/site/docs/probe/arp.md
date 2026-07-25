@@ -6,7 +6,10 @@ description: The ARP prober — sends a broadcast ARP Request on the local subne
 
 The ARP prober speaks Address Resolution Protocol (RFC 826) against IPv4 targets on the local subnet. It sends a broadcast ARP Request as a raw Ethernet frame, waits for the ARP Reply carrying the target's hardware address, and emits it as a `Mac(<address>)` signal. That MAC is the input to the OUI vendor lookup — the first two-and-a-half octets identify the manufacturer of the network interface — and is the strongest identity signal a discovery pipeline can gather without an application-layer handshake.
 
-ARP is a link-layer protocol. Routers do not forward ARP frames. The prober only produces results for targets on the same broadcast domain as the interface used to send. Cross-subnet targets — anything reachable through a next-hop router — time out silently. This is a fundamental property of the protocol, not a limitation of the prober.
+**Use it when** you want the hardware (MAC) address of an IPv4 host on your local network. It is the strongest vendor clue there is.<br>
+**You get** a `Mac` signal for each host that answers on the local segment. It works only on the local network, not across routers.
+
+ARP is a link-layer protocol. Routers do not forward ARP frames. The prober only produces results for targets on the same broadcast domain as the interface used to send. A broadcast domain — also called an L2 or Layer 2 segment — is the group of devices that reach each other directly at the hardware level, without passing through a router. Cross-subnet targets, anything reachable only through a next-hop router, time out silently. This is a fundamental property of the protocol, not a limitation of the prober.
 
 ## Configuration
 
@@ -48,7 +51,7 @@ Probing the IP of one of your own interfaces returns `ProbeError::Other("arp tar
 
 Frames on the wire that are not ARP, or that are ARP Requests, or that carry an ARP Reply for a different sender IP, are silently discarded — the receive loop keeps waiting until the target answers or the scenario-level `timeout_ms` fires.
 
-A target that sends no ARP Reply before the timeout is marked unreachable and contributes no signal. That is a normal discovery result, not an error: the kernel does not surface ICMP unreachable for L2 lookups, so a silent timeout is the only shape absence can take. The address either is not in use on the segment, or an ARP-blocking firewall sits between the prober's interface and the target. Probe faults still surface as errors: no local interface reaches the target, the selected interface has no IPv4 address, the target is one of your own interface addresses, the target is an IPv6 address, or the process lacks `CAP_NET_RAW`. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
+A target that sends no ARP Reply before the timeout is marked unreachable and contributes no signal. That is a normal discovery result, not an error: the kernel does not surface ICMP unreachable for L2 lookups, so a silent timeout is the only shape absence can take. The address either is not in use on the segment, or an ARP-blocking firewall sits between the prober's interface and the target. Probe faults still surface as errors: no local interface reaches the target, the selected interface has no IPv4 address, the target is one of your own interface addresses, the target is an IPv6 address, or the process lacks [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw) — the Linux permission that lets a non-root process open the raw socket ARP needs. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 

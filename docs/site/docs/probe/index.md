@@ -4,25 +4,48 @@ description: Reference for each prober. rastreo ships the TCP-connect, HTTP, DNS
 
 # Probe
 
-This section is the per-prober reference. Each prober has its own configuration, its own observable [signals](../reference/glossary.md#signal), and its own timing semantics. Thirteen probers ship today — TCP-connect for reachability, HTTP for `Server:` banner fingerprinting, DNS for authoritative-server discovery, reverse DNS for attaching a hostname to an unknown IP, UDP for protocol-specific fingerprints over NTP, SIP, memcached, and STUN, SNMP for MIB-II system-group vendor and identity fingerprinting, ARP + NDP for link-layer MAC-address discovery on IPv4 and IPv6 subnets respectively, SSH for banner and host-key identity fingerprinting, ICMP for baseline reachability plus a canonical RTT measurement, TLS for capturing the server certificate's Subject and Subject Alternative Names as an identity fingerprint, gNMI for reading a device's supported YANG models and configured state over gRPC, and LLDP for reading a device's link-layer neighbors into topology links.
+This section is the per-prober reference. A **prober** sends traffic to a target and records what it observes. Each prober speaks one protocol, emits its own [signals](../reference/glossary.md#signal), and has its own configuration and timing. Thirteen ship today.
 
-| Prober | Signal | Build feature |
-|---|---|---|
-| [TCP-connect](../reference/scenario.md#probers) | `OpenPort(<port>)` | always available |
-| [HTTP](http.md) | `OpenPort(<port>)`, `HttpBanner(<value>)` | `--features http` (bundled with release binaries) |
-| [DNS](dns.md) | `DnsHost(<value>)` | always available |
-| [Reverse DNS](reverse-dns.md) | `ReverseDnsName(<hostname>)` | always available |
-| [UDP](udp.md) | `NtpBanner`, `SipUserAgent`, `MemcachedVersion`, `StunMappedAddress` | always available |
-| [SNMP](snmp.md) | `SnmpSysDescr`, `SnmpSysObjectId`, `SnmpSysName` | `--features snmp` (bundled with release binaries) |
-| [ARP](arp.md) | `Mac(<address>)` (IPv4 targets) | `--features arp` (bundled with release binaries; requires `CAP_NET_RAW`) |
-| [NDP](ndp.md) | `Mac(<address>)` (IPv6 targets) | `--features ndp` (bundled with release binaries; requires `CAP_NET_RAW`) |
-| [SSH](ssh.md) | `OpenPort(<port>)`, `SshBanner(<value>)`, `SshHostKey(<value>)` | `--features ssh` (bundled with release binaries) |
-| [ICMP](icmp.md) | `IcmpEchoRttMicros(<value>)` | `--features icmp` (bundled with release binaries; unprivileged where `SOCK_DGRAM` ICMP is permitted, `CAP_NET_RAW` otherwise) |
-| [TLS](tls.md) | `OpenPort(<port>)`, `TlsSubject(<value>)`, `TlsSanName(<value>)` | `--features tls` (bundled with release binaries) |
-| [gNMI](gnmi.md) | `GnmiVersion`, `GnmiSupportedModel`, `GnmiSupportedEncoding`, `GnmiState`; topology links with `lldp: true` (see [Topology](../discover/topology.md)) | `--features gnmi` (bundled with release binaries) |
-| [LLDP](lldp.md) | topology links, not device signals — see [Topology](../discover/topology.md) | `--features lldp` (implies `snmp`; bundled with release binaries) |
+## Which prober do I need?
 
-Topics covered here include the configuration schema, observable signal shape, timeout semantics, and known limits for each prober. Where a prober has nontrivial tuning (HTTP TLS modes, DNS transport selection, UDP protocol selection, SNMP credentials, ARP or NDP interface selection, reverse DNS resolver selection), that surface lives on the prober's page rather than scattered across the scenario reference.
+Start from the question you want answered:
+
+- **Is anything listening on this port?** → [TCP-connect](tcp-connect.md). The default first probe. Confirms a port accepts a connection.
+- **Is this host up at all?** → [ICMP](icmp.md). The `ping` probe. Works across routers, unlike ARP and NDP.
+- **What web server is this?** → [HTTP](http.md). Reads the `Server:` banner (`nginx`, `Apache`, `Caddy`).
+- **What SSH server is this, and is it the same box as another IP?** → [SSH](ssh.md). Reads the banner and a stable host key.
+- **What TLS certificate does this service present?** → [TLS](tls.md). Reads the names the certificate claims.
+- **What is this IP's hardware (MAC) address?** → [ARP](arp.md) on IPv4, [NDP](ndp.md) on IPv6. Local network only.
+- **What is this IP's hostname?** → [Reverse DNS](reverse-dns.md). Or [DNS](dns.md) to treat the target itself as a DNS server.
+- **What UDP service answers here?** → [UDP](udp.md). Fingerprints NTP, SIP, memcached, or STUN.
+- **What vendor, model, and hostname is this network device?** → [SNMP](snmp.md) for existing or managed gear, [gNMI](gnmi.md) for modern network operating systems. See the note below.
+- **What is cabled to what?** → [LLDP](lldp.md), or [gNMI](gnmi.md) with `lldp: true`. Builds topology links.
+
+!!! tip "SNMP or gNMI?"
+    Both read a device's vendor, model, and hostname. Choose by the gear:
+
+    - **[SNMP](snmp.md)** — the long-established management protocol. Almost every router, switch, printer, and UPS speaks it, often with only a shared read password. Use it on mixed or older networks.
+    - **[gNMI](gnmi.md)** — the modern equivalent on current network operating systems (Nokia SR Linux, Arista EOS, Cisco IOS-XR, Juniper). It needs a username and password and returns richer structured state. Use it when the gear is modern and you have credentials.
+
+## Every prober at a glance
+
+| Prober | What it tells you | Signal | Build feature |
+|---|---|---|---|
+| [TCP-connect](tcp-connect.md) | Whether a port accepts a connection. | `OpenPort(<port>)` | always available |
+| [HTTP](http.md) | The web-server software behind a port. | `OpenPort(<port>)`, `HttpBanner(<value>)` | `--features http` (bundled with release binaries) |
+| [DNS](dns.md) | What names a DNS server can resolve. | `DnsHost(<value>)` | always available |
+| [Reverse DNS](reverse-dns.md) | The hostname registered for an IP. | `ReverseDnsName(<hostname>)` | always available |
+| [UDP](udp.md) | Which UDP service answers, and its version. | `NtpBanner`, `SipUserAgent`, `MemcachedVersion`, `StunMappedAddress` | always available |
+| [SNMP](snmp.md) | A device's vendor, model, and hostname. | `SnmpSysDescr`, `SnmpSysObjectId`, `SnmpSysName` | `--features snmp` (bundled with release binaries) |
+| [ARP](arp.md) | An IPv4 host's MAC (hardware) address. | `Mac(<address>)` (IPv4 targets) | `--features arp` (bundled with release binaries; requires [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw)) |
+| [NDP](ndp.md) | An IPv6 host's MAC (hardware) address. | `Mac(<address>)` (IPv6 targets) | `--features ndp` (bundled with release binaries; requires [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw)) |
+| [SSH](ssh.md) | The SSH server software and a stable host-key identity. | `OpenPort(<port>)`, `SshBanner(<value>)`, `SshHostKey(<value>)` | `--features ssh` (bundled with release binaries) |
+| [ICMP](icmp.md) | Whether a host is up, and how far away it is. | `IcmpEchoRttMicros(<value>)` | `--features icmp` (bundled with release binaries; unprivileged where `SOCK_DGRAM` ICMP is permitted, [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw) otherwise) |
+| [TLS](tls.md) | The names on a service's TLS certificate. | `OpenPort(<port>)`, `TlsSubject(<value>)`, `TlsSanName(<value>)` | `--features tls` (bundled with release binaries) |
+| [gNMI](gnmi.md) | A modern device's vendor, model, and live state (needs credentials). | `GnmiVersion`, `GnmiSupportedModel`, `GnmiSupportedEncoding`, `GnmiState`; topology links with `lldp: true` (see [Topology](../discover/topology.md)) | `--features gnmi` (bundled with release binaries) |
+| [LLDP](lldp.md) | A device's directly cabled neighbors (topology links). | topology links, not device signals — see [Topology](../discover/topology.md) | `--features lldp` (implies `snmp`; bundled with release binaries) |
+
+Each page covers the configuration schema, the signal shape, timeout behavior, and known limits. Where a prober has real tuning (HTTP TLS modes, DNS transport selection, UDP protocol selection, SNMP credentials, ARP or NDP interface selection, reverse DNS resolver selection), that surface lives on the prober's page rather than in the scenario reference.
 
 ## Reachable, unreachable, and probe faults
 

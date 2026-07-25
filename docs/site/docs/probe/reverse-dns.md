@@ -6,6 +6,9 @@ description: The reverse DNS prober — issues a PTR query for each target IP ag
 
 The reverse DNS prober asks a resolver "who is this IP?" and records the hostname it comes back with. This is the opposite direction from the [DNS prober](dns.md), which treats each target as a DNS server and asks it to resolve names. Here the resolver is a peer, not the target — the target is the IP whose hostname you want to look up.
 
+**Use it when** you have an IP address and want the hostname registered for it.<br>
+**You get** a `ReverseDnsName` signal for each name a resolver returns for the IP.
+
 A PTR record is the DNS record type that maps an IP back to a name. For each resolved target IP, the prober issues a PTR query against every configured resolver — or against the host's system resolver when none are configured. Each PTR record the resolver returns becomes one `ReverseDnsName` signal. IPv4 targets are looked up under `in-addr.arpa` and IPv6 targets under `ip6.arpa`. The prober builds both arpa-name shapes automatically from the target `IpAddr` and only needs the IP.
 
 ## Configuration
@@ -33,7 +36,7 @@ Unlike the DNS prober, `reverse_dns` does not accept a `ports` field — resolve
 |---|---|
 | `ReverseDnsName(<hostname>)` | The resolver returned at least one PTR record for the target IP. One signal is emitted per PTR record. The trailing `.` on the returned name is stripped, so `router.example.com.` becomes `router.example.com`. |
 
-Reachability tracks whether the resolver itself responded, not whether it knew the target. When the resolver returns `NXDOMAIN`, `REFUSED`, `SERVFAIL`, or an empty answer section, the prober records `reachable = true` with zero signals — the resolver is up, it just had no name to hand back. When the resolver never replies (outer timeout, network unreachable, UDP port closed), the prober records `reachable = false` with zero signals. Neither case is an error. This matches the classification the [DNS prober](dns.md) uses when treating a target as a DNS server.
+Reachability tracks whether the resolver itself responded, not whether it knew the target. The resolver can answer in several ways that carry no name: `NXDOMAIN` (no record for that IP), `REFUSED` (the resolver will not answer), `SERVFAIL` (the resolver tried and failed), or an empty answer section. In every one of these, the prober records `reachable = true` with zero signals — the resolver is up, it just had no name to hand back. When the resolver never replies (outer timeout, network unreachable, UDP port closed), the prober records `reachable = false` with zero signals. Neither case is an error. This matches the classification the [DNS prober](dns.md) uses when treating a target as a DNS server.
 
 A resolver that answers with something the prober cannot read, and a socket or permission failure on the scan host, are probe faults and surface as errors. Those are cases where the lookup broke, so "this IP has no PTR record" would be the wrong conclusion to draw. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 

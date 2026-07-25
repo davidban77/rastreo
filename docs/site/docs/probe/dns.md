@@ -4,7 +4,10 @@ description: The DNS prober — treats the target as a DNS server, sends queries
 
 # DNS prober
 
-The DNS prober treats every resolved target as a DNS server and sends queries against it. For each configured `query_name` and port, it issues a query of the configured type over UDP or TCP, captures the answer records, and emits each answer as a `DnsHost` signal. A target that responds — even with `NXDOMAIN` or `REFUSED` — is a DNS server. What zones it knows tells you what's behind it.
+The DNS prober treats every resolved target as a DNS server and sends queries against it. For each configured `query_name` and port, it issues a query of the configured type over UDP or TCP, captures the answer records, and emits each answer as a `DnsHost` signal. A target that responds is a DNS server — even a `NXDOMAIN` reply ("that name does not exist") or a `REFUSED` reply ("I will not answer that") proves it speaks DNS. What names it can answer for tells you what is behind it.
+
+**Use it when** the target is itself a DNS server and you want to know which names it can resolve.<br>
+**You get** one `DnsHost` signal per answer the server returns. An answer of any kind proves the target speaks DNS.
 
 ## Configuration
 
@@ -29,13 +32,23 @@ probers:
 | `query_names` | array of string | yes | — | DNS names to query. Each name must have non-empty labels no longer than 63 bytes and a total length no greater than 253 bytes. |
 | `query_type` | string | no | `a` | One of `a`, `aaaa`, `mx`, `txt`, `ptr`, `ns`, `cname`. See [Query types](#query-types). |
 | `transport` | string | no | `udp` | One of `udp`, `tcp`. See [Transport](#transport). |
-| `recursion_desired` | bool | no | `true` | Sets the RD bit on the outgoing query. Set to `false` when probing authoritative-only servers that will not follow the query. |
+| `recursion_desired` | bool | no | `true` | Asks the server to chase the answer through other DNS servers on your behalf (the RD, or Recursion Desired, flag). Set to `false` when probing authoritative-only servers — servers that hold their own names and will not chase names they do not own. See [Recursion](#recursion). |
 
 The prober issues one query per `(port, query_name)` combination — the total probe count per target is `len(ports) × len(query_names)`. A scenario with `ports: [53]` and `query_names: [a, b, c]` fires three queries per target IP.
 
 ## Query types
 
-Each query type controls what the prober asks for and how the answer is formatted in the emitted signal.
+A DNS server holds several kinds of record. The `query_type` picks which kind to ask for:
+
+- `a` — the IPv4 address for a name.
+- `aaaa` — the IPv6 address for a name.
+- `mx` — the mail servers that accept email for a domain.
+- `txt` — free-form text records, used for domain verification and policy.
+- `ptr` — the hostname for an IP address (a reverse lookup).
+- `ns` — the zone's authoritative name servers.
+- `cname` — the alias a name points to.
+
+Each type controls what the prober asks for and how the answer is formatted in the emitted signal.
 
 | Query type | RR type | Signal format |
 |---|---|---|
@@ -54,6 +67,12 @@ Answer names are emitted as the server returned them; DNS names are typically fu
 `transport: udp` (the default) matches the wire protocol most resolvers speak on port 53. UDP responses can be truncated when they exceed 512 bytes (or the negotiated EDNS payload size); when the truncation flag is set, the hickory client does not automatically fall back to TCP inside a single probe. Set `transport: tcp` explicitly when querying zones whose responses are large — TCP has no per-message size limit.
 
 Both transports honour the scenario-level `timeout_ms`. The prober owns the deadline via `tokio::time::timeout`; the hickory inner timeout is disabled so a per-query retry cannot exceed the configured probe timeout.
+
+## Recursion
+
+Recursion is a DNS server chasing an answer for you. When you ask a recursive resolver (such as `1.1.1.1`) for a name it does not hold, it queries other servers until it finds the answer, then returns it. An authoritative-only server does not do this: it answers only for the names it holds and refuses the rest.
+
+`recursion_desired: true` (the default) sets a flag on the query that asks for this chasing. Leave it on when probing a recursive resolver. Set `recursion_desired: false` when probing an authoritative server, so the reply reflects only what that server holds locally.
 
 ## Signals emitted
 

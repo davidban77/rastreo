@@ -4,7 +4,10 @@ description: The gNMI prober — connects to a device's gRPC/gNMI endpoint, issu
 
 # gNMI prober
 
-gNMI is a network-device management protocol that runs over gRPC. Modern network operating systems expose it — Nokia SR Linux, Arista EOS, Cisco IOS-XR, and Juniper among them. The gNMI prober connects to that endpoint on each configured port and asks the device two questions. First a **Capabilities** call, which returns the gNMI protocol version, the YANG data models the device supports, and the encodings it can speak. Then a **Get** call, which reads the current value at each path you list, such as `/system/state/hostname`. Each answer becomes a typed signal for vendor and identity fingerprinting.
+gNMI is a network-device management protocol that runs over gRPC. Modern network operating systems expose it — Nokia SR Linux, Arista EOS, Cisco IOS-XR, and Juniper among them. The gNMI prober connects to that endpoint on each configured port and asks the device two questions. First a **Capabilities** call, which returns the gNMI protocol version, the YANG data models the device supports, and the encodings it can speak. A YANG model is a schema that describes one slice of a device's data; the exact set a device supports is itself a vendor and version fingerprint. OpenConfig is one widely shared, vendor-neutral set of these models. Then a **Get** call, which reads the current value at each path you list, such as `/system/state/hostname`. Each answer becomes a typed signal for vendor and identity fingerprinting.
+
+**Use it when** you want the vendor, model, and live state of a modern network device that speaks gNMI. Examples: Nokia SR Linux, Arista EOS, Cisco IOS-XR, Juniper.<br>
+**You get** the device's supported data models and, with valid credentials, real state values such as the hostname. Optionally, its cabled neighbors as topology links.
 
 !!! tip "Credentials are what unlock the value"
     Real devices require authentication on gNMI. With valid credentials you get the hostname and any other state paths you request. Without them, most devices reject the read, and the prober learns only that the port speaks gNMI — roughly a port check. Set `username` and `password` for every scan against production gear. See [Authentication](#authentication).
