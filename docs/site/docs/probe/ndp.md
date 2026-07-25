@@ -47,9 +47,8 @@ The Neighbor Solicitation is sent to the Solicited-Node multicast address `ff02:
 
 The prober computes both addresses at send time from the target IPv6; there is no static routing table or configuration to keep in sync.
 
-## ICMPv6 checksum
-
-The ICMPv6 checksum is computed over the ICMPv6 payload plus an IPv6 pseudo-header (source, destination, ICMPv6 length, next-header=58) per RFC 4443 §2.3. The pseudo-header binds the checksum to the exact source and destination addresses used on the wire, so a bit-flipped or spoofed IPv6 header is detected at the receiver. The prober delegates checksum computation to `pnet_packet::icmpv6::checksum`, which does the same one's-complement sum required by every ICMPv6 sender.
+??? note "ICMPv6 checksum (implementation detail)"
+    The ICMPv6 checksum is computed over the ICMPv6 payload plus an IPv6 pseudo-header (source, destination, ICMPv6 length, next-header=58) per RFC 4443 §2.3. The pseudo-header binds the checksum to the exact source and destination addresses used on the wire, so a bit-flipped or spoofed IPv6 header is detected at the receiver. The prober delegates checksum computation to `pnet_packet::icmpv6::checksum`, which does the same one's-complement sum required by every ICMPv6 sender.
 
 ## Degenerate case: probing your own address
 
@@ -85,7 +84,7 @@ The feature pulls in `pnet_datalink` and `pnet_packet` from the libpnet family, 
     sudo sysctl -w debug.bpf_maxbufsize=4194304
     ```
 
-The published image ships both binaries with `CAP_NET_RAW` set as a permitted-only file capability. The non-root runtime user (`UID 65532`) raises it to effective in-process just before opening an `AF_PACKET` socket, so the image execs cleanly under a hardened, non-root `securityContext`. To actually open the socket the container still needs `NET_RAW` granted at runtime — pass `--cap-add=NET_RAW` to `docker run` (standalone) or set `capabilities.add: [NET_RAW]` on the Kubernetes container (via the Helm chart's `podSecurity.netRaw`).
+How the image raises [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw) in-process — so it execs cleanly under a hardened, non-root `securityContext` — is covered once under [ARP · Build feature](arp.md#build-feature). To actually open the socket the container still needs `NET_RAW` granted at runtime — pass `--cap-add=NET_RAW` to `docker run` (standalone) or set `capabilities.add: [NET_RAW]` on the Kubernetes container (via the Helm chart's `podSecurity.netRaw`).
 
 ## Runtime privilege
 

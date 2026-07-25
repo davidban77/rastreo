@@ -32,10 +32,21 @@ Stdout (one line, formatted here across multiple lines for reading):
   "mac": null,
   "manufacturer": null,
   "platform": null,
+  "os_version": null,
   "role": null,
   "confidence": 0.2,
-  "last_seen": "2026-07-05T11:22:51.423959000Z",
-  "signals": [ { "OpenPort": 443 } ]
+  "last_seen": "2026-07-25T10:25:21.320939Z",
+  "signals": [ { "OpenPort": 443 } ],
+  "probe_kinds": [ "TcpConnect" ],
+  "schema_version": "v1",
+  "schema_id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
+  "possible_alias_of": null,
+  "scan_metadata": {
+    "scan_id": "01KYCCXPWNTY0ZGA5VGEZHRSWC",
+    "scenario_name": null,
+    "initiated_at": "2026-07-25T10:25:21.301389Z",
+    "source_config_hash": "sha256:7d980a397706ae764d9e92c5146a747a66d9f6ddde535f4994b37e074c3422a6"
+  }
 }
 ```
 
@@ -60,10 +71,16 @@ Each NDJSON line is one `DeviceRecord`. The fields you will see on a TCP-only sc
 | `mac` | MAC address. `null` until an ARP-style [prober](../reference/glossary.md#prober) populates it. |
 | `manufacturer` | OUI vendor name. `null` until MAC enrichment is available. |
 | `platform` | Platform fingerprint. `null` until a fingerprinting prober populates it. |
+| `os_version` | OS version string. `null` until a fingerprinting prober populates it. |
 | `role` | Device role from the classifier. `null` until a role classifier runs. |
 | `confidence` | [Fuser](../reference/glossary.md#fuser) confidence score in the range `0.0` to `1.0`. With the default `DirectFuser`, a single observed signal yields `0.2`. |
 | `last_seen` | When the last probe touched this device, as an RFC 3339 UTC timestamp. |
 | `signals` | Observed [signals](../reference/glossary.md#signal). For a TCP-connect probe, each open port becomes an `OpenPort` entry. |
+| `probe_kinds` | Which probers observed this device. A TCP-connect scan reports `["TcpConnect"]`. |
+| `schema_version` | The record schema version. `v1` today. |
+| `schema_id` | URL of the JSON Schema this record validates against. See [Record schema](../reference/schema/index.md). |
+| `possible_alias_of` | Set by [identity](../discover/identity.md) resolution when this record may be another device's alternate address. `null` on a single-host scan. |
+| `scan_metadata` | Provenance for the scan: a unique `scan_id`, the scenario name, the start time, and a hash of the config that produced the record. |
 
 ## Pipe into jq
 

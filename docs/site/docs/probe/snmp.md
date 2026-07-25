@@ -80,7 +80,8 @@ The security level is derived from the `(auth, privacy)` pair per RFC 3411:
 | any algorithm | any algorithm | `authPriv` | HMAC authentication over the whole SNMP message; scoped PDU encrypted with the chosen cipher. |
 | `none` | any algorithm | invalid | Rejected at construction with `snmp v3 privacy requires an auth algorithm`. |
 
-Key derivation follows RFC 3414 §2.6 (password-to-key localization) and, for AES-192 / AES-256, the key-extension algorithm from draft-reeder-snmpv3-usm-3desede. HMAC output is truncated per RFC 3414 §6.3.1 and RFC 7860 §4: MD5 and SHA-1 to 12 bytes, SHA-224 to 16, SHA-256 to 24, SHA-384 to 32, SHA-512 to 48.
+??? note "Key derivation and HMAC truncation (crypto internals)"
+    Key derivation follows RFC 3414 §2.6 (password-to-key localization) and, for AES-192 / AES-256, the key-extension algorithm from draft-reeder-snmpv3-usm-3desede. HMAC output is truncated per RFC 3414 §6.3.1 and RFC 7860 §4: MD5 and SHA-1 to 12 bytes, SHA-224 to 16, SHA-256 to 24, SHA-384 to 32, SHA-512 to 48.
 
 The `usmStatsNotInTimeWindow` Report PDU triggers exactly one retry with the corrected `msgAuthoritativeEngineBoots` and `msgAuthoritativeEngineTime` extracted from the report. Persistent time-window errors surface as reachable-but-no-signals. All other Report PDUs (`usmStatsUnknownEngineIDs` outside discovery, `usmStatsUnknownUserNames`, `usmStatsWrongDigests`, `usmStatsDecryptionErrors`) mark the target reachable with no signals — the target is confirmed to speak SNMPv3 even if the credentials are wrong.
 
