@@ -21,8 +21,13 @@ Two classifier variants ship: `noop` (pass-through, the default) and `rules` (re
 
 ## Pipeline position
 
-```
-probe → fuse → classify → encode → sink
+```mermaid
+flowchart LR
+    P[Probe] --> F[Fuse]
+    F --> C[Classify]
+    C --> E[Encode]
+    E --> S[Sink]
+    style C stroke-width:4px
 ```
 
 The classifier is the fourth stage. Each stage has one job:
