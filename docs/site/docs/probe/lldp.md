@@ -4,9 +4,12 @@ description: The LLDP prober — walks the LLDP-MIB over SNMP to read a device's
 
 # LLDP prober
 
-The LLDP prober discovers a device's link-layer neighbors — the other devices directly connected to its interfaces. It walks the LLDP-MIB over SNMP to read the device's own chassis identity and its table of neighbors. Each neighbor then flows to rastreo's topology stage. Unlike every other prober, it does not emit device signals. Its output is the set of links between devices, emitted as `LinkRecord`s. See [Topology](../discover/topology.md) for the record shape and where it is delivered.
+The LLDP prober discovers a device's link-layer neighbors — the other devices directly connected to its interfaces by a cable. A switch or router that runs LLDP announces its own identity out every port and listens for its neighbors doing the same, so each device keeps a table of who is on the other end of each cable. The prober reads that table over SNMP — it walks the LLDP-MIB, reading the table's rows one at a time — along with the device's own chassis identity. Each neighbor then flows to rastreo's topology stage. Unlike every other prober, it does not emit device signals. Its output is the set of links between devices, emitted as `LinkRecord`s. See [Topology](../discover/topology.md) for the record shape and where it is delivered.
 
-LLDP (IEEE 802.1AB) is the vendor-neutral neighbor-discovery protocol most switches and routers speak. A device that runs LLDP keeps a table of what it sees on each port; the prober reads that table over SNMP, so it needs the same SNMP access as the [SNMP prober](snmp.md).
+**Use it when** you want to map which devices are directly cabled to which — the network's topology.<br>
+**You get** topology links (`LinkRecord`s), not device signals: each reachable device's list of directly connected neighbors.
+
+LLDP (IEEE 802.1AB) is the vendor-neutral neighbor-discovery protocol most switches and routers speak. Because the prober reads the neighbor table over SNMP, it needs the same SNMP access as the [SNMP prober](snmp.md).
 
 ## Configuration
 

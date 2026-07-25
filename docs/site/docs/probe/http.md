@@ -4,7 +4,10 @@ description: The HTTP prober — issues GET requests against configured ports an
 
 # HTTP prober
 
-The HTTP prober issues a `GET` request against each configured port on every resolved target and captures the response `Server:` header as an `HttpBanner` signal. It complements the TCP-connect prober by returning a fingerprint (`nginx/1.24.0`, `Apache/2.4.62`, `Caddy`) alongside "port responds to HTTP" reachability information.
+The HTTP prober issues a `GET` request against each configured port on every resolved target and captures the response `Server:` header as an `HttpBanner` signal. The `Server:` header is the line a web server sends to name the software it runs. The prober turns "port 80 is open" into "port 80 is nginx".
+
+**Use it when** you want to know what web-server software answers on a port, not just that the port is open.<br>
+**You get** the server's self-reported name (`nginx/1.24.0`, `Apache/2.4.62`, `Caddy`) as an `HttpBanner` signal, plus an `OpenPort` signal.
 
 ## Configuration
 
@@ -41,7 +44,7 @@ When `scheme: auto`, the scheme is chosen per-port using the table below. Settin
 
 ## TLS behaviour
 
-`tls_verify: false` (the default) lets the prober complete handshakes against hosts that present self-signed certificates, expired certificates, or names that do not match the certificate's Subject Alternative Names. Enabling verification (`tls_verify: true`) fails the probe when the certificate chain does not verify against the system's webpki root store — appropriate when probing known-good hosts on a trusted network.
+`tls_verify: false` (the default) lets the prober complete handshakes against hosts that present self-signed certificates, expired certificates, or names that do not match the certificate's Subject Alternative Names. Enabling verification (`tls_verify: true`) fails the probe when the certificate chain does not verify against the built-in list of trusted certificate authorities that browsers ship with (the webpki root store) — appropriate when probing known-good hosts on a trusted network.
 
 The prober disables HTTP redirects (`301`, `302`, `307`, and `308` count as reachable, banner-carrying responses rather than being followed).
 

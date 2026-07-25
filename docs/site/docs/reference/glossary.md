@@ -52,6 +52,8 @@ This glossary defines the terms used across rastreo's documentation and source. 
 
 **VRRP** — Virtual Router Redundancy Protocol. A protocol that lets several routers share one virtual IP for gateway failover. rastreo tags an alternate IP that looks like such a shared address (VRRP, HSRP, or CARP) with a matching role hint on the `DeviceRecord`.
 
+**CAP_NET_RAW**{ #cap-net-raw } — A Linux capability that lets a process open raw network sockets — the low-level sockets that send hand-built packets — without running as the root user. The ARP, NDP, and ICMP probers need it because they craft packets the operating system does not build for them. rastreo's published image grants it to the binary, so the probers work under a non-root container. See [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
+
 ## Discovery pipeline
 
 **Probe** — A single action that sends traffic to one target and observes the reply. Each `(target, port)` pair, or each protocol exchange, is one probe.

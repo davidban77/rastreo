@@ -6,7 +6,10 @@ description: The NDP prober — sends an ICMPv6 Neighbor Solicitation on the loc
 
 The NDP prober speaks the Neighbor Discovery Protocol (RFC 4861) against IPv6 targets on the local subnet. It sends an ICMPv6 Neighbor Solicitation (type 135) to the target's Solicited-Node multicast address, waits for the Neighbor Advertisement (type 136) that carries the target's link-layer address in a Target Link-Layer Address option, and emits it as a `Mac(<address>)` signal. NDP is the IPv6 replacement for ARP — same purpose, different wire format — and produces the same signal shape for downstream OUI vendor enrichment.
 
-NDP is a link-layer discovery protocol. Routers do not forward Neighbor Solicitation frames off the local segment. The prober only produces results for targets reachable at Layer 2 from the sending interface. Cross-subnet IPv6 targets time out silently.
+**Use it when** you want the hardware (MAC) address of an IPv6 host on your local network. NDP is the IPv6 version of ARP.<br>
+**You get** a `Mac` signal for each host that answers on the local segment. It works only on the local network, not across routers.
+
+NDP is a link-layer discovery protocol. Routers do not forward Neighbor Solicitation frames off the local segment. The prober only produces results for targets reachable at Layer 2 — the hardware level, reached directly without going through a router — from the sending interface. Cross-subnet IPv6 targets time out silently.
 
 ## Configuration
 
@@ -60,7 +63,7 @@ Probing an IPv6 address that is assigned to one of your interfaces returns `Prob
 
 Advertisements that lack the Target Link-Layer Address option are silently skipped — RFC 4861 §4.4 allows the option to be omitted when the sender's link-layer address is already known to the receiver, but a probing sender by definition does not know it yet, so an option-less advertisement produces no signal. Frames that are not ICMPv6 Neighbor Advertisements, or whose target address does not match the probe, are discarded and the receive loop continues.
 
-A target that sends no Neighbor Advertisement before the timeout is marked unreachable and contributes no signal. That is a normal discovery result, not an error: the kernel does not surface ICMP unreachable for L2 solicitations, so a silent timeout is the only shape absence can take. Probe faults still surface as errors: no local interface reaches the target, the selected interface has no IPv6 address, the target is one of your own interface addresses, the target is an IPv4 address, or the process lacks `CAP_NET_RAW`. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
+A target that sends no Neighbor Advertisement before the timeout is marked unreachable and contributes no signal. That is a normal discovery result, not an error: the kernel does not surface ICMP unreachable for L2 solicitations, so a silent timeout is the only shape absence can take. Probe faults still surface as errors: no local interface reaches the target, the selected interface has no IPv6 address, the target is one of your own interface addresses, the target is an IPv4 address, or the process lacks [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw) — the Linux permission that lets a non-root process open the raw socket NDP needs. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
 ## Build feature
 
