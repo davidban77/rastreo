@@ -306,11 +306,15 @@ The `encoder` field is an internally-tagged object. One encoder is available tod
 
 The `sink` field is an internally-tagged object. Five variants exist; the `kafka` variant is only available when `rastreo-core` is built with the `kafka` Cargo feature and the `nats` variant is only available with the `nats` Cargo feature. The `memory` variant is reachable from the library API and is what the HTTP server uses internally to capture records for the response body. Clients can submit a `memory` sink on `POST /scans`, but the server strips and replaces any client-supplied sink either way.
 
+### stdout
+
 Write each NDJSON line to standard output:
 
 ```json
 {"type": "stdout"}
 ```
+
+### file
 
 Append each NDJSON line to a file. The path is opened in append mode; repeated runs accumulate rather than overwrite.
 
@@ -318,11 +322,15 @@ Append each NDJSON line to a file. The path is opened in append mode; repeated r
 {"type": "file", "path": "/tmp/scan.ndjson"}
 ```
 
+### memory
+
 Buffer records in memory. Useful for library tests and for the HTTP server's internal capture; not typically set by clients.
 
 ```json
 {"type": "memory"}
 ```
+
+### kafka
 
 Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `kafka` build feature on `rastreo-core` and on the consuming binary.
 
@@ -379,6 +387,8 @@ The `tls` and `sasl` fields secure the broker connection. `tls` carries `verify`
 ```json
 {"type": "batched", "threshold_bytes": 65536}
 ```
+
+### nats
 
 Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requires the `nats` build feature on `rastreo-core` and on the consuming binary. The JetStream stream that binds the subject must be created out of band (`nats stream add` or Terraform); construction fails fast if the stream is missing so records never silently drop.
 

@@ -6,6 +6,13 @@ description: Output sinks for rastreo discover — stdout (default), file, Kafka
 
 A sink is where `DeviceRecord` events go after they are encoded. rastreo ships four sinks today: stdout (the default), a file sink that writes NDJSON to a path, a Kafka sink that publishes events to a topic, and a NATS JetStream sink that publishes events to a subject. Every sink uses the same NDJSON encoder, so the on-the-wire shape is identical regardless of destination.
 
+## Choosing a sink
+
+- **stdout** for ad-hoc shell pipelines: piping into `jq`, `grep`, or a script that consumes NDJSON. The default for a reason — no setup, no extra flags.
+- **file** for one-shot dumps you want to keep, share, or feed into another tool later. Append-mode means repeated scans accumulate into one file.
+- **Kafka** for streaming into a topic that downstream consumers reconcile into a source of truth such as NetBox, Nautobot, or Infrahub. Consumer offset management belongs to the downstream system. See [Integrate](../integrate/index.md) for the wire contract.
+- **NATS** for a lighter-weight streaming transport with at-least-once JetStream delivery. Pick NATS when the reconcilers already speak NATS or when you want to avoid the Kafka broker footprint. See [Integrate · NATS](../integrate/nats.md) for the wire contract.
+
 ## stdout (default)
 
 The default sink writes one NDJSON `DeviceRecord` per line to stdout. Tracing logs and the end-of-run summary go to stderr, which keeps stdout clean for downstream tools.
@@ -57,7 +64,7 @@ Secured brokers — Confluent Cloud, Amazon MSK, any `SASL_SSL` listener — nee
 
 ### Retrying before the dead-letter queue
 
-A brief broker reconnect should not fill the dead-letter queue. The Kafka sink retries the primary produce with bounded backoff before it falls back to the DLQ. A short outage that clears within the retry budget reaches the primary topic and is never quarantined.
+A brief broker reconnect should not fill the dead-letter queue. The dead-letter queue, or DLQ, is a second topic for records the primary produce could not deliver. It is defined in full [below](#dead-letter-queue). The Kafka sink retries the primary produce with bounded backoff before it falls back to the DLQ. A short outage that clears within the retry budget reaches the primary topic and is never quarantined.
 
 Retry is on by default. Every Kafka sink retries even with no `retry` block. Add the block to change the limits. It has three fields:
 
@@ -156,7 +163,7 @@ rastreo discover --file scenario.yaml
 
 ### Retrying before the dead-letter queue
 
-The NATS sink retries the primary publish with bounded backoff before it falls back to the DLQ. A short broker outage that clears within the retry budget reaches the primary subject and is never quarantined. Retry works the same way as the Kafka sink, with the same `retry` block and defaults.
+The dead-letter queue, or DLQ, is a second JetStream subject for records the primary publish could not deliver. It is defined in full [below](#dead-letter-queue_1). The NATS sink retries the primary publish with bounded backoff before it falls back to the DLQ. A short broker outage that clears within the retry budget reaches the primary subject and is never quarantined. Retry works the same way as the Kafka sink, with the same `retry` block and defaults.
 
 The block has three fields:
 
@@ -236,13 +243,6 @@ The stdout and file sinks emit one `DeviceRecord` per NDJSON line. Each line is 
 ```
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).
-
-## Choosing a sink
-
-- **stdout** for ad-hoc shell pipelines: piping into `jq`, `grep`, or a script that consumes NDJSON. The default for a reason — no setup, no extra flags.
-- **file** for one-shot dumps you want to keep, share, or feed into another tool later. Append-mode means repeated scans accumulate into one file.
-- **Kafka** for streaming into a topic that downstream consumers reconcile into a source of truth such as NetBox, Nautobot, or Infrahub. Consumer offset management belongs to the downstream system. See [Integrate](../integrate/index.md) for the wire contract.
-- **NATS** for a lighter-weight streaming transport with at-least-once JetStream delivery. Pick NATS when the reconcilers already speak NATS or when you want to avoid the Kafka broker footprint. See [Integrate · NATS](../integrate/nats.md) for the wire contract.
 
 ## See also
 
