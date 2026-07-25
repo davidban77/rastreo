@@ -6,18 +6,94 @@ description: CLI flag reference, scenario JSON schema, error code table, and a g
 
 This section is the alphabetical / structured reference material. It is meant to be skimmed and grepped, not read top to bottom. Each page in this section is a flat list of fields, flags, or terms with their meaning and default.
 
-Topics covered here include the full `rastreo` and `rastreo-server` CLI flag reference, the scenario JSON schema (every field in the `DiscoverScenarioConfig` shape that `POST /scans` and the library accept), an error reference mapping each `RastreoError` variant to its meaning and likely cause, and a glossary of network-discovery terminology.
+<div class="grid cards" markdown>
 
-## Pages in this section
+-   :material-console:{ .lg .middle } **CLI reference**
 
-- [CLI reference](cli.md) — every flag for `rastreo` and `rastreo-server`.
-- [Configuration reference](configuration.md) — every runtime environment variable both binaries read, with defaults and scope.
-- [Scenario schema](scenario.md) — the `DiscoverScenarioConfig` JSON shape.
-- [Secrets](secrets.md) — env-var and file-mount syntaxes for keeping credentials out of scenario YAML.
-- [Record schema](schema/index.md) — the emitted `DeviceRecord` JSON Schema, versioning policy, and the streaming API description.
-- [Error reference](errors.md) — every `RastreoError` variant and its likely fix.
-- [Health endpoints](health-endpoints.md) — `/healthz`, `/readyz`, the `/health` alias, and the readiness gates.
-- [Observability](observability.md) — the `/metrics` endpoint inventory, the bundled Grafana dashboard, and the packaged PrometheusRule alerts.
-- [Logging](logging.md) — text and JSON log formats, log-level control, and aggregator ingestion examples.
-- [OTLP](otlp.md) — OpenTelemetry OTLP export for metrics, logs, and traces, behind the `otlp` Cargo feature.
-- [Glossary](glossary.md) — domain terms used across the docs.
+    ---
+
+    Every flag for `rastreo` and `rastreo-server`.
+
+    [:octicons-arrow-right-24: CLI reference](cli.md)
+
+-   :material-cog:{ .lg .middle } **Configuration reference**
+
+    ---
+
+    Every runtime environment variable both binaries read, with defaults and scope.
+
+    [:octicons-arrow-right-24: Configuration reference](configuration.md)
+
+-   :material-file-code:{ .lg .middle } **Scenario schema**
+
+    ---
+
+    The `DiscoverScenarioConfig` JSON shape.
+
+    [:octicons-arrow-right-24: Scenario schema](scenario.md)
+
+-   :material-key-variant:{ .lg .middle } **Secrets**
+
+    ---
+
+    Env-var and file-mount syntaxes for keeping credentials out of scenario YAML.
+
+    [:octicons-arrow-right-24: Secrets](secrets.md)
+
+-   :material-code-json:{ .lg .middle } **Record schema**
+
+    ---
+
+    The emitted `DeviceRecord` JSON Schema, versioning policy, and the streaming API description.
+
+    [:octicons-arrow-right-24: Record schema](schema/index.md)
+
+-   :material-alert-circle:{ .lg .middle } **Error reference**
+
+    ---
+
+    Every `RastreoError` variant and its likely fix.
+
+    [:octicons-arrow-right-24: Error reference](errors.md)
+
+-   :material-heart-pulse:{ .lg .middle } **Health endpoints**
+
+    ---
+
+    `/healthz`, `/readyz`, the `/health` alias, and the readiness gates.
+
+    [:octicons-arrow-right-24: Health endpoints](health-endpoints.md)
+
+-   :material-monitor-dashboard:{ .lg .middle } **Observability**
+
+    ---
+
+    The `/metrics` endpoint inventory, the bundled Grafana dashboard, and the packaged PrometheusRule alerts.
+
+    [:octicons-arrow-right-24: Observability](observability.md)
+
+-   :material-text-box-outline:{ .lg .middle } **Logging**
+
+    ---
+
+    Text and JSON log formats, log-level control, and aggregator ingestion examples.
+
+    [:octicons-arrow-right-24: Logging](logging.md)
+
+-   :material-telescope:{ .lg .middle } **OTLP**
+
+    ---
+
+    OpenTelemetry OTLP export for metrics, logs, and traces, behind the `otlp` build feature.
+
+    [:octicons-arrow-right-24: OTLP](otlp.md)
+
+-   :material-book-alphabet:{ .lg .middle } **Glossary**
+
+    ---
+
+    Domain terms used across the docs.
+
+    [:octicons-arrow-right-24: Glossary](glossary.md)
+
+</div>

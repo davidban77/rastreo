@@ -35,27 +35,34 @@ Flag-driven mode always uses the TCP-connect prober. To reach the HTTP, DNS, UDP
 
 `--file <PATH>` (`-f <PATH>`) loads a `ScenarioFile` and runs every scenario entry in order. The file must set `version: 1` and `kind: discovery`; other values are rejected. See [Scenario schema](../reference/scenario.md) for the full field list. The argument also accepts a `@name` catalog reference that resolves to a scenario file in `~/.config/rastreo/catalog/` or `/etc/rastreo/catalog/` — see [Catalog](catalog.md) for the search order and setup.
 
-A single-scenario file that probes an HTTP target and a DNS resolver:
+A single-scenario file that probes an HTTP target and a DNS resolver. The numbered markers explain each part — click one to expand it:
 
-```yaml
+``` { .yaml .annotate }
 # yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
-version: 1
-kind: discovery
-scenarios:
+version: 1 # (1)!
+kind: discovery # (2)!
+scenarios: # (3)!
   - signal_type: discover
     name: web-and-dns
     timeout_ms: 500
-    sink:
+    sink: # (4)!
       type: stdout
-    targets:
+    targets: # (5)!
       - Ip: "192.0.2.10"
       - Ip: "1.1.1.1"
-    probers:
+    probers: # (6)!
       - type: http
         ports: [80, 443]
       - type: dns
         query_names: ["example.com"]
 ```
+
+1.  **`version`** — the scenario file format version. Always `1` today.
+2.  **`kind`** — declares the file as a discovery run. Always `discovery`.
+3.  **`scenarios`** — the list of runs. Each entry is one independent scan, and the CLI runs them in order.
+4.  **`sink`** — where records go. Here, one NDJSON line per device on stdout. See [Sinks](sinks.md).
+5.  **`targets`** — what to probe. Two single IPs here. See [Targets](targets.md) for CIDR, range, and DNS forms.
+6.  **`probers`** — how to probe each target. This scan runs the HTTP and DNS probers against every target.
 
 ```bash
 rastreo discover --file /etc/rastreo/scan.yml
