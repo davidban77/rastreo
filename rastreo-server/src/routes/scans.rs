@@ -7,9 +7,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rastreo_core::config::DiscoverScenarioConfig;
 use rastreo_core::{
-    hint_for_error_kind, resolve_scenario_targets, run_discovery_with_components_with_progress,
-    DeviceRecord, DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink,
-    PlanKnobs, Sink, TeeChild, TeeSink,
+    hint_for_error_kind, resolve_scenario_targets, run_discovery, DeviceRecord, DiscoveryPlan,
+    DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink, PlanKnobs, RunOptions, Sink,
+    TeeChild, TeeSink,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -197,11 +197,11 @@ async fn run_scan(
         ScanOutcomeGuard::new(Arc::clone(&state.metrics), start, scenario_label.clone());
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
     let progress_task = spawn_progress_logger(progress_rx, scenario_label.clone());
-    let summary_result = run_discovery_with_components_with_progress(
-        &scenario,
-        state.resolver.clone(),
-        pipeline_sink,
-        progress_tx,
+    let summary_result = run_discovery(
+        RunOptions::new(&scenario)
+            .resolver(state.resolver.clone())
+            .sink(pipeline_sink)
+            .progress(progress_tx),
     )
     .await;
     progress_task.abort();
