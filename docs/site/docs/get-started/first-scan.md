@@ -1,25 +1,27 @@
 ---
-description: Run a TCP-connect discovery scan against a single host, read the resulting DeviceRecord on stdout, and learn what each field means.
+description: Run a discovery scan against a single host with no flags beyond the target, read the resulting DeviceRecord on stdout, and learn what each field means.
 ---
 
 # First scan
 
-In this walkthrough you probe a single TCP port on a known-reachable host and read the resulting `DeviceRecord` off stdout. The scan takes one command, no config file, and prints one NDJSON line per device found.
+In this walkthrough you probe a single host and read the resulting `DeviceRecord` off stdout. The scan takes one command, no config file, and prints one NDJSON line per device found.
 
 ## Pick a target
 
-You need a host that accepts TCP on the port you ask about. Two easy options:
+You need a host that answers something. Two easy options:
 
-- **A public HTTPS endpoint**, such as `1.1.1.1:443`. Reachable from any host with outbound internet — the simplest path for a first scan.
-- **The local compose stack**, which brings up three nginx target containers serving HTTP on port 80. Start it with `docker compose up -d` from the repository root. The containers live on a `10.50.0.0/24` Docker bridge network at `10.50.0.10`, `10.50.0.11`, and `10.50.0.12`. From your host the bridge addresses are not directly reachable, so run the CLI from inside the network: `docker compose exec rastreo-server /rastreo discover --target 10.50.0.10 --port 80`.
+- **A public HTTPS endpoint**, such as `1.1.1.1`. Reachable from any host with outbound internet — the simplest path for a first scan.
+- **The local compose stack**, which brings up three nginx target containers serving HTTP on port 80. Start it with `docker compose up -d` from the repository root. The containers live on a `10.50.0.0/24` Docker bridge network at `10.50.0.10`, `10.50.0.11`, and `10.50.0.12`. From your host the bridge addresses are not directly reachable, so run the CLI from inside the network: `docker compose exec rastreo-server /rastreo discover --target 10.50.0.10`.
 
-The rest of this page uses `1.1.1.1:443` because it works without any extra setup.
+The rest of this page uses `1.1.1.1` because it works without any extra setup.
 
 ## Run the scan
 
 ```bash
-rastreo discover --target 1.1.1.1 --port 443
+rastreo discover --target 1.1.1.1
 ```
+
+That is the whole command. With no `--probe` flag, rastreo runs its **default probe set** — every prober the binary carries that needs no extra parameter. On a release binary that is `icmp`, `tcp_connect`, `http`, `ssh`, `tls`, `snmp`, and `reverse_dns`. See [Choosing probers](../discover/cli.md#choosing-probers) to pick your own.
 
 `rastreo discover` writes one NDJSON `DeviceRecord` per line to stdout. The progress summary and any log lines go to stderr, so stdout stays clean for downstream tools.
 
@@ -34,18 +36,41 @@ Stdout (one line, formatted here across multiple lines for reading):
   "platform": null,
   "os_version": null,
   "role": null,
-  "confidence": 0.2,
-  "last_seen": "2026-07-25T10:25:21.320939Z",
-  "signals": [ { "OpenPort": 443 } ],
-  "probe_kinds": [ "TcpConnect" ],
+  "confidence": 1.0,
+  "last_seen": "2026-07-26T23:14:23.917897Z",
+  "signals": [
+    { "IcmpEchoRttMicros": 15052 },
+    { "OpenPort": 80 },
+    { "OpenPort": 443 },
+    { "OpenPort": 8080 },
+    { "HttpBanner": "cloudflare" },
+    { "OpenPort": 8443 },
+    { "TlsProtocolVersion": "TLSv1.3" },
+    { "TlsCipherSuite": "TLS_AES_256_GCM_SHA384" },
+    { "TlsAlpn": "h2" },
+    { "TlsSubject": "cloudflare-dns.com" },
+    { "TlsSanName": "cloudflare-dns.com" },
+    { "TlsSanName": "*.cloudflare-dns.com" },
+    { "TlsSanName": "ip:1.0.0.1" },
+    { "TlsSanName": "ip:1.1.1.1" },
+    { "TlsSanName": "ip:162.159.36.1" },
+    { "TlsSanName": "ip:162.159.46.1" },
+    { "TlsSanName": "ip:2606:4700:4700::1001" },
+    { "TlsSanName": "ip:2606:4700:4700::1111" },
+    { "TlsSanName": "ip:2606:4700:4700::64" },
+    { "TlsSanName": "ip:2606:4700:4700::6400" },
+    { "TlsSanName": "one.one.one.one" },
+    { "ReverseDnsName": "one.one.one.one" }
+  ],
+  "probe_kinds": [ "Icmp", "TcpConnect", "Http", "Tls", "ReverseDns" ],
   "schema_version": "v1",
   "schema_id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
   "possible_alias_of": null,
   "scan_metadata": {
-    "scan_id": "01KYCCXPWNTY0ZGA5VGEZHRSWC",
+    "scan_id": "01KYGBAJ1R9D6R0548FP88TY3X",
     "scenario_name": null,
-    "initiated_at": "2026-07-25T10:25:21.301389Z",
-    "source_config_hash": "sha256:7d980a397706ae764d9e92c5146a747a66d9f6ddde535f4994b37e074c3422a6"
+    "initiated_at": "2026-07-26T23:14:22.904079Z",
+    "source_config_hash": "sha256:4e688bf2179b5b97b79369e4fc15e69289b74371da9d84f0dd792b7d137393ba"
   }
 }
 ```
@@ -53,45 +78,75 @@ Stdout (one line, formatted here across multiple lines for reading):
 Stderr:
 
 ```text
-▶ discover  targets: 1 | probes: tcp_connect (ports 22) | concurrency: 64 | timeout: 1000ms | sink: stdout
-■ discover  completed in 112ms | hosts: 1 | records: 1 | probes: 1 | faults: 0 | sink: stdout
+▶ discover  targets: 1 | probes: icmp (count 3, interval_ms 200), tcp_connect (ports 22, 23, 80, 443, 830, 8080), http (ports 80, 443, 8080, 8443), ssh (ports 22), tls (ports 443), snmp (ports 161, V2c), reverse_dns (system resolvers) | concurrency: 64 | timeout: 1000ms | sink: stdout
+■ discover  completed in 1.0s | hosts: 1 | records: 1 | probes: 7 | faults: 0 | sink: stdout
 ```
 
 The start banner tells you what is about to run; the completion banner tells you what happened. Add `-v` for a per-prober breakdown under the completion banner, or `-q` to silence stderr entirely.
 
-If a scan returns zero records and at least one probe attempt happened, the CLI prints a hint on stderr explaining that no probe reached an open port. The most common cause is an unreachable target or a port the host does not actually listen on.
+`probes: 7` counts probers, not ports — the seven default probers each ran once against the one target. The record's `probe_kinds` lists the five that actually observed something; `ssh` and `snmp` got no answer on this host, which is a normal negative result rather than a failure.
+
+Your `signals` list will differ. It is whatever the host answered with, so a switch, a printer, and a DNS resolver all produce different sets.
+
+!!! tip "Preview a scan before it sends anything"
+    `rastreo discover --target 1.1.1.1 --dry-run` resolves the targets and prints the probers and ports that would run, then exits without touching the network.
+
+If a scan returns zero records and at least one probe attempt happened, the CLI prints a hint on stderr explaining that no probe reached the target. The most common cause is an unreachable host or a firewall dropping every probe.
 
 `faults` counts probe faults, not silent targets. A target that does not answer is a normal negative result: it keeps `faults` at `0` and produces no record. Sweeping a `/24` with twelve live hosts gives you twelve records and zero faults. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults).
 
 ## Read the output
 
-Each NDJSON line is one `DeviceRecord`. The fields you will see on a TCP-only scan today:
+Each NDJSON line is one `DeviceRecord`.
 
 | Field | Meaning |
 |---|---|
 | `identity_key` | Stable dedup key. For IP targets, this is `ip:<address>`. |
-| `mgmt_ip` | Management IP if known. For a TCP-connect probe against an IP target, this is the target address. |
-| `mac` | MAC address. `null` until an ARP-style [prober](../reference/glossary.md#prober) populates it. |
-| `manufacturer` | OUI vendor name. `null` until MAC enrichment is available. |
-| `platform` | Platform fingerprint set by the [classifier](../discover/classification.md). `null` here because a TCP-connect probe collects no banner for a platform rule to match — add an `ssh`, `http`, or `snmp` prober and it fills in. |
+| `mgmt_ip` | Management IP if known. For an IP target, this is the target address. |
+| `mac` | MAC address. `null` until an ARP-style [prober](../reference/glossary.md#prober) populates it, which needs a target on the local segment. |
+| `manufacturer` | OUI vendor name. `null` until a MAC address is known for the OUI lookup to work from. |
+| `platform` | Platform fingerprint set by the [classifier](../discover/classification.md). `null` here because Cloudflare's banners match no platform rule — point the same command at a switch or a router and it fills in. |
 | `os_version` | OS version string set by the classifier alongside `platform`. `null` for the same reason. |
-| `role` | Device role from the [classifier](../discover/classification.md). `null` here: the default role rules need multi-port evidence (SSH + BGP, or SSH + HTTPS + NETCONF), and one open port is a guess rather than evidence. |
-| `confidence` | [Fuser](../reference/glossary.md#fuser) confidence score in the range `0.0` to `1.0`. With the default `DirectFuser`, a single observed signal yields `0.2`. |
+| `role` | Device role from the [classifier](../discover/classification.md). `null` here: the default role rules need multi-port evidence such as SSH + BGP, or SSH + HTTPS + NETCONF. |
+| `confidence` | [Fuser](../reference/glossary.md#fuser) confidence score in the range `0.0` to `1.0`. With the default `DirectFuser` it climbs with the number of distinct signals, so a well-answered host saturates at `1.0`. |
 | `last_seen` | When the last probe touched this device, as an RFC 3339 UTC timestamp. |
-| `signals` | Observed [signals](../reference/glossary.md#signal). For a TCP-connect probe, each open port becomes an `OpenPort` entry. |
-| `probe_kinds` | Which probers observed this device. A TCP-connect scan reports `["TcpConnect"]`. |
+| `signals` | Observed [signals](../reference/glossary.md#signal). One entry per fact a prober read: open ports, an HTTP banner, TLS certificate names, a reverse-DNS name, an ICMP round-trip time. |
+| `probe_kinds` | Which probers observed this device. Probers that ran and got nothing are not listed. |
 | `schema_version` | The record schema version. `v1` today. |
 | `schema_id` | URL of the JSON Schema this record validates against. See [Record schema](../reference/schema/index.md). |
 | `possible_alias_of` | Set by [identity](../discover/identity.md) resolution when this record may be another device's alternate address. `null` on a single-host scan. |
 | `scan_metadata` | Provenance for the scan: a unique `scan_id`, the scenario name, the start time, and a hash of the config that produced the record. |
+
+## Narrow the scan
+
+The default set is the right start when you do not know what is out there. When you do, `--probe` picks the probers and `--port` sets the ports for the three that have no well-known port (`tcp_connect`, `http`, `udp`):
+
+```bash
+rastreo discover --target 1.1.1.1 --probe tcp_connect --port 443
+```
+
+```text
+▶ discover  targets: 1 | probes: tcp_connect (ports 443) | concurrency: 64 | timeout: 1000ms | sink: stdout
+■ discover  completed in 34ms | hosts: 1 | records: 1 | probes: 1 | faults: 0 | sink: stdout
+```
+
+That record carries a single `{ "OpenPort": 443 }` signal, `probe_kinds: ["TcpConnect"]`, and `confidence: 0.2` — one prober, one observation.
+
+Pass `--port` without `--probe` and rastreo prints a note on stderr, because a port list on the default set is not the port-only scan it looks like:
+
+```text
+• note: --port applies to tcp_connect, http; the default probe set also runs icmp, ssh, tls, snmp, reverse_dns. Use --probe tcp_connect for a port-only scan.
+```
+
+See [Ports](../discover/cli.md#ports) for the full rules, including `--probe-ports` for retargeting one prober.
 
 ## Pipe into jq
 
 Because tracing logs go to stderr and records go to stdout, you can pipe stdout straight into `jq` (or any NDJSON tool) without log noise.
 
 ```bash
-rastreo discover --target 1.1.1.1 --port 443 | jq .
-rastreo discover --target 1.1.1.1 --port 443 | jq -r '.signals[].OpenPort'
+rastreo discover --target 1.1.1.1 | jq .
+rastreo discover --target 1.1.1.1 | jq -r '.signals[].OpenPort | select(. != null)'
 ```
 
 ## See also

@@ -2,6 +2,7 @@
 pub mod catalog;
 pub mod discover;
 mod output;
+pub mod probe_args;
 #[cfg(feature = "config")]
 pub mod validate;
 

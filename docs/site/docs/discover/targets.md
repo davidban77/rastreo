@@ -11,8 +11,8 @@ The `--target` flag accepts four forms: a single IP address, a CIDR block, an IP
 A single IPv4 or IPv6 address is parsed directly. Probes are dispatched against that one address.
 
 ```bash
-rastreo discover --target 10.0.0.1 --port 22
-rastreo discover --target 2001:db8::1 --port 22
+rastreo discover --target 10.0.0.1
+rastreo discover --target 2001:db8::1
 ```
 
 ## CIDR
@@ -20,8 +20,8 @@ rastreo discover --target 2001:db8::1 --port 22
 A string containing `/` is parsed as a CIDR block. Both IPv4 and IPv6 prefixes are accepted. The target resolver expands the block into individual host addresses before probing.
 
 ```bash
-rastreo discover --target 10.0.0.0/24 --port 80
-rastreo discover --target 2001:db8::/120 --port 80
+rastreo discover --target 10.0.0.0/24
+rastreo discover --target 2001:db8::/120
 ```
 
 A `/24` block expands to 254 usable host addresses; a `/29` expands to 6. The resolver skips the network and broadcast addresses, except on `/31` point-to-point links (RFC 3021) where both addresses are used and `/32` which expands to the single host. IPv6 prefixes do not have a broadcast carve-out — a `/120` block expands to 256 addresses.
@@ -31,8 +31,8 @@ A `/24` block expands to 254 usable host addresses; a `/29` expands to 6. The re
 A string of the form `<ip>-<ip>` (whitespace around the `-` is tolerated) is parsed as an inclusive IP range. Both sides must parse as IP addresses; otherwise the string falls through to DNS-name detection.
 
 ```bash
-rastreo discover --target 10.0.0.1-10.0.0.5 --port 22
-rastreo discover --target "10.0.0.1 - 10.0.0.5" --port 22
+rastreo discover --target 10.0.0.1-10.0.0.5
+rastreo discover --target "10.0.0.1 - 10.0.0.5"
 ```
 
 ## DNS name
@@ -40,7 +40,7 @@ rastreo discover --target "10.0.0.1 - 10.0.0.5" --port 22
 Anything that is not an IP, a CIDR, or an IP range is treated as a DNS name. rastreo resolves it through the system resolver and probes the resulting address.
 
 ```bash
-rastreo discover --target router-1.lab.local --port 22
+rastreo discover --target router-1.lab.local
 ```
 
 When a name resolves to more than one A or AAAA record, every address is probed.
@@ -54,6 +54,7 @@ rastreo discover \
   --target 10.0.0.1 \
   --target 192.0.2.0/29 \
   --target router-1.lab \
+  --probe tcp_connect \
   --port 22,80,443
 ```
 

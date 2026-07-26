@@ -25,6 +25,7 @@ const SCRUBBED: &[&str] = &[
     "RASTREO_OTLP_METRICS_INTERVAL_SECS",
     "RASTREO_OTLP_SERVICE_NAME",
     "RASTREO_OTLP_PROTOCOL",
+    "RASTREO_SNMP_COMMUNITY",
 ];
 
 pub fn rastreo() -> Command {

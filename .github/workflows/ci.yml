@@ -164,6 +164,11 @@ jobs:
       - name: Test rastreo-core with each feature in isolation
         run: cargo hack --each-feature test -p rastreo-core
 
+      # Running (not just building) is what exercises the feature-absent branches: the
+      # rebuild-hint assertions are vacuous on a build that carries every prober.
+      - name: Test the rastreo CLI without default features
+        run: cargo test -p rastreo --no-default-features
+
   msrv:
     name: MSRV (rust-version) check
     runs-on: ubuntu-latest

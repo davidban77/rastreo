@@ -108,7 +108,7 @@ Catalog references compose with every other `--file` behavior:
 
 - `--dry-run` resolves the catalog reference first, then prints the plan for the resolved file — no probes run.
 - `--sink`, `--concurrency`, `--timeout-ms`, and other overrides apply to the resolved scenario exactly as they would for a plain-path `--file`.
-- `--file @name` and `--target` / `--port` remain mutually exclusive.
+- `--file @name` and every flag-driven scan argument (`--target`, `--probe`, `--port`, `--probe-ports`, and the per-prober parameters) remain mutually exclusive.
 
 ## Error output
 

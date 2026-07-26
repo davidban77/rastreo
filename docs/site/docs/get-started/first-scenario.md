@@ -4,14 +4,14 @@ description: Turn the flag-driven first scan into a reusable YAML scenario file,
 
 # First scenario file
 
-The [first scan](first-scan.md) used two flags: `--target` and `--port`. That is the quick path, and it always runs one prober — `tcp_connect`. A scenario file is the next step. It writes the same scan as YAML, then lets you add any prober and point at any destination. This page takes you there one step at a time.
+The [first scan](first-scan.md) ended on a narrowed one-liner: `--target`, `--probe`, and `--port`. That is the quick path. A scenario file is the next step. It writes the same scan as YAML, then lets you configure any prober and point at any destination. This page takes you there one step at a time.
 
 ## The same scan as a file
 
 Here is the flag scan the first-scan page ended on:
 
 ```bash
-rastreo discover --target 1.1.1.1 --port 443
+rastreo discover --target 1.1.1.1 --probe tcp_connect --port 443
 ```
 
 The same scan written as a scenario file uses a few named fields:
@@ -39,7 +39,7 @@ scenarios:
         ports: [443]
 ```
 
-Run it with `--file` instead of `--target` and `--port`:
+Run it with `--file` instead of the scan flags:
 
 ```bash
 rastreo discover --file scenario.yaml

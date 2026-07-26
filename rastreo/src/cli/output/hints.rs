@@ -16,8 +16,8 @@ const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
     ("mib_enrichment", "mib_enrichment"),
 ];
 
-#[cfg(feature = "config")]
-const RELEASE_BUNDLED_FEATURES: &str = "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls";
+const RELEASE_BUNDLED_FEATURES: &str =
+    "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls, gnmi, lldp";
 
 // Resolver / sink errors abort the whole scan and are not kinded, so they hint by string match.
 const SCAN_ERROR_HINT_PATTERNS: &[(&str, &str)] = &[
@@ -79,11 +79,33 @@ pub(crate) fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary, verb
     }
 }
 
+/// Pre-scan advisory about how the requested scan was interpreted; not a failure.
+pub(crate) fn print_note(note: &str, verbosity: Verbosity) {
+    if !verbosity.prints_chrome() {
+        return;
+    }
+    eprintln!("{}", note_line(note));
+}
+
 fn hint_line(hint: &str) -> String {
     format!(
         "{} {} {hint}",
         theme::warn(glyphs().warn),
         theme::label("hint:")
+    )
+}
+
+fn note_line(note: &str) -> String {
+    format!(
+        "{} {} {note}",
+        theme::label(glyphs().bullet),
+        theme::label("note:")
+    )
+}
+
+pub(crate) fn rebuild_hint(name: &str, feature: &str) -> String {
+    format!(
+        "'{name}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles {RELEASE_BUNDLED_FEATURES}."
     )
 }
 
@@ -98,9 +120,7 @@ pub(crate) fn enrich_feature_hint(error_msg: &str) -> Option<String> {
         .iter()
         .find(|(name, _)| *name == variant)
         .map(|(_, feat)| *feat)?;
-    Some(format!(
-        "'{variant}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles {RELEASE_BUNDLED_FEATURES}."
-    ))
+    Some(rebuild_hint(variant, feature))
 }
 
 #[cfg(test)]
@@ -162,13 +182,9 @@ mod tests {
 
     #[cfg(feature = "config")]
     #[test]
-    fn enrich_feature_hint_names_current_bundled_release_features() {
+    fn enrich_feature_hint_names_the_bundled_release_features() {
         let hint = enrich_feature_hint("unknown variant `ssh`, expected one of ...").expect("hint");
-        for feat in [
-            "kafka", "http", "snmp", "arp", "ndp", "oui", "nats", "ssh", "icmp", "tls",
-        ] {
-            assert!(hint.contains(feat), "hint missing '{feat}': {hint}");
-        }
+        assert!(hint.contains(RELEASE_BUNDLED_FEATURES), "hint: {hint}");
     }
 
     #[cfg(feature = "config")]
@@ -327,6 +343,42 @@ mod tests {
             let line = hint_line("check the port list");
             assert!(line.contains(&theme::warn(glyphs().warn)), "{line:?}");
         });
+    }
+
+    #[test]
+    fn note_line_carries_the_bullet_glyph_and_the_note_prefix() {
+        let line = super::super::theme::strip_ansi(&note_line("icmp is not in the default set"));
+        assert_eq!(line, "• note: icmp is not in the default set");
+    }
+
+    #[test]
+    fn print_note_is_silent_under_quiet() {
+        print_note("suppressed", Verbosity::Quiet);
+    }
+
+    #[test]
+    fn rebuild_hint_names_the_feature_and_the_bundled_release_set() {
+        let hint = rebuild_hint("gnmi", "gnmi");
+        assert!(hint.contains("--features gnmi"), "hint: {hint}");
+        assert!(hint.contains("'gnmi'"), "hint: {hint}");
+        assert!(hint.contains(RELEASE_BUNDLED_FEATURES), "hint: {hint}");
+    }
+
+    #[test]
+    fn the_bundled_release_set_is_exactly_what_the_dockerfile_builds() {
+        let declared: std::collections::BTreeSet<&str> = include_str!("../../../../Dockerfile")
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("ARG FEATURES="))
+            .expect("Dockerfile declares ARG FEATURES=")
+            .split(',')
+            .map(str::trim)
+            .collect();
+        let advertised: std::collections::BTreeSet<&str> =
+            RELEASE_BUNDLED_FEATURES.split(", ").collect();
+        assert_eq!(
+            advertised, declared,
+            "the rebuild hint must name every feature the release image bundles"
+        );
     }
 
     #[test]

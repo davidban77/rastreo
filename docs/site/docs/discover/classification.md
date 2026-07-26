@@ -58,7 +58,7 @@ classifier:
 
 The `type` field is required whenever the key is present. Each variant adds its own configuration fields.
 
-Classification is configurable only from a scenario file. `rastreo discover --target ... --port ...` has no `--classifier` flag, so a flag-mode scan always runs the default `rules` classifier; put the scenario in a YAML file and run `rastreo discover --file scan.yaml` when you need `noop` or your own rules.
+Classification is configurable only from a scenario file. A flag-driven `rastreo discover --target ...` has no `--classifier` flag, so a flag-mode scan always runs the default `rules` classifier; put the scenario in a YAML file and run `rastreo discover --file scan.yaml` when you need `noop` or your own rules.
 
 ## Rules classifier
 

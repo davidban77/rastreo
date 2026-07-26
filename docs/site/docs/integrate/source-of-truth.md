@@ -54,7 +54,7 @@ Fingerprint signals identify the software running on a device and what role that
 
 Expect these fields to carry values as soon as a probe collects a signal a baked-in rule matches — an SSH banner sets `platform`, `os_version`, and `ssh_version`; `[22, 179]` open together sets `role: router`. The shipped tables classify only on evidence and leave `role` at `null` on a guess (a single open port is a guess), because `null` is the one value that is safe downstream: most reconcilers, including the three sketched below, overwrite a field whose value differs rather than filling only empty ones. A populated `platform` or `role` will therefore replace whatever an operator set by hand, so decide deliberately whether your reconciler should write those two fields at all — and consider gating the write on the object being unset, or on `confidence` clearing a threshold.
 
-Set `classifier.type: noop` to turn classification off and keep all six fields `null`, leaving the reconciler to derive them from the raw signals. That setting lives in a scenario file; a flag-mode `rastreo discover --target ... --port ...` has no classifier switch, so use `--file`.
+Set `classifier.type: noop` to turn classification off and keep all six fields `null`, leaving the reconciler to derive them from the raw signals. That setting lives in a scenario file; a flag-driven `rastreo discover --target ...` has no classifier switch, so use `--file`.
 
 | Signal | Populates on the record | NetBox / Nautobot mapping | Infrahub mapping |
 |---|---|---|---|

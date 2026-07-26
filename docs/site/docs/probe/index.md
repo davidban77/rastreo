@@ -47,6 +47,31 @@ Start from the question you want answered:
 
 Each page covers the configuration schema, the signal shape, timeout behavior, and known limits. Where a prober has real tuning (HTTP TLS modes, DNS transport selection, UDP protocol selection, SNMP credentials, ARP or NDP interface selection, reverse DNS resolver selection), that surface lives on the prober's page rather than in the scenario reference.
 
+## Selecting probers
+
+Two ways to pick which probers a scan runs.
+
+From the command line, `--probe` takes one or more kind names:
+
+```bash
+rastreo discover --target 10.0.0.0/24 --probe icmp,snmp,ssh
+```
+
+Omit `--probe` entirely and rastreo runs the **default set** — every prober in the build that needs no extra parameter, is not link-layer, and produces no second output stream. That is `icmp`, `tcp_connect`, `http`, `ssh`, `tls`, `snmp`, and `reverse_dns` on a release binary. `udp` and `dns` sit outside it because they need a service or a query name; `arp` and `ndp` because they only reach the local segment; `lldp` and `gnmi` because they need credentials and build a second stream. Name any of them explicitly to run it. See [Choosing probers](../discover/cli.md#choosing-probers) for the flags each one takes.
+
+From a scenario file, the `probers:` list names them with their full configuration — the route to SNMPv3 credentials, gNMI authentication, and per-prober TLS settings that the flags do not expose:
+
+```yaml
+probers:
+  - type: snmp
+    ports: [161]
+    version: v2c
+    community: public
+  - type: tls
+```
+
+See [Scenario schema](../reference/scenario.md) for every field.
+
 ## Reachable, unreachable, and probe faults
 
 Every prober reports one of three results for a target. The rules are the same for all thirteen.

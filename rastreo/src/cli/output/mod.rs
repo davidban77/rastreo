@@ -13,7 +13,9 @@ pub(crate) use banner::{accumulate, print_aggregate, print_blank, print_failed, 
 pub(crate) use banner::{print_complete, print_start};
 #[cfg(feature = "config")]
 pub(crate) use hints::enrich_feature_hint;
-pub(crate) use hints::{enrich_scan_error_hint, print_hint, print_runtime_hints};
+pub(crate) use hints::{
+    enrich_scan_error_hint, print_hint, print_note, print_runtime_hints, rebuild_hint,
+};
 pub(crate) use progress::progress_display_loop;
 #[cfg(feature = "config")]
 pub(crate) use report::{print_catalog_empty, print_scenario_invalid};
