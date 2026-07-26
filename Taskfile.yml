@@ -37,24 +37,6 @@ tasks:
       - task: lint
 
   # ---------------------------------------------------------------------------
-  # Schema
-  # ---------------------------------------------------------------------------
-  schema:generate:
-    desc: Regenerate JSON Schema files from Rust type definitions
-    cmds:
-      - cargo run -p xtask -- generate
-
-  schema:render:
-    desc: Render JSON Schema files into MkDocs pages
-    cmds:
-      - cargo run -p xtask -- render
-
-  schema:all:
-    desc: Regenerate schemas and render docs in one shot
-    cmds:
-      - cargo run -p xtask -- all
-
-  # ---------------------------------------------------------------------------
   # Utilities
   # ---------------------------------------------------------------------------
   clean:
@@ -66,6 +48,16 @@ tasks:
     desc: Run cargo audit for security vulnerabilities
     cmds:
       - cargo audit
+
+  docs:
+    desc: Build and open Rust API documentation
+    cmds:
+      - cargo doc --workspace --no-deps --open
+
+  fmt:
+    desc: Auto-format all code
+    cmds:
+      - cargo fmt --all
 
   # ---------------------------------------------------------------------------
   # Documentation site
@@ -79,6 +71,8 @@ tasks:
         uv pip install -r docs/site/requirements.txt --python docs/site/.venv/bin/python
         echo ""
         echo "Done! Run 'task site:serve' to preview the docs locally."
+    status:
+      - test -f docs/site/.venv/bin/mkdocs
 
   site:build:
     desc: Build the MkDocs site (strict mode)
@@ -100,6 +94,24 @@ tasks:
       - rm -rf docs/site/site docs/site/.venv
 
   # ---------------------------------------------------------------------------
+  # Schema
+  # ---------------------------------------------------------------------------
+  schema:generate:
+    desc: Regenerate JSON Schema files from Rust type definitions
+    cmds:
+      - cargo run -p xtask -- generate
+
+  schema:render:
+    desc: Render JSON Schema files into MkDocs pages
+    cmds:
+      - cargo run -p xtask -- render
+
+  schema:all:
+    desc: Regenerate schemas and render docs in one shot
+    cmds:
+      - cargo run -p xtask -- all
+
+  # ---------------------------------------------------------------------------
   # Local stack
   # ---------------------------------------------------------------------------
   stack:up:
@@ -111,13 +123,3 @@ tasks:
     desc: Stop and remove the local development stack
     cmds:
       - docker compose down -v
-
-  docs:
-    desc: Build and open Rust API documentation
-    cmds:
-      - cargo doc --workspace --no-deps --open
-
-  fmt:
-    desc: Auto-format all code
-    cmds:
-      - cargo fmt --all
