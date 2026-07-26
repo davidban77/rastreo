@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0](https://github.com/davidban77/rastreo/compare/v0.8.0...v0.9.0) (2026-07-26)
+
+
+### Features
+
+* **checkpoint:** resume checkpoint contract + eligibility guards ([#189](https://github.com/davidban77/rastreo/issues/189)) ([08aa376](https://github.com/davidban77/rastreo/commit/08aa376190d9468502758195aa6c542280914f46))
+* **cli:** report scan progress for long discovery runs ([#187](https://github.com/davidban77/rastreo/issues/187)) ([a2c7298](https://github.com/davidban77/rastreo/commit/a2c72981c6bf62d9c1b1953fc322e6eedc8d504e))
+* **cli:** resume an interrupted scan from a checkpoint ([#191](https://github.com/davidban77/rastreo/issues/191)) ([52658f6](https://github.com/davidban77/rastreo/commit/52658f63fd5d170fe441233dde00c37b91d63317))
+* **cli:** write resume checkpoints during a scan ([#190](https://github.com/davidban77/rastreo/issues/190)) ([2052d93](https://github.com/davidban77/rastreo/commit/2052d93c6889a3658e2a73a65b8d5ad9a9852d74))
+* **core:** make the identity correlation bucket-cap tunable and visible ([#204](https://github.com/davidban77/rastreo/issues/204)) ([29cfaaf](https://github.com/davidban77/rastreo/commit/29cfaaf769f9cc1cb9558917f18f9b83a29c7481))
+* **fuser:** SNMP sysObjectID identity enrichment (mib_enrichment) ([#182](https://github.com/davidban77/rastreo/issues/182)) ([8fd2f93](https://github.com/davidban77/rastreo/commit/8fd2f935b46c620d5353b6cbc0536704fa737318))
+* **gnmi:** discover LLDP topology over OpenConfig /lldp ([#179](https://github.com/davidban77/rastreo/issues/179)) ([bfbdd4d](https://github.com/davidban77/rastreo/commit/bfbdd4dd90d3637fd24187bc5cbc1d328faf82e8))
+* **otlp:** custom headers on OTLP export (RASTREO_OTLP_HEADERS) ([#181](https://github.com/davidban77/rastreo/issues/181)) ([2df759b](https://github.com/davidban77/rastreo/commit/2df759b50a7258e9d96fc580aad74bacf132fc4e))
+* **prober:** SNMP table-walk engine + lldp prober ([#176](https://github.com/davidban77/rastreo/issues/176)) ([addc7c5](https://github.com/davidban77/rastreo/commit/addc7c51be0eac58a3960a1c7b326240d1224f5a))
+* **profile:** emit gNMI collection-profile records on a second stream ([#183](https://github.com/davidban77/rastreo/issues/183)) ([7ca5ab0](https://github.com/davidban77/rastreo/commit/7ca5ab08de377c36de3d9871718f8aa37e2bc345))
+* **profile:** populate collection-profile suggestions from OpenConfig paths ([#184](https://github.com/davidban77/rastreo/issues/184)) ([b12861b](https://github.com/davidban77/rastreo/commit/b12861bc1ec41472ae40085a6b277eec1fd23d70))
+* **resolver:** stream target resolution instead of materializing it ([#188](https://github.com/davidban77/rastreo/issues/188)) ([f661f31](https://github.com/davidban77/rastreo/commit/f661f31d48806fee6c6155aa6f149afa37b230ec))
+* **topology:** emit device links as first-class LinkRecords ([#178](https://github.com/davidban77/rastreo/issues/178)) ([9e9ba07](https://github.com/davidban77/rastreo/commit/9e9ba07c9fbb64282dbee828e9e9b516db4f5cb0))
+
+
+### Bug Fixes
+
+* **fuser:** cap the identity correlator's per-bucket candidate blow-up ([#186](https://github.com/davidban77/rastreo/issues/186)) ([97c079d](https://github.com/davidban77/rastreo/commit/97c079dad069ff4b009d744cc43496bc97e6441d))
+* **helm:** remove vestigial .Values.config mount ([#212](https://github.com/davidban77/rastreo/issues/212)) ([1dec46c](https://github.com/davidban77/rastreo/commit/1dec46cb1d3dd63558ce764d256fec1b9884e371))
+* **prober:** retransmit ARP/NDP probes on no reply ([#180](https://github.com/davidban77/rastreo/issues/180)) ([29c3884](https://github.com/davidban77/rastreo/commit/29c388419e9d43c9cf7320e91e90c6383a0adad0))
+* **scheduler:** bound run_scan slot memory to the concurrency window ([#185](https://github.com/davidban77/rastreo/issues/185)) ([6841f13](https://github.com/davidban77/rastreo/commit/6841f13bf401467d7dded293e20b1d117a51f3fa))
+
+
+### Documentation
+
+* brand the site green-and-slate and add freshness signals ([#196](https://github.com/davidban77/rastreo/issues/196)) ([caf7512](https://github.com/davidban77/rastreo/commit/caf7512513f22e4c70beebd6194a1b3b4f900446))
+* correct stale counts, field references, and version strings ([#193](https://github.com/davidban77/rastreo/issues/193)) ([2efec7f](https://github.com/davidban77/rastreo/commit/2efec7f8d68f17be833056fb9cf26842c84beb7a))
+* final polish — grid cards, collapsible detail, annotated example, fixed record ([#202](https://github.com/davidban77/rastreo/issues/202)) ([07c5956](https://github.com/davidban77/rastreo/commit/07c595619c5b854dfcc34a5c9941660089b05813))
+* fix commands and examples that failed against the real stack ([#192](https://github.com/davidban77/rastreo/issues/192)) ([547c419](https://github.com/davidban77/rastreo/commit/547c419f2c232a52d118b2406c0919229e728126))
+* fix the newcomer journey — nav order, a scenario-file bridge, page structure ([#200](https://github.com/davidban77/rastreo/issues/200)) ([8689d8f](https://github.com/davidban77/rastreo/commit/8689d8f98de3e7d232ca373a1479addf55884df3))
+* make every probe page newcomer-legible ([#198](https://github.com/davidban77/rastreo/issues/198)) ([e042c00](https://github.com/davidban77/rastreo/commit/e042c00550f88ad21dfce2d9e4cb649904c2a44e))
+* make the integrate section and identity page newcomer-legible ([#199](https://github.com/davidban77/rastreo/issues/199)) ([1f0643f](https://github.com/davidban77/rastreo/commit/1f0643fca4079eaf0ce1f67159cea9ef74d2f654))
+* rebuild the landing page as a product landing ([#195](https://github.com/davidban77/rastreo/issues/195)) ([1853110](https://github.com/davidban77/rastreo/commit/185311005bcfb64f0ced4f3d99a38eccd1002790))
+* render the discovery pipeline as a diagram ([#197](https://github.com/davidban77/rastreo/issues/197)) ([37054b7](https://github.com/davidban77/rastreo/commit/37054b72aee27d0f5b40089c308a9298071ee054))
+* rewrite the glossary and expand abbreviation tooltips ([#194](https://github.com/davidban77/rastreo/issues/194)) ([acfcdfc](https://github.com/davidban77/rastreo/commit/acfcdfc3aa22e826b90d002acd50da8c81bb5c82))
+* **schema:** describe wire-contract fields and render enum values in the reference ([#201](https://github.com/davidban77/rastreo/issues/201)) ([adcaf5a](https://github.com/davidban77/rastreo/commit/adcaf5ae4a0d6d09e674eafb9d5a141960bdebfb))
+
+
+### CI/CD
+
+* bump actions/setup-python from 6 to 7 ([#206](https://github.com/davidban77/rastreo/issues/206)) ([778bf2e](https://github.com/davidban77/rastreo/commit/778bf2e3316b486eeb88662cd9ea799114dc7735))
+
+
+### Refactoring
+
+* **core:** collapse run_discovery entry points into RunOptions builder ([#205](https://github.com/davidban77/rastreo/issues/205)) ([6fdf414](https://github.com/davidban77/rastreo/commit/6fdf4145b80600c156c95d5452c07abe297d608b))
+* **core:** unify the multi-port fault-latch rule in one helper ([#203](https://github.com/davidban77/rastreo/issues/203)) ([df3d2b1](https://github.com/davidban77/rastreo/commit/df3d2b14dbe0e5be10f8c50e91cf9a80c7d48aae))
+
 ## [0.8.0](https://github.com/davidban77/rastreo/compare/v0.7.0...v0.8.0) (2026-07-19)
 
 

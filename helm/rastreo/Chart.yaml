@@ -5,8 +5,8 @@ description: >-
   ARP probes fused into deduplicated DeviceRecord events on Kafka, file, or
   stdout
 type: application
-version: 0.8.0
-appVersion: 0.8.0
+version: 0.9.0
+appVersion: 0.9.0
 kubeVersion: '>=1.25.0-0'
 home: https://github.com/davidban77/rastreo
 sources:
