@@ -79,7 +79,7 @@ Expected output (one `DeviceRecord` per node):
 ```
 {"identity_key":"ip:198.51.100.11","mgmt_ip":"198.51.100.11","signals":[{"OpenPort":22}], ...}
 {"identity_key":"ip:198.51.100.12","mgmt_ip":"198.51.100.12","signals":[{"OpenPort":22}], ...}
-discovery complete: targets_resolved=2 probe_attempts=2 probe_errors=0 records_emitted=2 elapsed_ms=8
+■ discover  completed in 8ms | hosts: 2 | records: 2 | probes: 2 | faults: 0 | sink: stdout
 ```
 
 ## Teardown

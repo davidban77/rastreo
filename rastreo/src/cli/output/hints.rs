@@ -1,5 +1,8 @@
 use rastreo_core::hint_for_error_kind;
 
+use super::theme::{self, glyphs};
+use super::Verbosity;
+
 #[cfg(feature = "config")]
 const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
     ("http", "http"),
@@ -63,10 +66,25 @@ fn runtime_hint_line(summary: &rastreo_core::DiscoverySummary) -> Option<String>
     None
 }
 
-pub(crate) fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary) {
-    if let Some(hint) = runtime_hint_line(summary) {
-        eprintln!("hint: {hint}");
+pub(crate) fn print_hint(hint: &str, verbosity: Verbosity) {
+    if !verbosity.prints_chrome() {
+        return;
     }
+    eprintln!("{}", hint_line(hint));
+}
+
+pub(crate) fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary, verbosity: Verbosity) {
+    if let Some(hint) = runtime_hint_line(summary) {
+        print_hint(&hint, verbosity);
+    }
+}
+
+fn hint_line(hint: &str) -> String {
+    format!(
+        "{} {} {hint}",
+        theme::warn(glyphs().warn),
+        theme::label("hint:")
+    )
 }
 
 #[cfg(feature = "config")]
@@ -294,7 +312,21 @@ mod tests {
             runtime_hint_line(&summary).is_none(),
             "records emitted with no fault must produce no hint"
         );
-        print_runtime_hints(&summary);
+        print_runtime_hints(&summary, Verbosity::Normal);
+    }
+
+    #[test]
+    fn hint_line_carries_the_warn_glyph_and_the_hint_prefix() {
+        let line = super::super::theme::strip_ansi(&hint_line("check the port list"));
+        assert_eq!(line, "⚠ hint: check the port list");
+    }
+
+    #[test]
+    fn hint_line_paints_its_glyph_with_the_warn_role() {
+        theme::with_colour(|| {
+            let line = hint_line("check the port list");
+            assert!(line.contains(&theme::warn(glyphs().warn)), "{line:?}");
+        });
     }
 
     #[test]
@@ -339,6 +371,6 @@ mod tests {
             "permission denied",
         ));
         assert!(runtime_hint_line(&summary).is_none());
-        print_runtime_hints(&summary);
+        print_runtime_hints(&summary, Verbosity::Normal);
     }
 }

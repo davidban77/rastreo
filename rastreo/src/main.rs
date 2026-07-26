@@ -66,8 +66,9 @@ fn init_tracing(
     otlp_config: Option<&otlp::OtlpConfig>,
 ) -> anyhow::Result<()> {
     rastreo_core::observability::otlp::init_tracing(
-        default_level(verbose, quiet),
+        &filter_directive(verbose, quiet, std::env::var("RUST_LOG").ok().as_deref()),
         matches!(log_format, LogFormat::Json),
+        cli::stderr_supports_colour(),
         otlp_config,
     )
 }
@@ -80,13 +81,14 @@ fn init_tracing(
     _otlp_config: Option<&otlp::OtlpConfig>,
 ) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
-    let level = default_level(verbose, quiet);
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    let directive = filter_directive(verbose, quiet, std::env::var("RUST_LOG").ok().as_deref());
+    let filter = EnvFilter::new(directive);
     match log_format {
         LogFormat::Text => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
                 .with_env_filter(filter)
+                .with_ansi(cli::stderr_supports_colour())
                 .init();
         }
         LogFormat::Json => {
@@ -98,6 +100,23 @@ fn init_tracing(
         }
     }
     Ok(())
+}
+
+/// A `-q` / `-v` typed on this invocation is more specific than ambient `RUST_LOG`, so it wins.
+/// The result always parses, so every subscriber can build its filter without a fallback of its own.
+fn filter_directive(verbose: u8, quiet: bool, rust_log: Option<&str>) -> String {
+    match rust_log {
+        Some(directive) if !quiet && verbose == 0 && !directive.is_empty() && parses(directive) => {
+            directive.to_string()
+        }
+        _ => default_level(verbose, quiet).to_string(),
+    }
+}
+
+fn parses(directive: &str) -> bool {
+    tracing_subscriber::EnvFilter::builder()
+        .parse(directive)
+        .is_ok()
 }
 
 fn default_level(verbose: u8, quiet: bool) -> &'static str {
@@ -187,6 +206,66 @@ mod tests {
         ])
         .expect("explicit parse");
         assert_eq!(cli.log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn default_level_walks_the_verbosity_ladder() {
+        assert_eq!(default_level(0, false), "info");
+        assert_eq!(default_level(1, false), "debug");
+        assert_eq!(default_level(2, false), "trace");
+        assert_eq!(default_level(9, false), "trace");
+        assert_eq!(default_level(3, true), "error");
+    }
+
+    #[test]
+    fn rust_log_wins_when_no_verbosity_flag_was_given() {
+        assert_eq!(
+            filter_directive(0, false, Some("rastreo_core=debug")),
+            "rastreo_core=debug"
+        );
+    }
+
+    #[test]
+    fn quiet_beats_rust_log() {
+        assert_eq!(filter_directive(0, true, Some("debug")), "error");
+    }
+
+    #[test]
+    fn verbose_beats_rust_log() {
+        assert_eq!(filter_directive(1, false, Some("error")), "debug");
+        assert_eq!(filter_directive(2, false, Some("error")), "trace");
+    }
+
+    #[test]
+    fn an_empty_rust_log_falls_back_to_the_flag_derived_level() {
+        assert_eq!(filter_directive(0, false, Some("")), "info");
+    }
+
+    #[test]
+    fn a_malformed_rust_log_falls_back_to_the_flag_derived_level() {
+        assert_eq!(filter_directive(0, false, Some("rastreo=shout")), "info");
+        assert_eq!(filter_directive(0, true, Some("rastreo=shout")), "error");
+    }
+
+    #[test]
+    fn every_directive_handed_to_a_subscriber_parses() {
+        for (verbose, quiet, rust_log) in [
+            (0, false, None),
+            (0, false, Some("rastreo_core=debug")),
+            (0, false, Some("rastreo=shout")),
+            (1, false, Some("error")),
+            (0, true, Some("debug")),
+            (9, false, None),
+        ] {
+            let directive = filter_directive(verbose, quiet, rust_log);
+            assert!(parses(&directive), "unparseable directive: {directive}");
+        }
+    }
+
+    #[test]
+    fn an_unset_rust_log_falls_back_to_the_flag_derived_level() {
+        assert_eq!(filter_directive(0, false, None), "info");
+        assert_eq!(filter_directive(0, true, None), "error");
     }
 
     #[test]

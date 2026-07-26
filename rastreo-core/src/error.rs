@@ -97,6 +97,19 @@ pub enum ProbeErrorKind {
     Other,
 }
 
+impl ProbeErrorKind {
+    /// snake_case label matching the serde wire form, for rendering fault tallies.
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            ProbeErrorKind::AuthFailed => "auth_failed",
+            ProbeErrorKind::PermissionDenied => "permission_denied",
+            ProbeErrorKind::DnsFailed => "dns_failed",
+            ProbeErrorKind::DecodeFailed => "decode_failed",
+            ProbeErrorKind::Other => "other",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProbeError {
@@ -393,6 +406,34 @@ mod tests {
             format!("{}", ConfigError::EmptyProbeSelection),
             "no probe kinds selected"
         );
+    }
+
+    #[test]
+    fn probe_error_kind_as_label_matches_the_serde_wire_form() {
+        for kind in [
+            ProbeErrorKind::AuthFailed,
+            ProbeErrorKind::PermissionDenied,
+            ProbeErrorKind::DnsFailed,
+            ProbeErrorKind::DecodeFailed,
+            ProbeErrorKind::Other,
+        ] {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", kind.as_label()));
+        }
+    }
+
+    #[test]
+    fn probe_error_kind_labels_are_unique() {
+        use std::collections::BTreeSet;
+        let kinds = [
+            ProbeErrorKind::AuthFailed,
+            ProbeErrorKind::PermissionDenied,
+            ProbeErrorKind::DnsFailed,
+            ProbeErrorKind::DecodeFailed,
+            ProbeErrorKind::Other,
+        ];
+        let labels: BTreeSet<&str> = kinds.iter().map(|k| k.as_label()).collect();
+        assert_eq!(labels.len(), kinds.len());
     }
 
     #[test]

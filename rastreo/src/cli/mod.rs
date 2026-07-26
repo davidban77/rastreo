@@ -9,6 +9,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use discover::DiscoverArgs;
+use output::Verbosity;
+
+pub(crate) use output::theme::stderr_supports_colour;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum LogFormat {
@@ -23,13 +26,14 @@ pub enum LogFormat {
 #[command(
     name = "rastreo",
     version,
-    about = "Enrichment-aware network discovery"
+    about = "Enrichment-aware network discovery",
+    styles = output::theme::HELP_STYLES
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// Increase log verbosity (can be repeated: -v, -vv).
+    /// Show the per-kind detail lines under the completion banner and raise the log level (repeatable: -v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
@@ -77,13 +81,14 @@ pub enum CatalogAction {
 }
 
 pub async fn run(cli: Cli, cancel: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
     match cli.command {
-        Command::Discover(args) => discover::run(args, cancel).await,
+        Command::Discover(args) => discover::run(args, cancel, verbosity).await,
         #[cfg(feature = "config")]
         Command::Catalog(args) => match args.action {
             CatalogAction::List => catalog::run_list(),
         },
         #[cfg(feature = "config")]
-        Command::Validate(args) => validate::run(args),
+        Command::Validate(args) => validate::run(args, verbosity),
     }
 }

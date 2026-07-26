@@ -42,10 +42,12 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 ipnet = { workspace = true }
+owo-colors = { version = "4", features = ["supports-colors"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+rstest = { workspace = true }
 
 [lints]
 workspace = true

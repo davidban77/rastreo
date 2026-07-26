@@ -12,13 +12,43 @@ These flags apply to `rastreo` itself, before any subcommand. They are global �
 
 | Flag | Default | Notes |
 |---|---|---|
-| `-v`, `--verbose` | — | Increase log verbosity. Repeatable (`-vv`, `-vvv`). Logs always go to stderr. |
-| `-q`, `--quiet` | — | Drop log level to `error`. Mutually exclusive in spirit with `-v`. |
+| `-v`, `--verbose` | — | Show the per-kind detail lines under the completion banner and raise the log level. Repeatable (`-vv`, `-vvv`). Logs always go to stderr. |
+| `-q`, `--quiet` | — | Suppress banners, the progress line, hints, and all logs below `error`. Wins over `--verbose`. |
 | `--log-format <FORMAT>` | `text` | Log line format on stderr. Values: `text` (human-readable) or `json` (one JSON object per line). Env var: `RASTREO_LOG_FORMAT`. See [Logging](logging.md). |
 | `-h`, `--help` | — | Print help and exit. |
 | `-V`, `--version` | — | Print version and exit. |
 
-The verbosity ladder is: no flag = `info`, `-v` = `debug`, `-vv` or more = `trace`. `--quiet` overrides `--verbose` and pins the level at `error`. The `RUST_LOG` environment variable, when set, takes precedence over the flag-derived default.
+### What each verbosity level shows
+
+Everything in this table goes to **stderr**. Records always go to the sink (stdout by default) and are never affected by verbosity.
+
+| | start banner | progress line | completion banner | detail lines | hints | log level |
+|---|---|---|---|---|---|---|
+| `-q` | no | no | no | no | no | `error` |
+| *(no flag)* | yes | yes | yes | no | yes | `info` |
+| `-v` | yes | yes | yes | yes | yes | `debug` |
+| `-vv` and up | yes | yes | yes | yes | yes | `trace` |
+
+A successful `-q` run writes nothing at all to stderr, which makes it the right choice for a cron job or a pipeline step. Errors still print — `-q` suppresses status output, not failures.
+
+### Log-level precedence
+
+An explicit `-q` or `-v` typed on the invocation wins over `RUST_LOG`. With neither flag given, `RUST_LOG` wins over the built-in `info` default. So `RUST_LOG=debug rastreo discover -q ...` is silent, while `RUST_LOG=debug rastreo discover ...` logs at debug.
+
+### Colour and glyphs
+
+Colour is enabled when stderr is a terminal that reports colour support, and disabled when it is redirected to a file or a pipe — so `2>scan.log` never contains escape sequences. The standard overrides apply: `NO_COLOR` (any value but `0`) turns colour off, and `CLICOLOR_FORCE=1` or `FORCE_COLOR=1` turns it on even when the output is piped. Log lines follow the same decision as the banners. This is the `rastreo` CLI's behaviour: `rastreo-server` colours its log lines whenever stderr is a terminal and does not consult `NO_COLOR`, `CLICOLOR_FORCE`, or `FORCE_COLOR`.
+
+Banners use the Unicode glyphs `▶`, `■`, `⚠`, `•`, and `→`. They fall back to the ASCII `>`, `#`, `!`, `*`, and `->` when `LC_ALL` / `LC_CTYPE` / `LANG` names a non-UTF-8 locale, or when you set `RASTREO_ASCII` to any non-empty value other than `0`.
+
+The completion glyph is blue on a clean run and turns yellow when the scan needs attention — it was cancelled, records were quarantined to a dead-letter destination, or a scenario in a multi-scenario file failed. Probe faults alone do not tint it; they are expected on any real scan and are counted in the `faults:` field.
+
+| Env var | Effect |
+|---|---|
+| `RUST_LOG` | Tracing filter directive. Overridden by an explicit `-q` / `-v`. |
+| `NO_COLOR` | Any value but `0` disables colour on stderr. |
+| `CLICOLOR_FORCE`, `FORCE_COLOR` | Force colour on even when stderr is not a terminal. |
+| `RASTREO_ASCII` | Any non-empty value other than `0` forces the ASCII glyph table. |
 
 ## rastreo discover
 
@@ -74,7 +104,7 @@ Run the HTTP control plane. Every flag has both a CLI form and an environment-va
 
 ## Env-var precedence
 
-For both binaries, the precedence from lowest to highest is: built-in default, then environment variable, then CLI flag. A flag value always wins over an environment-variable value. Variables only apply to flags that declare an env mapping in the table above.
+For both binaries, the precedence from lowest to highest is: built-in default, then environment variable, then CLI flag. A flag value always wins over an environment-variable value. Variables only apply to flags that declare an env mapping in the table above. `RUST_LOG` follows the same rule: it beats the built-in default but loses to an explicit `-q` / `-v`.
 
 ## Build features
 

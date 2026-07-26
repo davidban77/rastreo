@@ -59,7 +59,7 @@ A response without a `Server:` header still marks the target as reachable and st
 
 A target that refuses the TCP connection on every port, or that times out on every port, is marked unreachable and contributes no signals. That is a normal discovery result, not an error.
 
-Probing an `https` scheme against a port that fails at the TLS layer still records the open port. Whether the peer speaks plain HTTP, sends a handshake alert, offers no shared protocol version or cipher, or presents a certificate the probe rejects under `tls_verify: true` — the TCP connection already opened, so the prober keeps the `OpenPort` signal and emits a normal record with no `HttpBanner`. `probe_errors` stays at zero, and the device is recorded.
+Probing an `https` scheme against a port that fails at the TLS layer still records the open port. Whether the peer speaks plain HTTP, sends a handshake alert, offers no shared protocol version or cipher, or presents a certificate the probe rejects under `tls_verify: true` — the TCP connection already opened, so the prober keeps the `OpenPort` signal and emits a normal record with no `HttpBanner`. `faults` stays at zero, and the device is recorded.
 
 The prober's only fault is a local socket failure on the scan host, such as descriptor exhaustion or a denied socket at connect time. That is the one case where the connection never opened and the probe learned nothing. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 

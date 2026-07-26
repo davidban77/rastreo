@@ -123,8 +123,8 @@ Each scenario prints its own status line to stderr, and the CLI runs every scena
 | `--checkpoint <PATH>` | — | Write a resume checkpoint to this file during the scan, so a scan that dies can be resumed later. The scenario must be resume-safe or the scan is refused before probing. See [Checkpoints](#checkpoints). |
 | `--checkpoint-interval <N>` | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. See [Checkpoints](#checkpoints). |
 | `--resume` | off | Continue an interrupted scan from the checkpoint at `--checkpoint <PATH>`: skip the targets already written and probe the rest. Requires `--checkpoint`. Works for a single scenario only. See [Resuming](#resuming). |
-| `-v`, `--verbose` | info | Increase log verbosity. `-v` is debug, `-vv` (or more) is trace. Logs go to stderr. |
-| `-q`, `--quiet` | — | Drop the log level to `error`. Mutually exclusive in spirit with `-v`. |
+| `-v`, `--verbose` | — | Show the per-kind detail lines under the completion banner and raise the log level: `-v` is debug, `-vv` (or more) is trace. Everything goes to stderr. See [What each verbosity level shows](../reference/cli.md#what-each-verbosity-level-shows). |
+| `-q`, `--quiet` | — | Suppress the banners, the progress line, hints, and all logs below `error`. A successful `-q` run writes nothing to stderr; failures still print. Wins over `-v`. |
 
 !!! info "Concurrency vs rate"
     These are two different limits. `--concurrency` (YAML `max_concurrent`) sets how many probes run at the same time. `--rate` (YAML `probe_rate`) sets how many probes start each second. They compose: with `--concurrency 64 --rate 50`, up to 64 probes run at once, but no more than 50 start per second. The rate bounds the scan whenever it is the tighter limit. Leave `--rate` unset to let probes start as fast as concurrency allows — useful to be gentle on a fragile network.
@@ -179,7 +179,7 @@ rastreo discover --file wan-snmp.yml --retries 3
 
 ## Examples
 
-A minimum-flags scan against one host and one port. Stdout receives one NDJSON record per discovered device; stderr receives the summary line.
+A minimum-flags scan against one host and one port. Stdout receives one NDJSON record per discovered device; stderr receives the start and completion banners.
 
 ```bash
 rastreo discover --target 1.1.1.1 --port 443
@@ -303,41 +303,42 @@ Only fields the CLI flag was explicitly set for are overridden. `rastreo discove
 
 ## Progress
 
-A scan prints a live progress line to stderr while it runs — updated repeatedly through a long scan, and shown once at completion for a fast one. It shows how far the scan has reached and how much is left, so you can see it is still working. The line carries four fields:
+A scan prints a live progress line to stderr while it runs. It shows how far the scan has reached and how much is left, so you can see it is still working. The line carries:
 
-- `targets N/M` — targets finished (`N`) out of the total to probe (`M`).
-- `(X%)` — percent of targets finished.
-- `records R` — `DeviceRecord` events emitted so far.
-- `ETA ~Ss` — estimated seconds left. It appears once at least three targets have finished, so the estimate uses real timing, and it drops off at `100%`.
+- `hosts: N/M (X%)` — targets finished (`N`) out of the total to probe (`M`), and the percentage that represents.
+- `records: R` — `DeviceRecord` events emitted so far.
+- `rate: N/s` — targets finished per second, averaged over the whole run.
+- `elapsed: T` — how long the scan has been running.
+- `eta: T` — estimated time left. It appears once at least three targets have finished, so the estimate uses real timing, and it drops off at `100%`.
 
-The line updates at most once per second. On a terminal it redraws in place on a single line, then clears when the scan ends. The summary line prints next.
+On a terminal the line redraws in place four times a second and clears when the scan ends; the completion banner prints next.
 
-When stderr is not a terminal, each update prints as a new line instead. Piping stderr to another program or redirecting it to a file keeps the full history in order.
+When stderr is not a terminal, each update prints as a new line every five seconds instead. Piping stderr to another program or redirecting it to a file keeps the full history in order.
 
 Progress goes to stderr, never stdout. Records stream to stdout on the default sink, so the progress line never mixes into them. If you pipe stdout to `jq` or a file, only the records pass through.
 
 ```bash
-rastreo discover --target 192.0.2.0/28 --port 80 --concurrency 4 2> scan.log
+rastreo discover --target 192.0.2.0/24 --port 80 --concurrency 8 2> scan.log
 ```
 
 The `2> scan.log` above redirects stderr, so the progress updates are written to `scan.log` as periodic lines:
 
 ```text
-targets 4/14 (28%), records 0, ETA ~2s
-targets 8/14 (57%), records 0, ETA ~1s
-targets 12/14 (85%), records 0, ETA ~0s
-targets 14/14 (100%), records 0
-discovery complete: targets_resolved=14 probe_attempts=14 probe_errors=0 records_emitted=0 elapsed_ms=4010
+▶ discover  targets: 1 | probes: tcp_connect (ports 80) | concurrency: 8 | timeout: 1000ms | sink: stdout
+  hosts: 42/254 (16%) | records: 0 | rate: 8.4/s | elapsed: 5.0s | eta: 25.2s
+  hosts: 83/254 (32%) | records: 0 | rate: 8.3/s | elapsed: 10.0s | eta: 20.6s
+  hosts: 241/254 (94%) | records: 0 | rate: 8.0/s | elapsed: 30.0s | eta: 1.6s
+■ discover  completed in 31.8s | hosts: 254 | records: 0 | probes: 254 | faults: 0 | sink: stdout
 ```
 
-The last line is the run summary; [Runtime hints](#runtime-hints) explains its fields. In YAML-driven mode each scenario reports its own progress line, under the `running <scenario>` header the CLI prints before it starts.
+The last line is the completion banner; [Runtime hints](#runtime-hints) explains its fields. In YAML-driven mode each scenario gets its own start and completion banner, followed by one aggregate banner for the whole file. The aggregate counts only the scenarios that ran to completion — a file where one of three scenarios failed reads `1 of 3 scenarios`, and its `■` turns yellow.
 
 !!! note "A fast scan may show no progress line"
-    The line first appears after one second. A small scan against a nearby host can finish in under a second, so you see only the summary line. Progress is for the long scans where it helps — a wide CIDR, a slow link, or a low concurrency setting.
+    On a terminal the line redraws in place four times a second. When stderr is redirected to a file or a pipe it is written as a whole line every five seconds instead, so a scan that finishes sooner shows only the two banners. Progress is for the long scans where it helps — a wide CIDR, a slow link, or a low concurrency setting.
 
 ## Cancellation
 
-On `SIGINT` (ctrl-c) or `SIGTERM`, `rastreo discover` finishes any in-flight probes that have already started, fuses the outcomes collected so far, emits the resulting records to the sink, and flushes the sink before exiting. The summary line on stderr reads `discovery cancelled:` instead of `discovery complete:` when this path runs. The exit code is still `0` for a clean shutdown — non-zero is reserved for errors.
+On `SIGINT` (ctrl-c) or `SIGTERM`, `rastreo discover` finishes any in-flight probes that have already started, fuses the outcomes collected so far, emits the resulting records to the sink, and flushes the sink before exiting. The completion banner on stderr reads `cancelled after` instead of `completed in` when this path runs, and its `■` turns yellow. The exit code is still `0` for a clean shutdown — non-zero is reserved for errors.
 
 Records that hadn't been emitted yet at the moment of cancellation are still written if they came from outcomes the pipeline had already gathered. Records from probers that hadn't started yet are not produced — `--target 10.0.0.0/24 --port 22,80,443 ...` cancelled after the `22` sweep gives you records for port 22 only.
 
@@ -370,7 +371,7 @@ rastreo discover \
   --resume
 ```
 
-The resumed run keeps the original scan's id, so records from both runs group under one logical scan. The progress line continues from where the last run stopped. A scan interrupted at 2 of 14 targets resumes at `targets 2/14`, not `0/12`. When the resumed scan finishes, rastreo removes the checkpoint, exactly as a fresh scan does on completion.
+The resumed run keeps the original scan's id, so records from both runs group under one logical scan. The progress line continues from where the last run stopped. A scan interrupted at 2 of 14 targets resumes at `hosts: 2/14`, not `0/12`. When the resumed scan finishes, rastreo removes the checkpoint, exactly as a fresh scan does on completion.
 
 The eligibility rules in [Which scans can checkpoint](#which-scans-can-checkpoint) still apply. `--resume` re-checks them and refuses an ineligible scenario before probing.
 
@@ -446,16 +447,16 @@ A file at the path that is not a valid checkpoint is refused the same way, with 
 
 ## Runtime hints
 
-The CLI prints one `hint:` line to stderr next to the summary. It appears when a probe faulted, or when a scan without a fault emitted zero records. Hints are suppressed only when the run was cancelled or when `--dry-run` was used.
+The CLI prints one `⚠ hint:` line to stderr under the completion banner. It appears when a probe faulted, or when a scan without a fault emitted zero records. Hints are suppressed when the run was cancelled, when `--dry-run` was used, and under `-q`.
 
-One case is a scan that reached nothing. Nobody answered, `probe_errors` stays at `0`, and you get the generic hint:
+One case is a scan that reached nothing. Nobody answered, `faults` stays at `0`, and you get the generic hint:
 
 ```text
-discovery complete: targets_resolved=1 probe_attempts=1 probe_errors=0 records_emitted=0 elapsed_ms=1
-hint: 0 records emitted — no probe reached an open port. Check target reachability and port list.
+■ discover  completed in 1ms | hosts: 1 | records: 0 | probes: 1 | faults: 0 | sink: stdout
+⚠ hint: 0 records emitted — no probe reached an open port. Check target reachability and port list.
 ```
 
-When `probe_errors` is above `0`, a probe hit a fault. The CLI derives the hint from the fault's typed kind, not from the wording of the error. The same fault always gives the same advice. The fault hint prints whenever a fault occurred, even when the scan also produced records. An SNMP agent that answers with a reply rastreo cannot decode keeps the device and emits a record. The CLI still prints the `decode_failed` hint next to that summary. A probe blocked by a missing `CAP_NET_RAW` capability gets a `permission_denied` fault. The hint then tells you to grant the capability or check local egress policy. A probe that needed a name lookup gets a `dns_failed` fault when the lookup did not resolve, and the hint points at the resolver. A fault kind with no specific remedy (`other`) prints no hint. Only one hint is printed per scan.
+When `faults` is above `0`, a probe hit a fault. Run with `-v` to see the `faults by kind` and `first fault` breakdown under the banner. The CLI derives the hint from the fault's typed kind, not from the wording of the error. The same fault always gives the same advice. The fault hint prints whenever a fault occurred, even when the scan also produced records. An SNMP agent that answers with a reply rastreo cannot decode keeps the device and emits a record. The CLI still prints the `decode_failed` hint under that banner. A probe blocked by a missing `CAP_NET_RAW` capability gets a `permission_denied` fault. The hint then tells you to grant the capability or check local egress policy. A probe that needed a name lookup gets a `dns_failed` fault when the lookup did not resolve, and the hint points at the resolver. A fault kind with no specific remedy (`other`) prints no hint. Only one hint is printed per scan.
 
 An SNMP probe blocked by a local firewall REJECT in the OUTPUT chain also surfaces as `permission_denied` and gets the same egress-policy hint.
 

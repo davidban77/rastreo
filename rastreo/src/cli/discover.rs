@@ -23,11 +23,16 @@ use rastreo_core::{
 use tokio::sync::watch;
 
 #[cfg(feature = "config")]
-use super::output::enrich_feature_hint;
 use super::output::{
-    enrich_scan_error_hint, print_runtime_hints, print_summary, progress_display_loop,
+    accumulate, enrich_feature_hint, print_aggregate, print_blank, print_failed, print_notice,
+    ScenarioTally,
+};
+use super::output::{
+    enrich_scan_error_hint, print_complete, print_hint, print_runtime_hints, print_start,
+    progress_display_loop, Verbosity,
 };
 
+const FLAG_DRIVEN_LABEL: &str = "discover";
 const DEFAULT_CONCURRENCY: u32 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CHECKPOINT_INTERVAL: usize = 5000;
@@ -165,24 +170,31 @@ pub enum SinkKind {
     Kafka,
 }
 
-pub async fn run(args: DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
+pub async fn run(
+    args: DiscoverArgs,
+    cancel: watch::Receiver<bool>,
+    verbosity: Verbosity,
+) -> Result<()> {
     if args.dry_run {
-        return run_dry_run(&args).await;
+        return run_dry_run(&args, verbosity).await;
     }
     #[cfg(feature = "config")]
     if args.file.is_some() {
-        return run_from_file(&args, cancel).await;
+        run_from_file(&args, cancel, verbosity).await?;
+        return Ok(());
     }
-    run_legacy(&args, cancel).await
+    run_legacy(&args, cancel, verbosity).await
 }
 
-async fn run_dry_run(args: &DiscoverArgs) -> Result<()> {
+async fn run_dry_run(args: &DiscoverArgs, verbosity: Verbosity) -> Result<()> {
     let resolver = HickoryResolver::from_system()?;
 
     #[cfg(feature = "config")]
     if args.file.is_some() {
-        return run_dry_run_from_file(args, &resolver).await;
+        return run_dry_run_from_file(args, &resolver, verbosity).await;
     }
+    #[cfg(not(feature = "config"))]
+    let _ = verbosity;
 
     let scenario = build_scenario(args)?;
     let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
@@ -192,10 +204,14 @@ async fn run_dry_run(args: &DiscoverArgs) -> Result<()> {
 }
 
 #[cfg(feature = "config")]
-async fn run_dry_run_from_file(args: &DiscoverArgs, resolver: &dyn Resolver) -> Result<()> {
+async fn run_dry_run_from_file(
+    args: &DiscoverArgs,
+    resolver: &dyn Resolver,
+    verbosity: Verbosity,
+) -> Result<()> {
     let raw = args.file.as_deref().expect("file present per dispatch");
     let path = resolve_scenario_source(raw)?;
-    let file = load_scenario_file(&path)?;
+    let file = load_scenario_file(&path).map_err(|e| e.report(verbosity))?;
 
     if file.version != 1 {
         return Err(anyhow!(
@@ -372,10 +388,11 @@ async fn run_discovery_reporting_progress(
     scenario: &DiscoverScenarioConfig,
     cancel: watch::Receiver<bool>,
     checkpoint: Option<CheckpointConfig>,
+    verbosity: Verbosity,
 ) -> std::result::Result<DiscoverySummary, RastreoError> {
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
     let is_tty = std::io::stderr().is_terminal();
-    let display = tokio::spawn(progress_display_loop(progress_rx, is_tty));
+    let display = tokio::spawn(progress_display_loop(progress_rx, is_tty, verbosity));
     let mut opts = RunOptions::new(scenario)
         .cancel(cancel)
         .progress(progress_tx);
@@ -397,17 +414,29 @@ fn checkpoint_config(args: &DiscoverArgs) -> Option<CheckpointConfig> {
     })
 }
 
-async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
+async fn run_legacy(
+    args: &DiscoverArgs,
+    cancel: watch::Receiver<bool>,
+    verbosity: Verbosity,
+) -> Result<()> {
     let scenario = build_scenario(args)?;
-    match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args)).await {
+    // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
+    print_start(
+        &build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, &[], args),
+        scenario.targets.len(),
+        verbosity,
+    );
+    match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args), verbosity)
+        .await
+    {
         Ok(summary) => {
-            print_summary("discovery", &summary);
-            print_runtime_hints(&summary);
+            print_complete(FLAG_DRIVEN_LABEL, &summary, verbosity);
+            print_runtime_hints(&summary, verbosity);
             Ok(())
         }
         Err(err) => {
             if let Some(hint) = enrich_scan_error_hint(&err.to_string()) {
-                eprintln!("hint: {hint}");
+                print_hint(&hint, verbosity);
             }
             Err(err.into())
         }
@@ -415,10 +444,14 @@ async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Resul
 }
 
 #[cfg(feature = "config")]
-async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
+async fn run_from_file(
+    args: &DiscoverArgs,
+    cancel: watch::Receiver<bool>,
+    verbosity: Verbosity,
+) -> Result<(ScenarioTally, DiscoverySummary)> {
     let raw = args.file.as_deref().expect("file present per dispatch");
     let path = resolve_scenario_source(raw)?;
-    let file = load_scenario_file(&path)?;
+    let file = load_scenario_file(&path).map_err(|e| e.report(verbosity))?;
 
     if file.version != 1 {
         return Err(anyhow!(
@@ -449,11 +482,19 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
 
     let cli_sink = build_cli_sink_override(args)?;
     let total = file.scenarios.len();
-    let mut errors = 0usize;
+    let mut tally = ScenarioTally {
+        total,
+        ..ScenarioTally::default()
+    };
+    let mut aggregate = DiscoverySummary::default();
 
     for (idx, entry) in file.scenarios.into_iter().enumerate() {
         if *cancel.borrow() {
-            eprintln!("cancelled before scenario {} of {total}", idx + 1);
+            print_notice(
+                &format!("cancelled before scenario {} of {total}", idx + 1),
+                verbosity,
+            );
+            aggregate.cancelled = true;
             break;
         }
         let mut cfg = match entry {
@@ -466,37 +507,60 @@ async fn run_from_file(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Re
 
         let label = scenario_label(&cfg.base, idx, total);
         if idx > 0 {
-            eprintln!();
+            print_blank(verbosity);
         }
-        eprintln!("running {label}");
 
         if cfg.probers.is_empty() {
-            eprintln!("{label}: no probers configured, skipping");
+            print_notice(
+                &format!("{label}: no probers configured, skipping"),
+                verbosity,
+            );
             continue;
         }
 
-        match run_discovery_reporting_progress(&cfg, cancel.clone(), checkpoint_config(args)).await
+        // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
+        print_start(
+            &build_scenario_plan(&label, &cfg, &[], args),
+            cfg.targets.len(),
+            verbosity,
+        );
+
+        match run_discovery_reporting_progress(
+            &cfg,
+            cancel.clone(),
+            checkpoint_config(args),
+            verbosity,
+        )
+        .await
         {
             Ok(summary) => {
-                print_summary(&label, &summary);
-                print_runtime_hints(&summary);
+                print_complete(&label, &summary, verbosity);
+                print_runtime_hints(&summary, verbosity);
+                accumulate(&mut aggregate, &summary);
+                tally.completed += 1;
             }
             Err(err) => {
-                errors += 1;
-                eprintln!("{label} failed: {err:#}");
+                tally.failed += 1;
+                print_failed(&label, &format!("{err:#}"));
                 if let Some(hint) = enrich_scan_error_hint(&err.to_string()) {
-                    eprintln!("hint: {hint}");
+                    print_hint(&hint, verbosity);
                 }
             }
         }
     }
 
-    if errors > 0 {
+    if total > 1 {
+        print_blank(verbosity);
+        print_aggregate(tally, &aggregate, verbosity);
+    }
+
+    if tally.failed > 0 {
         return Err(anyhow!(
-            "{errors} of {total} scenario(s) failed; see individual errors above"
+            "{} of {total} scenario(s) failed; see individual errors above",
+            tally.failed
         ));
     }
-    Ok(())
+    Ok((tally, aggregate))
 }
 
 #[cfg(feature = "config")]
@@ -509,21 +573,37 @@ pub(crate) fn resolve_scenario_source(input: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(feature = "config")]
-pub(crate) fn load_scenario_file(path: &Path) -> Result<ScenarioFile> {
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read scenario file '{}'", path.display()))?;
-    match parse_scenario_file(&contents) {
-        Ok(file) => Ok(file),
-        Err(err) => {
-            if let Some(hint) = enrich_feature_hint(&err.to_string()) {
-                eprintln!("hint: {hint}");
-            }
-            Err(anyhow::Error::new(err).context(format!(
-                "failed to parse scenario file '{}'",
-                path.display()
-            )))
+pub(crate) struct ScenarioLoadError {
+    source: anyhow::Error,
+    hint: Option<String>,
+}
+
+#[cfg(feature = "config")]
+impl ScenarioLoadError {
+    pub(crate) fn report(self, verbosity: Verbosity) -> anyhow::Error {
+        if let Some(hint) = &self.hint {
+            print_hint(hint, verbosity);
         }
+        self.source
     }
+}
+
+#[cfg(feature = "config")]
+pub(crate) fn load_scenario_file(
+    path: &Path,
+) -> std::result::Result<ScenarioFile, ScenarioLoadError> {
+    let contents = std::fs::read_to_string(path).map_err(|err| ScenarioLoadError {
+        source: anyhow::Error::new(err)
+            .context(format!("failed to read scenario file '{}'", path.display())),
+        hint: None,
+    })?;
+    parse_scenario_file(&contents).map_err(|err| ScenarioLoadError {
+        hint: enrich_feature_hint(&err.to_string()),
+        source: anyhow::Error::new(err).context(format!(
+            "failed to parse scenario file '{}'",
+            path.display()
+        )),
+    })
 }
 
 #[cfg(feature = "config")]
@@ -1786,6 +1866,76 @@ mod tests {
             out.contains("total probes: 1"),
             "single-scenario dry-run must print total probes footer: {out}"
         );
+    }
+
+    #[cfg(feature = "config")]
+    fn write_scenario_file(contents: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(contents.as_bytes()).expect("write scenario");
+        f.flush().expect("flush scenario");
+        f
+    }
+
+    #[cfg(feature = "config")]
+    const TWO_SCENARIOS: &str = "version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: first
+    targets:
+      - Ip: \"127.0.0.1\"
+    probers:
+      - type: tcp_connect
+        ports: [22]
+  - signal_type: discover
+    name: second
+    targets:
+      - Ip: \"127.0.0.1\"
+    probers:
+      - type: tcp_connect
+        ports: [22]
+";
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_cancel_before_the_first_scenario_marks_the_aggregate_cancelled() {
+        let file = write_scenario_file(TWO_SCENARIOS);
+        let mut a = args(&[], &[]);
+        a.file = Some(file.path().to_path_buf());
+        let (_tx, cancel) = watch::channel(true);
+
+        let (tally, aggregate) = run_from_file(&a, cancel, Verbosity::Normal)
+            .await
+            .expect("a cancelled run with no failed scenario exits ok");
+
+        assert!(
+            aggregate.cancelled,
+            "a run interrupted before any scenario must not report a clean aggregate"
+        );
+        assert_eq!(tally.total, 2);
+        assert_eq!(tally.completed, 0);
+        assert_eq!(tally.failed, 0);
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn an_uncancelled_run_leaves_the_aggregate_uncancelled() {
+        let file = write_scenario_file(TWO_SCENARIOS);
+        let records = tempfile::NamedTempFile::new().expect("tempfile");
+        let mut a = args(&[], &[]);
+        a.file = Some(file.path().to_path_buf());
+        a.sink = Some(SinkKind::File);
+        a.output = Some(records.path().to_path_buf());
+        a.timeout_ms = Some(50);
+        let (_tx, cancel) = watch::channel(false);
+
+        let (tally, aggregate) = run_from_file(&a, cancel, Verbosity::Quiet)
+            .await
+            .expect("both scenarios run to completion against loopback");
+
+        assert!(!aggregate.cancelled);
+        assert_eq!(tally.completed, 2);
     }
 
     #[tokio::test]

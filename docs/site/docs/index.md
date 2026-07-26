@@ -100,10 +100,11 @@ It prints one record per device it finds, as a single line of JSON on stdout. Th
     }
     ```
 
-The summary line on stderr confirms what ran:
+The banners on stderr confirm what ran:
 
 ```text
-discovery complete: targets_resolved=1 probe_attempts=1 probe_errors=0 records_emitted=1 elapsed_ms=39
+▶ discover  targets: 1 | probes: tcp_connect (ports 22) | concurrency: 64 | timeout: 1000ms | sink: stdout
+■ discover  completed in 39ms | hosts: 1 | records: 1 | probes: 1 | faults: 0 | sink: stdout
 ```
 
 !!! info "Why some fields are empty"

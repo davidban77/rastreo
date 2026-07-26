@@ -1,6 +1,7 @@
+mod common;
+
 #[cfg(feature = "config")]
 use std::io::Write;
-use std::process::Command;
 
 #[tokio::test]
 async fn discover_against_in_process_listener_emits_ndjson_record() {
@@ -9,9 +10,8 @@ async fn discover_against_in_process_listener_emits_ndjson_record() {
         .expect("bind listener");
     let port = listener.local_addr().expect("local_addr").port();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -74,8 +74,7 @@ async fn discover_against_in_process_listener_emits_ndjson_record() {
 
 #[test]
 fn discover_help_lists_required_flags() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
-    let output = Command::new(bin)
+    let output = common::rastreo()
         .args(["discover", "--help"])
         .output()
         .expect("spawn rastreo");
@@ -99,8 +98,7 @@ fn discover_help_lists_required_flags() {
 
 #[test]
 fn top_level_help_lists_discover_subcommand() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
-    let output = Command::new(bin)
+    let output = common::rastreo()
         .args(["--help"])
         .output()
         .expect("spawn rastreo");
@@ -111,8 +109,7 @@ fn top_level_help_lists_discover_subcommand() {
 
 #[test]
 fn version_flag_reports_crate_version() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
-    let output = Command::new(bin)
+    let output = common::rastreo()
         .args(["--version"])
         .output()
         .expect("spawn rastreo");
@@ -123,9 +120,8 @@ fn version_flag_reports_crate_version() {
 
 #[tokio::test]
 async fn discover_emits_zero_records_hint_when_no_records() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -152,7 +148,7 @@ async fn discover_emits_zero_records_hint_when_no_records() {
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("records_emitted=0"),
+        stderr.contains("records: 0"),
         "stderr missing zero-records summary: {stderr}"
     );
     assert!(
@@ -168,9 +164,8 @@ async fn discover_reports_no_probe_error_for_dns_target_on_refused_port() {
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: dns\n        ports: [1]\n        query_names: [\"example.com\"]\n";
     let path = write_yaml(&dir, "dns-refused.yml", yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -188,11 +183,11 @@ async fn discover_reports_no_probe_error_for_dns_target_on_refused_port() {
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("probe_errors=0"),
+        stderr.contains("faults: 0"),
         "a server that does not answer must not count as a probe error: {stderr}"
     );
     assert!(
-        stderr.contains("records_emitted=0"),
+        stderr.contains("records: 0"),
         "stderr missing zero-records summary: {stderr}"
     );
     assert!(
@@ -203,9 +198,8 @@ async fn discover_reports_no_probe_error_for_dns_target_on_refused_port() {
 
 #[tokio::test]
 async fn dry_run_prints_no_runtime_hint() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -240,9 +234,8 @@ async fn discover_no_hint_when_records_emitted_greater_than_zero() {
         .expect("bind listener");
     let port = listener.local_addr().expect("local_addr").port();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -298,9 +291,8 @@ async fn run_from_file_loads_minimal_tcp_scenario() {
     );
     let path = write_yaml(&dir, "tcp.yml", &yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -329,8 +321,8 @@ async fn run_from_file_loads_minimal_tcp_scenario() {
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("records_emitted=1"),
-        "stderr missing records_emitted=1: {stderr}"
+        stderr.contains("records: 1"),
+        "stderr missing the record count: {stderr}"
     );
 }
 
@@ -344,9 +336,8 @@ async fn run_from_file_rejects_unsupported_version() {
         "version: 2\nkind: discovery\nscenarios: []\n",
     );
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -366,9 +357,8 @@ async fn run_from_file_rejects_unsupported_version() {
 #[cfg(feature = "config")]
 #[tokio::test]
 async fn run_from_file_rejects_missing_file() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--file",
@@ -394,9 +384,8 @@ async fn run_from_file_rejects_malformed_yaml() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = write_yaml(&dir, "broken.yml", "version: 1\n  kind: [\n");
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -431,9 +420,8 @@ async fn run_from_file_reports_all_scenarios_in_multi_scenario_file() {
     );
     let path = write_yaml(&dir, "multi.yml", &yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -485,9 +473,8 @@ async fn concurrency_flag_overrides_yaml_max_concurrent() {
     );
     let path = write_yaml(&dir, "rate.yml", &yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .args(["--concurrency", "16"])
@@ -507,7 +494,7 @@ async fn concurrency_flag_overrides_yaml_max_concurrent() {
     );
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("records_emitted=1"),
+        stderr.contains("records: 1"),
         "expected one record with overridden concurrency: {stderr}"
     );
 }
@@ -519,9 +506,8 @@ async fn retired_rate_limit_scenario_fails_with_migration_hint() {
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    rate_limit: 50\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
     let path = write_yaml(&dir, "retired.yml", yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -553,9 +539,8 @@ async fn timeout_ms_flag_overrides_yaml_timeout_ms() {
     );
     let path = write_yaml(&dir, "timeout.yml", &yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .args(["--timeout-ms", "5000"])
@@ -575,7 +560,7 @@ async fn timeout_ms_flag_overrides_yaml_timeout_ms() {
     );
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("records_emitted=1"),
+        stderr.contains("records: 1"),
         "expected one record with overridden timeout: {stderr}"
     );
 }
@@ -598,10 +583,9 @@ async fn output_flag_overrides_yaml_file_sink_path() {
     );
     let yaml_path = write_yaml(&dir, "sink-path.yml", &yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let cli_out_arg = cli_out.clone();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&yaml_path)
             .args(["--sink", "file", "--output"])
@@ -650,9 +634,8 @@ async fn multi_scenario_partial_failure_continues_and_exits_nonzero() {
     );
     let path = write_yaml(&dir, "partial.yml", &yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -703,9 +686,8 @@ async fn zero_reachable_hosts_scenario_exits_zero() {
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: empty-scan\n    timeout_ms: 200\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"192.0.2.1\"\n    probers:\n      - type: tcp_connect\n        ports: [1]\n";
     let path = write_yaml(&dir, "zero-reachable.yml", yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -722,7 +704,7 @@ async fn zero_reachable_hosts_scenario_exits_zero() {
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("records_emitted=0"),
+        stderr.contains("records: 0"),
         "stderr missing zero-records summary: {stderr}"
     );
     assert!(
@@ -742,9 +724,8 @@ async fn empty_probers_scenario_is_skipped_with_warning() {
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: empty\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n";
     let path = write_yaml(&dir, "empty.yml", yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -772,7 +753,7 @@ async fn empty_probers_scenario_is_skipped_with_warning() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
-async fn scenario_label_is_consistent_across_running_and_summary_lines() {
+async fn scenario_label_is_consistent_across_start_and_completion_banners() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -784,9 +765,8 @@ async fn scenario_label_is_consistent_across_running_and_summary_lines() {
     );
     let path = write_yaml(&dir, "labels.yml", &yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .output()
@@ -805,30 +785,27 @@ async fn scenario_label_is_consistent_across_running_and_summary_lines() {
     );
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    for label in ["scenario 'first' (1 of 2)", "scenario 'second' (2 of 2)"] {
+        assert!(
+            stderr.contains(&format!("▶ {label}")),
+            "stderr missing start banner for {label}: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("■ {label}")),
+            "stderr missing completion banner for {label}: {stderr}"
+        );
+    }
     assert!(
-        stderr.contains("running scenario 'first' (1 of 2)"),
-        "stderr missing first running line: {stderr}"
-    );
-    assert!(
-        stderr.contains("scenario 'first' (1 of 2) complete:"),
-        "stderr missing first summary line with same label: {stderr}"
-    );
-    assert!(
-        stderr.contains("running scenario 'second' (2 of 2)"),
-        "stderr missing second running line: {stderr}"
-    );
-    assert!(
-        stderr.contains("scenario 'second' (2 of 2) complete:"),
-        "stderr missing second summary line with same label: {stderr}"
+        stderr.contains("■ 2 scenarios"),
+        "stderr missing the aggregate banner: {stderr}"
     );
 }
 
 #[tokio::test]
 async fn dry_run_flag_driven_prints_plan_and_exits_zero_without_probing() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let start = std::time::Instant::now();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -889,10 +866,9 @@ async fn dry_run_flag_driven_prints_plan_and_exits_zero_without_probing() {
 #[cfg(feature = "kafka")]
 #[tokio::test]
 async fn dry_run_with_kafka_sink_does_not_connect_to_broker() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let start = std::time::Instant::now();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -937,9 +913,8 @@ async fn dry_run_yaml_mode_prints_per_scenario_blocks_and_total_probes() {
     let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: stdout\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n  - signal_type: discover\n    name: second\n    targets:\n      - Cidr: \"10.0.0.0/30\"\n    probers:\n      - type: tcp_connect\n        ports: [80, 443]\n";
     let path = write_yaml(&dir, "multi.yml", yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .arg("--dry-run")
@@ -978,9 +953,8 @@ async fn dry_run_yaml_mode_prints_per_scenario_blocks_and_total_probes() {
 
 #[tokio::test]
 async fn dry_run_dns_failure_prints_inline_error_and_still_exits_zero() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -1021,9 +995,8 @@ async fn catalog_reference_resolves_and_dry_run_prints_plan() {
     write_yaml(&dir, "office.yml", yaml);
     let catalog_path = dir.path().to_path_buf();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .env("RASTREO_CATALOG_DIR", &catalog_path)
             .args(["discover", "--file", "@office", "--dry-run"])
             .output()
@@ -1056,9 +1029,8 @@ async fn catalog_reference_accepts_yml_suffix_in_name() {
     write_yaml(&dir, "office.yml", yaml);
     let catalog_path = dir.path().to_path_buf();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .env("RASTREO_CATALOG_DIR", &catalog_path)
             .args(["discover", "--file", "@office.yml", "--dry-run"])
             .output()
@@ -1086,9 +1058,8 @@ async fn catalog_reference_not_found_prints_actionable_error() {
     );
     let catalog_path = dir.path().to_path_buf();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .env("RASTREO_CATALOG_DIR", &catalog_path)
             .args(["discover", "--file", "@nonexistent", "--dry-run"])
             .output()
@@ -1107,9 +1078,8 @@ async fn catalog_reference_not_found_prints_actionable_error() {
 #[cfg(feature = "config")]
 #[tokio::test]
 async fn catalog_reference_rejects_path_separators() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file", "@../etc/passwd", "--dry-run"])
             .output()
             .expect("spawn rastreo")
@@ -1125,9 +1095,8 @@ async fn catalog_reference_rejects_path_separators() {
 #[cfg(feature = "config")]
 #[tokio::test]
 async fn catalog_reference_rejects_empty_name() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file", "@", "--dry-run"])
             .output()
             .expect("spawn rastreo")
@@ -1155,9 +1124,8 @@ async fn plain_path_still_works_when_catalog_env_set() {
     let path = write_yaml(&dir, "plain.yml", &yaml);
     let catalog_path = dir.path().to_path_buf();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .env("RASTREO_CATALOG_DIR", &catalog_path)
             .args(["discover", "--file"])
             .arg(&path)
@@ -1177,16 +1145,15 @@ async fn plain_path_still_works_when_catalog_env_set() {
     );
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("records_emitted=1"),
+        stderr.contains("records: 1"),
         "expected one record: {stderr}"
     );
 }
 
 #[tokio::test]
 async fn dry_run_format_json_emits_parseable_plan_array() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -1236,9 +1203,8 @@ async fn dry_run_format_json_multi_scenario_file_emits_array_of_plans() {
     let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: stdout\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n  - signal_type: discover\n    name: second\n    targets:\n      - Cidr: \"10.0.0.0/30\"\n    probers:\n      - type: tcp_connect\n        ports: [80, 443]\n";
     let path = write_yaml(&dir, "multi.yml", yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .args(["--dry-run", "--dry-run-format", "json"])
@@ -1271,9 +1237,8 @@ async fn dry_run_format_json_single_scenario_file_uses_plain_scenario_name() {
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: solo-scenario\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
     let path = write_yaml(&dir, "solo.yml", yaml);
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .args(["--dry-run", "--dry-run-format", "json"])
@@ -1300,9 +1265,8 @@ async fn dry_run_format_json_single_scenario_file_uses_plain_scenario_name() {
 
 #[tokio::test]
 async fn dry_run_format_json_all_targets_failed_exits_nonzero() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args([
                 "discover",
                 "--target",
@@ -1349,9 +1313,8 @@ async fn catalog_list_prints_sorted_names_with_resolved_paths() {
     );
     let catalog_path = dir.path().to_path_buf();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .env("RASTREO_CATALOG_DIR", &catalog_path)
             .args(["catalog", "list"])
             .output()
@@ -1381,9 +1344,8 @@ async fn catalog_list_empty_reports_none_found_and_exits_zero() {
     let dir = tempfile::tempdir().expect("tempdir");
     let catalog_path = dir.path().to_path_buf();
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .env("RASTREO_CATALOG_DIR", &catalog_path)
             .args(["catalog", "list"])
             .output()
@@ -1428,10 +1390,9 @@ async fn sink_flag_overrides_yaml_sink() {
     );
     let output_ndjson = dir.path().join("out.ndjson");
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output_path = output_ndjson.clone();
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&yaml_path)
             .args(["--sink", "file", "--output"])
@@ -1474,9 +1435,8 @@ async fn resume_refuses_a_multi_scenario_file() {
     let path = write_yaml(&dir, "multi.yml", yaml);
     let checkpoint = dir.path().join("scan.checkpoint");
 
-    let bin = env!("CARGO_BIN_EXE_rastreo");
     let output = tokio::task::spawn_blocking(move || {
-        Command::new(bin)
+        common::rastreo()
             .args(["discover", "--file"])
             .arg(&path)
             .arg("--checkpoint")
