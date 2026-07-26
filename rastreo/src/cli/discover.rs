@@ -1,10 +1,9 @@
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::net::IpAddr;
 #[cfg(feature = "config")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -17,15 +16,17 @@ use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
-    hint_for_error_kind, resolve_scenario_targets, run_discovery, CheckpointConfig, ConfigError,
-    DiscoveryPlan, DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs, ProberConfig,
-    RastreoError, ResolvedScenarioTarget, RunOptions, SinkConfig, Target,
+    resolve_scenario_targets, run_discovery, CheckpointConfig, ConfigError, DiscoveryPlan,
+    DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs, ProberConfig, RastreoError,
+    ResolvedScenarioTarget, RunOptions, SinkConfig, Target,
 };
 use tokio::sync::watch;
 
-const PROGRESS_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
-// Below a few completed targets, a linear ETA extrapolation is too noisy to be useful.
-const ETA_MIN_COMPLETED: usize = 3;
+#[cfg(feature = "config")]
+use super::output::enrich_feature_hint;
+use super::output::{
+    enrich_scan_error_hint, print_runtime_hints, print_summary, progress_display_loop,
+};
 
 const DEFAULT_CONCURRENCY: u32 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
@@ -396,65 +397,6 @@ fn checkpoint_config(args: &DiscoverArgs) -> Option<CheckpointConfig> {
     })
 }
 
-async fn progress_display_loop(mut rx: watch::Receiver<DiscoveryProgress>, is_tty: bool) {
-    let mut last_draw: Option<Instant> = None;
-    while rx.changed().await.is_ok() {
-        let snapshot = rx.borrow().clone();
-        if snapshot.targets_total == 0 {
-            continue;
-        }
-        let now = Instant::now();
-        if should_redraw(last_draw, now, PROGRESS_REDRAW_INTERVAL) {
-            redraw_progress(&snapshot, is_tty);
-            last_draw = Some(now);
-        }
-    }
-    finalize_progress_line(is_tty);
-}
-
-fn should_redraw(last_draw: Option<Instant>, now: Instant, interval: Duration) -> bool {
-    match last_draw {
-        None => true,
-        Some(t) => now.duration_since(t) >= interval,
-    }
-}
-
-fn format_progress_line(p: &DiscoveryProgress) -> String {
-    let total = p.targets_total;
-    let done = p.targets_completed;
-    let pct = done.saturating_mul(100).checked_div(total).unwrap_or(0);
-    let mut line = format!(
-        "targets {done}/{total} ({pct}%), records {}",
-        p.records_emitted
-    );
-    if done >= ETA_MIN_COMPLETED && done < total {
-        let remaining = (total - done) as u128;
-        let eta_secs = p.elapsed_ms.saturating_mul(remaining) / done as u128 / 1000;
-        line.push_str(&format!(", ETA ~{eta_secs}s"));
-    }
-    line
-}
-
-// stderr, not stdout: records stream to stdout and the progress line must not corrupt them.
-fn redraw_progress(p: &DiscoveryProgress, is_tty: bool) {
-    let line = format_progress_line(p);
-    let mut err = std::io::stderr();
-    if is_tty {
-        let _ = write!(err, "\r\x1b[K{line}");
-    } else {
-        let _ = writeln!(err, "{line}");
-    }
-    let _ = err.flush();
-}
-
-fn finalize_progress_line(is_tty: bool) {
-    if is_tty {
-        let mut err = std::io::stderr();
-        let _ = write!(err, "\r\x1b[K");
-        let _ = err.flush();
-    }
-}
-
 async fn run_legacy(args: &DiscoverArgs, cancel: watch::Receiver<bool>) -> Result<()> {
     let scenario = build_scenario(args)?;
     match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args)).await {
@@ -585,91 +527,6 @@ pub(crate) fn load_scenario_file(path: &Path) -> Result<ScenarioFile> {
 }
 
 #[cfg(feature = "config")]
-const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
-    ("http", "http"),
-    ("snmp", "snmp"),
-    ("arp", "arp"),
-    ("ndp", "ndp"),
-    ("ssh", "ssh"),
-    ("icmp", "icmp"),
-    ("tls", "tls"),
-    ("oui_enrichment", "oui"),
-    ("mib_enrichment", "mib_enrichment"),
-];
-
-#[cfg(feature = "config")]
-const RELEASE_BUNDLED_FEATURES: &str = "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls";
-
-// Resolver / sink errors abort the whole scan and are not kinded, so they hint by string match.
-const SCAN_ERROR_HINT_PATTERNS: &[(&str, &str)] = &[
-    (
-        "nxdomain",
-        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
-    ),
-    (
-        "dns lookup failed",
-        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
-    ),
-    (
-        "no records found",
-        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
-    ),
-];
-
-fn enrich_scan_error_hint(error_msg: &str) -> Option<String> {
-    let lower = error_msg.to_lowercase();
-    SCAN_ERROR_HINT_PATTERNS
-        .iter()
-        .find(|(needle, _)| lower.contains(needle))
-        .map(|(_, hint)| (*hint).to_string())
-}
-
-fn runtime_probe_hint(summary: &rastreo_core::DiscoverySummary) -> Option<&'static str> {
-    summary
-        .first_probe_error
-        .as_ref()
-        .and_then(|fault| hint_for_error_kind(fault.kind))
-}
-
-const ZERO_RECORDS_HINT: &str =
-    "0 records emitted — no probe reached an open port. Check target reachability and port list.";
-
-fn runtime_hint_line(summary: &rastreo_core::DiscoverySummary) -> Option<String> {
-    if summary.cancelled {
-        return None;
-    }
-    if summary.first_probe_error.is_some() {
-        return runtime_probe_hint(summary).map(str::to_string);
-    }
-    if summary.records_emitted == 0 && summary.probe_attempts > 0 {
-        return Some(ZERO_RECORDS_HINT.to_string());
-    }
-    None
-}
-
-fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary) {
-    if let Some(hint) = runtime_hint_line(summary) {
-        eprintln!("hint: {hint}");
-    }
-}
-
-#[cfg(feature = "config")]
-fn enrich_feature_hint(error_msg: &str) -> Option<String> {
-    const NEEDLE: &str = "unknown variant `";
-    let start = error_msg.find(NEEDLE)? + NEEDLE.len();
-    let rest = &error_msg[start..];
-    let end = rest.find('`')?;
-    let variant = &rest[..end];
-    let feature = FEATURE_GATED_VARIANTS
-        .iter()
-        .find(|(name, _)| *name == variant)
-        .map(|(_, feat)| *feat)?;
-    Some(format!(
-        "'{variant}' requires the '{feature}' Cargo feature. Rebuild with --features {feature} or use the release Docker image which bundles {RELEASE_BUNDLED_FEATURES}."
-    ))
-}
-
-#[cfg(feature = "config")]
 pub(crate) fn merge_defaults(base: &mut BaseProbeConfig, defaults: &BaseProbeConfig) {
     if base.name.is_none() {
         base.name = defaults.name.clone();
@@ -740,24 +597,6 @@ pub(crate) fn scenario_label(base: &BaseProbeConfig, idx: usize, total: usize) -
         Some(n) => format!("scenario '{n}' ({} of {total})", idx + 1),
         None => format!("scenario {} of {total}", idx + 1),
     }
-}
-
-fn print_summary(label: &str, summary: &rastreo_core::DiscoverySummary) {
-    let status = if summary.cancelled {
-        "cancelled"
-    } else {
-        "complete"
-    };
-    let probe_errors: usize = summary.error_counts.values().sum();
-    eprintln!(
-        "{label} {}: targets_resolved={} probe_attempts={} probe_errors={} records_emitted={} elapsed_ms={}",
-        status,
-        summary.targets_resolved,
-        summary.probe_attempts,
-        probe_errors,
-        summary.records_emitted,
-        summary.elapsed.as_millis(),
-    );
 }
 
 pub(crate) fn build_scenario(args: &DiscoverArgs) -> Result<DiscoverScenarioConfig> {
@@ -1584,103 +1423,6 @@ mod tests {
 
     #[cfg(feature = "config")]
     #[test]
-    fn enrich_feature_hint_matches_http_variant() {
-        let msg = "scenarios: unknown variant `http`, expected one of `tcp_connect`, `dns` at line 4 column 3";
-        let hint = enrich_feature_hint(msg).expect("hint");
-        assert!(hint.contains("--features http"), "hint: {hint}");
-        assert!(hint.contains("'http'"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_matches_snmp_variant() {
-        let msg = "unknown variant `snmp`, expected one of `tcp_connect`";
-        let hint = enrich_feature_hint(msg).expect("hint");
-        assert!(hint.contains("--features snmp"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_matches_arp_variant() {
-        let hint = enrich_feature_hint("unknown variant `arp`, expected one of ...").expect("hint");
-        assert!(hint.contains("--features arp"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_matches_ndp_variant() {
-        let hint = enrich_feature_hint("unknown variant `ndp`, expected one of ...").expect("hint");
-        assert!(hint.contains("--features ndp"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_matches_ssh_variant() {
-        let hint = enrich_feature_hint("unknown variant `ssh`, expected one of ...").expect("hint");
-        assert!(hint.contains("--features ssh"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_matches_icmp_variant() {
-        let hint =
-            enrich_feature_hint("unknown variant `icmp`, expected one of ...").expect("hint");
-        assert!(hint.contains("--features icmp"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_matches_tls_variant() {
-        let hint = enrich_feature_hint("unknown variant `tls`, expected one of ...").expect("hint");
-        assert!(hint.contains("--features tls"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_names_current_bundled_release_features() {
-        let hint = enrich_feature_hint("unknown variant `ssh`, expected one of ...").expect("hint");
-        for feat in [
-            "kafka", "http", "snmp", "arp", "ndp", "oui", "nats", "ssh", "icmp", "tls",
-        ] {
-            assert!(hint.contains(feat), "hint missing '{feat}': {hint}");
-        }
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_maps_oui_enrichment_variant_to_oui_feature() {
-        let hint =
-            enrich_feature_hint("unknown variant `oui_enrichment`, expected one of `direct`")
-                .expect("hint");
-        assert!(hint.contains("--features oui"), "hint: {hint}");
-        assert!(hint.contains("'oui_enrichment'"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_maps_mib_enrichment_variant_to_feature() {
-        let hint =
-            enrich_feature_hint("unknown variant `mib_enrichment`, expected one of `direct`")
-                .expect("hint");
-        assert!(hint.contains("--features mib_enrichment"), "hint: {hint}");
-        assert!(hint.contains("'mib_enrichment'"), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_does_not_fire_for_typo_variant() {
-        let msg = "unknown variant `htttp`, expected one of `tcp_connect`";
-        assert!(enrich_feature_hint(msg).is_none());
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_does_not_fire_when_no_unknown_variant_marker() {
-        assert!(enrich_feature_hint("missing field `targets`").is_none());
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
     fn scenario_label_named_scenario_uses_quoted_name_and_index() {
         let mut base = BaseProbeConfig::new();
         base.name = Some("first".into());
@@ -2059,242 +1801,5 @@ mod tests {
         assert_eq!(probes, 6, "expected deduped unique-IP count, got {probes}");
         // Per-target lines still show duplicates verbatim — dedup is only for the total.
         assert!(out.contains("10.0.0.1 → 10.0.0.1"), "{out}");
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_matches_nxdomain() {
-        let hint =
-            enrich_scan_error_hint("resolver error: NXDOMAIN for example.com").expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_matches_dns_lookup_failed() {
-        let hint = enrich_scan_error_hint("resolver error: DNS lookup failed for x.invalid")
-            .expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_matches_no_records_found() {
-        let hint = enrich_scan_error_hint("resolver error: no records found").expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_is_case_insensitive() {
-        let hint =
-            enrich_scan_error_hint("RESOLVER ERROR: NXDOMAIN for example.com").expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_returns_none_for_unknown_message() {
-        assert!(enrich_scan_error_hint("some totally novel failure mode").is_none());
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_returns_none_for_empty_message() {
-        assert!(enrich_scan_error_hint("").is_none());
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_ignores_probe_fault_strings() {
-        assert!(enrich_scan_error_hint("probe error: raw socket: Permission denied").is_none());
-    }
-
-    fn summary_with_fault(
-        kind: rastreo_core::ProbeErrorKind,
-        detail: &str,
-    ) -> rastreo_core::DiscoverySummary {
-        let mut summary = rastreo_core::DiscoverySummary::default();
-        summary.first_probe_error = Some(rastreo_core::ProbeFault::new(kind, detail));
-        summary
-    }
-
-    #[test]
-    fn runtime_probe_hint_derives_permission_denied_from_kind() {
-        // detail omits any "permission denied" substring: the hint must come from the kind.
-        let summary = summary_with_fault(
-            rastreo_core::ProbeErrorKind::PermissionDenied,
-            "snmp egress blocked",
-        );
-        let hint = runtime_probe_hint(&summary).expect("hint");
-        assert!(hint.contains("CAP_NET_RAW"), "hint: {hint}");
-    }
-
-    #[test]
-    fn runtime_probe_hint_derives_decode_failed_from_kind() {
-        let summary = summary_with_fault(rastreo_core::ProbeErrorKind::DecodeFailed, "gibberish");
-        let hint = runtime_probe_hint(&summary).expect("hint");
-        assert!(hint.contains("could not parse"), "hint: {hint}");
-    }
-
-    #[test]
-    fn runtime_probe_hint_agrees_with_core_hint_for_the_same_kind() {
-        for kind in [
-            rastreo_core::ProbeErrorKind::PermissionDenied,
-            rastreo_core::ProbeErrorKind::DnsFailed,
-            rastreo_core::ProbeErrorKind::DecodeFailed,
-            rastreo_core::ProbeErrorKind::AuthFailed,
-        ] {
-            let summary = summary_with_fault(kind, "x");
-            assert_eq!(
-                runtime_probe_hint(&summary),
-                rastreo_core::hint_for_error_kind(kind),
-                "CLI runtime hint must match the shared core hint for {kind:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn runtime_probe_hint_is_none_for_other_kind() {
-        let summary = summary_with_fault(rastreo_core::ProbeErrorKind::Other, "unclassified");
-        assert!(runtime_probe_hint(&summary).is_none());
-    }
-
-    #[test]
-    fn runtime_probe_hint_is_none_without_a_fault() {
-        let summary = rastreo_core::DiscoverySummary::default();
-        assert!(runtime_probe_hint(&summary).is_none());
-    }
-
-    #[test]
-    fn print_runtime_hints_no_op_when_records_emitted() {
-        let mut summary = rastreo_core::DiscoverySummary::default();
-        summary.targets_resolved = 1;
-        summary.probe_attempts = 1;
-        summary.records_emitted = 1;
-        assert!(
-            runtime_hint_line(&summary).is_none(),
-            "records emitted with no fault must produce no hint"
-        );
-        print_runtime_hints(&summary);
-    }
-
-    #[test]
-    fn runtime_hint_line_returns_fault_hint_even_when_a_record_was_kept() {
-        // SNMP decode-failure keeps the device (records_emitted == 1) yet latches a fault.
-        let mut summary =
-            summary_with_fault(rastreo_core::ProbeErrorKind::DecodeFailed, "gibberish");
-        summary.probe_attempts = 1;
-        summary.records_emitted = 1;
-        let line = runtime_hint_line(&summary).expect("fault hint must fire despite a kept record");
-        assert_eq!(
-            line.as_str(),
-            rastreo_core::hint_for_error_kind(rastreo_core::ProbeErrorKind::DecodeFailed)
-                .expect("decode hint")
-        );
-    }
-
-    #[test]
-    fn runtime_hint_line_falls_back_to_zero_records_hint_without_a_fault() {
-        let mut summary = rastreo_core::DiscoverySummary::default();
-        summary.probe_attempts = 1;
-        summary.records_emitted = 0;
-        let line = runtime_hint_line(&summary).expect("fallback hint");
-        assert_eq!(line, ZERO_RECORDS_HINT);
-        assert!(
-            !line.starts_with("hint:"),
-            "content must be prefix-free; the label is added at the print layer: {line}"
-        );
-    }
-
-    #[test]
-    fn runtime_hint_line_no_op_when_cancelled() {
-        let mut summary = rastreo_core::DiscoverySummary::default();
-        summary.targets_resolved = 1;
-        summary.probe_attempts = 1;
-        summary
-            .error_counts
-            .insert(rastreo_core::ProbeErrorKind::PermissionDenied, 1);
-        summary.cancelled = true;
-        summary.first_probe_error = Some(rastreo_core::ProbeFault::new(
-            rastreo_core::ProbeErrorKind::PermissionDenied,
-            "permission denied",
-        ));
-        assert!(runtime_hint_line(&summary).is_none());
-        print_runtime_hints(&summary);
-    }
-
-    fn progress(
-        completed: usize,
-        total: usize,
-        records: usize,
-        elapsed_ms: u128,
-    ) -> DiscoveryProgress {
-        let mut p = DiscoveryProgress::default();
-        p.targets_completed = completed;
-        p.targets_total = total;
-        p.records_emitted = records;
-        p.elapsed_ms = elapsed_ms;
-        p
-    }
-
-    #[test]
-    fn should_redraw_always_true_on_first_draw() {
-        assert!(should_redraw(
-            None,
-            Instant::now(),
-            PROGRESS_REDRAW_INTERVAL
-        ));
-    }
-
-    #[test]
-    fn should_redraw_false_before_interval_elapses() {
-        let t = Instant::now();
-        assert!(!should_redraw(
-            Some(t),
-            t + Duration::from_millis(500),
-            Duration::from_secs(1)
-        ));
-    }
-
-    #[test]
-    fn should_redraw_true_at_and_after_interval() {
-        let t = Instant::now();
-        assert!(should_redraw(
-            Some(t),
-            t + Duration::from_secs(1),
-            Duration::from_secs(1)
-        ));
-        assert!(should_redraw(
-            Some(t),
-            t + Duration::from_millis(1500),
-            Duration::from_secs(1)
-        ));
-    }
-
-    #[test]
-    fn format_progress_line_early_scan_omits_eta() {
-        let line = format_progress_line(&progress(0, 10, 0, 0));
-        assert_eq!(line, "targets 0/10 (0%), records 0");
-        assert!(
-            !line.contains("ETA"),
-            "no ETA before any target completes: {line}"
-        );
-    }
-
-    #[test]
-    fn format_progress_line_below_eta_threshold_omits_eta() {
-        let line = format_progress_line(&progress(2, 10, 1, 4000));
-        assert!(
-            !line.contains("ETA"),
-            "ETA must stay hidden under the threshold: {line}"
-        );
-        assert!(line.contains("targets 2/10 (20%)"), "{line}");
-    }
-
-    #[test]
-    fn format_progress_line_shows_linear_eta_after_threshold() {
-        // 5 of 10 done in 10s ⇒ 5 remaining at 2s each ⇒ ~10s left.
-        let line = format_progress_line(&progress(5, 10, 3, 10_000));
-        assert_eq!(line, "targets 5/10 (50%), records 3, ETA ~10s");
-    }
-
-    #[test]
-    fn format_progress_line_at_completion_is_full_percent_without_eta() {
-        let line = format_progress_line(&progress(10, 10, 8, 20_000));
-        assert_eq!(line, "targets 10/10 (100%), records 8");
     }
 }

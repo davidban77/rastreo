@@ -23,7 +23,11 @@ src/
     ├── mod.rs       ← Cli struct + Command enum + clap dispatch
     ├── catalog.rs   ← @name resolution across catalog directories (feature = "config")
     ├── validate.rs  ← validate subcommand handler: offline config-shape + sink-config lint (feature = "config")
-    └── discover.rs  ← discover subcommand handler + arg parsing
+    ├── discover.rs  ← discover subcommand handler + arg parsing
+    └── output/      ← human-facing terminal output, all of it on stderr
+        ├── progress.rs  ← live progress line (TTY in-place redraw, plain lines otherwise)
+        ├── summary.rs   ← end-of-scan summary line
+        └── hints.rs     ← runtime probe hints, scan-error hints, feature-gate hints
 ```
 
 ## CLI Surface
