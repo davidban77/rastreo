@@ -52,7 +52,9 @@ pub use prober::IcmpProber;
 pub use prober::SshProber;
 #[cfg(feature = "tls")]
 pub use prober::TlsProber;
-pub use prober::{Prober, ProberConfig, ReverseDnsProber, TcpConnectProber};
+pub use prober::{
+    ProbeSelection, ProbeSelectionOptions, Prober, ProberConfig, ReverseDnsProber, TcpConnectProber,
+};
 pub use resolver::{GuardedResolver, HickoryResolver, ResolvedPlan, Resolver};
 pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{

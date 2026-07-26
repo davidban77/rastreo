@@ -21,6 +21,7 @@ src/
 │   └── guarded.rs   ← GuardedResolver decorator (spec-level allow-list + arithmetic aggregate host cap, both pre-flight)
 ├── prober/
 │   ├── mod.rs           ← Prober trait + ProberConfig + create_prober factory
+│   ├── selection.rs     ← probe-kind name parsing, default set, and expansion into ProberConfig
 │   ├── classify.rs      ← shared absence-vs-fault classifier (io / hickory errors) + chain walkers
 │   ├── tcp_connect.rs   ← TcpConnectProber
 │   ├── http.rs          ← HttpProber (feature: http)

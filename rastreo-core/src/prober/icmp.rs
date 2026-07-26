@@ -83,6 +83,11 @@ impl IcmpProber {
         self.interval
     }
 
+    /// Whether an ICMP socket can be opened on this host right now.
+    pub fn is_runnable() -> bool {
+        any_family_opens(PRE_FLIGHT_FAMILIES, |family| open_socket(family).is_ok())
+    }
+
     fn engine_for(&self, ip: IpAddr) -> Result<Arc<Engine>, ProbeFault> {
         let family = Family::of(ip);
         get_or_open(&self.engines, family, || Engine::open(family))
@@ -189,6 +194,13 @@ pub(crate) fn build_icmpv6_echo_request(
     pkt.set_sequence_number(sequence);
     pkt.set_payload(payload);
     buf
+}
+
+// One openable family is enough — a pre-flight has no target, so an IPv4-only host still counts.
+const PRE_FLIGHT_FAMILIES: &[Family] = &[Family::V4, Family::V6];
+
+fn any_family_opens(families: &[Family], opens: impl Fn(Family) -> bool) -> bool {
+    families.iter().copied().any(opens)
 }
 
 fn open_socket(family: Family) -> Result<Socket, ProbeFault> {
@@ -1300,6 +1312,66 @@ mod tests {
         assert!(!recv_error_is_transient(&std::io::Error::from(
             ErrorKind::PermissionDenied
         )));
+    }
+
+    #[tokio::test]
+    async fn a_real_probe_never_contradicts_the_runnability_pre_flight() {
+        use crate::model::Target;
+        use std::net::Ipv4Addr;
+
+        let prober = IcmpProber::new(1, 10).expect("valid");
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let target = ResolvedTarget {
+            ip,
+            original: Target::Ip(ip),
+            resolved_at: SystemTime::UNIX_EPOCH,
+        };
+        let outcome = prober
+            .probe(&target, &ProbeCtx::new(Duration::from_millis(500), 0))
+            .await
+            .expect("probe ok");
+        let denied = outcome
+            .fault
+            .as_ref()
+            .is_some_and(|fault| fault.kind == ProbeErrorKind::PermissionDenied);
+        if IcmpProber::is_runnable() {
+            assert!(
+                !denied,
+                "an openable socket must not produce PermissionDenied"
+            );
+        } else {
+            assert!(
+                outcome.fault.is_some(),
+                "an unopenable socket must fault, never look like absence"
+            );
+        }
+    }
+
+    #[test]
+    fn one_openable_family_is_enough() {
+        assert!(any_family_opens(PRE_FLIGHT_FAMILIES, |family| family == Family::V4));
+        assert!(any_family_opens(PRE_FLIGHT_FAMILIES, |family| family == Family::V6));
+        assert!(!any_family_opens(PRE_FLIGHT_FAMILIES, |_| false));
+    }
+
+    #[test]
+    fn is_runnable_asks_a_real_socket_open_of_each_family() {
+        let per_family = PRE_FLIGHT_FAMILIES
+            .iter()
+            .map(|family| open_socket(*family).is_ok());
+        assert_eq!(
+            IcmpProber::is_runnable(),
+            per_family.into_iter().any(|opened| opened)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn is_runnable_is_true_on_macos_for_any_user() {
+        assert!(
+            IcmpProber::is_runnable(),
+            "macOS grants unprivileged SOCK_DGRAM ICMP"
+        );
     }
 
     #[test]

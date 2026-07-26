@@ -14,6 +14,8 @@ use crate::error::ProbeErrorKind;
     Default,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     serde::Serialize,
     serde::Deserialize,
@@ -99,6 +101,26 @@ impl ProbeKind {
             ProbeKind::ReverseDns => "reverse_dns",
             ProbeKind::Gnmi => "gnmi",
             ProbeKind::Lldp => "lldp",
+        }
+    }
+
+    /// Inverse of [`ProbeKind::label`]; `None` for any string that is not a canonical label.
+    pub fn from_label(label: &str) -> Option<ProbeKind> {
+        match label {
+            "tcp_connect" => Some(ProbeKind::TcpConnect),
+            "udp" => Some(ProbeKind::Udp),
+            "http" => Some(ProbeKind::Http),
+            "dns" => Some(ProbeKind::Dns),
+            "snmp" => Some(ProbeKind::Snmp),
+            "arp" => Some(ProbeKind::Arp),
+            "ndp" => Some(ProbeKind::Ndp),
+            "ssh" => Some(ProbeKind::Ssh),
+            "icmp" => Some(ProbeKind::Icmp),
+            "tls" => Some(ProbeKind::Tls),
+            "reverse_dns" => Some(ProbeKind::ReverseDns),
+            "gnmi" => Some(ProbeKind::Gnmi),
+            "lldp" => Some(ProbeKind::Lldp),
+            _ => None,
         }
     }
 }
@@ -496,6 +518,43 @@ mod tests {
                 "label {label} not snake_case"
             );
         }
+    }
+
+    #[test]
+    fn probe_kind_from_label_round_trips_every_variant() {
+        for kind in ProbeKind::all() {
+            assert_eq!(
+                ProbeKind::from_label(kind.label()),
+                Some(*kind),
+                "label {} does not round-trip",
+                kind.label()
+            );
+        }
+    }
+
+    #[test]
+    fn probe_kind_from_label_rejects_non_canonical_spellings() {
+        for label in ["", "tcp", "TcpConnect", "Http", "reverse-dns", "nope"] {
+            assert_eq!(ProbeKind::from_label(label), None, "accepted {label:?}");
+        }
+    }
+
+    #[test]
+    fn probe_kind_orders_by_declaration_for_btreemap_keys() {
+        use std::collections::BTreeMap;
+        let mut ports: BTreeMap<ProbeKind, u16> = BTreeMap::new();
+        ports.insert(ProbeKind::Lldp, 161);
+        ports.insert(ProbeKind::TcpConnect, 22);
+        let first = ports.keys().next().copied().expect("non-empty");
+        assert_eq!(first, ProbeKind::TcpConnect);
+        let ordered: Vec<usize> = ProbeKind::all().iter().map(|k| k.index()).collect();
+        let mut sorted = ProbeKind::all().to_vec();
+        sorted.sort();
+        assert_eq!(
+            sorted.iter().map(|k| k.index()).collect::<Vec<_>>(),
+            ordered,
+            "Ord must agree with index order"
+        );
     }
 
     #[test]
