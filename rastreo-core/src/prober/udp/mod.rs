@@ -30,6 +30,16 @@ pub enum UdpProtocol {
     StunBinding,
 }
 
+// Not a serde default: a serde default cannot read the sibling `protocol` field.
+pub const fn default_ports_for(protocol: UdpProtocol) -> &'static [u16] {
+    match protocol {
+        UdpProtocol::Ntp => &[123],
+        UdpProtocol::SipOptions => &[5060],
+        UdpProtocol::MemcachedStats => &[11211],
+        UdpProtocol::StunBinding => &[3478],
+    }
+}
+
 #[derive(Debug)]
 pub struct UdpProber {
     ports: Vec<u16>,
@@ -271,6 +281,28 @@ mod tests {
             }
         });
         Ok(port)
+    }
+
+    #[test]
+    fn default_ports_for_names_the_well_known_port_of_each_protocol() {
+        assert_eq!(default_ports_for(UdpProtocol::Ntp), &[123]);
+        assert_eq!(default_ports_for(UdpProtocol::SipOptions), &[5060]);
+        assert_eq!(default_ports_for(UdpProtocol::MemcachedStats), &[11211]);
+        assert_eq!(default_ports_for(UdpProtocol::StunBinding), &[3478]);
+    }
+
+    #[test]
+    fn default_ports_for_yields_a_constructible_prober_for_every_protocol() {
+        for protocol in [
+            UdpProtocol::Ntp,
+            UdpProtocol::SipOptions,
+            UdpProtocol::MemcachedStats,
+            UdpProtocol::StunBinding,
+        ] {
+            let prober = UdpProber::new(default_ports_for(protocol).to_vec(), protocol)
+                .expect("default ports are non-empty");
+            assert_eq!(prober.protocol(), protocol);
+        }
     }
 
     fn ntp_response(stratum: u8, ref_id: [u8; 4]) -> Vec<u8> {

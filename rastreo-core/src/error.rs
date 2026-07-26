@@ -45,6 +45,26 @@ impl RastreoError {
 pub enum ConfigError {
     #[error("{0}")]
     InvalidValue(String),
+
+    #[error("unknown probe kind '{name}'; available in this build: {available}")]
+    UnknownProbeKind { name: String, available: String },
+
+    #[error(
+        "probe kind '{kind}' requires the '{feature}' Cargo feature, which this binary was not built with"
+    )]
+    ProbeKindNotCompiled {
+        kind: &'static str,
+        feature: &'static str,
+    },
+
+    #[error("probe kind '{kind}' requires {param}")]
+    ProbeKindMissingParam {
+        kind: &'static str,
+        param: &'static str,
+    },
+
+    #[error("no probe kinds selected")]
+    EmptyProbeSelection,
 }
 
 impl ConfigError {
@@ -332,6 +352,47 @@ mod tests {
         assert_eq!(json, "\"decode_failed\"");
         let back: ProbeErrorKind = serde_json::from_str("\"permission_denied\"").expect("parse");
         assert_eq!(back, ProbeErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn unknown_probe_kind_display_names_the_input_and_the_alternatives() {
+        let err = RastreoError::Config(ConfigError::UnknownProbeKind {
+            name: "snmpp".into(),
+            available: "tcp_connect, udp, dns".into(),
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("snmpp"), "msg: {msg}");
+        assert!(msg.contains("tcp_connect, udp, dns"), "msg: {msg}");
+    }
+
+    #[test]
+    fn probe_kind_not_compiled_display_names_the_cargo_feature() {
+        let err = ConfigError::ProbeKindNotCompiled {
+            kind: "snmp",
+            feature: "snmp",
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("Cargo feature"), "msg: {msg}");
+        assert!(msg.contains("'snmp'"), "msg: {msg}");
+    }
+
+    #[test]
+    fn probe_kind_missing_param_display_names_the_kind_and_the_parameter() {
+        let err = ConfigError::ProbeKindMissingParam {
+            kind: "udp",
+            param: "a udp protocol",
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("'udp'"), "msg: {msg}");
+        assert!(msg.contains("a udp protocol"), "msg: {msg}");
+    }
+
+    #[test]
+    fn empty_probe_selection_display_is_stable() {
+        assert_eq!(
+            format!("{}", ConfigError::EmptyProbeSelection),
+            "no probe kinds selected"
+        );
     }
 
     #[test]
