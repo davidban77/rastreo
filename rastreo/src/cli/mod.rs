@@ -1,6 +1,7 @@
 #[cfg(feature = "config")]
 pub mod catalog;
 pub mod discover;
+mod output;
 #[cfg(feature = "config")]
 pub mod validate;
 
