@@ -307,26 +307,33 @@ pub fn stashed_tracer_provider() -> Option<SdkTracerProvider> {
     OTLP_TRACER_PROVIDER.get().cloned()
 }
 
-/// Install the tracing subscriber: an stderr fmt layer (`json` selects JSON lines) at `base_level`,
-/// plus the OTLP log layer when logs are enabled and the OTLP trace layer when traces are enabled.
+/// Install the tracing subscriber: an stderr fmt layer filtered by `filter_directive` (`json` selects
+/// JSON lines, `ansi` colours the text ones), plus the OTLP log and trace layers when they are enabled.
+/// The caller owns `RUST_LOG` resolution, so a binary's own verbosity flags stay authoritative.
 pub fn init_tracing(
-    base_level: &str,
+    filter_directive: &str,
     json: bool,
+    ansi: bool,
     otlp_config: Option<&OtlpConfig>,
 ) -> anyhow::Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(base_level));
+    let filter = EnvFilter::new(filter_directive);
     let fmt_layer: Box<dyn Layer<_> + Send + Sync> = if json {
         Box::new(
             tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
+                .with_ansi(ansi)
                 .json(),
         )
     } else {
-        Box::new(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(ansi),
+        )
     };
     let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
 

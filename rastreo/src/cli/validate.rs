@@ -9,6 +9,7 @@ use rastreo_core::config::{DiscoverScenarioConfig, ScenarioEntry, ScenarioKind};
 use super::discover::{
     load_scenario_file, merge_defaults, resolve_scenario_source, scenario_label,
 };
+use super::output::{print_scenario_invalid, Verbosity};
 
 #[derive(Parser, Debug)]
 pub struct ValidateArgs {
@@ -16,9 +17,9 @@ pub struct ValidateArgs {
     pub file: PathBuf,
 }
 
-pub fn run(args: ValidateArgs) -> Result<()> {
+pub fn run(args: ValidateArgs, verbosity: Verbosity) -> Result<()> {
     let path = resolve_scenario_source(&args.file)?;
-    let file = load_scenario_file(&path)?;
+    let file = load_scenario_file(&path).map_err(|e| e.report(verbosity))?;
 
     if file.version != 1 {
         return Err(anyhow!(
@@ -54,7 +55,7 @@ pub fn run(args: ValidateArgs) -> Result<()> {
             Ok(()) => println!("{label}: ok"),
             Err(reason) => {
                 invalid += 1;
-                eprintln!("{label}: {reason}");
+                print_scenario_invalid(&label, &reason);
             }
         }
     }
@@ -242,7 +243,7 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        run(args).expect("valid scenario file must validate");
+        run(args, Verbosity::Normal).expect("valid scenario file must validate");
     }
 
     #[test]
@@ -252,7 +253,7 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        let err = run(args).expect_err("empty-probers scenario must be invalid");
+        let err = run(args, Verbosity::Normal).expect_err("empty-probers scenario must be invalid");
         assert!(err.to_string().contains("invalid"), "err was: {err}");
     }
 
@@ -263,7 +264,7 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        let err = run(args).expect_err("empty-targets scenario must be invalid");
+        let err = run(args, Verbosity::Normal).expect_err("empty-targets scenario must be invalid");
         assert!(err.to_string().contains("invalid"), "err was: {err}");
     }
 
@@ -275,7 +276,7 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        let err = run(args).expect_err("invalid kafka sink must be invalid");
+        let err = run(args, Verbosity::Normal).expect_err("invalid kafka sink must be invalid");
         assert!(err.to_string().contains("invalid"), "err was: {err}");
     }
 
@@ -287,7 +288,7 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        run(args).expect("secured kafka scenario must validate offline");
+        run(args, Verbosity::Normal).expect("secured kafka scenario must validate offline");
     }
 
     #[test]
@@ -297,7 +298,7 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        let err = run(args).expect_err("bad-fuser scenario must be invalid");
+        let err = run(args, Verbosity::Normal).expect_err("bad-fuser scenario must be invalid");
         assert!(err.to_string().contains("invalid"), "err was: {err}");
     }
 
@@ -308,7 +309,8 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        let err = run(args).expect_err("bad identity virtual_mac must be invalid");
+        let err =
+            run(args, Verbosity::Normal).expect_err("bad identity virtual_mac must be invalid");
         assert!(err.to_string().contains("invalid"), "err was: {err}");
     }
 
@@ -319,7 +321,7 @@ mod tests {
         let args = ValidateArgs {
             file: f.path().to_path_buf(),
         };
-        let err = run(args).expect_err("unsupported version must error");
+        let err = run(args, Verbosity::Normal).expect_err("unsupported version must error");
         assert!(err.to_string().contains("version"), "err was: {err}");
     }
 }

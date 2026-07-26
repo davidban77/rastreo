@@ -8,7 +8,7 @@ The page below covers the failures that come up most often when records do not l
 
 ## Zero records emitted
 
-The end-of-run summary on stderr reads `records_emitted=0`, even though `probe_attempts` is non-zero. The CLI also prints a hint that no probe reached an open port. `probe_errors` reads `0` — nothing went wrong, nothing answered. A target that does not answer is a normal negative result, not an error.
+The completion banner on stderr reads `records: 0`, even though `probes:` is non-zero. The CLI also prints a hint that no probe reached an open port. `faults:` reads `0` — nothing went wrong, nothing answered. A target that does not answer is a normal negative result, not an error.
 
 Common causes:
 
@@ -20,11 +20,11 @@ Verify the target answers TCP from the host running the scan: `nc -vz <ip> <port
 
 To emit a record for every probed address, silent ones included, set `include_unreachable: true` on the `direct` fuser — see [Recording addresses that did not answer](../reference/scenario.md#recording-addresses-that-did-not-answer).
 
-## Probe errors on every probe
+## Probe faults on every probe
 
-The summary reads `probe_errors` equal to `probe_attempts`. Every probe hit a fault, which means no probe could run. Offline targets never cause this.
+The completion banner reads `faults:` equal to `probes:`. Every probe hit a fault, which means no probe could run. Offline targets never cause this. Re-run with `-v` for the `faults by kind` and `first fault` lines.
 
-The CLI prints a hint next to the summary, chosen from the fault's typed kind. A `permission_denied` fault, for example, tells you to grant `CAP_NET_RAW` or check local egress policy. Then check the usual causes:
+The CLI prints a hint under the banner, chosen from the fault's typed kind. A `permission_denied` fault, for example, tells you to grant `CAP_NET_RAW` or check local egress policy. Then check the usual causes:
 
 - The ARP, NDP, or ICMP prober is running without `CAP_NET_RAW`. See [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
 - An SNMP probe is blocked by a local firewall REJECT in the OUTPUT chain. This now surfaces as a `permission_denied` fault with the same egress-policy hint.

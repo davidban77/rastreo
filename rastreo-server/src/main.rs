@@ -1,4 +1,5 @@
 use std::future::IntoFuture;
+use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -165,11 +166,30 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+const DEFAULT_LOG_LEVEL: &str = "info";
+
+// NO_COLOR / CLICOLOR_FORCE are deliberately not consulted: the server carries no owo-colors dep.
+fn stderr_is_terminal() -> bool {
+    std::io::stderr().is_terminal()
+}
+
+fn filter_directive(rust_log: Option<&str>) -> String {
+    rust_log
+        .filter(|d| !d.is_empty() && tracing_subscriber::EnvFilter::builder().parse(d).is_ok())
+        .unwrap_or(DEFAULT_LOG_LEVEL)
+        .to_string()
+}
+
+fn env_filter_directive() -> String {
+    filter_directive(std::env::var("RUST_LOG").ok().as_deref())
+}
+
 #[cfg(feature = "otlp")]
 fn init_tracing(log_format: LogFormat, otlp: Option<&OtlpConfig>) -> anyhow::Result<()> {
     rastreo_core::observability::otlp::init_tracing(
-        "info",
+        &env_filter_directive(),
         matches!(log_format, LogFormat::Json),
+        stderr_is_terminal(),
         otlp,
     )
 }
@@ -177,12 +197,13 @@ fn init_tracing(log_format: LogFormat, otlp: Option<&OtlpConfig>) -> anyhow::Res
 #[cfg(not(feature = "otlp"))]
 fn init_tracing(log_format: LogFormat, _otlp: Option<&OtlpConfig>) -> anyhow::Result<()> {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::new(env_filter_directive());
     match log_format {
         LogFormat::Text => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
                 .with_env_filter(filter)
+                .with_ansi(stderr_is_terminal())
                 .init();
         }
         LogFormat::Json => {
@@ -267,6 +288,21 @@ mod tests {
     #[test]
     fn log_format_rejects_unknown_value() {
         assert!(LogFormat::from_str("yaml", true).is_err());
+    }
+
+    #[test]
+    fn rust_log_drives_the_filter_when_it_parses() {
+        assert_eq!(
+            filter_directive(Some("rastreo_core=debug")),
+            "rastreo_core=debug"
+        );
+    }
+
+    #[test]
+    fn an_unset_empty_or_malformed_rust_log_falls_back_to_info() {
+        assert_eq!(filter_directive(None), "info");
+        assert_eq!(filter_directive(Some("")), "info");
+        assert_eq!(filter_directive(Some("rastreo=shout")), "info");
     }
 
     #[test]

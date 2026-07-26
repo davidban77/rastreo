@@ -25,10 +25,28 @@ src/
     ├── validate.rs  ← validate subcommand handler: offline config-shape + sink-config lint (feature = "config")
     ├── discover.rs  ← discover subcommand handler + arg parsing
     └── output/      ← human-facing terminal output, all of it on stderr
-        ├── progress.rs  ← live progress line (TTY in-place redraw, plain lines otherwise)
-        ├── summary.rs   ← end-of-scan summary line
-        └── hints.rs     ← runtime probe hints, scan-error hints, feature-gate hints
+        ├── mod.rs       ← Verbosity (Quiet / Normal / Verbose) + re-exports
+        ├── theme.rs     ← every colour, glyph, and escape-sequence decision; the only file allowed to call owo-colors
+        ├── humanize.rs  ← duration / count / rate formatting; one home per formatter
+        ├── banner.rs    ← start banner, completion banner, -v detail lines, scenario failure line, multi-scenario aggregate
+        ├── progress.rs  ← live progress line (250ms TTY in-place redraw, 5s plain lines otherwise)
+        ├── hints.rs     ← runtime probe hints, scan-error hints, feature-gate hints
+        └── report.rs    ← plain result lines from the catalog and validate subcommands
 ```
+
+## Terminal Output
+
+All human-facing output goes to stderr; stdout carries records only. Every stderr write lives under `cli/output/` — a unit test walks `src/cli/` and fails on an `eprintln!` / `eprint!` anywhere else, so a new message cannot skip the theme and the `Verbosity` gate.
+
+`theme.rs` owns colour. Roles are semantic (`label`, `value`, `name`, `ok`, `done`, `warn`, `err`, `sep`), never chromatic — adding a colour means adding a role, not calling `owo-colors` at the use site. Raw CSI escapes are owned there too (`theme::ERASE_LINE`). Two unit tests walk `src/` and fail if any file other than `theme.rs` mentions `owo_colors` / `if_supports_color` or embeds an `\x1b[` literal. Colour detection is entirely `owo-colors`' `supports-colors` feature (`NO_COLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`, `TERM`, TTY); there is no hand-rolled detection. Log lines share the same decision via `theme::stderr_supports_colour`, on both the plain and the OTLP build.
+
+Glyphs come from `theme::glyphs()`, which picks the Unicode or ASCII table once per process from `RASTREO_ASCII` and the locale vars, so a terminal that cannot render `▶` still gets a readable banner.
+
+`humanize.rs` is the single home for each formatter. The progress line and the completion banner both call `humanize::duration`, and a test in `output/mod.rs` pins that they agree on a fixed elapsed.
+
+`Verbosity` gates the chrome: `Quiet` prints nothing on a successful run, `Normal` prints banners plus progress plus hints, `Verbose` adds the per-kind detail lines. Failure lines are the one exemption — `print_failed` takes no `Verbosity` because `-q` suppresses status output, not failures. The completion glyph turns yellow only on a scan-level problem (cancellation, quarantined records, a failed scenario in the multi-scenario aggregate) — never on probe faults, which are expected data on any real scan and are reported as `faults:`. The aggregate banner labels how many scenarios actually completed, so an interrupted or partly-failed file never reads as a clean run.
+
+Integration tests build their command with `tests/common::rastreo()`, which scrubs every env var the binary reads (verbosity, locale, colour, catalog, OTLP) so a golden never inherits the developer's shell.
 
 ## CLI Surface
 
@@ -57,7 +75,7 @@ Two modes:
 
 Catalog references (`@name`) resolve `--file` to a scenario file in `RASTREO_CATALOG_DIR` (colon-separated PATH-style) if set, otherwise `$XDG_CONFIG_HOME/rastreo/catalog/` (fallback `$HOME/.config/rastreo/catalog/`) then `/etc/rastreo/catalog/`. First hit wins, `.yml` before `.yaml` within each directory. Names may not contain path separators.
 
-Output: one NDJSON `DeviceRecord` per line on the chosen sink. Tracing logs always go to stderr so a stdout sink stays clean for downstream `jq` / NDJSON consumers.
+Output: one NDJSON `DeviceRecord` per line on the chosen sink. Banners, the progress line, hints, and tracing logs all go to stderr so a stdout sink stays clean for downstream `jq` / NDJSON consumers. An explicit `-q` / `-v` beats an ambient `RUST_LOG`; with neither flag, `RUST_LOG` beats the built-in `info` default.
 
 ## Error Handling
 

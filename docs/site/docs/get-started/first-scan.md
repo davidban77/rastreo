@@ -53,12 +53,15 @@ Stdout (one line, formatted here across multiple lines for reading):
 Stderr:
 
 ```text
-discovery complete: targets_resolved=1 probe_attempts=1 probe_errors=0 records_emitted=1 elapsed_ms=112
+▶ discover  targets: 1 | probes: tcp_connect (ports 22) | concurrency: 64 | timeout: 1000ms | sink: stdout
+■ discover  completed in 112ms | hosts: 1 | records: 1 | probes: 1 | faults: 0 | sink: stdout
 ```
+
+The start banner tells you what is about to run; the completion banner tells you what happened. Add `-v` for a per-prober breakdown under the completion banner, or `-q` to silence stderr entirely.
 
 If a scan returns zero records and at least one probe attempt happened, the CLI prints a hint on stderr explaining that no probe reached an open port. The most common cause is an unreachable target or a port the host does not actually listen on.
 
-`probe_errors` counts probe faults, not silent targets. A target that does not answer is a normal negative result: it keeps `probe_errors` at `0` and produces no record. Sweeping a `/24` with twelve live hosts gives you twelve records and zero probe errors. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults).
+`faults` counts probe faults, not silent targets. A target that does not answer is a normal negative result: it keeps `faults` at `0` and produces no record. Sweeping a `/24` with twelve live hosts gives you twelve records and zero faults. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults).
 
 ## Read the output
 

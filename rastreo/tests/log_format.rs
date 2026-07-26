@@ -1,12 +1,9 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn top_level_help_lists_log_format_flag() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
-    let output = Command::new(bin)
+    let output = common::rastreo()
         .args(["--help"])
-        .env_remove("RUST_LOG")
-        .env_remove("RASTREO_LOG_FORMAT")
         .output()
         .expect("spawn rastreo");
 
@@ -28,11 +25,8 @@ fn top_level_help_lists_log_format_flag() {
 
 #[test]
 fn discover_subcommand_help_inherits_log_format_flag() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
-    let output = Command::new(bin)
+    let output = common::rastreo()
         .args(["discover", "--help"])
-        .env_remove("RUST_LOG")
-        .env_remove("RASTREO_LOG_FORMAT")
         .output()
         .expect("spawn rastreo");
 
@@ -50,8 +44,7 @@ fn discover_subcommand_help_inherits_log_format_flag() {
 
 #[test]
 fn invalid_log_format_value_is_rejected() {
-    let bin = env!("CARGO_BIN_EXE_rastreo");
-    let output = Command::new(bin)
+    let output = common::rastreo()
         .args([
             "--log-format",
             "yaml",
@@ -61,8 +54,6 @@ fn invalid_log_format_value_is_rejected() {
             "-p",
             "22",
         ])
-        .env_remove("RUST_LOG")
-        .env_remove("RASTREO_LOG_FORMAT")
         .output()
         .expect("spawn rastreo");
 

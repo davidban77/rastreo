@@ -37,7 +37,7 @@ pub fn list_catalog() -> Vec<(String, PathBuf)> {
 pub fn run_list() -> Result<()> {
     let entries = list_catalog();
     if entries.is_empty() {
-        eprintln!("{}", none_found_message(&search_dirs(&StdEnv)));
+        super::output::print_catalog_empty(&none_found_message(&search_dirs(&StdEnv)));
         return Ok(());
     }
     print!("{}", format_listing(&entries));
