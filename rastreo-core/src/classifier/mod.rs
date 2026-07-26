@@ -17,7 +17,7 @@ pub trait Classifier: Send + Sync {
     fn classify(&self, record: &mut DeviceRecord) -> Result<(), RastreoError>;
 }
 
-/// Default classifier that leaves every record untouched. Used when no classifier is configured.
+/// Pass-through classifier that leaves every record untouched.
 pub struct NoopClassifier;
 
 impl Classifier for NoopClassifier {
@@ -402,9 +402,19 @@ mod tests {
     fn create_classifier_produces_noop_for_noop_config() {
         let c = create_classifier(&ClassifierConfig::Noop).expect("create");
         let mut record = empty_record();
+        record.signals.push(cisco_ios_sys_descr());
+        record.signals.push(Signal::OpenPort(22));
+        record.signals.push(Signal::OpenPort(179));
         c.classify(&mut record).expect("noop is infallible");
-        assert!(record.platform.is_none());
-        assert!(record.role.is_none());
+        assert!(
+            record.platform.is_none(),
+            "signals the baked platform table matches must stay unclassified under noop"
+        );
+        assert!(
+            record.role.is_none(),
+            "signals the baked role table matches must stay unclassified under noop"
+        );
+        assert!(record.os_version.is_none());
     }
 
     #[cfg(feature = "config")]
@@ -1184,22 +1194,54 @@ role: router
     fn baked_role_rules_snapshot_matches_expected_count() {
         assert_eq!(
             role_rules::baked_role_rules().len(),
-            5,
+            2,
             "if you added or removed a baked-in role rule, update docs/site/docs/discover/classification.md AND this count"
+        );
+        assert_eq!(
+            role_rules::baked_role_rules_with_port_heuristics().len(),
+            5,
+            "if you added or removed a port heuristic, update docs/site/docs/discover/classification.md AND this count"
         );
     }
 
     #[test]
     fn baked_role_rules_match_realistic_fixtures() {
+        let cases: &[(&[u16], Option<&str>)] = &[
+            (&[22, 179], Some("router")),
+            (&[22, 443, 830], Some("router")),
+            (&[443], None),
+            (&[80], None),
+            (&[22], None),
+        ];
+
+        let classifier = create_classifier(&extend_role_rules(vec![])).expect("create");
+        for (ports, expected_role) in cases {
+            let mut record = empty_record();
+            for p in *ports {
+                record.signals.push(Signal::OpenPort(*p));
+            }
+            classifier.classify(&mut record).expect("classify ok");
+            assert_eq!(
+                record.role.as_deref(),
+                *expected_role,
+                "fixture ports {ports:?} should classify to `{expected_role:?}`"
+            );
+        }
+    }
+
+    #[test]
+    fn port_heuristics_classify_single_port_records_once_opted_in() {
         let cases: &[(&[u16], &str)] = &[
             (&[22, 179], "router"),
-            (&[22, 443, 830], "router"),
             (&[443], "web_server"),
             (&[80], "web_server"),
             (&[22], "host"),
         ];
 
-        let classifier = create_classifier(&extend_role_rules(vec![])).expect("create");
+        let classifier = create_classifier(&replace_role_rules(
+            role_rules::baked_role_rules_with_port_heuristics(),
+        ))
+        .expect("create");
         for (ports, expected_role) in cases {
             let mut record = empty_record();
             for p in *ports {

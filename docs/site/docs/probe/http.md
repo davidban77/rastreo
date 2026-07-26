@@ -63,7 +63,7 @@ Probing an `https` scheme against a port that fails at the TLS layer still recor
 
 The prober's only fault is a local socket failure on the scan host, such as descriptor exhaustion or a denied socket at connect time. That is the one case where the connection never opened and the probe learned nothing. See [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults).
 
-When the [rules classifier](../discover/classification.md) is enabled, an `HttpBanner` matching a baked-in rule (`nginx/*`, `Apache/*`) populates `DeviceRecord.platform` (OS — `linux`), `DeviceRecord.http_server` (web-server product), and `DeviceRecord.http_version` (product version) as three separate fields on the record.
+The [rules classifier](../discover/classification.md) runs by default, so an `HttpBanner` matching a baked-in rule (`nginx/*`, `Apache/*`) populates `DeviceRecord.platform` (OS — `linux`), `DeviceRecord.http_server` (web-server product), and `DeviceRecord.http_version` (product version) as three separate fields on the record.
 
 ## Build feature
 

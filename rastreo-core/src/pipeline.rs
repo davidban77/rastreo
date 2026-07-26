@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::Instrument;
 
 use crate::checkpoint::{resume_fingerprint, Checkpoint, CheckpointConfig, CheckpointWriter};
-use crate::classifier::{create_classifier, Classifier, ClassifierConfig};
+use crate::classifier::{create_classifier, Classifier, ClassifierConfig, MergeMode};
 use crate::collection_profile::CollectionProfileAssembler;
 use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, Encoder, EncoderConfig};
@@ -26,6 +26,15 @@ use crate::topology::TopologyAssembler;
 
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CONCURRENCY: u32 = 64;
+
+fn default_classifier_config() -> ClassifierConfig {
+    // Empty user lists under `Extend` resolve to the baked-in platform and role tables.
+    ClassifierConfig::Rules {
+        merge_mode: MergeMode::Extend,
+        platform_rules: Vec::new(),
+        role_rules: Vec::new(),
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
@@ -295,7 +304,7 @@ async fn run_discovery_core(
         .base
         .classifier
         .clone()
-        .unwrap_or(ClassifierConfig::Noop);
+        .unwrap_or_else(default_classifier_config);
     let classifier = create_classifier(&classifier_config)?;
 
     let mut probers: Vec<Arc<dyn Prober>> = Vec::with_capacity(scenario.probers.len());
@@ -2495,12 +2504,26 @@ mod tests {
         assert!(r.possible_alias_of.is_none());
     }
 
-    #[tokio::test]
-    async fn pipeline_runs_classifier_after_fuser() {
-        let port = open_loopback_port().await;
+    fn role_rule_on_port(port: u16) -> ClassifierConfig {
+        ClassifierConfig::Rules {
+            merge_mode: MergeMode::Extend,
+            platform_rules: Vec::new(),
+            role_rules: vec![crate::classifier::RoleRule::PortsOpen {
+                ports: vec![port],
+                role: "test_host".to_string(),
+            }],
+        }
+    }
+
+    async fn scan_open_loopback_port(
+        port: u16,
+        classifier: Option<ClassifierConfig>,
+        fuser: Option<FuserConfig>,
+    ) -> DeviceRecord {
         let scenario = DiscoverScenarioConfig {
             base: BaseProbeConfig {
-                classifier: Some(ClassifierConfig::Noop),
+                classifier,
+                fuser,
                 timeout_ms: Some(500),
                 ..Default::default()
             },
@@ -2521,10 +2544,154 @@ mod tests {
         assert_eq!(summary.records_emitted, 1);
         let lines = handle.ndjson_lines();
         assert_eq!(lines.len(), 1);
-        let record: crate::model::DeviceRecord =
-            serde_json::from_str(&lines[0]).expect("parse json");
-        assert!(record.platform.is_none(), "noop must leave platform unset");
-        assert!(record.role.is_none(), "noop must leave role unset");
+        serde_json::from_str(&lines[0]).expect("parse json")
+    }
+
+    #[tokio::test]
+    async fn pipeline_runs_classifier_after_fuser() {
+        let port = open_loopback_port().await;
+        let record = scan_open_loopback_port(port, Some(role_rule_on_port(port)), None).await;
+        assert_eq!(record.role.as_deref(), Some("test_host"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_classifies_the_records_the_identity_fuser_holds_until_finish() {
+        let port = open_loopback_port().await;
+        let fuser = FuserConfig::Identity {
+            identity_hints: crate::fuser::IdentityHints::default(),
+            inner: Box::new(FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            }),
+        };
+        let record =
+            scan_open_loopback_port(port, Some(role_rule_on_port(port)), Some(fuser)).await;
+        assert_eq!(
+            record.role.as_deref(),
+            Some("test_host"),
+            "identity fuser emits every record from finish(), so the tail loop must classify too"
+        );
+    }
+
+    fn classified_by_default(signals: Vec<crate::model::Signal>) -> DeviceRecord {
+        let classifier = create_classifier(&default_classifier_config()).expect("classifier");
+        let mut record = DeviceRecord {
+            identity_key: crate::model::IdentityKey::new("ip:10.0.0.1").expect("identity"),
+            mgmt_ip: None,
+            mac: None,
+            manufacturer: None,
+            model: None,
+            product_family: None,
+            platform: None,
+            os_version: None,
+            ssh_version: None,
+            http_server: None,
+            http_version: None,
+            role: None,
+            confidence: crate::model::Confidence::new(0.0).expect("confidence"),
+            last_seen: std::time::SystemTime::UNIX_EPOCH,
+            signals,
+            probe_kinds: Vec::new(),
+            schema_version: crate::model::CURRENT_SCHEMA_VERSION.to_string(),
+            schema_id: crate::model::CURRENT_SCHEMA_ID.to_string(),
+            alt_ips: Vec::new(),
+            possible_alias_of: None,
+            scan_metadata: Arc::new(ScanMetadata::default()),
+        };
+        classifier.classify(&mut record).expect("classify ok");
+        record
+    }
+
+    #[test]
+    fn default_classifier_reaches_the_baked_platform_table() {
+        let record = classified_by_default(vec![crate::model::Signal::SnmpSysDescr(
+            "Cisco IOS Software, C3560E Software, Version 15.7(3)M, RELEASE".to_string(),
+        )]);
+        assert_eq!(record.platform.as_deref(), Some("cisco_ios"));
+        assert_eq!(record.os_version.as_deref(), Some("15.7"));
+    }
+
+    #[test]
+    fn default_classifier_reaches_the_baked_role_table() {
+        let record = classified_by_default(vec![
+            crate::model::Signal::OpenPort(22),
+            crate::model::Signal::OpenPort(179),
+        ]);
+        assert_eq!(record.role.as_deref(), Some("router"));
+    }
+
+    #[test]
+    fn default_classifier_leaves_role_null_for_a_lone_open_port() {
+        let record = classified_by_default(vec![crate::model::Signal::OpenPort(443)]);
+        assert!(
+            record.role.is_none(),
+            "a single open port is a guess; the default table must not assign a role from it"
+        );
+    }
+
+    #[cfg(feature = "ssh")]
+    async fn spawn_ssh_banner_stub(banner: &'static str) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(banner.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    #[cfg(feature = "ssh")]
+    async fn scan_ssh_banner_stub(classifier: Option<ClassifierConfig>) -> DeviceRecord {
+        let port = spawn_ssh_banner_stub("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13\r\n").await;
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig {
+                classifier,
+                timeout_ms: Some(500),
+                ..Default::default()
+            },
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::Ssh { ports: vec![port] }],
+        };
+
+        let mem = crate::sink::MemorySink::new();
+        let handle = mem.handle();
+        let resolver: Arc<dyn Resolver> = Arc::new(HickoryResolver::from_system().expect("init"));
+        run_discovery(
+            RunOptions::new(&scenario)
+                .resolver(resolver)
+                .sink(Box::new(mem)),
+        )
+        .await
+        .expect("run_discovery");
+        let lines = handle.ndjson_lines();
+        assert_eq!(lines.len(), 1);
+        serde_json::from_str(&lines[0]).expect("parse json")
+    }
+
+    #[cfg(feature = "ssh")]
+    #[tokio::test]
+    async fn scan_without_classifier_config_classifies_an_ssh_banner() {
+        let record = scan_ssh_banner_stub(None).await;
+        assert_eq!(record.platform.as_deref(), Some("linux"));
+        assert_eq!(record.os_version.as_deref(), Some("Ubuntu"));
+        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.6p1"));
+    }
+
+    #[cfg(feature = "ssh")]
+    #[tokio::test]
+    async fn explicit_noop_classifier_leaves_an_ssh_banner_unclassified() {
+        let record = scan_ssh_banner_stub(Some(ClassifierConfig::Noop)).await;
+        assert!(record.platform.is_none());
+        assert!(record.os_version.is_none());
+        assert!(record.ssh_version.is_none());
     }
 
     #[tokio::test]

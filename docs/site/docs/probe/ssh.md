@@ -39,7 +39,7 @@ An example banner: `SSH-2.0-OpenSSH_9.3p1 Ubuntu-1ubuntu3.13`.
 
 An example host key: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ`.
 
-When the [rules classifier](../discover/classification.md) is enabled, an `SshBanner` matching a baked-in rule (Ubuntu, Debian, FreeBSD) populates `DeviceRecord.platform` (OS — `linux` or `freebsd`), `DeviceRecord.os_version` (distro token — `Ubuntu`, `Debian`, or `FreeBSD`), and `DeviceRecord.ssh_version` (SSH software identifier — for example `OpenSSH_9.3p1`) as three separate fields on the record.
+The [rules classifier](../discover/classification.md) runs by default, so an `SshBanner` matching a baked-in rule (Ubuntu, Debian, FreeBSD) populates `DeviceRecord.platform` (OS — `linux` or `freebsd`), `DeviceRecord.os_version` (distro token — `Ubuntu`, `Debian`, or `FreeBSD`), and `DeviceRecord.ssh_version` (SSH software identifier — for example `OpenSSH_9.3p1`) as three separate fields on the record.
 
 The banner and host-key steps are independent. A target that answers only one of them is still marked reachable, and only the step that succeeded contributes a signal. A target that refuses the TCP connection, or that times out on both steps, is marked unreachable and contributes no signals. That is a normal discovery result, not an error.
 

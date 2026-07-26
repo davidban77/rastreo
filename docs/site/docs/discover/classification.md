@@ -1,5 +1,5 @@
 ---
-description: The classifier stage assigns canonical platform, os_version, ssh_version, http_server, http_version, and role values on each DeviceRecord after fusion and before encoding. Two variants ship — noop and a rules classifier that runs a regex-based platform phase and a signal-driven role phase, each with a baked-in default table.
+description: The classifier stage assigns canonical platform, os_version, ssh_version, http_server, http_version, and role values on each DeviceRecord after fusion and before encoding. The rules classifier runs by default with a baked-in platform table and a baked-in role table; noop turns classification off.
 ---
 
 # Classification
@@ -10,14 +10,14 @@ Classification is the pipeline stage that assigns canonical `platform`, `os_vers
 
 All six fields exist so downstream reconcilers (NetBox, Nautobot, Infrahub) receive already-canonicalised values instead of inferring them from raw signals. Keeping the web-server product on its own field (`http_server`) preserves `platform` for the OS — nginx runs on Linux, BSD, and Windows, so putting `nginx` in `platform` would be a category error against source-of-truth OS-platform models.
 
-Two classifier variants ship: `noop` (pass-through, the default) and `rules` (regex-driven platform detection plus signal-driven role detection, each with a baked-in default table). The `rules` classifier populates `platform`, `os_version`, `ssh_version`, `http_server`, and `http_version` in its platform phase, then `role` in its role phase.
+Two classifier variants ship: `rules` (the default — regex-driven platform detection plus signal-driven role detection, each backed by a table that ships with rastreo) and `noop` (pass-through). The `rules` classifier populates `platform`, `os_version`, `ssh_version`, `http_server`, and `http_version` in its platform phase, then `role` in its role phase.
 
 ## Available classifiers
 
 | Classifier | Behaviour |
 |---|---|
-| `noop` | Leaves every `DeviceRecord` unchanged. `platform`, `os_version`, `ssh_version`, `http_server`, `http_version`, and `role` stay `null`. Selected by default when the scenario does not configure a classifier. |
-| `rules` | Runs a platform phase (regex patterns against `SnmpSysDescr`, `SnmpSysName`, `SshBanner`, `HttpBanner`) then a role phase (`SnmpSysObjectId` byte-prefix and `OpenPort` set-membership matching). First match per phase wins. |
+| `rules` | Runs a platform phase (regex patterns against `SnmpSysDescr`, `SnmpSysName`, `SshBanner`, `HttpBanner`) then a role phase (`SnmpSysObjectId` byte-prefix and `OpenPort` set-membership matching). First match per phase wins. Selected when the scenario does not configure a classifier, running the baked-in tables on their own. |
+| `noop` | Leaves every `DeviceRecord` unchanged. `platform`, `os_version`, `ssh_version`, `http_server`, `http_version`, and `role` stay `null`. Select it explicitly to get raw signals with no canonical fields derived from them. |
 
 ## Pipeline position
 
@@ -42,27 +42,31 @@ Because the classifier runs after fusion, it operates on merged records. A devic
 
 ## Configuration
 
-The classifier is configured under the top-level `classifier` key of a scenario. Omitting the key selects `noop`:
-
-```yaml
-classifier:
-  type: noop
-```
-
-Selecting the `rules` classifier with no additional configuration runs the baked-in defaults on their own:
+The classifier is configured under the top-level `classifier` key of a scenario. Omitting the key is equivalent to writing this — the `rules` classifier over the baked-in tables:
 
 ```yaml
 classifier:
   type: rules
 ```
 
-The `type` field is required. Each variant adds its own configuration fields.
+To turn classification off and get raw signals only, ask for `noop` explicitly:
+
+```yaml
+classifier:
+  type: noop
+```
+
+The `type` field is required whenever the key is present. Each variant adds its own configuration fields.
+
+Classification is configurable only from a scenario file. `rastreo discover --target ... --port ...` has no `--classifier` flag, so a flag-mode scan always runs the default `rules` classifier; put the scenario in a YAML file and run `rastreo discover --file scan.yaml` when you need `noop` or your own rules.
 
 ## Rules classifier
 
-The `rules` classifier is opt-in — a scenario must set `classifier.type: rules` to enable it. When enabled, it walks each `DeviceRecord`'s signals in two phases. The platform phase evaluates an ordered list of regex rules and, on first match, sets `platform` (and `os_version` when the pattern names a capture group). The role phase then evaluates an ordered list of role rules and, on first match, sets `role`. Each phase preserves prepopulated values on the record.
+The `rules` classifier walks each `DeviceRecord`'s signals in two phases. The platform phase evaluates an ordered list of regex rules and, on first match, sets `platform` (and `os_version` when the pattern names a capture group). The role phase then evaluates an ordered list of role rules and, on first match, sets `role`. Each phase preserves prepopulated values on the record.
 
-Turn on `rules` when you want `platform` and `role` populated on records reaching your downstream (NetBox, Nautobot, Infrahub). The baked-in defaults cover common enterprise network gear and popular web servers on the platform side, and port-heuristic `router` / `web_server` / `host` inferences on the role side. Add your own rules for anything the defaults do not cover — in particular, `sys_object_id_prefix` role rules against your own devices' `sysObjectID` values (rastreo ships no baked defaults for OID prefixes; see [Baked-in role rules](#baked-in-role-rules) for why).
+Because it is the default, every scan populates `platform` and `role` on records reaching your downstream (NetBox, Nautobot, Infrahub) wherever the signals support it. That makes the default tables a write path into your source of truth, so they follow one principle: **a device gets a role when rastreo has evidence, and stays `null` when rastreo only has a guess.** A `null` never overwrites anything downstream; a guess does. The platform table is banner-based — a `sysDescr` or an SSH banner naming a vendor and version is evidence. The default role table is multi-port only: `[22, 179]` (SSH + BGP) says router in a way a lone open port never can. The single-port heuristics ship too, but you opt into them — see [Port heuristics](#port-heuristics-opt-in).
+
+Add your own rules for anything the defaults do not cover — in particular, `sys_object_id_prefix` role rules against your own devices' `sysObjectID` values (rastreo ships no baked defaults for OID prefixes; see [Baked-in role rules](#baked-in-role-rules) for why).
 
 Platform rule patterns are validated when the classifier is built. A pattern that fails to compile is rejected before the scan starts, not silently ignored at match time. Role rules are validated similarly — a `ports_open` rule with an empty `ports` list is rejected at construction.
 
@@ -102,16 +106,52 @@ The baked-in rules are evaluated in the order shown below. SNMP `sysDescr` rules
 
 The role phase runs after the platform phase. The baked-in table ships only `ports_open` rules — each matches when every port in the list is present as an `OpenPort` signal on the record. Rules are evaluated in the order shown below; first match wins.
 
+Two rules run by default. Both need several ports open together, which is what makes them evidence rather than a guess:
+
 | # | Match | Role |
 |---|---|---|
 | 1 | `[22, 179]` (SSH + BGP) | `router` |
 | 2 | `[22, 443, 830]` (SSH + HTTPS + NETCONF) | `router` |
-| 3 | `[443]` | `web_server` |
-| 4 | `[80]` | `web_server` |
-| 5 | `[22]` (SSH-only host) | `host` |
+
+A record that matches neither keeps `role: null`. A `/24` swept with `--port 443` produces no roles at all, which is the intended outcome: HTTPS on a management interface is not evidence of a web server, and a reconciler that wrote `web_server` over your curated `access-switch` role would be wrong on every switch, firewall, and router in the range.
+
+### Port heuristics (opt-in)
+
+Three single-port heuristics ship but are not applied unless you ask for them. They are useful on a server estate where a lone open port really does identify the machine, and wrong on network gear where every device answers on 22 and 443:
+
+| Match | Role |
+|---|---|
+| `[443]` | `web_server` |
+| `[80]` | `web_server` |
+| `[22]` (SSH-only host) | `host` |
+
+Turn them on by listing them under `role_rules`. Order matters — the multi-port rules must come first, or a router with SSH open matches `[22]` and classifies as `host`:
+
+```yaml
+classifier:
+  type: rules
+  role_rules:
+    - type: ports_open
+      ports: [22, 179]
+      role: "router"
+    - type: ports_open
+      ports: [22, 443, 830]
+      role: "router"
+    - type: ports_open
+      ports: [443]
+      role: "web_server"
+    - type: ports_open
+      ports: [80]
+      role: "web_server"
+    - type: ports_open
+      ports: [22]
+      role: "host"
+```
+
+The first two entries repeat the defaults so they keep their precedence; the baked-in copies that `merge_mode: extend` appends afterwards never get reached. Rust callers get the same ordered list from `rastreo_core::classifier::role_rules::baked_role_rules_with_port_heuristics()`.
 
 !!! info "Why no baked-in SNMP `sysObjectID` rules"
-    `sys_object_id_prefix` is a first-class role-rule kind — a user can supply their own list under `role_rules` and it will be evaluated before the baked-in port heuristics. rastreo ships no baked defaults for it because no public vendor MIB tree cleanly maps sub-prefixes to device roles at a level rastreo could ship a defensible default for: the common vendor product subtrees commingle routers, switches, firewalls, and management gear inside the same prefix, so any curated default would misclassify as often as it helps. Users supply their own `sys_object_id_prefix` rules against their fleet's actual OIDs.
+    `sys_object_id_prefix` is a first-class role-rule kind — a user can supply their own list under `role_rules` and it will be evaluated before the baked-in port rules. rastreo ships no baked defaults for it because no public vendor MIB tree cleanly maps sub-prefixes to device roles at a level rastreo could ship a defensible default for: the common vendor product subtrees commingle routers, switches, firewalls, and management gear inside the same prefix, so any curated default would misclassify as often as it helps. Users supply their own `sys_object_id_prefix` rules against their fleet's actual OIDs.
 
     To classify by `sysObjectID` today, add rules that match the exact OID prefixes present on your devices:
 
@@ -134,13 +174,13 @@ The role phase runs after the platform phase. The baked-in table ships only `por
 
     Add your own rules under `role_rules` to cover any of these — see [Extending the rule set](#extending-the-rule-set).
 
-## Port heuristic semantics
+## `ports_open` matching
 
 `ports_open` rules match when **every** port in the `ports` list appears as an `OpenPort` signal on the record. Extra open ports on the device do not cause a mismatch: `ports: [22, 179]` matches a record that also has `OpenPort(443)`, but does not match a record that only has `OpenPort(22)`.
 
 Every prober that opens a TCP connection to a target port emits `Signal::OpenPort(port)` alongside its protocol-specific signals. `tcp_connect`, `http`, `ssh`, and `tls` all satisfy this contract today. A `ports_open` rule matching `[80]` fires against a record produced by any of them.
 
-Because rule evaluation is first-match-wins, ordering matters for role rules with overlapping port sets. A `[22, 179]` rule for `router` must be listed before a `[22]` rule for `host`, otherwise every router with SSH open would classify as `host`. The baked-in table follows this pattern: more specific port sets are listed before less specific ones. User-supplied `sys_object_id_prefix` rules run before either kind when merged via `merge_mode: extend`, because SNMP fingerprints are more specific evidence of role than a port-only heuristic.
+Because rule evaluation is first-match-wins, ordering matters for role rules with overlapping port sets. A `[22, 179]` rule for `router` must be listed before a `[22]` rule for `host`, otherwise every router with SSH open would classify as `host`. Keep more specific port sets ahead of less specific ones — and remember that `merge_mode: extend` puts *your* whole list ahead of the baked-in defaults, so a single-port rule you add without repeating the defaults first will shadow them. User-supplied `sys_object_id_prefix` rules run before either kind under `extend`, because SNMP fingerprints are more specific evidence of role than a port-only heuristic.
 
 ## Extending the rule set
 

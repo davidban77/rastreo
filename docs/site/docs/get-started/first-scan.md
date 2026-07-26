@@ -73,9 +73,9 @@ Each NDJSON line is one `DeviceRecord`. The fields you will see on a TCP-only sc
 | `mgmt_ip` | Management IP if known. For a TCP-connect probe against an IP target, this is the target address. |
 | `mac` | MAC address. `null` until an ARP-style [prober](../reference/glossary.md#prober) populates it. |
 | `manufacturer` | OUI vendor name. `null` until MAC enrichment is available. |
-| `platform` | Platform fingerprint. `null` until a fingerprinting prober populates it. |
-| `os_version` | OS version string. `null` until a fingerprinting prober populates it. |
-| `role` | Device role from the classifier. `null` until a role classifier runs. |
+| `platform` | Platform fingerprint set by the [classifier](../discover/classification.md). `null` here because a TCP-connect probe collects no banner for a platform rule to match — add an `ssh`, `http`, or `snmp` prober and it fills in. |
+| `os_version` | OS version string set by the classifier alongside `platform`. `null` for the same reason. |
+| `role` | Device role from the [classifier](../discover/classification.md). `null` here: the default role rules need multi-port evidence (SSH + BGP, or SSH + HTTPS + NETCONF), and one open port is a guess rather than evidence. |
 | `confidence` | [Fuser](../reference/glossary.md#fuser) confidence score in the range `0.0` to `1.0`. With the default `DirectFuser`, a single observed signal yields `0.2`. |
 | `last_seen` | When the last probe touched this device, as an RFC 3339 UTC timestamp. |
 | `signals` | Observed [signals](../reference/glossary.md#signal). For a TCP-connect probe, each open port becomes an `OpenPort` entry. |
