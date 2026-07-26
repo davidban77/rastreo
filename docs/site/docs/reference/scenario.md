@@ -24,7 +24,7 @@ Any string scalar in the scenario may use `${VAR}` to interpolate an environment
 | `retries` | integer \| null | `null` (0, single-shot) | Retransmit attempts for the connectionless probers (UDP, SNMP, DNS, reverse DNS) on lossy links. `0` sends one request and never resends. Range 0–1024; a larger value is rejected at load. It divides `timeout_ms` across `retries + 1` attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. See [CLI · Retries on lossy links](../discover/cli.md#retries-on-lossy-links). |
 | `encoder` | object \| null | `null` (NDJSON) | Output encoding. See [Encoders](#encoders). |
 | `fuser` | object \| null | `null` (Direct, baseline 0.1 / per-signal 0.1) | Signal-fusion strategy. See [Fusers](#fusers). |
-| `classifier` | object \| null | `null` (Noop) | Platform / os_version / role classifier applied after fusion. See [Classifier](#classifier). |
+| `classifier` | object \| null | `null` (Rules, baked-in tables, merge_mode extend) | Platform / os_version / role classifier applied after fusion. See [Classifier](#classifier). |
 | `sink` | object \| null | `null` | Output destination. See [Sinks](#sinks). On `POST /scans` the server strips this and writes records to an internal buffer that is returned in the response body. |
 | `targets` | array | — (required) | List of targets to probe. Must not be empty for `POST /scans`. See [Targets](#targets). |
 | `probers` | array | `[]` | List of probers to run against each target. Must not be empty for `POST /scans`. See [Probers](#probers). |
@@ -583,11 +583,11 @@ The `identity_hints.vrrp_groups` array declares physical members of a shared vir
 
 ## Classifier
 
-The `classifier` field is an internally-tagged object. Two classifiers ship today: `noop` (pass-through) and `rules` (a platform phase for `platform` + `os_version` and a role phase for `role`, each with a baked-in default table). When the field is omitted, `noop` is used. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
+The `classifier` field is an internally-tagged object. Two classifiers ship today: `rules` (a platform phase for `platform` + `os_version` and a role phase for `role`, each with a baked-in default table) and `noop` (pass-through). When the field is omitted, `rules` is used with `merge_mode: extend` and no user rules, which runs the baked-in tables on their own. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
 
 ### noop
 
-Pass-through classifier. Assigns nothing on the record; `platform`, `os_version`, and `role` stay at whatever the fuser set them to.
+Pass-through classifier. Assigns nothing on the record; `platform`, `os_version`, and `role` stay at whatever the fuser set them to. Set it explicitly to turn classification off.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -599,7 +599,7 @@ Pass-through classifier. Assigns nothing on the record; `platform`, `os_version`
 
 ### rules
 
-Rules classifier. Runs a platform phase (regex patterns) and a role phase (signal-driven prefix and set-membership rules). First match per phase sets the corresponding field. See [Baked-in platform rules](../discover/classification.md#baked-in-platform-rules), [Baked-in role rules](../discover/classification.md#baked-in-role-rules), and [Extending the rule set](../discover/classification.md#extending-the-rule-set) for the shipped defaults and merge-mode semantics.
+Rules classifier, and the default when `classifier` is omitted. Runs a platform phase (regex patterns) and a role phase (signal-driven prefix and set-membership rules). First match per phase sets the corresponding field. See [Baked-in platform rules](../discover/classification.md#baked-in-platform-rules), [Baked-in role rules](../discover/classification.md#baked-in-role-rules), and [Extending the rule set](../discover/classification.md#extending-the-rule-set) for the shipped defaults and merge-mode semantics.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
