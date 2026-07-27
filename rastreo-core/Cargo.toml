@@ -124,6 +124,11 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "logs", "metrics
 tracing-opentelemetry = "0.33"
 tracing-subscriber = { workspace = true, features = ["json"] }
 serde_json = { workspace = true }
+criterion = { version = "0.8", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
+
+[[bench]]
+name = "emit_path"
+harness = false
 
 [lints]
 workspace = true

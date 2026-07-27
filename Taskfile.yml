@@ -23,6 +23,16 @@ tasks:
     cmds:
       - cargo test --workspace
 
+  bench:
+    desc: Run the criterion benchmark suite (~3 minutes)
+    cmds:
+      - cargo bench -p rastreo-core
+
+  bench:check:
+    desc: Run one iteration of each benchmark as a compile-and-run check
+    cmds:
+      - cargo bench -p rastreo-core -- --test
+
   lint:
     desc: Run clippy and format check
     cmds:
