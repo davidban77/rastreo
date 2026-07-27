@@ -90,7 +90,7 @@ The `--kafka-flush-per-record` and `--kafka-batch-threshold` flags are only pres
 `--probe` and `--probe-ports` always accept every kind name, whatever the build. Naming a kind this binary was not built with fails with a message that says which Cargo feature is missing, so a typo and a missing feature never look the same:
 
 ```text
-Error: configuration error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
+Error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
 ```
 
 Run `rastreo discover --help` for the full kind list with each kind's feature annotation.

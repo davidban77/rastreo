@@ -485,6 +485,18 @@ async fn run_discovery_reporting_progress(
     result
 }
 
+// A failure line and a hint needle are both single-line, so flatten every level onto one line.
+fn render_error_chain(err: &dyn std::error::Error) -> String {
+    let mut rendered = err.to_string();
+    let mut next = err.source();
+    while let Some(source) = next {
+        rendered.push_str(": ");
+        rendered.push_str(&source.to_string());
+        next = source.source();
+    }
+    rendered
+}
+
 fn checkpoint_config(args: &DiscoverArgs) -> Option<CheckpointConfig> {
     args.checkpoint.as_ref().map(|path| CheckpointConfig {
         path: path.clone(),
@@ -516,7 +528,7 @@ async fn run_legacy(
             Ok(())
         }
         Err(err) => {
-            if let Some(hint) = enrich_scan_error_hint(&err.to_string()) {
+            if let Some(hint) = enrich_scan_error_hint(&render_error_chain(&err)) {
                 print_hint(&hint, verbosity);
             }
             Err(err.into())
@@ -622,8 +634,9 @@ async fn run_from_file(
             }
             Err(err) => {
                 tally.failed += 1;
-                print_failed(&label, &format!("{err:#}"));
-                if let Some(hint) = enrich_scan_error_hint(&err.to_string()) {
+                let rendered = render_error_chain(&err);
+                print_failed(&label, &rendered);
+                if let Some(hint) = enrich_scan_error_hint(&rendered) {
                     print_hint(&hint, verbosity);
                 }
             }
@@ -1199,6 +1212,23 @@ mod tests {
     use clap::Parser;
     use rastreo_core::ProberConfig;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn render_error_chain_flattens_every_level_onto_one_line() {
+        use rastreo_core::{SinkError, SinkErrorClass};
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory");
+        let err = RastreoError::Sink(SinkError::new(SinkErrorClass::Other, io));
+        assert_eq!(
+            render_error_chain(&err),
+            "output sink failed: No such file or directory"
+        );
+    }
+
+    #[test]
+    fn render_error_chain_of_a_sourceless_error_is_its_display() {
+        let err = RastreoError::Config(rastreo_core::ConfigError::EmptyProbeSelection);
+        assert_eq!(render_error_chain(&err), "no probe kinds selected");
+    }
 
     fn args(target: &[&str], port: &[u16]) -> DiscoverArgs {
         DiscoverArgs {

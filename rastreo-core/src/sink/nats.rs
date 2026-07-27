@@ -637,6 +637,7 @@ impl Sink for NatsSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::sink_io_detail;
 
     #[test]
     fn default_buffer_threshold_is_64_kib() {
@@ -1022,8 +1023,8 @@ mod tests {
             Some(SinkErrorClass::PublishFailure)
         );
         assert_eq!(ack.sink_error_class(), Some(SinkErrorClass::AckRejection));
-        assert!(publish.to_string().contains("failed to publish"));
-        assert!(ack.to_string().contains("was not acked"));
+        assert!(sink_io_detail(&publish).contains("failed to publish"));
+        assert!(sink_io_detail(&ack).contains("was not acked"));
     }
 
     #[test]

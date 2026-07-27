@@ -624,6 +624,43 @@ async fn output_flag_overrides_yaml_file_sink_path() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
+async fn scenario_failure_line_carries_the_underlying_cause() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let unopenable = dir.path().join("no-such-dir").join("out.ndjson");
+    let yaml = format!(
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: unwritable\n    timeout_ms: 200\n    sink:\n      type: file\n      path: \"{}\"\n    targets:\n      - Ip: \"192.0.2.1\"\n    probers:\n      - type: tcp_connect\n        ports: [1]\n",
+        unopenable.display()
+    );
+    let path = write_yaml(&dir, "unwritable.yml", &yaml);
+
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(!output.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    let failure_line = stderr
+        .lines()
+        .find(|l| l.contains("failed"))
+        .unwrap_or_else(|| panic!("no failure line on stderr: {stderr}"));
+    assert!(
+        failure_line.contains("output sink failed"),
+        "failure line must state the sink failure: {failure_line}"
+    );
+    assert!(
+        failure_line.contains(&unopenable.display().to_string()),
+        "failure line must carry the cause, naming the path: {failure_line}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
 async fn multi_scenario_partial_failure_continues_and_exits_nonzero() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

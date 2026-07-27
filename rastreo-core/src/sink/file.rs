@@ -7,6 +7,13 @@ use crate::error::RastreoError;
 
 use super::{Sink, SinkError, SinkErrorClass, SinkType};
 
+fn open_error(path: &Path, e: std::io::Error) -> RastreoError {
+    RastreoError::Sink(SinkError::other(std::io::Error::new(
+        e.kind(),
+        format!("failed to open file sink at {}: {e}", path.display()),
+    )))
+}
+
 fn write_error(e: std::io::Error) -> RastreoError {
     RastreoError::Sink(SinkError::new(
         SinkErrorClass::WriteFailure,
@@ -27,13 +34,14 @@ pub struct FileSink {
 
 impl FileSink {
     pub async fn new(path: impl AsRef<Path>) -> Result<Self, RastreoError> {
+        let path = path.as_ref();
         // create-if-missing, append-if-exists: never truncate.
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path.as_ref())
+            .open(path)
             .await
-            .map_err(SinkError::other)?;
+            .map_err(|e| open_error(path, e))?;
         Ok(Self {
             writer: BufWriter::new(file),
         })
@@ -69,7 +77,7 @@ mod tests {
         Confidence, DeviceRecord, IdentityKey, ScanMetadata, Signal, CURRENT_SCHEMA_ID,
         CURRENT_SCHEMA_VERSION,
     };
-    use crate::sink::{create_sink, SinkConfig};
+    use crate::sink::{create_sink, sink_io_detail, SinkConfig};
 
     fn sample_record(name: &str) -> DeviceRecord {
         DeviceRecord {
@@ -185,6 +193,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_names_the_path_it_could_not_open() {
+        let bad = Path::new("/this/path/should/not/exist/anywhere/foo.ndjson");
+        let Err(err) = FileSink::new(bad).await else {
+            panic!("bad path must error");
+        };
+        let detail = sink_io_detail(&err);
+        assert!(
+            detail.contains(&bad.display().to_string()),
+            "detail: {detail}"
+        );
+        assert!(
+            detail.contains("failed to open file sink"),
+            "detail: {detail}"
+        );
+    }
+
+    #[tokio::test]
     async fn factory_returns_file_sink_for_file_config() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("factory.ndjson");
@@ -224,14 +249,14 @@ mod tests {
 
         let err = sink.flush().await.expect_err("flush must fail");
         assert_eq!(err.sink_error_class(), Some(SinkErrorClass::FlushFailure));
-        assert!(err.to_string().contains("failed to flush"));
+        assert!(sink_io_detail(&err).contains("failed to flush"));
     }
 
     #[test]
     fn write_error_carries_write_failure_class_and_prefix() {
         let err = write_error(std::io::Error::other("No space left on device"));
         assert_eq!(err.sink_error_class(), Some(SinkErrorClass::WriteFailure));
-        assert!(err.to_string().contains("failed to write to file sink"));
+        assert!(sink_io_detail(&err).contains("failed to write to file sink"));
     }
 
     #[test]
@@ -241,6 +266,6 @@ mod tests {
             "Broken pipe",
         ));
         assert_eq!(err.sink_error_class(), Some(SinkErrorClass::FlushFailure));
-        assert!(err.to_string().contains("failed to flush file sink"));
+        assert!(sink_io_detail(&err).contains("failed to flush file sink"));
     }
 }

@@ -56,6 +56,7 @@ impl Sink for StdoutSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::sink_io_detail;
 
     #[test]
     fn stdout_sink_new_returns_value_infallibly() {
@@ -88,7 +89,7 @@ mod tests {
             "Broken pipe",
         ));
         assert_eq!(err.sink_error_class(), Some(SinkErrorClass::WriteFailure));
-        assert!(err.to_string().contains("failed to write to stdout sink"));
+        assert!(sink_io_detail(&err).contains("failed to write to stdout sink"));
     }
 
     #[test]
@@ -98,6 +99,6 @@ mod tests {
             "Broken pipe",
         ));
         assert_eq!(err.sink_error_class(), Some(SinkErrorClass::FlushFailure));
-        assert!(err.to_string().contains("failed to flush stdout sink"));
+        assert!(sink_io_detail(&err).contains("failed to flush stdout sink"));
     }
 }

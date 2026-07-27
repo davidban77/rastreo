@@ -13,7 +13,7 @@ pub enum OtlpEnvError {
     #[error("invalid value for {name}: {value:?} is not a boolean (expected true/false)")]
     NotBoolean { name: String, value: String },
 
-    #[error("invalid value for {name}: {value:?} is not a non-negative integer ({source})")]
+    #[error("invalid value for {name}: {value:?} is not a non-negative integer")]
     NotU64 {
         name: String,
         value: String,

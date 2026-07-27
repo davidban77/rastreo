@@ -135,9 +135,10 @@ impl SinkType {
 /// The class travels as data on the error, so DLQ headers and metric attribution read it
 /// directly instead of re-deriving it from the message.
 #[derive(Debug, thiserror::Error)]
-#[error("{source}")]
+#[error("output sink failed")]
 pub struct SinkError {
     pub class: SinkErrorClass,
+    #[source]
     pub source: std::io::Error,
 }
 
@@ -150,6 +151,13 @@ impl SinkError {
     pub fn other(source: std::io::Error) -> Self {
         Self::new(SinkErrorClass::Other, source)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn sink_io_detail(err: &RastreoError) -> String {
+    std::error::Error::source(err)
+        .expect("a sink error carries its io detail as the source")
+        .to_string()
 }
 
 #[async_trait::async_trait]
@@ -653,12 +661,13 @@ mod tests {
     }
 
     #[test]
-    fn sink_error_display_forwards_the_io_message() {
+    fn sink_error_display_names_the_sink_and_sources_the_io_message() {
         let err = SinkError::new(
             SinkErrorClass::WriteFailure,
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke"),
         );
-        assert_eq!(err.to_string(), "pipe broke");
+        assert_eq!(err.to_string(), "output sink failed");
+        assert_eq!(sink_io_detail(&err.into()), "pipe broke");
     }
 
     #[test]

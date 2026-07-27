@@ -3492,6 +3492,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "hickory-resolver",
  "ipnet",
  "opentelemetry",
  "opentelemetry-otlp",

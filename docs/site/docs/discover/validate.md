@@ -116,8 +116,8 @@ rastreo validate two-scenarios.yml
 
 ```text
 scenario 'routers' (1 of 2): ok
-scenario 'web-tier' (2 of 2): configuration error: kafka sink: topic is empty
-1 of 2 scenario(s) invalid
+scenario 'web-tier' (2 of 2): kafka sink: topic is empty
+Error: 1 of 2 scenario(s) invalid
 ```
 
 The command exits `1`. The valid scenario still reports `ok`; only the broken one is flagged.
@@ -138,7 +138,7 @@ Another common mistake is a TLS block that would accept any certificate. Setting
 ```
 
 ```text
-scenario 'secured-web' (1 of 1): configuration error: kafka sink: tls.ca_cert requires tls.verify: true
+scenario 'secured-web' (1 of 1): kafka sink: tls.ca_cert requires tls.verify: true
 Error: 1 of 1 scenario(s) invalid
 ```
 
