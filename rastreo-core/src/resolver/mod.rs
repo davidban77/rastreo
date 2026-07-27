@@ -412,13 +412,13 @@ impl HickoryResolver {
         let builder =
             TokioResolver::builder_tokio().map_err(|source| ResolverError::DnsLookupFailed {
                 name: "<system resolver init>".into(),
-                source,
+                source: source.into(),
             })?;
         let inner = builder
             .build()
             .map_err(|source| ResolverError::DnsLookupFailed {
                 name: "<system resolver init>".into(),
-                source,
+                source: source.into(),
             })?;
         Ok(Self {
             inner,
@@ -482,7 +482,7 @@ impl HickoryResolver {
                 .await
                 .map_err(|source| ResolverError::DnsLookupFailed {
                     name: name.to_string(),
-                    source,
+                    source: source.into(),
                 })?;
         let ips: Vec<IpAddr> = lookup.iter().collect();
         if ips.is_empty() {

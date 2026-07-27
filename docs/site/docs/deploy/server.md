@@ -149,7 +149,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/scans \
 HTTP/1.1 403 Forbidden
 content-type: application/json
 
-{"error":"resolver error: target 127.0.0.1 is outside the configured allow-list"}
+{"error":"target 127.0.0.1 is outside the configured allow-list"}
 ```
 
 The error names only the caller's offending IP. It never echoes the allow-list.
@@ -168,7 +168,7 @@ The error names only the caller's offending IP. It never echoes the allow-list.
 A request that resolves to more hosts than the cap is rejected with `400 Bad Request` before any probe runs:
 
 ```text
-{"error":"resolver error: scan resolves to 14 hosts; exceeds the configured aggregate limit of 4"}
+{"error":"scan resolves to 14 hosts; exceeds the configured aggregate limit of 4"}
 ```
 
 This cap is separate from the per-target expansion limit. A single CIDR or range wider than 65536 hosts is rejected on its own with a different error (`CidrTooLarge` or `RangeTooLarge`). The aggregate cap adds a second limit on the sum across all targets. Many small targets then cannot add up to one very large scan.
@@ -526,7 +526,7 @@ A real scan rejects an out-of-allow-list target with a hard `403` and probes not
 {
   "scenario": "mgmt-sweep",
   "targets": [
-    { "target": "192.168.1.1", "resolution": { "error": "resolver error: target 192.168.1.1 is outside the configured allow-list" } }
+    { "target": "192.168.1.1", "resolution": { "error": "target 192.168.1.1 is outside the configured allow-list" } }
   ],
   "probers": ["tcp_connect (ports 22, 443)"],
   "sink": "stdout (default)",

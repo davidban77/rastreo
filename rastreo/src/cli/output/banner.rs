@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn a_failed_scenario_paints_its_glyph_with_the_err_role() {
         theme::with_colour(|| {
-            let line = failed_line("scenario 'bad' (1 of 2)", "sink error: pipe broke");
+            let line = failed_line("scenario 'bad' (1 of 2)", "output sink failed: pipe broke");
             assert!(line.contains(&theme::err(glyphs().done)), "{line:?}");
         });
     }
@@ -730,11 +730,11 @@ mod tests {
     fn failed_line_names_the_scenario_and_the_error() {
         let line = strip_ansi(&failed_line(
             "scenario 'bad' (1 of 2)",
-            "sink error: pipe broke",
+            "output sink failed: pipe broke",
         ));
         assert_eq!(
             line,
-            "■ scenario 'bad' (1 of 2)  failed → sink error: pipe broke"
+            "■ scenario 'bad' (1 of 2)  failed → output sink failed: pipe broke"
         );
     }
 

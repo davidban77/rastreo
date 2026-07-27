@@ -57,10 +57,10 @@ A kind your binary was not built with is a different error from a typo:
 
 ```console
 $ rastreo discover --target 10.0.0.1 --probe gnmi
-Error: configuration error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
+Error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
 
 $ rastreo discover --target 10.0.0.1 --probe gnnmi
-Error: configuration error: unknown probe kind 'gnnmi'; available in this build: tcp_connect, udp, http, dns, snmp, arp, ndp, ssh, icmp, tls, reverse_dns, default, tcp
+Error: unknown probe kind 'gnnmi'; available in this build: tcp_connect, udp, http, dns, snmp, arp, ndp, ssh, icmp, tls, reverse_dns, default, tcp
 ```
 
 Run `rastreo discover --help` for the full kind list annotated with the feature each one needs, and `--dry-run` to see exactly which probers and ports a command would use before it sends anything.
@@ -500,7 +500,7 @@ The eligibility rules in [Which scans can checkpoint](#which-scans-can-checkpoin
 **The checkpoint must match the scan.** A checkpoint is tied to two things: the ordered target list and the sink destination. rastreo refuses to resume when either changed, because the new records would describe a different scan or reach the wrong destination:
 
 ```text
-Error: resume error: checkpoint does not match the current scenario: the target sequence or append destination changed, so resuming would produce a different scan or append to the wrong destination
+Error: checkpoint does not match the current scenario: the target sequence or append destination changed, so resuming would produce a different scan or append to the wrong destination
 ```
 
 Changing only a performance knob is allowed. `--concurrency`, `--rate`, `--timeout-ms`, and `--retries` do not change which targets are scanned or where their records go. A resume with a different value for one of them warns, then continues.
@@ -508,7 +508,7 @@ Changing only a performance knob is allowed. `--concurrency`, `--rate`, `--timeo
 **A missing checkpoint is an error.** `--resume` needs an existing checkpoint to continue from. When the file is absent, rastreo refuses rather than start over from zero:
 
 ```text
-Error: resume error: no checkpoint to resume at /var/log/scan.checkpoint; --resume requires an existing checkpoint at this path
+Error: no checkpoint to resume at /var/log/scan.checkpoint; --resume requires an existing checkpoint at this path
 ```
 
 !!! info "One target may be scanned twice"
@@ -540,7 +540,7 @@ Each rule guards against a resume that would produce a different result:
 An ineligible scenario is refused before any probe runs, with an error naming the reason:
 
 ```text
-Error: resume error: scenario is not resume-safe: the stdout sink has no durable append destination to resume into
+Error: scenario is not resume-safe: the stdout sink has no durable append destination to resume into
 ```
 
 ### What a checkpoint protects against
@@ -557,7 +557,7 @@ This protects against the process dying: a crash, a scan timeout, or `Ctrl-C`. T
 If a file already exists at the `--checkpoint` path, the scan refuses to start and leaves the file untouched. This protects a checkpoint from an earlier run you may still want. To continue that run instead of starting over, resume it with [`--resume`](#resuming). Remove the file to start fresh:
 
 ```text
-Error: resume error: a checkpoint already exists at /var/log/scan.checkpoint; remove it to start a fresh scan
+Error: a checkpoint already exists at /var/log/scan.checkpoint; remove it to start a fresh scan
 ```
 
 A file at the path that is not a valid checkpoint is refused the same way, with a `corrupt` message. rastreo never overwrites it.

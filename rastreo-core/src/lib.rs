@@ -28,8 +28,8 @@ pub use classifier::{
 pub use collection_profile::CollectionProfileAssembler;
 pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
 pub use error::{
-    ClassifierError, ConfigError, EncoderError, ProbeError, ProbeErrorKind, RastreoError,
-    ResolverError, ResumeError, RuntimeError,
+    ClassifierError, ConfigError, DnsFailure, EncoderError, ProbeError, ProbeErrorKind,
+    RastreoError, ResolverError, ResumeError, RuntimeError,
 };
 pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
 pub use hints::hint_for_error_kind;

@@ -35,7 +35,7 @@ scenarios:
 
 Multiple references may appear in the same scalar and the surrounding text is preserved verbatim. `"nats://${NATS_USER}:${NATS_PASS}@nats:4222"` interpolates both variables.
 
-A missing environment variable (`std::env::var` returns `NotPresent`) fails scenario load with `configuration error: environment variable NAME referenced in scenario is not set`. A variable that is set to an empty string substitutes as an empty string with no error — this is a deliberate distinction so `unset` and `set-to-empty` remain distinguishable, and lets a deployment script export `AUTH_PASS=""` to select the SNMPv3 `noAuthNoPriv` code path without special-casing.
+A missing environment variable (`std::env::var` returns `NotPresent`) fails scenario load with `environment variable NAME referenced in scenario is not set`, reported under a `Caused by:` beneath `failed to parse scenario file '<path>'`. A variable that is set to an empty string substitutes as an empty string with no error — this is a deliberate distinction so `unset` and `set-to-empty` remain distinguishable, and lets a deployment script export `AUTH_PASS=""` to select the SNMPv3 `noAuthNoPriv` code path without special-casing.
 
 To include a literal `${VAR}` in the output — for example when a value legitimately contains braces — prefix the sequence with a second `$`: `$${VAR}` expands to `${VAR}` in the loaded value. No other escape syntax is recognised; a stray `${` with no closing brace or a malformed identifier like `${1foo}` or `${a-b}` is passed through untouched, on the theory that surprise-erroring on non-interpolation shapes is more annoying than useful.
 
@@ -74,9 +74,9 @@ Missing files, unreadable files, and other I/O errors fail at scenario load with
 
 | Error kind | Message shape |
 |---|---|
-| File not found | `configuration error: file secret /run/secrets/foo not found` |
-| Permission denied | `configuration error: file secret /run/secrets/foo not readable: permission denied` |
-| Other I/O failure | `configuration error: file secret /run/secrets/foo could not be read: <os message>` |
+| File not found | `file secret /run/secrets/foo not found` |
+| Permission denied | `file secret /run/secrets/foo not readable: permission denied` |
+| Other I/O failure | `file secret /run/secrets/foo could not be read: <os message>` |
 | Non-UTF-8 contents | Same class as other I/O failures; the message names the path. |
 
 The `!file` tag applies to the whole scalar. `!file /run/secrets/foo` reads the file and produces its contents as the value; there is no prefix / suffix concatenation. If you need a value like `prefix-<secret>-suffix`, use env-var interpolation instead and set the env var to `prefix-$(cat /run/secrets/foo)-suffix` in the wrapping script. Note that bash `$(...)` strips exactly one trailing newline; if the secret file could have multiple trailing newlines and you want the shell to match rastreo's `!file` behaviour (which trims all trailing whitespace), use `printf '%s' "$(< /run/secrets/foo)"` or pipe the value through `sed -E 's/[[:space:]]+$//'` before interpolating.

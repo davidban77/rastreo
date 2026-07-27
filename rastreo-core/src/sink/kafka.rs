@@ -792,6 +792,7 @@ impl Sink for KafkaSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::sink_io_detail;
 
     #[test]
     fn default_buffer_threshold_is_64_kib() {
@@ -1266,7 +1267,7 @@ mod tests {
             rskafka::client::error::Error::InvalidResponse("boom".to_string()),
         );
         assert_eq!(err.sink_error_class(), Some(SinkErrorClass::ProduceFailure));
-        assert!(err.to_string().contains("failed to produce"));
+        assert!(sink_io_detail(&err).contains("failed to produce"));
     }
 
     fn sample_ca_pem() -> String {

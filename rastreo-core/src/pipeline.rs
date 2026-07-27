@@ -1905,7 +1905,11 @@ mod tests {
         .expect_err("write must error");
         match &err {
             RastreoError::Sink(e) => {
-                assert!(format!("{e}").contains("simulated"), "unexpected msg: {e}");
+                assert!(
+                    e.source.to_string().contains("simulated"),
+                    "unexpected msg: {}",
+                    e.source
+                );
                 assert_eq!(e.class, SinkErrorClass::WriteFailure);
             }
             other => panic!("expected Sink error, got {other:?}"),

@@ -93,6 +93,17 @@ mod tests {
     }
 
     #[test]
+    fn dns_lookup_failed_maps_to_503_with_a_redacted_body() {
+        let err: AppError = RastreoError::Resolver(ResolverError::DnsLookupFailed {
+            name: "internal.lab".into(),
+            source: hickory_resolver::net::NetError::NoConnections.into(),
+        })
+        .into();
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.message, "internal server error");
+    }
+
+    #[test]
     fn resolver_error_cidr_too_large_maps_to_400() {
         let err: AppError = RastreoError::Resolver(ResolverError::CidrTooLarge {
             cidr: "10.0.0.0/8".into(),
@@ -180,12 +191,13 @@ mod tests {
     }
 
     #[test]
-    fn sink_error_maps_to_500() {
+    fn sink_error_maps_to_500_with_a_redacted_body() {
         use rastreo_core::{SinkError, SinkErrorClass};
         let io = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe");
         let err: AppError =
             RastreoError::Sink(SinkError::new(SinkErrorClass::WriteFailure, io)).into();
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.message, "internal server error");
     }
 
     #[test]

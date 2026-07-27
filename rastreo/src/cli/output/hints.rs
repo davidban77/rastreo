@@ -19,20 +19,14 @@ const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
 const RELEASE_BUNDLED_FEATURES: &str =
     "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls, gnmi, lldp";
 
+const DNS_RESOLUTION_HINT: &str =
+    "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.";
+
 // Resolver / sink errors abort the whole scan and are not kinded, so they hint by string match.
+// Needles are lowercase and matched against the whole rendered error chain, not just its top level.
 const SCAN_ERROR_HINT_PATTERNS: &[(&str, &str)] = &[
-    (
-        "nxdomain",
-        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
-    ),
-    (
-        "dns lookup failed",
-        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
-    ),
-    (
-        "no records found",
-        "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.",
-    ),
+    ("dns lookup failed", DNS_RESOLUTION_HINT),
+    ("no records", DNS_RESOLUTION_HINT),
 ];
 
 pub(crate) fn enrich_scan_error_hint(error_msg: &str) -> Option<String> {
@@ -220,31 +214,29 @@ mod tests {
         assert!(enrich_feature_hint("missing field `targets`").is_none());
     }
 
+    // The chain a failed `A`/`AAAA` lookup renders, verbatim from a live run.
+    const DNS_LOOKUP_FAILED_CHAIN: &str = "DNS lookup failed for does-not-exist.invalid: no records found for Query { name: Name(\"does-not-exist.invalid.\"), query_type: AAAA, query_class: IN }";
+
     #[test]
-    fn enrich_scan_error_hint_matches_nxdomain() {
-        let hint =
-            enrich_scan_error_hint("resolver error: NXDOMAIN for example.com").expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
+    fn enrich_scan_error_hint_matches_a_failed_dns_lookup_chain() {
+        let hint = enrich_scan_error_hint(DNS_LOOKUP_FAILED_CHAIN).expect("hint");
+        assert_eq!(hint, DNS_RESOLUTION_HINT);
     }
 
     #[test]
-    fn enrich_scan_error_hint_matches_dns_lookup_failed() {
-        let hint = enrich_scan_error_hint("resolver error: DNS lookup failed for x.invalid")
-            .expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
-    }
-
-    #[test]
-    fn enrich_scan_error_hint_matches_no_records_found() {
-        let hint = enrich_scan_error_hint("resolver error: no records found").expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
+    fn enrich_scan_error_hint_matches_the_resolver_no_records_message() {
+        let msg = rastreo_core::ResolverError::DnsNoRecords {
+            name: "missing.lab".into(),
+        }
+        .to_string();
+        let hint = enrich_scan_error_hint(&msg).expect("hint");
+        assert_eq!(hint, DNS_RESOLUTION_HINT);
     }
 
     #[test]
     fn enrich_scan_error_hint_is_case_insensitive() {
-        let hint =
-            enrich_scan_error_hint("RESOLVER ERROR: NXDOMAIN for example.com").expect("hint");
-        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
+        let hint = enrich_scan_error_hint(&DNS_LOOKUP_FAILED_CHAIN.to_uppercase()).expect("hint");
+        assert_eq!(hint, DNS_RESOLUTION_HINT);
     }
 
     #[test]
@@ -259,7 +251,15 @@ mod tests {
 
     #[test]
     fn enrich_scan_error_hint_ignores_probe_fault_strings() {
-        assert!(enrich_scan_error_hint("probe error: raw socket: Permission denied").is_none());
+        assert!(enrich_scan_error_hint("raw socket: Permission denied (os error 13)").is_none());
+    }
+
+    #[test]
+    fn enrich_scan_error_hint_ignores_a_sink_failure_chain() {
+        assert!(enrich_scan_error_hint(
+            "output sink failed: failed to open file sink at /nope/out.ndjson: No such file or directory (os error 2)"
+        )
+        .is_none());
     }
 
     fn summary_with_fault(
