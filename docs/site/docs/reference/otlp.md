@@ -126,7 +126,7 @@ Trace export works on both `rastreo-server` and the `rastreo` CLI. Enable it wit
 ```bash
 export RASTREO_OTLP_ENDPOINT=http://otel-collector:4317
 export RASTREO_OTLP_TRACES_ENABLED=true
-rastreo discover --target 192.0.2.0/24 --port 22,443
+rastreo discover --target 192.0.2.0/24 --probe tcp_connect --port 22,443
 ```
 
 Traces do not depend on metrics or logs. Enabling `RASTREO_OTLP_TRACES_ENABLED` on its own is valid. To send all three signals, set each `*_ENABLED` variable.

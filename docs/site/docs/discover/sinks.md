@@ -18,7 +18,7 @@ A sink is where `DeviceRecord` events go after they are encoded. rastreo ships f
 The default sink writes one NDJSON `DeviceRecord` per line to stdout. Tracing logs and the end-of-run summary go to stderr, which keeps stdout clean for downstream tools.
 
 ```bash
-rastreo discover --target 1.1.1.1 --port 443 | jq .
+rastreo discover --target 1.1.1.1 | jq .
 ```
 
 The example above pipes stdout into `jq` without any log noise, because `jq` reads stdin and rastreo's logs went to stderr.
@@ -30,6 +30,7 @@ The file sink appends one NDJSON record per line to the path you give. The file 
 ```bash
 rastreo discover \
   --target 192.0.2.0/24 \
+  --probe tcp_connect \
   --port 80 \
   --sink file \
   --output /tmp/scan.ndjson
@@ -52,6 +53,7 @@ The Kafka sink publishes `DeviceRecord` events to a Kafka topic. Each Kafka mess
 ```bash
 rastreo discover \
   --target 192.0.2.0/24 \
+  --probe tcp_connect \
   --port 80 \
   --sink kafka \
   --brokers localhost:9092 \

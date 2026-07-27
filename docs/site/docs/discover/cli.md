@@ -4,36 +4,140 @@ description: Reference for the rastreo discover subcommand — required flags, o
 
 # CLI
 
-`rastreo discover` is the entry point for one-shot discovery scans. It runs in two modes: **flag-driven** (`--target` + `--port`) for a quick TCP-connect sweep, or **YAML-driven** (`--file`) to execute a full `ScenarioFile` — the only CLI path that reaches the HTTP, DNS, UDP, SNMP, ARP, NDP probers and the OUI-enrichment fuser. Both modes emit one NDJSON `DeviceRecord` per discovered device to the chosen sink.
+`rastreo discover` is the entry point for one-shot discovery scans. It runs in two modes: **flag-driven** (`--target`, plus `--probe` to pick the probers) for a scan you type in one line, or **YAML-driven** (`--file`) to execute a full `ScenarioFile` when you want a scan committed to version control. Both modes emit one NDJSON `DeviceRecord` per discovered device to the chosen sink.
 
 ## Usage
 
 ```text
-rastreo discover [OPTIONS] --target <TARGET>... --port <PORT>
+rastreo discover [OPTIONS] --target <TARGET>...
 rastreo discover [OPTIONS] --file <SCENARIO.yml>
 ```
 
-`--target` / `--port` and `--file` are mutually exclusive. Exactly one of the two modes must be selected — clap rejects the command otherwise.
+`--file` is mutually exclusive with every flag-driven scan argument. Exactly one of the two modes must be selected — clap rejects the command otherwise.
 
 ## Flag-driven mode
 
 `--target` is the target to probe. It accepts a single IP, a CIDR block, an IP range, or a DNS name; the form is detected from the string shape. Repeat the flag to add more targets, or pass several values after one `--target`. See [Targets](targets.md) for the exact detection rules.
 
-```bash
-rastreo discover --target 10.0.0.1 --target 192.0.2.0/29 --port 80
-```
-
-`--port` (`-p`) is the TCP port to probe. Repeat the flag or comma-separate the values to probe more than one port per target.
+Nothing else is required. With `--target` alone, rastreo runs the default probe set:
 
 ```bash
-rastreo discover --target 1.1.1.1 --port 22,80,443
+rastreo discover --target 10.0.0.1 --target 192.0.2.0/29
 ```
 
-Flag-driven mode always uses the TCP-connect prober. To reach the HTTP, DNS, UDP, SNMP, ARP, or NDP probers from the CLI, use `--file` with a scenario YAML.
+### Choosing probers
+
+`--probe` picks which probers run. Repeat it or comma-separate the values:
+
+```bash
+rastreo discover --target 10.0.0.1 --probe icmp,snmp
+```
+
+Omit `--probe` and rastreo runs the **default set**: every prober this binary carries that needs no extra parameter, is not link-layer, and produces no second output stream. On a release binary that is `icmp`, `tcp_connect`, `http`, `ssh`, `tls`, `snmp`, and `reverse_dns`. Writing `--probe default` selects exactly the same set, so you can extend it rather than replace it:
+
+```bash
+rastreo discover --target 10.0.0.0/24 --probe default,arp --interface eth0
+```
+
+Some kinds are never in the default set, each for a reason:
+
+- `udp` and `dns` need a parameter you have to supply (`--udp-protocol`, `--dns-query`). There is no sensible guess.
+- `arp` and `ndp` only work on the local segment and need an interface, so they would fault on every routed target.
+- `lldp` and `gnmi` build a [topology](topology.md) or [collection-profile](collection-profile.md) stream and need credentials, so they belong in a scenario file.
+
+A prober whose runtime precondition fails is dropped from the *default* set and reported, rather than faulting on every target. On a host where rastreo cannot open an ICMP socket:
+
+```text
+• note: icmp dropped from the default set — cannot open an ICMP socket here. Run with --probe icmp to attempt it anyway.
+```
+
+Naming a kind explicitly always wins over that filter. `--probe icmp` attempts the socket anyway and reports the fault, which is what you want when you are diagnosing why ICMP is unavailable.
+
+A kind your binary was not built with is a different error from a typo:
+
+```console
+$ rastreo discover --target 10.0.0.1 --probe gnmi
+Error: configuration error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
+
+$ rastreo discover --target 10.0.0.1 --probe gnnmi
+Error: configuration error: unknown probe kind 'gnnmi'; available in this build: tcp_connect, udp, http, dns, snmp, arp, ndp, ssh, icmp, tls, reverse_dns, default, tcp
+```
+
+Run `rastreo discover --help` for the full kind list annotated with the feature each one needs, and `--dry-run` to see exactly which probers and ports a command would use before it sends anything.
+
+### Ports
+
+Only three probers have no well-known port: `tcp_connect`, `http`, and `udp`. `--port` (`-p`) sets the port list for those, and for those only.
+
+```bash
+rastreo discover --target 1.1.1.1 --probe tcp_connect --port 22,80,443
+```
+
+Every other prober keeps its protocol port — DNS on 53, SNMP on 161, SSH on 22, TLS on 443, gNMI on 57400 — no matter what `--port` says. `--probe-ports <kind>=<port>[,<port>...]` retargets one prober, and beats both `--port` and the prober's own default:
+
+```bash
+rastreo discover --target 10.0.0.1 --probe snmp --probe-ports snmp=1161
+```
+
+Repeat `--probe-ports` once per prober. Repeating it for the *same* prober is last-wins — `--probe-ports dns=53 --probe-ports dns=5353` queries 5353 only. Put every port for one prober in a single comma-separated value instead: `--probe-ports dns=53,5353`.
+
+When `--port` is given without `--probe`, rastreo says which probers it reached, because a port list on the default set is not the port-only scan it looks like:
+
+```text
+• note: --port applies to tcp_connect, http; the default probe set also runs icmp, ssh, tls, snmp, reverse_dns. Use --probe tcp_connect for a port-only scan.
+```
+
+And when `--port` reaches nothing in the selection at all, rastreo says so instead of silently ignoring it:
+
+```text
+• note: --port had no effect — none of the selected probes (snmp) read a shared port list. Use --probe-ports <kind>=<port> to retarget one.
+```
+
+Both notes go to stderr at the normal verbosity level and are suppressed by `-q`.
+
+### Per-prober parameters
+
+Probers that need a parameter take it from a dedicated flag. Each flag exists only in a build carrying the matching prober.
+
+Every one of these flags configures specific probers and nothing else, so rastreo tells you when the prober it feeds is not in the run rather than discarding the value in silence:
+
+```console
+$ rastreo discover --target 10.0.0.1 --dns-query example.com
+• note: --dns-query had no effect — no dns probe in this run. Add --probe dns.
+
+$ rastreo discover --target 10.0.0.1 --probe tcp_connect --http-path /health
+• note: --http-path had no effect — no http probe in this run. Add --probe http.
+```
+
+The same note covers `--probe-ports` for a prober you did not select (`--probe-ports dns=5353 had no effect — no dns probe in this run.`). Like the `--port` notes, these go to stderr and are suppressed by `-q`.
+
+| Flag | Prober | Default | Notes |
+|---|---|---|---|
+| `--udp-protocol <PROTOCOL>` | `udp` | — (required) | `ntp`, `sip_options`, `memcached_stats`, or `stun_binding`. |
+| `--dns-query <NAME>` | `dns` | — (required) | Repeatable or comma-separated. |
+| `--dns-query-type <TYPE>` | `dns` | `a` | `a`, `aaaa`, `mx`, `txt`, `ptr`, `ns`, `cname`. |
+| `--snmp-community <COMMUNITY>` | `snmp` | `public` | Also reads `RASTREO_SNMP_COMMUNITY`. |
+| `--snmp-version <VERSION>` | `snmp` | `v2c` | `v1`, `v2c`, or `v3`. |
+| `--http-path <PATH>` | `http` | `/` | |
+| `--icmp-count <N>` | `icmp` | `3` | Echo requests per target. Minimum 1. |
+| `--interface <NAME>` | `arp`, `ndp` | auto-select | Interface the request frame is sent from. Unset means auto-select per target from the local subnets. |
+
+!!! warning "Pass the SNMP community through the environment"
+    A value typed as a flag is visible in `ps` output to every user on the box. `--snmp-community` also reads `RASTREO_SNMP_COMMUNITY`, which is not:
+
+    ```bash
+    RASTREO_SNMP_COMMUNITY=lab-ro rastreo discover --target 10.0.0.0/24 --probe snmp
+    ```
+
+    The variable only feeds a flag-driven scan. Exporting it in your shell is safe: a `--file` run ignores it and takes the community from the scenario's `community:` field, where [secret expansion](../reference/secrets.md) applies.
+
+Anything past these flags — SNMPv3 USM credentials, gNMI usernames, per-prober TLS verification, custom reverse-DNS resolvers — belongs in a scenario file. See [Scenario schema](../reference/scenario.md).
 
 ## YAML-driven mode
 
 `--file <PATH>` (`-f <PATH>`) loads a `ScenarioFile` and runs every scenario entry in order. The file must set `version: 1` and `kind: discovery`; other values are rejected. See [Scenario schema](../reference/scenario.md) for the full field list. The argument also accepts a `@name` catalog reference that resolves to a scenario file in `~/.config/rastreo/catalog/` or `/etc/rastreo/catalog/` — see [Catalog](catalog.md) for the search order and setup.
+
+Reach for a scenario file when the scan needs more than the flags expose — SNMPv3 credentials, gNMI authentication, several scenarios in one run, or a scan you want reviewed and committed.
 
 A single-scenario file that probes an HTTP target and a DNS resolver. The numbered markers explain each part — click one to expand it:
 
@@ -108,6 +212,10 @@ Each scenario prints its own status line to stderr, and the CLI runs every scena
 
 | Flag | Default | Notes |
 |---|---|---|
+| `--probe <KIND>` | the default set | Which probers run. Repeatable or comma-separated. See [Choosing probers](#choosing-probers). |
+| `-p`, `--port <PORT>` | per-prober defaults | Ports for `tcp_connect`, `http`, and `udp`. Repeatable or comma-separated. See [Ports](#ports). |
+| `--probe-ports <KIND>=<PORT>` | — | Port list for one prober, beating both `--port` and the prober's own default. See [Ports](#ports). |
+| `--udp-protocol`, `--dns-query`, `--dns-query-type`, `--snmp-community`, `--snmp-version`, `--http-path`, `--icmp-count`, `--interface` | see below | Per-prober parameters. See [Per-prober parameters](#per-prober-parameters). |
 | `--sink <SINK>` | `stdout` (flag-driven) / YAML `sink` (YAML-driven) | Where records are emitted. Possible values: `stdout`, `file`. `kafka` is available when the binary is built with `--features kafka`. In YAML-driven mode, setting `--sink` overrides the sink configured in the file. See [Sinks](sinks.md). |
 | `--output <PATH>` | — | Output file path for `--sink file`. Required when the file sink is selected. |
 | `--brokers <BROKERS>` | — | Comma-separated Kafka brokers for `--sink kafka`. Requires the `kafka` build feature. |
@@ -144,7 +252,7 @@ Only the connectionless probers that lack their own retransmission honor `retrie
 - **SNMP** — v1, v2c, and v3.
 - **DNS** and **reverse DNS**.
 
-TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) ignore `retries`, because TCP already resends at the transport layer. ICMP has its own `count` knob instead, which defaults to 3 echoes. ARP and NDP do not honor `retries` yet. Flag-driven mode (`--target` + `--port`) only runs `tcp_connect`, so `--retries` changes nothing there. To reach the connectionless probers, use `--file` with a scenario that lists them.
+TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) ignore `retries`, because TCP already resends at the transport layer. ICMP has its own `count` knob instead, which defaults to 3 echoes. ARP and NDP do not honor `retries` yet. In flag-driven mode, `--retries` only changes anything when the selection includes one of the connectionless probers — `--probe snmp` or `--probe dns --dns-query <name>`, for example.
 
 !!! note "Retries split the timeout — they do not extend it"
     `retries` divides the existing `timeout_ms` budget across attempts. Each attempt gets about `timeout_ms / (retries + 1)` milliseconds, floored at 1 ms. The total time per probe stays the same no matter how many retries you set. A retry recovers a dropped packet inside the same deadline, instead of adding scan time. On a high-latency link, size `timeout_ms` for `RTT × (retries + 1)` so each attempt still has room for one round trip.
@@ -179,19 +287,29 @@ rastreo discover --file wan-snmp.yml --retries 3
 
 ## Examples
 
-A minimum-flags scan against one host and one port. Stdout receives one NDJSON record per discovered device; stderr receives the start and completion banners.
+A minimum-flags scan against one host, running the default probe set. Stdout receives one NDJSON record per discovered device; stderr receives the start and completion banners.
 
 ```bash
-rastreo discover --target 1.1.1.1 --port 443
+rastreo discover --target 1.1.1.1
 ```
 
-A scan across many targets and many ports. Each `--target` is expanded independently and the combined set is scheduled with up to `--concurrency` probes in flight.
+A port sweep across many targets. Each `--target` is expanded independently and the combined set is scheduled with up to `--concurrency` probes in flight.
 
 ```bash
 rastreo discover \
   --target 10.0.0.0/24 \
   --target router-1.lab \
+  --probe tcp_connect \
   --port 22,80,443
+```
+
+An SNMP inventory sweep on a non-standard agent port, with the community read from the environment.
+
+```bash
+RASTREO_SNMP_COMMUNITY=lab-ro rastreo discover \
+  --target 10.0.0.0/24 \
+  --probe snmp \
+  --probe-ports snmp=1161
 ```
 
 Persist results to an NDJSON file instead of stdout. The file is opened in append mode, so repeated runs accumulate rather than overwrite.
@@ -199,6 +317,7 @@ Persist results to an NDJSON file instead of stdout. The file is opened in appen
 ```bash
 rastreo discover \
   --target 192.0.2.0/24 \
+  --probe tcp_connect \
   --port 80 \
   --sink file \
   --output /tmp/scan.ndjson
@@ -212,6 +331,7 @@ Send records to a Kafka topic:
 ```bash
 rastreo discover \
   --target 192.0.2.0/24 \
+  --probe tcp_connect \
   --port 80 \
   --sink kafka \
   --brokers localhost:9092 \
@@ -220,7 +340,7 @@ rastreo discover \
 
 ## Dry-run mode
 
-`--dry-run` validates the scenario, resolves targets (DNS lookups run for real), prints the expanded plan to stdout, and exits without probing anything or opening a sink. It works in both flag-driven mode (`--target` + `--port`) and YAML-driven mode (`--file`). CLI overrides (`--sink`, `--concurrency`, `--retries`, `--timeout-ms`) are applied to the plan — what you see is what would run.
+`--dry-run` validates the scenario, resolves targets (DNS lookups run for real), prints the expanded plan to stdout, and exits without probing anything or opening a sink. It works in both flag-driven and YAML-driven mode. CLI overrides (`--sink`, `--concurrency`, `--retries`, `--timeout-ms`) are applied to the plan, and the `probers:` line lists every selected prober with the port list it resolved to — what you see is what would run. This is the fastest way to confirm a `--probe` / `--port` / `--probe-ports` combination before sending traffic.
 
 The output shows one block per scenario listing each target's DNS / CIDR / range expansion, the configured probers with their parameters, the sink kind and destination, and the effective concurrency, probe rate, and per-probe timeout. The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count: unique IPs × probers, counting an address once even when several targets cover it. This matches the real scan for targets that do not overlap. When targets overlap, the real scan probes each shared address once per target, so it runs more probes than this count shows. See [Overlapping targets](targets.md#overlapping-targets).
 
@@ -229,7 +349,7 @@ CIDRs and ranges that expand to more than six addresses are truncated with an el
 Kafka, NATS, and file sinks are described from the configured values only. `--dry-run` never opens a network connection to the sink or writes to the output file, so a bogus broker address in `--brokers` completes in milliseconds instead of hanging.
 
 ```bash
-rastreo discover --target 10.0.0.0/24 --port 22,80 --dry-run
+rastreo discover --target 10.0.0.0/24 --probe tcp_connect --port 22,80 --dry-run
 ```
 
 ```text
@@ -318,7 +438,7 @@ When stderr is not a terminal, each update prints as a new line every five secon
 Progress goes to stderr, never stdout. Records stream to stdout on the default sink, so the progress line never mixes into them. If you pipe stdout to `jq` or a file, only the records pass through.
 
 ```bash
-rastreo discover --target 192.0.2.0/24 --port 80 --concurrency 8 2> scan.log
+rastreo discover --target 192.0.2.0/24 --probe tcp_connect --port 80 --concurrency 8 2> scan.log
 ```
 
 The `2> scan.log` above redirects stderr, so the progress updates are written to `scan.log` as periodic lines:
@@ -340,7 +460,7 @@ The last line is the completion banner; [Runtime hints](#runtime-hints) explains
 
 On `SIGINT` (ctrl-c) or `SIGTERM`, `rastreo discover` finishes any in-flight probes that have already started, fuses the outcomes collected so far, emits the resulting records to the sink, and flushes the sink before exiting. The completion banner on stderr reads `cancelled after` instead of `completed in` when this path runs, and its `■` turns yellow. The exit code is still `0` for a clean shutdown — non-zero is reserved for errors.
 
-Records that hadn't been emitted yet at the moment of cancellation are still written if they came from outcomes the pipeline had already gathered. Records from probers that hadn't started yet are not produced — `--target 10.0.0.0/24 --port 22,80,443 ...` cancelled after the `22` sweep gives you records for port 22 only.
+Records that hadn't been emitted yet at the moment of cancellation are still written if they came from outcomes the pipeline had already gathered. Records from probers that hadn't started yet are not produced — `--target 10.0.0.0/24 --probe tcp_connect --port 22,80,443 ...` cancelled after the `22` sweep gives you records for port 22 only.
 
 ## Checkpoints
 
@@ -349,6 +469,7 @@ A wide scan can run for hours. A crash, a scan timeout, or a `SIGKILL` can stop 
 ```bash
 rastreo discover \
   --target 10.0.0.0/16 \
+  --probe tcp_connect \
   --port 22,443 \
   --sink file \
   --output /var/log/scan.ndjson \
@@ -364,6 +485,7 @@ rastreo writes the checkpoint every 5000 targets by default. `--checkpoint-inter
 ```bash
 rastreo discover \
   --target 10.0.0.0/16 \
+  --probe tcp_connect \
   --port 22,443 \
   --sink file \
   --output /var/log/scan.ndjson \
@@ -393,7 +515,7 @@ Error: resume error: no checkpoint to resume at /var/log/scan.checkpoint; --resu
     Resume restarts at the last checkpointed target, not the one after it. So exactly one target — the boundary — may be scanned in both runs. Its record is a harmless duplicate that a consumer keying on [`identity_key`](identity.md) collapses. This is deliberate. It guarantees no scanned target is ever skipped, even if the process died while writing that target's record.
 
 !!! note "`--resume` runs one scenario at a time"
-    Resume works for a single-scenario run: the flag-driven `--target` / `--port` form, or a `--file` with exactly one scenario. A multi-scenario file is refused, because one checkpoint path cannot record several scenarios' progress.
+    Resume works for a single-scenario run: the flag-driven form, or a `--file` with exactly one scenario. A multi-scenario file is refused, because one checkpoint path cannot record several scenarios' progress.
 
     ```text
     Error: --resume supports a single-scenario run; 'scan.yml' has 2 scenarios

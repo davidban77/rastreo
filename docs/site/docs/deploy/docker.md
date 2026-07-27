@@ -37,7 +37,7 @@ The image's `ENTRYPOINT` is `/rastreo-server`. To run the CLI instead, override 
 
 ```bash
 docker run --rm --entrypoint /rastreo rastreo --version
-docker run --rm --entrypoint /rastreo rastreo discover --target 1.1.1.1 --port 443
+docker run --rm --entrypoint /rastreo rastreo discover --target 1.1.1.1
 ```
 
 ## Run the server
@@ -77,7 +77,7 @@ docker compose down -v
 The target hosts sit on the bridge network and are not exposed on the host. To probe them, run the CLI from inside a container on `rastreo-net`.
 
 ```bash
-docker compose exec rastreo-server /rastreo discover --target 10.50.0.10 --port 80
+docker compose exec rastreo-server /rastreo discover --target 10.50.0.10
 ```
 
 ## Image security context

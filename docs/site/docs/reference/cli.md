@@ -52,13 +52,23 @@ The completion glyph is blue on a clean run and turns yellow when the scan needs
 
 ## rastreo discover
 
-Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` and `--port` are required unless `--file` is set; everything else has a default.
+Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` is required unless `--file` is set; everything else has a default.
 
 | Flag | Type | Default | Notes |
 |---|---|---|---|
-| `-f`, `--file <PATH>` | path | — | Load a YAML scenario file instead of building the scan from flags. Accepts a filesystem path, or an `@name` [catalog](../discover/catalog.md) reference resolved via the catalog search path. Mutually exclusive with `--target` / `--port`. Requires the `config` build feature (on by default). See [Discover · CLI](../discover/cli.md#yaml-driven-mode). |
+| `-f`, `--file <PATH>` | path | — | Load a YAML scenario file instead of building the scan from flags. Accepts a filesystem path, or an `@name` [catalog](../discover/catalog.md) reference resolved via the catalog search path. Mutually exclusive with every flag-driven scan argument (`--target`, `--port`, `--probe`, `--probe-ports`, and the per-prober parameters). Requires the `config` build feature (on by default). See [Discover · CLI](../discover/cli.md#yaml-driven-mode). |
 | `--target <TARGET>...` | string | — (required) | Target to probe. Accepts a single IP, a CIDR block (`10.0.0.0/24`), an IP range (`10.0.0.1-10.0.0.5`), or a DNS name. Repeatable; multiple values per flag accepted. See [Targets](../discover/targets.md). |
-| `-p`, `--port <PORT>` | u16 | — (required) | TCP port to probe. Repeatable; comma-separated values accepted (`-p 22,80,443`). |
+| `--probe <KIND>` | string list | the default set | Probe kinds to run. Repeatable; comma-separated values accepted (`--probe icmp,snmp`). Accepts any kind name, the `tcp` alias for `tcp_connect`, and the `default` keyword. Omit it to run the default set. See [Choosing probers](../discover/cli.md#choosing-probers). |
+| `-p`, `--port <PORT>` | u16 | per-prober defaults | Ports for the probers that have no well-known port: `tcp_connect`, `http`, and `udp`. Repeatable; comma-separated values accepted (`-p 22,80,443`). Probers with a protocol port (`dns` 53, `snmp` 161, `ssh` 22, `tls` 443, `gnmi` 57400) ignore it — retarget those with `--probe-ports`. |
+| `--probe-ports <KIND>=<PORT>` | string | — | Port list for one prober, overriding both `--port` and the prober's own default. Repeatable, one prober per flag (`--probe-ports snmp=1161 --probe-ports http=8080,8443`). Repeating it for the *same* prober is last-wins; put every port in one comma-separated value instead. |
+| `--udp-protocol <PROTOCOL>` | enum | — | UDP service to fingerprint. Required when `udp` is selected. Values: `ntp`, `sip_options`, `memcached_stats`, `stun_binding`. See [UDP](../probe/udp.md). |
+| `--dns-query <NAME>` | string list | — | Name to look up against each target. Required when `dns` is selected. Repeatable; comma-separated values accepted. See [DNS](../probe/dns.md). |
+| `--dns-query-type <TYPE>` | enum | `a` | Record type for `--dns-query`. Values: `a`, `aaaa`, `mx`, `txt`, `ptr`, `ns`, `cname`. |
+| `--snmp-community <COMMUNITY>` | string | `public` | SNMP read community for the flag-driven scan. Env var: `RASTREO_SNMP_COMMUNITY` — prefer it, because a flag value is visible to anyone who can run `ps`. Neither form affects a `--file` run, which takes the community from the scenario's `community:` field. Requires the `snmp` build feature. |
+| `--snmp-version <VERSION>` | enum | `v2c` | SNMP protocol version. Values: `v1`, `v2c`, `v3`. Requires the `snmp` build feature. |
+| `--http-path <PATH>` | string | `/` | Request path for the HTTP prober. Requires the `http` build feature. |
+| `--icmp-count <N>` | u32 | `3` | Echo requests per target for the ICMP prober. Minimum 1. Requires the `icmp` build feature. |
+| `--interface <NAME>` | string | auto-select | Interface the ARP and NDP probers send from. Unset means auto-select per target from the local subnets. Requires the `arp` or `ndp` build feature. See [ARP](../probe/arp.md) and [NDP](../probe/ndp.md). |
 | `--sink <SINK>` | enum | `stdout` | Output destination. Values: `stdout`, `file`. `kafka` is available only when the binary is built with the `kafka` Cargo feature. See [Sinks](../discover/sinks.md). |
 | `--output <PATH>` | path | — | File path for `--sink file`. Required when the file sink is selected; rejected before any probe runs if missing. |
 | `--brokers <BROKERS>` | string list | — | Comma-separated Kafka brokers for `--sink kafka`. Requires the `kafka` build feature. |
@@ -75,7 +85,17 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` a
 | `-v`, `--verbose` | counter | — | See top-level flags above. |
 | `-q`, `--quiet` | flag | — | See top-level flags above. |
 
-The `--kafka-flush-per-record` and `--kafka-batch-threshold` flags are only present in the help output and the parser when the binary was built with `--features kafka`. The default build omits them entirely.
+The `--kafka-flush-per-record` and `--kafka-batch-threshold` flags are only present in the help output and the parser when the binary was built with `--features kafka`. The default build omits them entirely. The same holds for the per-prober parameters: `--snmp-community` and `--snmp-version` need `--features snmp`, `--http-path` needs `http`, `--icmp-count` needs `icmp`, and `--interface` needs `arp` or `ndp`.
+
+`--probe` and `--probe-ports` always accept every kind name, whatever the build. Naming a kind this binary was not built with fails with a message that says which Cargo feature is missing, so a typo and a missing feature never look the same:
+
+```text
+Error: configuration error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
+```
+
+Run `rastreo discover --help` for the full kind list with each kind's feature annotation.
+
+`--probe-ports` and each per-prober parameter configure specific probers. Supply one for a prober the run does not select and rastreo prints a note on stderr naming the flag, the kind, and the `--probe` value that would select it, rather than discarding the value in silence. See [Per-prober parameters](../discover/cli.md#per-prober-parameters).
 
 ## rastreo validate
 
@@ -112,18 +132,18 @@ Several CLI surfaces appear conditionally based on which Cargo features were ena
 
 | Feature | Default | Effect on CLI |
 |---|---|---|
-| `config` | yes | Enables YAML scenario-file parsing. Required for `rastreo discover --file <path>`. Without it, `--target` / `--port` remain the only discovery entry point. |
+| `config` | yes | Enables YAML scenario-file parsing. Required for `rastreo discover --file <path>`. Without it, the flag-driven form (`--target` + `--probe`) remains the only discovery entry point. |
 | `kafka` | no | Adds `kafka` as a valid value for `--sink`, plus the `--kafka-flush-per-record` and `--kafka-batch-threshold` flags. The default build does not include it; build with `cargo build --features kafka` to enable. |
 | `nats` | no | Enables the NATS JetStream sink. Configured only through YAML scenarios loaded via `--file` or the `POST /scans` body (`type: nats`); no dedicated CLI flags. Also available via `POST /scans`. |
-| `http` | no | Enables the HTTP prober. Accepted as `type: http` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
-| `snmp` | no | Enables the SNMP prober (v1 / v2c / v3 with USM). Accepted as `type: snmp` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
-| `arp` | no | Enables the ARP prober for IPv4 link-layer neighbor discovery. Requires `CAP_NET_RAW` at runtime. Accepted as `type: arp` in YAML scenarios loaded via `--file`. |
-| `ndp` | no | Enables the NDP prober for IPv6 link-layer neighbor discovery. Requires `CAP_NET_RAW` at runtime. Accepted as `type: ndp` in YAML scenarios loaded via `--file`. |
+| `http` | no | Enables the HTTP prober. Selected with `--probe http`, or as `type: http` in a YAML scenario. Also available via `POST /scans`. |
+| `snmp` | no | Enables the SNMP prober (v1 / v2c / v3 with USM), plus the `--snmp-community` and `--snmp-version` flags. Selected with `--probe snmp`, or as `type: snmp` in a YAML scenario. Also available via `POST /scans`. |
+| `arp` | no | Enables the ARP prober for IPv4 link-layer neighbor discovery, plus the `--interface` flag. Requires `CAP_NET_RAW` at runtime. Selected with `--probe arp`, or as `type: arp` in a YAML scenario. |
+| `ndp` | no | Enables the NDP prober for IPv6 link-layer neighbor discovery, plus the `--interface` flag. Requires `CAP_NET_RAW` at runtime. Selected with `--probe ndp`, or as `type: ndp` in a YAML scenario. |
 | `oui` | no | Enables the OUI vendor enrichment fuser. Accepted as `type: oui_enrichment` in the `fuser` block of YAML scenarios loaded via `--file`. |
-| `ssh` | no | Enables the SSH prober. Accepted as `type: ssh` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
-| `icmp` | no | Enables the ICMP Echo prober. Prefers unprivileged `SOCK_DGRAM` and falls back to `SOCK_RAW` (requires `CAP_NET_RAW`). Accepted as `type: icmp` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
-| `tls` | no | Enables the TLS handshake prober. Opens a TLS connection to each configured port, accepts any certificate (fingerprinting, not authentication), and emits the leaf certificate's Subject CN and Subject Alternative Names as `TlsSubject` / `TlsSanName` signals. Accepted as `type: tls` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
-| `gnmi` | no | Enables the gNMI prober for gRPC/gNMI device fingerprinting. Accepted as `type: gnmi` in YAML scenarios loaded via `--file`. Also available via `POST /scans`. |
+| `ssh` | no | Enables the SSH prober. Selected with `--probe ssh`, or as `type: ssh` in a YAML scenario. Also available via `POST /scans`. |
+| `icmp` | no | Enables the ICMP Echo prober, plus the `--icmp-count` flag. Prefers unprivileged `SOCK_DGRAM` and falls back to `SOCK_RAW` (requires `CAP_NET_RAW`). Selected with `--probe icmp`, or as `type: icmp` in a YAML scenario. Also available via `POST /scans`. |
+| `tls` | no | Enables the TLS handshake prober. Opens a TLS connection to each configured port, accepts any certificate (fingerprinting, not authentication), and emits the leaf certificate's Subject CN and Subject Alternative Names as `TlsSubject` / `TlsSanName` signals. Selected with `--probe tls`, or as `type: tls` in a YAML scenario. Also available via `POST /scans`. |
+| `gnmi` | no | Enables the gNMI prober for gRPC/gNMI device fingerprinting. Selected with `--probe gnmi`, or as `type: gnmi` in a YAML scenario. Credentials are YAML-only. Also available via `POST /scans`. |
 
 ## Exit codes
 

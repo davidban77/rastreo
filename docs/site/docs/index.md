@@ -46,7 +46,7 @@ One line on Linux or macOS. Docker and Cargo work too.
 === "Docker"
 
     ```bash
-    docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:latest discover --target 1.1.1.1 --port 443
+    docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:latest discover --target 1.1.1.1
     ```
 
 === "Cargo"
@@ -59,10 +59,10 @@ See [Install](get-started/install.md) for every path, including the Helm chart f
 
 ## Try it
 
-One command, no config file. Point rastreo at a host and a port:
+One command, no config file, no flags beyond the target:
 
 ```bash
-rastreo discover --target 1.1.1.1 --port 443
+rastreo discover --target 1.1.1.1
 ```
 
 It prints one record per device it finds, as a single line of JSON on stdout. The scan summary goes to stderr, so stdout stays clean for tools like `jq`.
@@ -70,7 +70,7 @@ It prints one record per device it finds, as a single line of JSON on stdout. Th
 === "Output"
 
     ```json
-    {"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"os_version":null,"role":null,"confidence":0.2,"last_seen":"2026-07-24T21:24:30.391132Z","signals":[{"OpenPort":443}],"probe_kinds":["TcpConnect"],"schema_version":"v1","schema_id":"https://davidban77.github.io/rastreo/schemas/device-record-v1.json","possible_alias_of":null,"scan_metadata":{"scan_id":"01KYB07Y0HVA3XEM0M15BK0038","scenario_name":null,"initiated_at":"2026-07-24T21:24:30.353748Z","source_config_hash":"sha256:7d980a397706ae764d9e92c5146a747a66d9f6ddde535f4994b37e074c3422a6"}}
+    {"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"os_version":null,"role":null,"confidence":1.0,"last_seen":"2026-07-26T23:28:06.581327Z","signals":[{"IcmpEchoRttMicros":16128},{"OpenPort":80},{"OpenPort":443},{"OpenPort":8080},{"HttpBanner":"cloudflare"},{"OpenPort":8443},{"TlsProtocolVersion":"TLSv1.3"},{"TlsCipherSuite":"TLS_AES_256_GCM_SHA384"},{"TlsAlpn":"h2"},{"TlsSubject":"cloudflare-dns.com"},{"TlsSanName":"cloudflare-dns.com"},{"TlsSanName":"*.cloudflare-dns.com"},{"TlsSanName":"ip:1.0.0.1"},{"TlsSanName":"ip:1.1.1.1"},{"TlsSanName":"ip:162.159.36.1"},{"TlsSanName":"ip:162.159.46.1"},{"TlsSanName":"ip:2606:4700:4700::1001"},{"TlsSanName":"ip:2606:4700:4700::1111"},{"TlsSanName":"ip:2606:4700:4700::64"},{"TlsSanName":"ip:2606:4700:4700::6400"},{"TlsSanName":"one.one.one.one"},{"ReverseDnsName":"one.one.one.one"}],"probe_kinds":["Icmp","TcpConnect","Http","Tls","ReverseDns"],"schema_version":"v1","schema_id":"https://davidban77.github.io/rastreo/schemas/device-record-v1.json","possible_alias_of":null,"scan_metadata":{"scan_id":"01KYGC3NE0253PQ008C94HFW13","scenario_name":null,"initiated_at":"2026-07-26T23:28:05.568266Z","source_config_hash":"sha256:4e688bf2179b5b97b79369e4fc15e69289b74371da9d84f0dd792b7d137393ba"}}
     ```
 
 === "Same record, expanded"
@@ -84,18 +84,41 @@ It prints one record per device it finds, as a single line of JSON on stdout. Th
       "platform": null,
       "os_version": null,
       "role": null,
-      "confidence": 0.2,
-      "last_seen": "2026-07-24T21:24:30.391132Z",
-      "signals": [ { "OpenPort": 443 } ],
-      "probe_kinds": [ "TcpConnect" ],
+      "confidence": 1.0,
+      "last_seen": "2026-07-26T23:28:06.581327Z",
+      "signals": [
+        { "IcmpEchoRttMicros": 16128 },
+        { "OpenPort": 80 },
+        { "OpenPort": 443 },
+        { "OpenPort": 8080 },
+        { "HttpBanner": "cloudflare" },
+        { "OpenPort": 8443 },
+        { "TlsProtocolVersion": "TLSv1.3" },
+        { "TlsCipherSuite": "TLS_AES_256_GCM_SHA384" },
+        { "TlsAlpn": "h2" },
+        { "TlsSubject": "cloudflare-dns.com" },
+        { "TlsSanName": "cloudflare-dns.com" },
+        { "TlsSanName": "*.cloudflare-dns.com" },
+        { "TlsSanName": "ip:1.0.0.1" },
+        { "TlsSanName": "ip:1.1.1.1" },
+        { "TlsSanName": "ip:162.159.36.1" },
+        { "TlsSanName": "ip:162.159.46.1" },
+        { "TlsSanName": "ip:2606:4700:4700::1001" },
+        { "TlsSanName": "ip:2606:4700:4700::1111" },
+        { "TlsSanName": "ip:2606:4700:4700::64" },
+        { "TlsSanName": "ip:2606:4700:4700::6400" },
+        { "TlsSanName": "one.one.one.one" },
+        { "ReverseDnsName": "one.one.one.one" }
+      ],
+      "probe_kinds": [ "Icmp", "TcpConnect", "Http", "Tls", "ReverseDns" ],
       "schema_version": "v1",
       "schema_id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
       "possible_alias_of": null,
       "scan_metadata": {
-        "scan_id": "01KYB07Y0HVA3XEM0M15BK0038",
+        "scan_id": "01KYGC3NE0253PQ008C94HFW13",
         "scenario_name": null,
-        "initiated_at": "2026-07-24T21:24:30.353748Z",
-        "source_config_hash": "sha256:7d980a397706ae764d9e92c5146a747a66d9f6ddde535f4994b37e074c3422a6"
+        "initiated_at": "2026-07-26T23:28:05.568266Z",
+        "source_config_hash": "sha256:4e688bf2179b5b97b79369e4fc15e69289b74371da9d84f0dd792b7d137393ba"
       }
     }
     ```
@@ -103,12 +126,12 @@ It prints one record per device it finds, as a single line of JSON on stdout. Th
 The banners on stderr confirm what ran:
 
 ```text
-▶ discover  targets: 1 | probes: tcp_connect (ports 22) | concurrency: 64 | timeout: 1000ms | sink: stdout
-■ discover  completed in 39ms | hosts: 1 | records: 1 | probes: 1 | faults: 0 | sink: stdout
+▶ discover  targets: 1 | probes: icmp (count 3, interval_ms 200), tcp_connect (ports 22, 23, 80, 443, 830, 8080), http (ports 80, 443, 8080, 8443), ssh (ports 22), tls (ports 443), snmp (ports 161, V2c), reverse_dns (system resolvers) | concurrency: 64 | timeout: 1000ms | sink: stdout
+■ discover  completed in 1.0s | hosts: 1 | records: 1 | probes: 7 | faults: 0 | sink: stdout
 ```
 
 !!! info "Why some fields are empty"
-    This scan used a single prober, a plain TCP connect, so it reports only an open port. Add more probers, and rastreo fills in the MAC address, vendor, platform, and role. See [Probe](probe/index.md) and [Enrichment](discover/enrichment.md).
+    With no `--probe` flag, rastreo runs its default probe set — seven probers on a release binary. `mac` needs a target on the local segment, `manufacturer` needs that MAC, and `platform` and `role` need banners that match a classification rule. Point the same command at a switch or a router and they fill in. See [Probe](probe/index.md) and [Enrichment](discover/enrichment.md).
 
 ## What you can do with it
 

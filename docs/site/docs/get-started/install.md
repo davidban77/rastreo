@@ -30,7 +30,7 @@ docker pull ghcr.io/davidban77/rastreo:latest
 The image is multi-arch (linux amd64 + arm64) and ships both binaries. The default `ENTRYPOINT` is `rastreo-server` (port 8080); override to run the CLI:
 
 ```bash
-docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:latest discover --target 1.1.1.1 --port 443
+docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:latest discover --target 1.1.1.1
 ```
 
 Pinned tags (`X.Y.Z`, `X.Y`, `X`) are available on every release. See [Docker](../deploy/docker.md) for the full surface.
@@ -63,7 +63,7 @@ When you are changing rastreo itself, build the whole workspace and run the debu
 ```bash
 cargo build --workspace
 ./target/debug/rastreo --version
-./target/debug/rastreo discover --target 1.1.1.1 --port 443
+./target/debug/rastreo discover --target 1.1.1.1
 ```
 
 ## Verify the install

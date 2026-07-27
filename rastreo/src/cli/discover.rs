@@ -11,13 +11,19 @@ use ipnet::IpNet;
 #[cfg(feature = "config")]
 use rastreo_core::config::{parse_scenario_file, ScenarioEntry, ScenarioFile, ScenarioKind};
 use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig, MAX_RETRIES};
+#[cfg(feature = "snmp")]
+use rastreo_core::prober::Community;
+use rastreo_core::prober::{
+    apply_runnability_filter, consumes_shared_ports, expand_probe_selection, is_compiled_in,
+    parse_probe_selection, required_feature, ProbeSelectionOptions,
+};
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
     resolve_scenario_targets, run_discovery, CheckpointConfig, ConfigError, DiscoveryPlan,
-    DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs, ProberConfig, RastreoError,
+    DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs, ProbeKind, RastreoError,
     ResolvedScenarioTarget, RunOptions, SinkConfig, Target,
 };
 use tokio::sync::watch;
@@ -28,9 +34,12 @@ use super::output::{
     ScenarioTally,
 };
 use super::output::{
-    enrich_scan_error_hint, print_complete, print_hint, print_runtime_hints, print_start,
-    progress_display_loop, Verbosity,
+    enrich_scan_error_hint, print_complete, print_hint, print_note, print_runtime_hints,
+    print_start, progress_display_loop, rebuild_hint, Verbosity,
 };
+#[cfg(feature = "snmp")]
+use super::probe_args::SnmpVersionArg;
+use super::probe_args::{parse_probe_ports, DnsQueryTypeArg, UdpProtocolArg, PROBE_LONG_HELP};
 
 const FLAG_DRIVEN_LABEL: &str = "discover";
 const DEFAULT_CONCURRENCY: u32 = 64;
@@ -48,26 +57,94 @@ pub struct DiscoverArgs {
     #[cfg_attr(not(feature = "config"), arg(long, num_args = 1.., required = true))]
     pub target: Vec<String>,
 
-    /// Port to probe. Repeat or comma-separate for multiple.
+    /// Ports for probers with no well-known port (tcp_connect, http, udp). Probers with a
+    /// standard port (dns 53, snmp 161, ssh 22, tls 443, gnmi 57400) are unaffected — override
+    /// those with --probe-ports. Omit for the built-in defaults; use --dry-run to confirm.
     #[cfg_attr(
         feature = "config",
-        arg(
-            short,
-            long,
-            value_delimiter = ',',
-            required_unless_present = "file",
-            conflicts_with = "file"
-        )
+        arg(short, long, value_delimiter = ',', conflicts_with = "file")
+    )]
+    #[cfg_attr(not(feature = "config"), arg(short, long, value_delimiter = ','))]
+    pub port: Vec<u16>,
+
+    /// Probe kinds to run, comma-separated. Omit to run the default set.
+    #[cfg_attr(
+        feature = "config",
+        arg(long, value_delimiter = ',', conflicts_with = "file")
+    )]
+    #[cfg_attr(not(feature = "config"), arg(long, value_delimiter = ','))]
+    #[arg(long_help = PROBE_LONG_HELP)]
+    pub probe: Vec<String>,
+
+    /// Per-prober port override: --probe-ports snmp=1161 --probe-ports http=8080,8443
+    #[cfg_attr(
+        feature = "config",
+        arg(long, value_parser = parse_probe_ports, conflicts_with = "file")
+    )]
+    #[cfg_attr(not(feature = "config"), arg(long, value_parser = parse_probe_ports))]
+    pub probe_ports: Vec<(ProbeKind, Vec<u16>)>,
+
+    /// UDP service to fingerprint. Required when --probe udp is selected.
+    #[cfg_attr(feature = "config", arg(long, value_enum, conflicts_with = "file"))]
+    #[cfg_attr(not(feature = "config"), arg(long, value_enum))]
+    pub udp_protocol: Option<UdpProtocolArg>,
+
+    /// Name to look up against each target. Required when --probe dns is selected. Repeat or comma-separate for multiple.
+    #[cfg_attr(
+        feature = "config",
+        arg(long, value_delimiter = ',', conflicts_with = "file")
+    )]
+    #[cfg_attr(not(feature = "config"), arg(long, value_delimiter = ','))]
+    pub dns_query: Vec<String>,
+
+    /// Record type for --dns-query. Defaults to A.
+    #[cfg_attr(feature = "config", arg(long, value_enum, conflicts_with = "file"))]
+    #[cfg_attr(not(feature = "config"), arg(long, value_enum))]
+    pub dns_query_type: Option<DnsQueryTypeArg>,
+
+    /// SNMP read community, also read from RASTREO_SNMP_COMMUNITY. Prefer the environment
+    /// variable — a flag value is visible in `ps`.
+    #[cfg(feature = "snmp")]
+    #[cfg_attr(
+        feature = "config",
+        arg(long, value_parser = parse_community, conflicts_with = "file")
+    )]
+    #[cfg_attr(not(feature = "config"), arg(long, value_parser = parse_community))]
+    pub snmp_community: Option<Community>,
+
+    /// SNMP protocol version. Defaults to v2c.
+    #[cfg(feature = "snmp")]
+    #[cfg_attr(feature = "config", arg(long, value_enum, conflicts_with = "file"))]
+    #[cfg_attr(not(feature = "config"), arg(long, value_enum))]
+    pub snmp_version: Option<SnmpVersionArg>,
+
+    /// Request path for the HTTP prober. Defaults to /.
+    #[cfg(feature = "http")]
+    #[cfg_attr(feature = "config", arg(long, conflicts_with = "file"))]
+    #[cfg_attr(not(feature = "config"), arg(long))]
+    pub http_path: Option<String>,
+
+    /// Echo requests per target for the ICMP prober. Defaults to 3.
+    #[cfg(feature = "icmp")]
+    #[cfg_attr(
+        feature = "config",
+        arg(long, value_parser = clap::value_parser!(u32).range(1..), conflicts_with = "file")
     )]
     #[cfg_attr(
         not(feature = "config"),
-        arg(short, long, value_delimiter = ',', required = true)
+        arg(long, value_parser = clap::value_parser!(u32).range(1..))
     )]
-    pub port: Vec<u16>,
+    pub icmp_count: Option<u32>,
+
+    /// Network interface the ARP and NDP probers send from.
+    #[cfg(any(feature = "arp", feature = "ndp"))]
+    #[cfg_attr(feature = "config", arg(long, conflicts_with = "file"))]
+    #[cfg_attr(not(feature = "config"), arg(long))]
+    pub interface: Option<String>,
 
     /// YAML scenario file to load, or `@name` to resolve a scenario from the catalog
-    /// directories (see the CLI docs for search order). When present, --target and
-    /// --port are not permitted; each scenario in the file is executed in order.
+    /// directories (see the CLI docs for search order). When present, none of the
+    /// flag-driven scan arguments are permitted; each scenario in the file is executed in order.
     #[cfg(feature = "config")]
     #[arg(short = 'f', long)]
     pub file: Option<PathBuf>,
@@ -136,6 +213,12 @@ pub struct DiscoverArgs {
     pub resume: bool,
 }
 
+// Typed at the clap boundary so the plaintext never reaches a `{args:?}` render.
+#[cfg(feature = "snmp")]
+fn parse_community(raw: &str) -> Result<Community, String> {
+    Ok(Community(raw.to_string()))
+}
+
 fn parse_checkpoint_interval(s: &str) -> Result<usize, String> {
     match s.parse::<usize>() {
         Ok(n) if n >= 1 => Ok(n),
@@ -193,10 +276,8 @@ async fn run_dry_run(args: &DiscoverArgs, verbosity: Verbosity) -> Result<()> {
     if args.file.is_some() {
         return run_dry_run_from_file(args, &resolver, verbosity).await;
     }
-    #[cfg(not(feature = "config"))]
-    let _ = verbosity;
 
-    let scenario = build_scenario(args)?;
+    let scenario = scenario_from_flags(args, verbosity)?;
     let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
     let plan = build_scenario_plan("discovery", &scenario, &resolutions, args);
     render_dry_run(&[plan], args.dry_run_format)?;
@@ -419,7 +500,7 @@ async fn run_legacy(
     cancel: watch::Receiver<bool>,
     verbosity: Verbosity,
 ) -> Result<()> {
-    let scenario = build_scenario(args)?;
+    let scenario = scenario_from_flags(args, verbosity)?;
     // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
     print_start(
         &build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, &[], args),
@@ -679,7 +760,12 @@ pub(crate) fn scenario_label(base: &BaseProbeConfig, idx: usize, total: usize) -
     }
 }
 
-pub(crate) fn build_scenario(args: &DiscoverArgs) -> Result<DiscoverScenarioConfig> {
+#[cfg(test)]
+fn build_scenario(args: &DiscoverArgs) -> Result<DiscoverScenarioConfig> {
+    build_scenario_with_notes(args).map(|(scenario, _)| scenario)
+}
+
+fn build_scenario_with_notes(args: &DiscoverArgs) -> Result<(DiscoverScenarioConfig, Vec<String>)> {
     let targets: Vec<Target> = args
         .target
         .iter()
@@ -689,9 +775,10 @@ pub(crate) fn build_scenario(args: &DiscoverArgs) -> Result<DiscoverScenarioConf
     let sink_kind = args.sink.unwrap_or(SinkKind::Stdout);
     let sink_config = build_sink_config_for_kind(sink_kind, args)?;
 
-    let probers = vec![ProberConfig::TcpConnect {
-        ports: args.port.clone(),
-    }];
+    let selected = select_probe_kinds(args)?;
+    reject_uncompiled_probe_ports(args)?;
+    let probers = expand_probe_selection(&selected.kinds, &probe_options(args))?;
+    let notes = selection_notes(args, &selected);
 
     let mut base = BaseProbeConfig::new();
     base.max_concurrent = Some(args.concurrency.unwrap_or(DEFAULT_CONCURRENCY));
@@ -700,7 +787,340 @@ pub(crate) fn build_scenario(args: &DiscoverArgs) -> Result<DiscoverScenarioConf
     base.timeout_ms = Some(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
     base.sink = Some(sink_config);
 
-    Ok(DiscoverScenarioConfig::new(base, targets, probers))
+    Ok((DiscoverScenarioConfig::new(base, targets, probers), notes))
+}
+
+fn scenario_from_flags(
+    args: &DiscoverArgs,
+    verbosity: Verbosity,
+) -> Result<DiscoverScenarioConfig> {
+    match build_scenario_with_notes(args) {
+        Ok((scenario, notes)) => {
+            for note in &notes {
+                print_note(note, verbosity);
+            }
+            Ok(scenario)
+        }
+        Err(err) => {
+            if let Some(hint) = probe_selection_hint(&err) {
+                print_hint(&hint, verbosity);
+            }
+            Err(err)
+        }
+    }
+}
+
+const DEFAULT_PROBE_TOKEN: &str = "default";
+
+struct SelectedProbes {
+    kinds: Vec<ProbeKind>,
+    dropped: Vec<ProbeKind>,
+}
+
+fn select_probe_kinds(args: &DiscoverArgs) -> Result<SelectedProbes, RastreoError> {
+    select_probe_kinds_with(args, probe_is_runnable)
+}
+
+// An absent --probe is spelled `default` so the two paths cannot diverge.
+fn select_probe_kinds_with(
+    args: &DiscoverArgs,
+    runnable: impl Fn(ProbeKind) -> bool,
+) -> Result<SelectedProbes, RastreoError> {
+    let implied = [DEFAULT_PROBE_TOKEN.to_string()];
+    let values: &[String] = if args.probe.is_empty() {
+        &implied
+    } else {
+        &args.probe
+    };
+
+    let selection = parse_probe_selection(values)?;
+    let defaulted = selection.defaulted.clone();
+    let kinds = apply_runnability_filter(selection, runnable);
+    let dropped = defaulted
+        .into_iter()
+        .filter(|kind| !kinds.contains(kind))
+        .collect();
+    Ok(SelectedProbes { kinds, dropped })
+}
+
+fn probe_is_runnable(kind: ProbeKind) -> bool {
+    runnability_check(kind).is_none_or(|check| check())
+}
+
+// `_ => None`: a kind core later gives a precondition reads as runnable until an arm lands here.
+fn runnability_check(kind: ProbeKind) -> Option<fn() -> bool> {
+    match kind {
+        #[cfg(feature = "icmp")]
+        ProbeKind::Icmp => Some(rastreo_core::IcmpProber::is_runnable),
+        _ => None,
+    }
+}
+
+fn reject_uncompiled_probe_ports(args: &DiscoverArgs) -> Result<(), RastreoError> {
+    match args
+        .probe_ports
+        .iter()
+        .find(|(kind, _)| !is_compiled_in(*kind))
+    {
+        Some((kind, _)) => Err(ConfigError::ProbeKindNotCompiled {
+            kind: kind.label(),
+            feature: required_feature(*kind).unwrap_or(kind.label()),
+        }
+        .into()),
+        None => Ok(()),
+    }
+}
+
+fn probe_options(args: &DiscoverArgs) -> ProbeSelectionOptions {
+    let mut options = ProbeSelectionOptions::default();
+    options.ports.clone_from(&args.port);
+    options.ports_by_kind = args.probe_ports.iter().cloned().collect();
+    options.dns_query_names.clone_from(&args.dns_query);
+    options.udp_protocol = args.udp_protocol.map(Into::into);
+    if let Some(query_type) = args.dns_query_type {
+        options.dns_query_type = query_type.into();
+    }
+    #[cfg(feature = "snmp")]
+    {
+        if let Some(community) = snmp_community(args) {
+            options.snmp_community = community;
+        }
+        if let Some(version) = args.snmp_version {
+            options.snmp_version = version.into();
+        }
+    }
+    #[cfg(feature = "http")]
+    if let Some(path) = &args.http_path {
+        options.http_path = path.clone();
+    }
+    #[cfg(feature = "icmp")]
+    if let Some(count) = args.icmp_count {
+        options.icmp_count = count;
+    }
+    #[cfg(any(feature = "arp", feature = "ndp"))]
+    if let Some(interface) = &args.interface {
+        options.interface = interface.clone();
+    }
+    options
+}
+
+#[cfg(feature = "snmp")]
+const SNMP_COMMUNITY_ENV: &str = "RASTREO_SNMP_COMMUNITY";
+
+// Read here rather than through clap's `env`, because clap counts an env-sourced value as
+// present and would reject every --file run made from a shell that exports the variable.
+#[cfg(feature = "snmp")]
+fn snmp_community(args: &DiscoverArgs) -> Option<Community> {
+    args.snmp_community
+        .clone()
+        .or_else(|| std::env::var(SNMP_COMMUNITY_ENV).ok().map(Community))
+        .filter(|community| !community.is_empty())
+}
+
+fn probe_selection_hint(err: &anyhow::Error) -> Option<String> {
+    match err.downcast_ref::<RastreoError>()? {
+        RastreoError::Config(ConfigError::ProbeKindNotCompiled { kind, feature }) => {
+            Some(rebuild_hint(kind, feature))
+        }
+        RastreoError::Config(ConfigError::ProbeKindMissingParam { kind, .. }) => {
+            missing_param_flag(kind)
+                .map(|flag| format!("pass {flag} to give '{kind}' the parameter it needs."))
+        }
+        _ => None,
+    }
+}
+
+fn missing_param_flag(kind: &str) -> Option<&'static str> {
+    match kind {
+        "udp" => Some("--udp-protocol <PROTOCOL>"),
+        "dns" => Some("--dns-query <NAME>"),
+        _ => None,
+    }
+}
+
+/// A flag whose only job is to parameterise specific probe kinds; inert when none of them run.
+struct ParameterFlag {
+    flag: String,
+    consumers: Vec<ProbeKind>,
+    supplied: bool,
+}
+
+impl ParameterFlag {
+    fn new(flag: String, consumers: &[ProbeKind], supplied: bool) -> Self {
+        Self {
+            flag,
+            consumers: consumers
+                .iter()
+                .copied()
+                .filter(|kind| is_compiled_in(*kind))
+                .collect(),
+            supplied,
+        }
+    }
+}
+
+#[cfg(feature = "snmp")]
+const SNMP_PARAMETER_READERS: &[ProbeKind] = &[ProbeKind::Snmp, ProbeKind::Lldp];
+
+fn parameter_flags(args: &DiscoverArgs) -> Vec<ParameterFlag> {
+    let mut flags = vec![
+        ParameterFlag::new(
+            "--udp-protocol".to_string(),
+            &[ProbeKind::Udp],
+            args.udp_protocol.is_some(),
+        ),
+        ParameterFlag::new(
+            "--dns-query".to_string(),
+            &[ProbeKind::Dns],
+            !args.dns_query.is_empty(),
+        ),
+        ParameterFlag::new(
+            "--dns-query-type".to_string(),
+            &[ProbeKind::Dns],
+            args.dns_query_type.is_some(),
+        ),
+    ];
+    #[cfg(feature = "snmp")]
+    {
+        flags.push(ParameterFlag::new(
+            "--snmp-community".to_string(),
+            SNMP_PARAMETER_READERS,
+            args.snmp_community.is_some(),
+        ));
+        flags.push(ParameterFlag::new(
+            "--snmp-version".to_string(),
+            SNMP_PARAMETER_READERS,
+            args.snmp_version.is_some(),
+        ));
+    }
+    #[cfg(feature = "http")]
+    flags.push(ParameterFlag::new(
+        "--http-path".to_string(),
+        &[ProbeKind::Http],
+        args.http_path.is_some(),
+    ));
+    #[cfg(feature = "icmp")]
+    flags.push(ParameterFlag::new(
+        "--icmp-count".to_string(),
+        &[ProbeKind::Icmp],
+        args.icmp_count.is_some(),
+    ));
+    #[cfg(any(feature = "arp", feature = "ndp"))]
+    flags.push(ParameterFlag::new(
+        "--interface".to_string(),
+        &[ProbeKind::Arp, ProbeKind::Ndp],
+        args.interface.is_some(),
+    ));
+    for (kind, ports) in &args.probe_ports {
+        flags.push(ParameterFlag::new(
+            format!("--probe-ports {}={}", kind.label(), join_ports(ports)),
+            &[*kind],
+            true,
+        ));
+    }
+    flags
+}
+
+fn unused_parameter_notes(args: &DiscoverArgs, selected: &[ProbeKind]) -> Vec<String> {
+    parameter_flags(args)
+        .iter()
+        .filter(|flag| {
+            flag.supplied
+                && !flag
+                    .consumers
+                    .iter()
+                    .any(|consumer| selected.contains(consumer))
+        })
+        .map(unused_flag_note)
+        .collect()
+}
+
+fn unused_flag_note(flag: &ParameterFlag) -> String {
+    format!(
+        "{} had no effect — no {} probe in this run. Add {}.",
+        flag.flag,
+        join_or(flag.consumers.iter().map(|kind| kind.label().to_string())),
+        join_or(
+            flag.consumers
+                .iter()
+                .map(|kind| format!("--probe {}", kind.label()))
+        ),
+    )
+}
+
+fn join_or(parts: impl Iterator<Item = String>) -> String {
+    parts.collect::<Vec<_>>().join(" or ")
+}
+
+fn join_ports(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn selection_notes(args: &DiscoverArgs, selected: &SelectedProbes) -> Vec<String> {
+    let mut notes: Vec<String> = selected
+        .dropped
+        .iter()
+        .map(|kind| dropped_kind_note(*kind))
+        .collect();
+    notes.extend(unused_parameter_notes(args, &selected.kinds));
+
+    if args.port.is_empty() {
+        return notes;
+    }
+
+    let (port_takers, others): (Vec<ProbeKind>, Vec<ProbeKind>) = selected
+        .kinds
+        .iter()
+        .partition(|kind| consumes_shared_ports(**kind));
+
+    if port_takers.is_empty() {
+        notes.push(unused_port_note(&others));
+    } else if args.probe.is_empty() && !others.is_empty() {
+        notes.push(port_scope_note(&port_takers, &others));
+    }
+    notes
+}
+
+fn dropped_kind_note(kind: ProbeKind) -> String {
+    format!(
+        "{label} dropped from the default set — {reason}. Run with --probe {label} to attempt it anyway.",
+        label = kind.label(),
+        reason = unrunnable_reason(kind)
+    )
+}
+
+fn unrunnable_reason(kind: ProbeKind) -> &'static str {
+    match kind {
+        ProbeKind::Icmp => "cannot open an ICMP socket here",
+        _ => "its runtime precondition is not met here",
+    }
+}
+
+fn port_scope_note(port_takers: &[ProbeKind], others: &[ProbeKind]) -> String {
+    format!(
+        "--port applies to {}; the default probe set also runs {}. Use --probe tcp_connect for a port-only scan.",
+        labels(port_takers),
+        labels(others)
+    )
+}
+
+fn unused_port_note(kinds: &[ProbeKind]) -> String {
+    format!(
+        "--port had no effect — none of the selected probes ({}) read a shared port list. Use --probe-ports <kind>=<port> to retarget one.",
+        labels(kinds)
+    )
+}
+
+fn labels(kinds: &[ProbeKind]) -> String {
+    kinds
+        .iter()
+        .map(|kind| kind.label())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn build_sink_config_for_kind(kind: SinkKind, args: &DiscoverArgs) -> Result<SinkConfig> {
@@ -777,12 +1197,28 @@ pub(crate) fn parse_target(input: &str) -> Result<Target, ConfigError> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use rastreo_core::ProberConfig;
     use std::net::Ipv4Addr;
 
     fn args(target: &[&str], port: &[u16]) -> DiscoverArgs {
         DiscoverArgs {
             target: target.iter().map(|s| s.to_string()).collect(),
             port: port.to_vec(),
+            probe: Vec::new(),
+            probe_ports: Vec::new(),
+            udp_protocol: None,
+            dns_query: Vec::new(),
+            dns_query_type: None,
+            #[cfg(feature = "snmp")]
+            snmp_community: None,
+            #[cfg(feature = "snmp")]
+            snmp_version: None,
+            #[cfg(feature = "http")]
+            http_path: None,
+            #[cfg(feature = "icmp")]
+            icmp_count: None,
+            #[cfg(any(feature = "arp", feature = "ndp"))]
+            interface: None,
             #[cfg(feature = "config")]
             file: None,
             sink: None,
@@ -803,6 +1239,12 @@ mod tests {
             checkpoint_interval: None,
             resume: false,
         }
+    }
+
+    fn tcp_args(target: &[&str], port: &[u16]) -> DiscoverArgs {
+        let mut a = args(target, port);
+        a.probe = vec!["tcp_connect".to_string()];
+        a
     }
 
     #[test]
@@ -889,7 +1331,7 @@ mod tests {
 
     #[test]
     fn build_scenario_with_stdout_sink_produces_expected_shape() {
-        let a = args(&["10.0.0.1"], &[22, 80]);
+        let a = tcp_args(&["10.0.0.1"], &[22, 80]);
         let scenario = build_scenario(&a).expect("scenario");
         assert_eq!(scenario.targets.len(), 1);
         assert_eq!(scenario.probers.len(), 1);
@@ -1602,7 +2044,7 @@ mod tests {
 
     #[tokio::test]
     async fn render_dry_run_json_emits_array_of_one_plan() {
-        let mut a = args(&["127.0.0.1"], &[22]);
+        let mut a = tcp_args(&["127.0.0.1"], &[22]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
@@ -1654,7 +2096,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_flag_driven_prints_plan_and_exits_ok() {
-        let mut a = args(&["127.0.0.1"], &[22, 80]);
+        let mut a = tcp_args(&["127.0.0.1"], &[22, 80]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
@@ -1709,7 +2151,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_cidr_expansion_above_cutoff_uses_ellipsis_with_count() {
-        let mut a = args(&["10.0.0.0/24"], &[22]);
+        let mut a = tcp_args(&["10.0.0.0/24"], &[22]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
@@ -1853,7 +2295,7 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_single_scenario_now_prints_total_probes_footer() {
-        let mut a = args(&["127.0.0.1"], &[22]);
+        let mut a = tcp_args(&["127.0.0.1"], &[22]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
@@ -1940,7 +2382,7 @@ scenarios:
 
     #[tokio::test]
     async fn dry_run_probe_count_deduplicates_overlapping_ips() {
-        let mut a = args(&["10.0.0.1", "10.0.0.0/29"], &[22]);
+        let mut a = tcp_args(&["10.0.0.1", "10.0.0.0/29"], &[22]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
@@ -1951,5 +2393,861 @@ scenarios:
         assert_eq!(probes, 6, "expected deduped unique-IP count, got {probes}");
         // Per-target lines still show duplicates verbatim — dedup is only for the total.
         assert!(out.contains("10.0.0.1 → 10.0.0.1"), "{out}");
+    }
+
+    fn prober_kinds(scenario: &DiscoverScenarioConfig) -> Vec<ProbeKind> {
+        scenario
+            .probers
+            .iter()
+            .map(|config| {
+                rastreo_core::prober::create_prober(config)
+                    .expect("the factory accepts every expanded config")
+                    .kind()
+            })
+            .collect()
+    }
+
+    fn kinds_for(a: &DiscoverArgs) -> Vec<ProbeKind> {
+        prober_kinds(&build_scenario(a).expect("scenario"))
+    }
+
+    fn ports_of(scenario: &DiscoverScenarioConfig, wanted: ProbeKind) -> Vec<u16> {
+        let plan = DiscoveryPlan::new(
+            "s".to_string(),
+            scenario,
+            &[],
+            PlanKnobs {
+                max_concurrent: 1,
+                probe_rate: None,
+                retries: 0,
+                timeout_ms: 1,
+            },
+        );
+        let rendered = plan
+            .probers
+            .iter()
+            .find(|line| line.starts_with(&format!("{} (", wanted.label())))
+            .unwrap_or_else(|| panic!("no {} prober in {:?}", wanted.label(), plan.probers))
+            .clone();
+        let inner = rendered
+            .split_once("ports ")
+            .unwrap_or_else(|| panic!("no port list in {rendered}"))
+            .1;
+        inner
+            .trim_end_matches(')')
+            .split(&[',', ' '][..])
+            .filter(|token| !token.is_empty())
+            .map_while(|token| token.parse::<u16>().ok())
+            .collect()
+    }
+
+    #[test]
+    fn port_is_no_longer_required_without_a_file() {
+        let parsed = DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1"])
+            .expect("--target alone must parse");
+        assert!(parsed.port.is_empty());
+        assert!(parsed.probe.is_empty());
+    }
+
+    #[test]
+    fn omitting_probe_runs_the_zero_config_default_set() {
+        let kinds = kinds_for(&args(&["10.0.0.1"], &[]));
+        assert!(kinds.contains(&ProbeKind::TcpConnect), "{kinds:?}");
+        assert!(kinds.contains(&ProbeKind::ReverseDns), "{kinds:?}");
+        for excluded in [
+            ProbeKind::Udp,
+            ProbeKind::Dns,
+            ProbeKind::Arp,
+            ProbeKind::Ndp,
+            ProbeKind::Lldp,
+            ProbeKind::Gnmi,
+        ] {
+            assert!(
+                !kinds.contains(&excluded),
+                "{} must not default on: {kinds:?}",
+                excluded.label()
+            );
+        }
+    }
+
+    #[test]
+    fn probe_default_selects_exactly_what_omitting_the_flag_selects() {
+        let mut explicit = args(&["10.0.0.1"], &[]);
+        explicit.probe = vec!["default".to_string()];
+        assert_eq!(kinds_for(&explicit), kinds_for(&args(&["10.0.0.1"], &[])));
+    }
+
+    #[test]
+    fn naming_a_default_kind_before_or_after_default_yields_the_same_run() {
+        let mut before = args(&["10.0.0.1"], &[]);
+        before.probe = vec!["default".to_string(), "tcp_connect".to_string()];
+        let mut after = args(&["10.0.0.1"], &[]);
+        after.probe = vec!["tcp_connect".to_string(), "default".to_string()];
+        assert_eq!(kinds_for(&before), kinds_for(&after));
+        assert!(kinds_for(&before).contains(&ProbeKind::TcpConnect));
+    }
+
+    #[test]
+    fn a_named_kind_outside_the_default_set_is_added_to_it() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["default".to_string(), "udp".to_string()];
+        a.udp_protocol = Some(UdpProtocolArg::Ntp);
+        let kinds = kinds_for(&a);
+        assert_eq!(kinds.first(), Some(&ProbeKind::Udp), "{kinds:?}");
+        assert!(kinds.contains(&ProbeKind::TcpConnect), "{kinds:?}");
+    }
+
+    #[test]
+    fn shared_ports_retarget_tcp_connect() {
+        let mut a = args(&["10.0.0.1"], &[9100]);
+        a.probe = vec!["tcp_connect".to_string()];
+        let scenario = build_scenario(&a).expect("scenario");
+        assert_eq!(ports_of(&scenario, ProbeKind::TcpConnect), vec![9100]);
+    }
+
+    #[test]
+    fn shared_ports_leave_a_protocol_pinned_prober_on_its_own_port() {
+        let mut a = args(&["10.0.0.1"], &[1161]);
+        a.probe = vec!["dns".to_string()];
+        a.dns_query = vec!["example.com.".to_string()];
+        let scenario = build_scenario(&a).expect("scenario");
+        assert_eq!(ports_of(&scenario, ProbeKind::Dns), vec![53]);
+    }
+
+    #[test]
+    fn a_per_kind_override_retargets_a_protocol_pinned_prober() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["dns".to_string()];
+        a.dns_query = vec!["example.com.".to_string()];
+        a.probe_ports = vec![(ProbeKind::Dns, vec![5353])];
+        let scenario = build_scenario(&a).expect("scenario");
+        assert_eq!(ports_of(&scenario, ProbeKind::Dns), vec![5353]);
+    }
+
+    #[test]
+    fn a_per_kind_override_beats_the_shared_port_list() {
+        let mut a = args(&["10.0.0.1"], &[9100]);
+        a.probe = vec!["tcp_connect".to_string()];
+        a.probe_ports = vec![(ProbeKind::TcpConnect, vec![2222])];
+        let scenario = build_scenario(&a).expect("scenario");
+        assert_eq!(ports_of(&scenario, ProbeKind::TcpConnect), vec![2222]);
+    }
+
+    #[test]
+    fn an_unknown_probe_kind_is_rejected_and_lists_what_this_build_offers() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["nonsense".to_string()];
+        let err = build_scenario(&a).expect_err("unknown kind");
+        assert!(matches!(
+            err.downcast_ref::<RastreoError>(),
+            Some(RastreoError::Config(ConfigError::UnknownProbeKind { .. }))
+        ));
+        assert!(format!("{err}").contains("tcp_connect"), "err: {err}");
+    }
+
+    #[test]
+    fn udp_without_a_protocol_is_rejected_before_any_probe() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["udp".to_string()];
+        let err = build_scenario(&a).expect_err("udp needs a protocol");
+        assert!(matches!(
+            err.downcast_ref::<RastreoError>(),
+            Some(RastreoError::Config(ConfigError::ProbeKindMissingParam {
+                kind: "udp",
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn dns_without_a_query_name_is_rejected_before_any_probe() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["dns".to_string()];
+        let err = build_scenario(&a).expect_err("dns needs a query name");
+        assert!(matches!(
+            err.downcast_ref::<RastreoError>(),
+            Some(RastreoError::Config(ConfigError::ProbeKindMissingParam {
+                kind: "dns",
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn the_missing_param_hint_names_the_flag_core_deliberately_does_not() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["udp".to_string()];
+        let err = build_scenario(&a).expect_err("udp needs a protocol");
+        assert!(
+            !format!("{err}").contains("--udp-protocol"),
+            "core must stay flag-agnostic: {err}"
+        );
+        let hint = probe_selection_hint(&err).expect("hint");
+        assert!(hint.contains("--udp-protocol"), "hint: {hint}");
+    }
+
+    #[test]
+    fn the_dns_missing_param_hint_names_the_query_flag() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["dns".to_string()];
+        let hint =
+            probe_selection_hint(&build_scenario(&a).expect_err("dns needs a name")).expect("hint");
+        assert!(hint.contains("--dns-query"), "hint: {hint}");
+    }
+
+    #[test]
+    fn the_not_compiled_hint_names_the_feature_and_the_rebuild_route() {
+        let err = anyhow::Error::new(RastreoError::Config(ConfigError::ProbeKindNotCompiled {
+            kind: "gnmi",
+            feature: "gnmi",
+        }));
+        let hint = probe_selection_hint(&err).expect("hint");
+        assert!(hint.contains("--features gnmi"), "hint: {hint}");
+        assert!(hint.contains("Docker image"), "hint: {hint}");
+    }
+
+    #[test]
+    fn an_unknown_kind_gets_no_hint_because_the_error_already_lists_the_options() {
+        let err = anyhow::Error::new(RastreoError::Config(ConfigError::UnknownProbeKind {
+            name: "nonsense".into(),
+            available: "tcp_connect".into(),
+        }));
+        assert!(probe_selection_hint(&err).is_none());
+    }
+
+    #[test]
+    fn a_non_selection_error_gets_no_selection_hint() {
+        assert!(probe_selection_hint(&anyhow!("--sink file requires --output <path>")).is_none());
+    }
+
+    #[test]
+    fn a_kind_with_no_runtime_precondition_is_always_runnable() {
+        assert!(runnability_check(ProbeKind::TcpConnect).is_none());
+        assert!(probe_is_runnable(ProbeKind::TcpConnect));
+        assert!(runnability_check(ProbeKind::ReverseDns).is_none());
+        assert!(probe_is_runnable(ProbeKind::ReverseDns));
+    }
+
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn icmp_declares_a_runnability_check() {
+        assert!(
+            runnability_check(ProbeKind::Icmp).is_some(),
+            "icmp must be checked against the prober's own capability probe"
+        );
+    }
+
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn icmp_runnability_is_the_probers_own_capability_check() {
+        assert_eq!(
+            probe_is_runnable(ProbeKind::Icmp),
+            rastreo_core::IcmpProber::is_runnable()
+        );
+    }
+
+    #[test]
+    fn the_selection_honours_the_runnability_predicate() {
+        let expected = apply_runnability_filter(
+            parse_probe_selection(&[DEFAULT_PROBE_TOKEN.to_string()]).expect("parses"),
+            |_| false,
+        );
+        let selected =
+            select_probe_kinds_with(&args(&["10.0.0.1"], &[]), |_| false).expect("selects");
+        assert_eq!(selected.kinds, expected);
+    }
+
+    #[test]
+    fn dropped_holds_every_default_kind_the_predicate_rejected() {
+        let expected: Vec<ProbeKind> = rastreo_core::prober::default_probe_kinds()
+            .into_iter()
+            .filter(|kind| {
+                !apply_runnability_filter(
+                    parse_probe_selection(&[DEFAULT_PROBE_TOKEN.to_string()]).expect("parses"),
+                    |_| false,
+                )
+                .contains(kind)
+            })
+            .collect();
+        let selected =
+            select_probe_kinds_with(&args(&["10.0.0.1"], &[]), |_| false).expect("selects");
+        assert_eq!(selected.dropped, expected);
+    }
+
+    #[test]
+    fn an_explicitly_named_kind_survives_a_predicate_that_rejects_it() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["default".to_string(), "icmp".to_string()];
+        let selected = select_probe_kinds_with(&a, |_| false).expect("selects");
+        assert_eq!(selected.kinds.first(), Some(&ProbeKind::Icmp));
+        assert!(!selected.dropped.contains(&ProbeKind::Icmp));
+    }
+
+    fn selected(kinds: &[ProbeKind], dropped: &[ProbeKind]) -> SelectedProbes {
+        SelectedProbes {
+            kinds: kinds.to_vec(),
+            dropped: dropped.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_dropped_default_kind_is_reported_with_the_flag_that_forces_it() {
+        let notes = selection_notes(
+            &args(&["10.0.0.1"], &[]),
+            &selected(&[ProbeKind::TcpConnect], &[ProbeKind::Icmp]),
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with("icmp dropped from the default set"),
+            "{notes:?}"
+        );
+        assert!(notes[0].contains("ICMP socket"), "{notes:?}");
+        assert!(notes[0].contains("--probe icmp"), "{notes:?}");
+    }
+
+    #[test]
+    fn nothing_dropped_and_no_port_produces_no_notes() {
+        let notes = selection_notes(
+            &args(&["10.0.0.1"], &[]),
+            &selected(&[ProbeKind::TcpConnect, ProbeKind::ReverseDns], &[]),
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn port_without_probe_reports_which_probers_it_reaches() {
+        let notes = selection_notes(
+            &args(&["10.0.0.1"], &[8080]),
+            &selected(&[ProbeKind::TcpConnect, ProbeKind::ReverseDns], &[]),
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("--port applies to tcp_connect;"),
+            "{notes:?}"
+        );
+        assert!(notes[0].contains("also runs reverse_dns"), "{notes:?}");
+        assert!(notes[0].contains("--probe tcp_connect"), "{notes:?}");
+    }
+
+    #[test]
+    fn port_with_an_explicit_probe_skips_the_scope_note() {
+        let mut a = args(&["10.0.0.1"], &[8080]);
+        a.probe = vec!["tcp_connect".to_string(), "reverse_dns".to_string()];
+        let notes = selection_notes(
+            &a,
+            &selected(&[ProbeKind::TcpConnect, ProbeKind::ReverseDns], &[]),
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn port_that_reaches_no_selected_prober_is_reported_as_a_no_op() {
+        let mut a = args(&["10.0.0.1"], &[1161]);
+        a.probe = vec!["reverse_dns".to_string()];
+        let notes = selection_notes(&a, &selected(&[ProbeKind::ReverseDns], &[]));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("--port had no effect"), "{notes:?}");
+        assert!(notes[0].contains("(reverse_dns)"), "{notes:?}");
+        assert!(notes[0].contains("--probe-ports"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_dropped_kind_is_reported_alongside_a_port_note() {
+        let notes = selection_notes(
+            &args(&["10.0.0.1"], &[8080]),
+            &selected(
+                &[ProbeKind::TcpConnect, ProbeKind::ReverseDns],
+                &[ProbeKind::Icmp],
+            ),
+        );
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].starts_with("icmp"), "{notes:?}");
+        assert!(notes[1].starts_with("--port applies"), "{notes:?}");
+    }
+
+    fn args_with_every_parameter_flag() -> DiscoverArgs {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.udp_protocol = Some(UdpProtocolArg::Ntp);
+        a.dns_query = vec!["example.com".to_string()];
+        a.dns_query_type = Some(DnsQueryTypeArg::Mx);
+        #[cfg(feature = "snmp")]
+        {
+            a.snmp_community = Some(Community("lab-ro".to_string()));
+            a.snmp_version = Some(SnmpVersionArg::V1);
+        }
+        #[cfg(feature = "http")]
+        {
+            a.http_path = Some("/health".to_string());
+        }
+        #[cfg(feature = "icmp")]
+        {
+            a.icmp_count = Some(5);
+        }
+        #[cfg(any(feature = "arp", feature = "ndp"))]
+        {
+            a.interface = Some("eth0".to_string());
+        }
+        a.probe_ports = vec![(ProbeKind::Dns, vec![5353])];
+        a
+    }
+
+    #[test]
+    fn every_parameter_flag_reads_as_supplied_when_it_is_set() {
+        for flag in parameter_flags(&args_with_every_parameter_flag()) {
+            assert!(flag.supplied, "{} was set but reads as absent", flag.flag);
+        }
+    }
+
+    #[test]
+    fn no_parameter_flag_reads_as_supplied_on_bare_arguments() {
+        for flag in parameter_flags(&args(&["10.0.0.1"], &[])) {
+            assert!(
+                !flag.supplied,
+                "{} reads as supplied without being set",
+                flag.flag
+            );
+        }
+    }
+
+    #[test]
+    fn every_parameter_flag_names_a_kind_this_build_carries() {
+        for flag in parameter_flags(&args_with_every_parameter_flag()) {
+            assert!(
+                !flag.consumers.is_empty(),
+                "{} names no compiled-in consumer, so its note would name no kind",
+                flag.flag
+            );
+        }
+    }
+
+    #[test]
+    fn every_supplied_parameter_flag_whose_kinds_are_all_absent_is_reported() {
+        let mut a = args_with_every_parameter_flag();
+        a.probe = vec!["reverse_dns".to_string()];
+        let notes = selection_notes(&a, &selected(&[ProbeKind::ReverseDns], &[]));
+        for flag in parameter_flags(&a) {
+            let opener = format!("{} had no effect", flag.flag);
+            let note = notes
+                .iter()
+                .find(|note| note.starts_with(&opener))
+                .unwrap_or_else(|| panic!("{} is silently ignored: {notes:?}", flag.flag));
+            for consumer in &flag.consumers {
+                assert!(note.contains(consumer.label()), "{note}");
+                assert!(
+                    note.contains(&format!("--probe {}", consumer.label())),
+                    "{note}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_parameter_flag_whose_kind_runs_produces_no_note() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["dns".to_string()];
+        a.dns_query = vec!["example.com".to_string()];
+        a.dns_query_type = Some(DnsQueryTypeArg::Mx);
+        let notes = selection_notes(&a, &selected(&[ProbeKind::Dns], &[]));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_per_kind_port_override_for_an_unselected_kind_is_reported_with_its_value() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["tcp_connect".to_string()];
+        a.probe_ports = vec![(ProbeKind::Dns, vec![5353, 15353])];
+        let notes = selection_notes(&a, &selected(&[ProbeKind::TcpConnect], &[]));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with("--probe-ports dns=5353,15353 had no effect"),
+            "{notes:?}"
+        );
+        assert!(notes[0].contains("--probe dns"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_per_kind_port_override_for_a_selected_kind_produces_no_note() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["tcp_connect".to_string()];
+        a.probe_ports = vec![(ProbeKind::TcpConnect, vec![2222])];
+        let notes = selection_notes(&a, &selected(&[ProbeKind::TcpConnect], &[]));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[cfg(all(feature = "arp", feature = "ndp"))]
+    #[test]
+    fn a_parameter_flag_with_two_consumers_names_both() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.probe = vec!["tcp_connect".to_string()];
+        a.interface = Some("eth0".to_string());
+        let notes = selection_notes(&a, &selected(&[ProbeKind::TcpConnect], &[]));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("no arp or ndp probe"), "{notes:?}");
+        assert!(notes[0].contains("--probe arp or --probe ndp"), "{notes:?}");
+    }
+
+    #[test]
+    fn every_per_prober_parameter_argument_is_covered_by_the_unused_flag_table() {
+        use clap::CommandFactory as _;
+
+        // --port is excluded because its remedy is --probe-ports, so it keeps bespoke notes.
+        const NOT_A_PER_PROBER_PARAMETER: &[&str] = &[
+            "help",
+            "target",
+            "probe",
+            "port",
+            "file",
+            "sink",
+            "output",
+            "brokers",
+            "topic",
+            "kafka_flush_per_record",
+            "kafka_batch_threshold",
+            "concurrency",
+            "rate",
+            "retries",
+            "timeout_ms",
+            "dry_run",
+            "dry_run_format",
+            "checkpoint",
+            "checkpoint_interval",
+            "resume",
+        ];
+
+        let covered: Vec<String> = parameter_flags(&args_with_every_parameter_flag())
+            .into_iter()
+            .map(|flag| flag.flag)
+            .collect();
+        for arg in DiscoverArgs::command().get_arguments() {
+            let id = arg.get_id().as_str();
+            if NOT_A_PER_PROBER_PARAMETER.contains(&id) {
+                continue;
+            }
+            let long = format!(
+                "--{}",
+                arg.get_long()
+                    .unwrap_or_else(|| panic!("{id} has no long form"))
+            );
+            let with_value = format!("{long} ");
+            assert!(
+                covered
+                    .iter()
+                    .any(|flag| *flag == long || flag.starts_with(&with_value)),
+                "{long} parameterises a prober but is missing from the unused-flag table, so it \
+                 would be discarded in silence when its kind does not run"
+            );
+        }
+    }
+
+    #[test]
+    fn a_per_kind_port_override_is_accepted_exactly_when_the_kind_is_compiled_in() {
+        for kind in ProbeKind::all() {
+            let mut a = args(&["10.0.0.1"], &[]);
+            a.probe_ports = vec![(*kind, vec![1234])];
+            match reject_uncompiled_probe_ports(&a) {
+                Ok(()) => assert!(
+                    is_compiled_in(*kind),
+                    "{} is not in this build",
+                    kind.label()
+                ),
+                Err(err) => {
+                    assert!(!is_compiled_in(*kind), "{} is in this build", kind.label());
+                    let msg = err.to_string();
+                    assert!(msg.contains(kind.label()), "{msg}");
+                    if let Some(feature) = required_feature(*kind) {
+                        assert!(msg.contains(feature), "{msg}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn probe_options_carry_the_shared_and_per_kind_ports() {
+        let mut a = args(&["10.0.0.1"], &[9100, 9200]);
+        a.probe_ports = vec![(ProbeKind::Dns, vec![5353])];
+        let options = probe_options(&a);
+        assert_eq!(options.ports, vec![9100, 9200]);
+        assert_eq!(
+            options.ports_by_kind.get(&ProbeKind::Dns),
+            Some(&vec![5353])
+        );
+    }
+
+    #[test]
+    fn probe_options_carry_the_dns_query_names_and_type() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.dns_query = vec!["example.com.".to_string()];
+        a.dns_query_type = Some(DnsQueryTypeArg::Mx);
+        let options = probe_options(&a);
+        assert_eq!(options.dns_query_names, vec!["example.com.".to_string()]);
+        assert_eq!(
+            options.dns_query_type,
+            rastreo_core::prober::DnsQueryType::Mx
+        );
+    }
+
+    #[test]
+    fn probe_options_leave_unset_flags_on_the_core_defaults() {
+        let options = probe_options(&args(&["10.0.0.1"], &[]));
+        let defaults = ProbeSelectionOptions::default();
+        assert!(options.ports.is_empty());
+        assert!(options.ports_by_kind.is_empty());
+        assert!(options.udp_protocol.is_none());
+        assert_eq!(options.http_path, defaults.http_path);
+        assert_eq!(options.icmp_count, defaults.icmp_count);
+        assert_eq!(options.interface, defaults.interface);
+    }
+
+    #[test]
+    fn probe_options_carry_the_udp_protocol() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.udp_protocol = Some(UdpProtocolArg::MemcachedStats);
+        assert_eq!(
+            probe_options(&a).udp_protocol,
+            Some(rastreo_core::prober::UdpProtocol::MemcachedStats)
+        );
+    }
+
+    #[cfg(feature = "snmp")]
+    fn with_snmp_community_env<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: the guard above serialises every mutation of this variable across tests.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(SNMP_COMMUNITY_ENV, value),
+                None => std::env::remove_var(SNMP_COMMUNITY_ENV),
+            }
+        }
+        let out = body();
+        unsafe { std::env::remove_var(SNMP_COMMUNITY_ENV) };
+        out
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn probe_options_carry_the_snmp_community_and_version() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.snmp_community = Some(Community("lab-ro".to_string()));
+        a.snmp_version = Some(SnmpVersionArg::V1);
+        let options = with_snmp_community_env(None, || probe_options(&a));
+        assert_eq!(&*options.snmp_community, "lab-ro");
+        assert_eq!(options.snmp_version, rastreo_core::prober::SnmpVersion::V1);
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn the_snmp_community_falls_back_to_the_environment() {
+        let a = args(&["10.0.0.1"], &[]);
+        let options = with_snmp_community_env(Some("from-env"), || probe_options(&a));
+        assert_eq!(&*options.snmp_community, "from-env");
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn the_snmp_community_flag_beats_the_environment() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.snmp_community = Some(Community("from-flag".to_string()));
+        let options = with_snmp_community_env(Some("from-env"), || probe_options(&a));
+        assert_eq!(&*options.snmp_community, "from-flag");
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn an_empty_snmp_community_environment_variable_leaves_the_default() {
+        let a = args(&["10.0.0.1"], &[]);
+        let options = with_snmp_community_env(Some(""), || probe_options(&a));
+        assert_eq!(
+            &*options.snmp_community,
+            &*ProbeSelectionOptions::default().snmp_community
+        );
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn an_empty_snmp_community_flag_leaves_the_default_like_an_empty_environment_variable() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.snmp_community = Some(Community(String::new()));
+        let options = with_snmp_community_env(None, || probe_options(&a));
+        assert_eq!(
+            &*options.snmp_community,
+            &*ProbeSelectionOptions::default().snmp_community
+        );
+    }
+
+    #[cfg(feature = "snmp")]
+    #[test]
+    fn the_snmp_community_is_redacted_in_the_parsed_arguments() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--snmp-community",
+            "super-secret",
+        ])
+        .expect("parses");
+        let rendered = format!("{parsed:?}");
+        assert!(!rendered.contains("super-secret"), "{rendered}");
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn probe_options_carry_the_http_path() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.http_path = Some("/health".to_string());
+        assert_eq!(probe_options(&a).http_path, "/health");
+    }
+
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn probe_options_carry_the_icmp_count() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.icmp_count = Some(7);
+        assert_eq!(probe_options(&a).icmp_count, 7);
+    }
+
+    #[cfg(any(feature = "arp", feature = "ndp"))]
+    #[test]
+    fn probe_options_carry_the_interface() {
+        let mut a = args(&["10.0.0.1"], &[]);
+        a.interface = Some("eth0".to_string());
+        assert_eq!(probe_options(&a).interface, "eth0");
+    }
+
+    #[test]
+    fn discover_parses_a_comma_separated_probe_list() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--probe",
+            "tcp_connect,reverse_dns",
+        ])
+        .expect("parses");
+        assert_eq!(parsed.probe, vec!["tcp_connect", "reverse_dns"]);
+    }
+
+    #[test]
+    fn discover_parses_repeated_probe_ports_flags() {
+        let parsed = DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--probe-ports",
+            "dns=5353",
+            "--probe-ports",
+            "tcp=2222,2223",
+        ])
+        .expect("parses");
+        assert_eq!(
+            parsed.probe_ports,
+            vec![
+                (ProbeKind::Dns, vec![5353]),
+                (ProbeKind::TcpConnect, vec![2222, 2223]),
+            ]
+        );
+    }
+
+    #[test]
+    fn discover_rejects_a_malformed_probe_ports_value() {
+        assert!(DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--probe-ports",
+            "dns",
+        ])
+        .is_err());
+    }
+
+    #[cfg(feature = "icmp")]
+    #[test]
+    fn discover_rejects_icmp_count_zero() {
+        assert!(DiscoverArgs::try_parse_from([
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--icmp-count",
+            "0",
+        ])
+        .is_err());
+    }
+
+    #[cfg(feature = "config")]
+    fn rejects_alongside_file(extra: &[&str]) -> bool {
+        let mut argv = vec!["discover", "--file", "/tmp/x.yml"];
+        argv.extend_from_slice(extra);
+        DiscoverArgs::try_parse_from(argv)
+            .err()
+            .is_some_and(|err| err.kind() == clap::error::ErrorKind::ArgumentConflict)
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn every_scan_shaping_argument_conflicts_with_file() {
+        use clap::CommandFactory as _;
+
+        // Sink and knob overrides, run-mode switches, and the resume machinery stay legal.
+        const LEGAL_WITH_FILE: &[&str] = &[
+            "help",
+            "file",
+            "sink",
+            "output",
+            "brokers",
+            "topic",
+            "kafka_flush_per_record",
+            "kafka_batch_threshold",
+            "concurrency",
+            "rate",
+            "retries",
+            "timeout_ms",
+            "dry_run",
+            "dry_run_format",
+            "checkpoint",
+            "checkpoint_interval",
+            "resume",
+        ];
+        // Tried in order until one parses; a value-parse failure would mask the conflict.
+        const SAMPLE_VALUES: &[&str] = &["1", "tcp=1"];
+
+        let command = DiscoverArgs::command();
+        for arg in command.get_arguments() {
+            let id = arg.get_id().as_str();
+            if LEGAL_WITH_FILE.contains(&id) {
+                continue;
+            }
+            let long = format!(
+                "--{}",
+                arg.get_long()
+                    .unwrap_or_else(|| panic!("{id} has no long form"))
+            );
+            let rejected = if arg.get_action().takes_values() {
+                let possible: Vec<String> = arg
+                    .get_possible_values()
+                    .iter()
+                    .map(|value| value.get_name().to_string())
+                    .collect();
+                let values: Vec<&str> = if possible.is_empty() {
+                    SAMPLE_VALUES.to_vec()
+                } else {
+                    possible.iter().map(String::as_str).collect()
+                };
+                values
+                    .iter()
+                    .any(|value| rejects_alongside_file(&[&long, value]))
+            } else {
+                rejects_alongside_file(&[&long])
+            };
+            assert!(
+                rejected,
+                "{long} describes a scan --file already describes; it must declare \
+                 conflicts_with = \"file\""
+            );
+        }
     }
 }
