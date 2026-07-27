@@ -107,6 +107,7 @@ The output wire format for records.
 One of:
 
 - { `type`: `ndjson` }
+- { `type`: `table`, `width`: uint16 }
 
 ### `FuserConfig` {#fuserconfig}
 

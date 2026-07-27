@@ -1,5 +1,6 @@
 /target
 **/*.rs.bk
+**/*.snap.new
 *.swp
 *.swo
 .DS_Store

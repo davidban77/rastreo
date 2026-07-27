@@ -246,6 +246,18 @@ The stdout and file sinks emit one `DeviceRecord` per NDJSON line. Each line is 
 
 The field-by-field meaning of a `DeviceRecord` is covered in [First scan](../get-started/first-scan.md#read-the-output).
 
+## Encoders a sink accepts
+
+The stdout, file, and memory sinks carry any encoding: they hand bytes to a terminal, a file, or a buffer, and nothing downstream parses them for you. The `table` encoder is available on those three.
+
+Kafka and NATS are different. Their consumers read each message as one structured record, so an aligned-text message is unparseable garbage that a reconciler would ingest silently. A scenario pairing the `table` encoder with a `kafka` or `nats` sink is rejected before probing starts, and `rastreo validate` reports it offline without contacting the broker:
+
+```
+scenario 'inventory': the table encoder writes aligned text rows, which this sink cannot carry: its consumers read one structured record per message. Use the ndjson encoder with this sink.
+```
+
+The same check runs against the sink object itself, so it also holds when a sink is supplied through the library API rather than through configuration — including a fan-out sink with a broker among its children.
+
 ## See also
 
 - [CLI](cli.md) — every flag `rastreo discover` accepts.

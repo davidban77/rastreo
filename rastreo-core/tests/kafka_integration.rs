@@ -45,6 +45,17 @@ async fn kafka_create_sink_batched_close_delivers_one_message_per_record() {
         retry: SinkRetry::default(),
     };
     let mut sink = create_sink(&config).await.expect("create kafka sink");
+    assert_eq!(
+        config.sink_type(),
+        sink.kind(),
+        "structuredness is read off the sink kind, so the kind must match the config"
+    );
+    assert_eq!(
+        config.requires_structured_records(),
+        sink.requires_structured_records().await,
+        "the offline config twin must match the live sink"
+    );
+    assert!(sink.requires_structured_records().await);
 
     let written: Vec<String> = (0..3)
         .map(|i| format!("{{\"id\":\"itest-{i}\",\"ts\":0}}\n"))

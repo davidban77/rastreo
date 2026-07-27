@@ -26,7 +26,9 @@ pub use classifier::{
     PlatformSignal, RoleRule, RulesClassifier,
 };
 pub use collection_profile::CollectionProfileAssembler;
-pub use encoder::{Encoder, EncoderConfig, NdjsonEncoder};
+pub use encoder::{
+    ensure_encoder_output_fits_sink, Encoder, EncoderConfig, NdjsonEncoder, TableEncoder,
+};
 pub use error::{
     ClassifierError, ConfigError, DnsFailure, EncoderError, ProbeError, ProbeErrorKind,
     RastreoError, ResolverError, ResumeError, RuntimeError,

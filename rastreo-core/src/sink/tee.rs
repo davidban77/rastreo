@@ -166,6 +166,13 @@ async fn probe_child(child: &TeeChild) -> Result<(), std::io::Error> {
     }
 }
 
+async fn child_requires_structured_records(child: &TeeChild) -> bool {
+    match child {
+        TeeChild::Owned(sink) => sink.requires_structured_records().await,
+        TeeChild::Shared(sink) => sink.lock().await.requires_structured_records().await,
+    }
+}
+
 #[async_trait]
 impl Sink for TeeSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
@@ -220,6 +227,15 @@ impl Sink for TeeSink {
 
     fn kind(&self) -> SinkType {
         SinkType::Tee
+    }
+
+    async fn requires_structured_records(&self) -> bool {
+        for child in &self.children {
+            if child_requires_structured_records(child).await {
+                return true;
+            }
+        }
+        false
     }
 
     fn dlq_records_delivered(&self) -> u64 {
@@ -800,6 +816,57 @@ mod tests {
         let mut tee = TeeSink::new(vec![TeeChild::Shared(Arc::clone(&shared))]);
         tee.write(b"via-shared\n").await.expect("write");
         assert_eq!(handle.bytes(), b"via-shared\n");
+    }
+
+    struct StructuredOnlySink;
+
+    #[async_trait]
+    impl Sink for StructuredOnlySink {
+        async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        async fn requires_structured_records(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn tee_sink_with_no_children_does_not_require_structured_records() {
+        let tee = TeeSink::new(Vec::new());
+        assert!(!tee.requires_structured_records().await);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_of_plain_children_does_not_require_structured_records() {
+        let tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(MemorySink::new())),
+            TeeChild::Shared(Arc::new(Mutex::new(
+                Box::new(MemorySink::new()) as Box<dyn Sink>
+            ))),
+        ]);
+        assert!(!tee.requires_structured_records().await);
+    }
+
+    #[tokio::test]
+    async fn one_structured_owned_child_makes_the_whole_tee_structured() {
+        let tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(MemorySink::new())),
+            TeeChild::Owned(Box::new(StructuredOnlySink)),
+        ]);
+        assert!(tee.requires_structured_records().await);
+    }
+
+    #[tokio::test]
+    async fn one_structured_shared_child_makes_the_whole_tee_structured() {
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(StructuredOnlySink)));
+        let tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(MemorySink::new())),
+            TeeChild::Shared(shared),
+        ]);
+        assert!(tee.requires_structured_records().await);
     }
 
     #[test]

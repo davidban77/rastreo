@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use rastreo_core::config::{DiscoverScenarioConfig, ScenarioEntry, ScenarioKind};
+use rastreo_core::{ensure_encoder_output_fits_sink, SinkConfig};
 
 use super::discover::{
     load_scenario_file, merge_defaults, resolve_scenario_source, scenario_label,
@@ -77,6 +78,11 @@ fn validate_scenario(cfg: &DiscoverScenarioConfig) -> Result<(), String> {
     }
     if let Some(sink) = &cfg.base.sink {
         sink.validate().map_err(|e| e.to_string())?;
+    }
+    if let Some(encoder) = &cfg.base.encoder {
+        let sink = cfg.base.sink.clone().unwrap_or(SinkConfig::Stdout);
+        ensure_encoder_output_fits_sink(encoder, sink.requires_structured_records())
+            .map_err(|e| e.to_string())?;
     }
     if let Some(fuser) = &cfg.base.fuser {
         fuser.validate().map_err(|e| e.to_string())?;
@@ -172,6 +178,40 @@ mod tests {
         let cfg = scenario(one_ip(), vec![tcp_prober()], Some(sink));
         let err = validate_scenario(&cfg).expect_err("invalid sink must be invalid");
         assert!(err.contains("brokers"), "err was: {err}");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_scenario_rejects_the_table_encoder_against_a_kafka_sink() {
+        let sink = SinkConfig::Kafka {
+            brokers: vec!["kafka:9092".into()],
+            topic: "rastreo.devices".into(),
+            links_topic: None,
+            profiles_topic: None,
+            flush_mode: rastreo_core::KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: None,
+            sasl: None,
+            retry: rastreo_core::SinkRetry::default(),
+        };
+        let mut cfg = scenario(one_ip(), vec![tcp_prober()], Some(sink));
+        cfg.base.encoder = Some(rastreo_core::EncoderConfig::Table { width: 100 });
+        let err = validate_scenario(&cfg).expect_err("table into kafka must be invalid");
+        assert!(err.contains("table encoder"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_scenario_accepts_the_table_encoder_against_stdout() {
+        let mut cfg = scenario(one_ip(), vec![tcp_prober()], Some(SinkConfig::Stdout));
+        cfg.base.encoder = Some(rastreo_core::EncoderConfig::Table { width: 100 });
+        assert!(validate_scenario(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_scenario_accepts_the_table_encoder_when_the_sink_is_left_default() {
+        let mut cfg = scenario(one_ip(), vec![tcp_prober()], None);
+        cfg.base.encoder = Some(rastreo_core::EncoderConfig::Table { width: 100 });
+        assert!(validate_scenario(&cfg).is_ok());
     }
 
     #[test]

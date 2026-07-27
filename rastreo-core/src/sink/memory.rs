@@ -55,6 +55,8 @@ impl MemorySinkHandle {
         self.inner.buffer.lock().expect("memory sink mutex").clone()
     }
 
+    /// Splits the buffer on newlines. The lines parse as JSON only when the scan ran the NDJSON
+    /// encoder; under the table encoder they are the rendered header and rows.
     pub fn ndjson_lines(&self) -> Vec<String> {
         let bytes = self.bytes();
         String::from_utf8_lossy(&bytes)

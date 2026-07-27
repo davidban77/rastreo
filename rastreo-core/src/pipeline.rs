@@ -11,7 +11,7 @@ use crate::checkpoint::{resume_fingerprint, Checkpoint, CheckpointConfig, Checkp
 use crate::classifier::{create_classifier, Classifier, ClassifierConfig, MergeMode};
 use crate::collection_profile::CollectionProfileAssembler;
 use crate::config::DiscoverScenarioConfig;
-use crate::encoder::{create_encoder, Encoder, EncoderConfig};
+use crate::encoder::{create_encoder, ensure_encoder_output_fits_sink, Encoder, EncoderConfig};
 use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
 use crate::fuser::{create_fuser, Fuser, FuserConfig};
 use crate::model::{
@@ -26,6 +26,14 @@ use crate::topology::TopologyAssembler;
 
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CONCURRENCY: u32 = 64;
+
+fn effective_encoder_config(scenario: &DiscoverScenarioConfig) -> EncoderConfig {
+    scenario
+        .base
+        .encoder
+        .clone()
+        .unwrap_or(EncoderConfig::Ndjson)
+}
 
 fn default_classifier_config() -> ClassifierConfig {
     // Empty user lists under `Extend` resolve to the baked-in platform and role tables.
@@ -176,7 +184,15 @@ pub async fn run_discovery(opts: RunOptions<'_>) -> Result<DiscoverySummary, Ras
     };
     let sink = match sink {
         Some(s) => s,
-        None => create_sink(&scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout)).await?,
+        None => {
+            let sink_config = scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout);
+            // Offline first: a broker sink is rejected before the connect, not after it.
+            ensure_encoder_output_fits_sink(
+                &effective_encoder_config(scenario),
+                sink_config.requires_structured_records(),
+            )?;
+            create_sink(&sink_config).await?
+        }
     };
     let cancel = cancel.unwrap_or_else(|| watch::channel(false).1);
     run_discovery_core(
@@ -286,11 +302,9 @@ async fn run_discovery_core(
     )
     .with_port_budget(Some(port_budget));
 
-    let encoder_config = scenario
-        .base
-        .encoder
-        .clone()
-        .unwrap_or(EncoderConfig::Ndjson);
+    let encoder_config = effective_encoder_config(scenario);
+    // Catches a sink handed in through `RunOptions::sink`, which never passed the config check.
+    ensure_encoder_output_fits_sink(&encoder_config, sink.requires_structured_records().await)?;
     let encoder = create_encoder(&encoder_config)?;
 
     let fuser_config = scenario.base.fuser.clone().unwrap_or(FuserConfig::Direct {
@@ -416,6 +430,20 @@ fn accumulate_target(
     }
 }
 
+/// Delivers one encoded record, skipping the write when the encoder rendered nothing for this
+/// kind. Returns whether anything was written, so callers count only what the sink received.
+async fn write_encoded(
+    sink: &mut dyn Sink,
+    kind: RecordKind,
+    buf: &[u8],
+) -> Result<bool, RastreoError> {
+    if buf.is_empty() {
+        return Ok(false);
+    }
+    sink.write_kind(kind, buf).await?;
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn emit_target_records(
     outcomes: Vec<(usize, Result<ProbeOutcome, RastreoError>)>,
@@ -449,11 +477,13 @@ async fn emit_target_records(
             *emit_err = Some(e);
             break;
         }
-        if let Err(e) = sink.write(buf).await {
-            *emit_err = Some(e);
-            break;
+        match write_encoded(sink, RecordKind::Device, buf).await {
+            Ok(written) => *records_emitted += usize::from(written),
+            Err(e) => {
+                *emit_err = Some(e);
+                break;
+            }
         }
-        *records_emitted += 1;
     }
     Ok(())
 }
@@ -616,11 +646,13 @@ async fn stream_discovery(
             emit_err = Some(e);
             break;
         }
-        if let Err(e) = sink.write(&buf).await {
-            emit_err = Some(e);
-            break;
+        match write_encoded(sink, RecordKind::Device, &buf).await {
+            Ok(written) => records_emitted += usize::from(written),
+            Err(e) => {
+                emit_err = Some(e);
+                break;
+            }
         }
-        records_emitted += 1;
     }
     finish_span.record("records_emitted", records_emitted as u64);
     drop(finish_span);
@@ -636,11 +668,13 @@ async fn stream_discovery(
             emit_err = Some(e);
             break;
         }
-        if let Err(e) = sink.write_kind(RecordKind::Link, &buf).await {
-            emit_err = Some(e);
-            break;
+        match write_encoded(sink, RecordKind::Link, &buf).await {
+            Ok(written) => links_emitted += usize::from(written),
+            Err(e) => {
+                emit_err = Some(e);
+                break;
+            }
         }
-        links_emitted += 1;
     }
 
     let mut profiles_emitted: usize = 0;
@@ -653,11 +687,13 @@ async fn stream_discovery(
             emit_err = Some(e);
             break;
         }
-        if let Err(e) = sink.write_kind(RecordKind::CollectionProfile, &buf).await {
-            emit_err = Some(e);
-            break;
+        match write_encoded(sink, RecordKind::CollectionProfile, &buf).await {
+            Ok(written) => profiles_emitted += usize::from(written),
+            Err(e) => {
+                emit_err = Some(e);
+                break;
+            }
         }
-        profiles_emitted += 1;
     }
 
     // Final snapshot: a buffering fuser (identity) emits its records in the finish block above, after the last drain-time publish.
@@ -810,11 +846,13 @@ async fn finish_discovery_ref(
             emit_err = Some(e);
             break;
         }
-        if let Err(e) = sink.write(&buf).await {
-            emit_err = Some(e);
-            break;
+        match write_encoded(sink, RecordKind::Device, &buf).await {
+            Ok(written) => records_emitted += usize::from(written),
+            Err(e) => {
+                emit_err = Some(e);
+                break;
+            }
         }
-        records_emitted += 1;
     }
 
     for link in &assembler.finish() {
@@ -826,11 +864,13 @@ async fn finish_discovery_ref(
             emit_err = Some(e);
             break;
         }
-        if let Err(e) = sink.write_kind(RecordKind::Link, &buf).await {
-            emit_err = Some(e);
-            break;
+        match write_encoded(sink, RecordKind::Link, &buf).await {
+            Ok(written) => links_emitted += usize::from(written),
+            Err(e) => {
+                emit_err = Some(e);
+                break;
+            }
         }
-        links_emitted += 1;
     }
 
     for profile in &profile_assembler.finish() {
@@ -842,11 +882,13 @@ async fn finish_discovery_ref(
             emit_err = Some(e);
             break;
         }
-        if let Err(e) = sink.write_kind(RecordKind::CollectionProfile, &buf).await {
-            emit_err = Some(e);
-            break;
+        match write_encoded(sink, RecordKind::CollectionProfile, &buf).await {
+            Ok(written) => profiles_emitted += usize::from(written),
+            Err(e) => {
+                emit_err = Some(e);
+                break;
+            }
         }
-        profiles_emitted += 1;
     }
 
     let close_err = sink.close().await.err();
@@ -4687,5 +4729,397 @@ mod tests {
             err,
             RastreoError::Resume(crate::error::ResumeError::NoCheckpointToResume { .. })
         ));
+    }
+
+    mod empty_encoding_contract {
+        use super::*;
+        use crate::model::{GnmiEndpoint, Signal, Transport};
+        use crate::sink::RecordKind;
+        use std::sync::Mutex as StdMutex;
+        use std::time::SystemTime;
+
+        struct WritesNothingEncoder;
+
+        impl Encoder for WritesNothingEncoder {
+            fn encode_record(&self, _: &DeviceRecord, _: &mut Vec<u8>) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            fn encode_link(
+                &self,
+                _: &crate::model::LinkRecord,
+                _: &mut Vec<u8>,
+            ) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            fn encode_profile(
+                &self,
+                _: &crate::model::CollectionProfileRecord,
+                _: &mut Vec<u8>,
+            ) -> Result<(), RastreoError> {
+                Ok(())
+            }
+        }
+
+        #[derive(Default)]
+        struct WriteLog {
+            writes: Arc<StdMutex<Vec<(RecordKind, usize)>>>,
+        }
+
+        impl WriteLog {
+            fn entries(&self) -> Vec<(RecordKind, usize)> {
+                self.writes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            }
+        }
+
+        struct LoggingSink {
+            writes: Arc<StdMutex<Vec<(RecordKind, usize)>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for LoggingSink {
+            async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+                self.writes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((RecordKind::Device, data.len()));
+                Ok(())
+            }
+            async fn write_kind(
+                &mut self,
+                kind: RecordKind,
+                data: &[u8],
+            ) -> Result<(), RastreoError> {
+                self.writes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((kind, data.len()));
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+        }
+
+        struct GnmiProber;
+
+        #[async_trait::async_trait]
+        impl Prober for GnmiProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::Gnmi
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                Ok(ProbeOutcome {
+                    kind: ProbeKind::Gnmi,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![
+                        Signal::GnmiVersion("0.10.0".into()),
+                        Signal::GnmiSupportedEncoding("JSON_IETF".into()),
+                    ],
+                    fault: None,
+                    lldp: None,
+                    gnmi_endpoint: Some(GnmiEndpoint {
+                        port: 57400,
+                        transport: Transport::Tls,
+                        advertised_encodings: vec!["JSON_IETF".into()],
+                    }),
+                })
+            }
+        }
+
+        fn all_kinds_probers() -> Vec<Arc<dyn Prober>> {
+            vec![
+                Arc::new(MutualLldpProber {
+                    cx: "aaaaaaaaaaaa",
+                    cy: "bbbbbbbbbbbb",
+                }),
+                Arc::new(GnmiProber),
+            ]
+        }
+
+        fn two_targets() -> Vec<ResolvedTarget> {
+            (1u8..=2)
+                .map(|i| {
+                    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i));
+                    ResolvedTarget {
+                        ip,
+                        original: Target::Ip(ip),
+                        resolved_at: SystemTime::UNIX_EPOCH,
+                    }
+                })
+                .collect()
+        }
+
+        async fn run_streaming_with_encoder(
+            encoder: &dyn Encoder,
+            log: &WriteLog,
+        ) -> DiscoverySummary {
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let mut fuser = create_fuser(&FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            })
+            .expect("fuser");
+            let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
+            let mut sink: Box<dyn Sink> = Box::new(LoggingSink {
+                writes: Arc::clone(&log.writes),
+            });
+            let scheduler = BoundedScheduler::new(8);
+            let peak = AtomicUsize::new(0);
+            let scan_span = tracing::info_span!("scan");
+            stream_discovery(
+                &scheduler,
+                all_kinds_probers(),
+                Box::new(two_targets().into_iter()),
+                ProbeCtx::new(Duration::from_millis(100), 0),
+                watch::channel(false).1,
+                fuser.as_mut(),
+                classifier.as_ref(),
+                encoder,
+                sink.as_mut(),
+                &scan_metadata,
+                2,
+                Instant::now(),
+                0,
+                &peak,
+                &scan_span,
+                None,
+                None,
+            )
+            .await
+            .expect("streaming summary")
+        }
+
+        async fn run_batch_with_encoder(encoder: &dyn Encoder, log: &WriteLog) -> DiscoverySummary {
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let probers = all_kinds_probers();
+            let prober_kinds: Vec<ProbeKind> = probers.iter().map(|p| p.kind()).collect();
+            let mut fuser = create_fuser(&FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: None,
+                confidence_per_signal: None,
+            })
+            .expect("fuser");
+            let classifier = create_classifier(&ClassifierConfig::Noop).expect("classifier");
+            let mut sink: Box<dyn Sink> = Box::new(LoggingSink {
+                writes: Arc::clone(&log.writes),
+            });
+            let scheduler = BoundedScheduler::new(8);
+            let (scans, cancelled) = collect_scans_sorted(
+                &scheduler,
+                probers,
+                two_targets(),
+                ProbeCtx::new(Duration::from_millis(100), 0),
+                watch::channel(false).1,
+            )
+            .await;
+            let acc = accumulate_scans(scans, &prober_kinds, cancelled);
+            finish_discovery_ref(
+                acc,
+                fuser.as_mut(),
+                classifier.as_ref(),
+                encoder,
+                sink.as_mut(),
+                &scan_metadata,
+                2,
+                Instant::now(),
+            )
+            .await
+            .expect("batch summary")
+        }
+
+        #[tokio::test]
+        async fn the_probers_exercise_every_record_kind() {
+            // Without this, "nothing was written" below could just mean nothing was reachable.
+            let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+            let log = WriteLog::default();
+            let summary = run_streaming_with_encoder(encoder.as_ref(), &log).await;
+            assert_eq!(summary.records_emitted, 2);
+            assert_eq!(summary.links_emitted, 1);
+            assert_eq!(summary.profiles_emitted, 2);
+            let kinds: Vec<RecordKind> = log.entries().into_iter().map(|(k, _)| k).collect();
+            assert!(kinds.contains(&RecordKind::Device));
+            assert!(kinds.contains(&RecordKind::Link));
+            assert!(kinds.contains(&RecordKind::CollectionProfile));
+            assert!(log.entries().iter().all(|(_, len)| *len > 0));
+        }
+
+        #[tokio::test]
+        async fn streaming_skips_the_write_when_the_encoder_renders_nothing() {
+            let log = WriteLog::default();
+            let summary = run_streaming_with_encoder(&WritesNothingEncoder, &log).await;
+            assert_eq!(log.entries(), Vec::new(), "no empty message may be sent");
+            assert_eq!(summary.records_emitted, 0);
+            assert_eq!(summary.links_emitted, 0);
+            assert_eq!(summary.profiles_emitted, 0);
+        }
+
+        #[tokio::test]
+        async fn the_batch_reference_skips_the_write_when_the_encoder_renders_nothing() {
+            let log = WriteLog::default();
+            let summary = run_batch_with_encoder(&WritesNothingEncoder, &log).await;
+            assert_eq!(log.entries(), Vec::new(), "no empty message may be sent");
+            assert_eq!(summary.records_emitted, 0);
+            assert_eq!(summary.links_emitted, 0);
+            assert_eq!(summary.profiles_emitted, 0);
+        }
+
+        #[tokio::test]
+        async fn the_table_encoder_writes_device_rows_and_no_second_stream() {
+            let encoder = create_encoder(&EncoderConfig::Table { width: 100 }).expect("encoder");
+            let log = WriteLog::default();
+            let summary = run_streaming_with_encoder(encoder.as_ref(), &log).await;
+            assert_eq!(summary.records_emitted, 2);
+            assert_eq!(
+                summary.links_emitted, 0,
+                "links do not render as table rows"
+            );
+            assert_eq!(
+                summary.profiles_emitted, 0,
+                "profiles do not render as table rows"
+            );
+            let kinds: Vec<RecordKind> = log.entries().into_iter().map(|(k, _)| k).collect();
+            assert_eq!(kinds, vec![RecordKind::Device, RecordKind::Device]);
+        }
+    }
+
+    mod encoder_sink_compatibility {
+        use super::*;
+        use crate::sink::{MemorySink, TeeChild, TeeSink};
+
+        fn table_scenario(sink: Option<SinkConfig>) -> DiscoverScenarioConfig {
+            table_scenario_on_port(sink, 9)
+        }
+
+        fn table_scenario_on_port(sink: Option<SinkConfig>, port: u16) -> DiscoverScenarioConfig {
+            let base = BaseProbeConfig {
+                encoder: Some(EncoderConfig::Table { width: 100 }),
+                sink,
+                ..BaseProbeConfig::default()
+            };
+            DiscoverScenarioConfig {
+                base,
+                targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+                probers: vec![ProberConfig::TcpConnect { ports: vec![port] }],
+            }
+        }
+
+        struct StructuredOnlySink;
+
+        #[async_trait::async_trait]
+        impl Sink for StructuredOnlySink {
+            async fn write(&mut self, _: &[u8]) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            async fn requires_structured_records(&self) -> bool {
+                true
+            }
+        }
+
+        #[tokio::test]
+        async fn an_injected_structured_sink_rejects_the_table_encoder() {
+            let scenario = table_scenario(None);
+            let err = run_discovery(RunOptions::new(&scenario).sink(Box::new(StructuredOnlySink)))
+                .await
+                .expect_err("a sink injected past the config must still be checked");
+            match err {
+                RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                    assert!(msg.contains("table encoder"), "msg was: {msg}");
+                }
+                other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_injected_fan_out_sink_with_a_structured_child_rejects_the_table_encoder() {
+            let scenario = table_scenario(None);
+            let tee = TeeSink::new(vec![
+                TeeChild::Owned(Box::new(MemorySink::new())),
+                TeeChild::Owned(Box::new(StructuredOnlySink)),
+            ]);
+            let err = run_discovery(RunOptions::new(&scenario).sink(Box::new(tee)))
+                .await
+                .expect_err("a broker among the children makes the whole fan-out structured");
+            match err {
+                RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                    assert!(msg.contains("table encoder"), "msg was: {msg}");
+                }
+                other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn an_injected_plain_sink_receives_the_rendered_table() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let port = listener.local_addr().expect("local_addr").port();
+            let scenario = table_scenario_on_port(None, port);
+            let sink = MemorySink::new();
+            let handle = sink.handle();
+            run_discovery(RunOptions::new(&scenario).sink(Box::new(sink)))
+                .await
+                .expect("a plain sink carries table output");
+            let lines = handle.ndjson_lines();
+            assert!(
+                lines.first().is_some_and(|l| l.starts_with("ADDRESS")),
+                "rendered: {lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.starts_with("127.0.0.1")),
+                "rendered: {lines:?}"
+            );
+        }
+
+        #[cfg(feature = "kafka")]
+        #[tokio::test]
+        async fn a_kafka_sink_config_rejects_the_table_encoder_before_dialling_the_broker() {
+            // 127.0.0.1:1 is a black hole: reaching create_sink at all yields a connect error.
+            let scenario = table_scenario(Some(SinkConfig::Kafka {
+                brokers: vec!["127.0.0.1:1".into()],
+                topic: "rastreo.devices".into(),
+                links_topic: None,
+                profiles_topic: None,
+                flush_mode: crate::sink::KafkaFlushMode::default(),
+                dead_letter: None,
+                tls: None,
+                sasl: None,
+                retry: crate::sink::SinkRetry::default(),
+            }));
+            let started = Instant::now();
+            let err = run_discovery(RunOptions::new(&scenario))
+                .await
+                .expect_err("table into kafka must be rejected");
+            match err {
+                RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                    assert!(msg.contains("table encoder"), "msg was: {msg}");
+                }
+                other => panic!("expected the offline ConfigError, got {other:?}"),
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the rejection must precede the broker connect"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_memory_sink_config_accepts_the_table_encoder() {
+            let scenario = table_scenario(Some(SinkConfig::Memory));
+            run_discovery(RunOptions::new(&scenario))
+                .await
+                .expect("the memory sink carries table output");
+        }
     }
 }

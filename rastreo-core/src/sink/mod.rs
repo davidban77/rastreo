@@ -128,6 +128,15 @@ impl SinkType {
             SinkType::Tee => "tee",
         }
     }
+
+    /// Whether this destination's consumers parse each write as one structured record, which makes
+    /// aligned-text encoders unusable against it. Read by both the `Sink` and `SinkConfig` twins.
+    pub const fn requires_structured_records(self) -> bool {
+        match self {
+            SinkType::Kafka | SinkType::Nats => true,
+            SinkType::Stdout | SinkType::File | SinkType::Memory | SinkType::Tee => false,
+        }
+    }
 }
 
 /// A sink I/O failure tagged with its [`SinkErrorClass`], constructed at the failure site.
@@ -188,6 +197,12 @@ pub trait Sink: Send + Sync {
     /// Concrete sink kind; overridden by every built-in implementation.
     fn kind(&self) -> SinkType {
         SinkType::Memory
+    }
+
+    /// Reads [`SinkType::requires_structured_records`] off `kind()`. Async like [`Sink::probe`],
+    /// because a fan-out sink overrides it to consult children held behind an async mutex.
+    async fn requires_structured_records(&self) -> bool {
+        self.kind().requires_structured_records()
     }
 
     /// Cumulative count of records delivered to a dead-letter destination.
@@ -300,6 +315,25 @@ impl SinkConfig {
             SinkConfig::Nats { .. } => true,
             SinkConfig::Stdout | SinkConfig::Memory => false,
         }
+    }
+
+    /// The [`SinkType`] this config builds.
+    pub fn sink_type(&self) -> SinkType {
+        match self {
+            SinkConfig::Stdout => SinkType::Stdout,
+            SinkConfig::File { .. } => SinkType::File,
+            SinkConfig::Memory => SinkType::Memory,
+            #[cfg(feature = "kafka")]
+            SinkConfig::Kafka { .. } => SinkType::Kafka,
+            #[cfg(feature = "nats")]
+            SinkConfig::Nats { .. } => SinkType::Nats,
+        }
+    }
+
+    /// Offline twin of [`Sink::requires_structured_records`], so a config can be checked without
+    /// constructing the sink (and, for a broker sink, without dialling it).
+    pub fn requires_structured_records(&self) -> bool {
+        self.sink_type().requires_structured_records()
     }
 
     /// Validate the sink configuration offline: no network, no connect, no filesystem access.
@@ -1139,6 +1173,81 @@ mod tests {
             }
             other => panic!("expected Nats, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn default_sink_does_not_require_structured_records() {
+        let s: Box<dyn Sink> = Box::new(MockSink::new());
+        assert!(!s.requires_structured_records().await);
+    }
+
+    #[tokio::test]
+    async fn every_constructible_sink_config_agrees_with_the_sink_it_builds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let constructible: Vec<SinkConfig> = vec![
+            SinkConfig::Stdout,
+            SinkConfig::File {
+                path: dir.path().join("parity.ndjson"),
+            },
+            SinkConfig::Memory,
+        ];
+        for config in &constructible {
+            let sink = create_sink(config).await.expect("create");
+            assert_eq!(
+                config.sink_type(),
+                sink.kind(),
+                "config and sink disagree on kind for {config:?}"
+            );
+            assert_eq!(
+                config.requires_structured_records(),
+                sink.requires_structured_records().await,
+                "config and sink disagree for {config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn broker_sink_types_require_structured_records() {
+        assert!(SinkType::Kafka.requires_structured_records());
+        assert!(SinkType::Nats.requires_structured_records());
+    }
+
+    #[test]
+    fn local_sink_types_do_not_require_structured_records() {
+        for kind in [
+            SinkType::Stdout,
+            SinkType::File,
+            SinkType::Memory,
+            SinkType::Tee,
+        ] {
+            assert!(!kind.requires_structured_records(), "{kind:?}");
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn kafka_sink_config_requires_structured_records() {
+        let config = kafka_config(vec!["kafka:9092"], "t");
+        assert_eq!(config.sink_type(), SinkType::Kafka);
+        assert!(config.requires_structured_records());
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn nats_sink_config_requires_structured_records() {
+        let config = nats_config(vec!["nats://n:4222"], "s", "st");
+        assert_eq!(config.sink_type(), SinkType::Nats);
+        assert!(config.requires_structured_records());
+    }
+
+    #[test]
+    fn local_sink_configs_do_not_require_structured_records() {
+        assert!(!SinkConfig::Stdout.requires_structured_records());
+        assert!(!SinkConfig::Memory.requires_structured_records());
+        assert!(!SinkConfig::File {
+            path: PathBuf::from("/tmp/rastreo.ndjson"),
+        }
+        .requires_structured_records());
     }
 
     #[test]
