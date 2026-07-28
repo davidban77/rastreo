@@ -61,19 +61,19 @@ fn credit_attribution(
     }
 }
 
-struct WriteAttribution {
+struct ChildAttribution {
     kind: SinkType,
     deltas: ClassDeltas,
     delivered: bool,
 }
 
-async fn write_child(child: &mut TeeChild, data: &[u8]) -> Result<WriteAttribution, RastreoError> {
+async fn write_child(child: &mut TeeChild, data: &[u8]) -> Result<ChildAttribution, RastreoError> {
     match child {
         TeeChild::Owned(sink) => {
             let before = sink.dlq_records_by_class();
             sink.write(data).await?;
             let after = sink.dlq_records_by_class();
-            Ok(WriteAttribution {
+            Ok(ChildAttribution {
                 kind: sink.kind(),
                 deltas: class_deltas(before, after),
                 delivered: sink.last_write_delivered(),
@@ -84,7 +84,7 @@ async fn write_child(child: &mut TeeChild, data: &[u8]) -> Result<WriteAttributi
             let before = guard.dlq_records_by_class();
             guard.write(data).await?;
             let after = guard.dlq_records_by_class();
-            Ok(WriteAttribution {
+            Ok(ChildAttribution {
                 kind: guard.kind(),
                 deltas: class_deltas(before, after),
                 delivered: guard.last_write_delivered(),
@@ -97,13 +97,13 @@ async fn write_kind_child(
     child: &mut TeeChild,
     kind: RecordKind,
     data: &[u8],
-) -> Result<WriteAttribution, RastreoError> {
+) -> Result<ChildAttribution, RastreoError> {
     match child {
         TeeChild::Owned(sink) => {
             let before = sink.dlq_records_by_class();
             sink.write_kind(kind, data).await?;
             let after = sink.dlq_records_by_class();
-            Ok(WriteAttribution {
+            Ok(ChildAttribution {
                 kind: sink.kind(),
                 deltas: class_deltas(before, after),
                 delivered: sink.last_write_delivered(),
@@ -114,7 +114,7 @@ async fn write_kind_child(
             let before = guard.dlq_records_by_class();
             guard.write_kind(kind, data).await?;
             let after = guard.dlq_records_by_class();
-            Ok(WriteAttribution {
+            Ok(ChildAttribution {
                 kind: guard.kind(),
                 deltas: class_deltas(before, after),
                 delivered: guard.last_write_delivered(),
@@ -123,38 +123,54 @@ async fn write_kind_child(
     }
 }
 
-async fn flush_child(child: &mut TeeChild) -> Result<(SinkType, ClassDeltas), RastreoError> {
+async fn flush_child(child: &mut TeeChild) -> Result<ChildAttribution, RastreoError> {
     match child {
         TeeChild::Owned(sink) => {
             let before = sink.dlq_records_by_class();
             sink.flush().await?;
             let after = sink.dlq_records_by_class();
-            Ok((sink.kind(), class_deltas(before, after)))
+            Ok(ChildAttribution {
+                kind: sink.kind(),
+                deltas: class_deltas(before, after),
+                delivered: sink.last_write_delivered(),
+            })
         }
         TeeChild::Shared(sink) => {
             let mut guard = sink.lock().await;
             let before = guard.dlq_records_by_class();
             guard.flush().await?;
             let after = guard.dlq_records_by_class();
-            Ok((guard.kind(), class_deltas(before, after)))
+            Ok(ChildAttribution {
+                kind: guard.kind(),
+                deltas: class_deltas(before, after),
+                delivered: guard.last_write_delivered(),
+            })
         }
     }
 }
 
-async fn close_child(child: &mut TeeChild) -> Result<(SinkType, ClassDeltas), RastreoError> {
+async fn close_child(child: &mut TeeChild) -> Result<ChildAttribution, RastreoError> {
     match child {
         TeeChild::Owned(sink) => {
             let before = sink.dlq_records_by_class();
             sink.close().await?;
             let after = sink.dlq_records_by_class();
-            Ok((sink.kind(), class_deltas(before, after)))
+            Ok(ChildAttribution {
+                kind: sink.kind(),
+                deltas: class_deltas(before, after),
+                delivered: sink.last_write_delivered(),
+            })
         }
         TeeChild::Shared(sink) => {
             let mut guard = sink.lock().await;
             let before = guard.dlq_records_by_class();
             guard.close().await?;
             let after = guard.dlq_records_by_class();
-            Ok((guard.kind(), class_deltas(before, after)))
+            Ok(ChildAttribution {
+                kind: guard.kind(),
+                deltas: class_deltas(before, after),
+                delivered: guard.last_write_delivered(),
+            })
         }
     }
 }
@@ -178,7 +194,7 @@ impl Sink for TeeSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         let mut all_delivered = true;
         for child in &mut self.children {
-            let WriteAttribution {
+            let ChildAttribution {
                 kind,
                 deltas,
                 delivered,
@@ -193,7 +209,7 @@ impl Sink for TeeSink {
     async fn write_kind(&mut self, kind: RecordKind, data: &[u8]) -> Result<(), RastreoError> {
         let mut all_delivered = true;
         for child in &mut self.children {
-            let WriteAttribution {
+            let ChildAttribution {
                 kind: sink_kind,
                 deltas,
                 delivered,
@@ -206,18 +222,32 @@ impl Sink for TeeSink {
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
+        let mut all_delivered = true;
         for child in &mut self.children {
-            let (kind, deltas) = flush_child(child).await?;
+            let ChildAttribution {
+                kind,
+                deltas,
+                delivered,
+            } = flush_child(child).await?;
             credit_attribution(&self.attribution, kind, &deltas);
+            all_delivered &= delivered;
         }
+        self.last_delivered = all_delivered;
         Ok(())
     }
 
     async fn close(&mut self) -> Result<(), RastreoError> {
+        let mut all_delivered = true;
         for child in &mut self.children {
-            let (kind, deltas) = close_child(child).await?;
+            let ChildAttribution {
+                kind,
+                deltas,
+                delivered,
+            } = close_child(child).await?;
             credit_attribution(&self.attribution, kind, &deltas);
+            all_delivered &= delivered;
         }
+        self.last_delivered = all_delivered;
         Ok(())
     }
 
@@ -358,6 +388,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
         }
+        fn last_write_delivered(&self) -> bool {
+            false
+        }
         fn kind(&self) -> SinkType {
             SinkType::Memory
         }
@@ -372,6 +405,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Err(sink_err(SinkErrorClass::FlushFailure, "flush failed"))
+        }
+        fn last_write_delivered(&self) -> bool {
+            true
         }
         fn kind(&self) -> SinkType {
             SinkType::Memory
@@ -391,6 +427,9 @@ mod tests {
         async fn close(&mut self) -> Result<(), RastreoError> {
             Err(sink_err(SinkErrorClass::FlushFailure, "close failed"))
         }
+        fn last_write_delivered(&self) -> bool {
+            true
+        }
         fn kind(&self) -> SinkType {
             SinkType::Memory
         }
@@ -408,6 +447,9 @@ mod tests {
         }
         async fn probe(&self) -> Result<(), io::Error> {
             Err(io::Error::other(self.0))
+        }
+        fn last_write_delivered(&self) -> bool {
+            true
         }
         fn kind(&self) -> SinkType {
             SinkType::Memory
@@ -587,6 +629,68 @@ mod tests {
         ]);
         tee_ok.write(b"x").await.expect("write");
         assert!(tee_ok.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn tee_flush_restores_the_claim_a_buffering_child_revoked_on_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = crate::sink::FileSink::new(dir.path().join("tee-flush.ndjson"))
+            .await
+            .expect("file child");
+        let mut tee = TeeSink::new(vec![TeeChild::Owned(Box::new(file))]);
+
+        tee.write(b"x\n").await.expect("write");
+        assert!(!tee.last_write_delivered());
+
+        tee.flush().await.expect("flush");
+        assert!(
+            tee.last_write_delivered(),
+            "the child put the bytes on disk, so the tee's claim is restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn tee_close_restores_the_claim_a_buffering_child_revoked_on_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = crate::sink::FileSink::new(dir.path().join("tee-close.ndjson"))
+            .await
+            .expect("file child");
+        let mut tee = TeeSink::new(vec![TeeChild::Owned(Box::new(file))]);
+
+        tee.write(b"x\n").await.expect("write");
+        assert!(!tee.last_write_delivered());
+
+        tee.close().await.expect("close");
+        assert!(tee.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn tee_flush_keeps_the_claim_false_while_one_child_still_withholds() {
+        let mut withholding = RecordingSink::new();
+        withholding.delivered = false;
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(RecordingSink::new())),
+            TeeChild::Owned(Box::new(withholding)),
+        ]);
+        tee.write(b"x").await.expect("write");
+        tee.flush().await.expect("flush");
+        assert!(!tee.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn tee_flush_recomputes_the_claim_over_shared_children() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = crate::sink::FileSink::new(dir.path().join("tee-shared.ndjson"))
+            .await
+            .expect("file child");
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(file)));
+        let mut tee = TeeSink::new(vec![TeeChild::Shared(shared)]);
+
+        tee.write(b"x\n").await.expect("write");
+        assert!(!tee.last_write_delivered());
+
+        tee.flush().await.expect("flush");
+        assert!(tee.last_write_delivered());
     }
 
     #[tokio::test]
@@ -840,6 +944,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
         }
+        fn last_write_delivered(&self) -> bool {
+            true
+        }
         // A local kind under a structured answer, so the tee must OR children's answers, not their kinds.
         fn kind(&self) -> SinkType {
             SinkType::Memory
@@ -914,6 +1021,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
+        }
+        fn last_write_delivered(&self) -> bool {
+            true
         }
         fn kind(&self) -> SinkType {
             SinkType::Memory

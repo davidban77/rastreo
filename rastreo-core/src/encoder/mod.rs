@@ -4,7 +4,7 @@ pub mod table;
 pub use ndjson::NdjsonEncoder;
 pub use table::TableEncoder;
 
-use crate::error::{ConfigError, EncoderError, RastreoError};
+use crate::error::{ConfigError, RastreoError};
 use crate::model::{CollectionProfileRecord, DeviceRecord, LinkRecord};
 
 /// Renders records into a caller-provided byte buffer. An encoder with nothing to render for a
@@ -12,25 +12,13 @@ use crate::model::{CollectionProfileRecord, DeviceRecord, LinkRecord};
 pub trait Encoder: Send + Sync {
     fn encode_record(&self, record: &DeviceRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError>;
 
-    /// Encodes a topology link. Defaulted so existing encoders gain the second stream without
-    /// change; the default mirrors `encode_record`'s one-object-per-line NDJSON framing.
-    fn encode_link(&self, link: &LinkRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError> {
-        serde_json::to_writer(&mut *buf, link).map_err(EncoderError::SerializationFailed)?;
-        buf.push(b'\n');
-        Ok(())
-    }
+    fn encode_link(&self, link: &LinkRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError>;
 
-    /// Encodes a collection profile. Defaulted like `encode_link`, so existing encoders gain the
-    /// profile stream without change; the default is one-object-per-line NDJSON.
     fn encode_profile(
         &self,
         profile: &CollectionProfileRecord,
         buf: &mut Vec<u8>,
-    ) -> Result<(), RastreoError> {
-        serde_json::to_writer(&mut *buf, profile).map_err(EncoderError::SerializationFailed)?;
-        buf.push(b'\n');
-        Ok(())
-    }
+    ) -> Result<(), RastreoError>;
 }
 
 /// The output wire format for records.
@@ -101,6 +89,18 @@ mod tests {
             let json = serde_json::to_vec(record)
                 .map_err(|e| RastreoError::Encoder(EncoderError::SerializationFailed(e)))?;
             buf.extend_from_slice(&json);
+            Ok(())
+        }
+
+        fn encode_link(&self, _: &LinkRecord, _: &mut Vec<u8>) -> Result<(), RastreoError> {
+            Ok(())
+        }
+
+        fn encode_profile(
+            &self,
+            _: &CollectionProfileRecord,
+            _: &mut Vec<u8>,
+        ) -> Result<(), RastreoError> {
             Ok(())
         }
     }

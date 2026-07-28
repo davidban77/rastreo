@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use async_nats::jetstream;
-use rastreo_core::sink::{create_sink, NatsCredentials, NatsFlushMode, SinkConfig, SinkRetry};
+use rastreo_core::sink::{
+    create_sink, NatsCredentials, NatsFlushMode, RecordKind, SinkConfig, SinkRetry,
+};
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
 
@@ -102,6 +104,51 @@ async fn nats_create_sink_delivers_each_record_to_the_stream() {
             message.payload.as_ref(),
             want.as_bytes(),
             "payload round-trip at sequence {sequence}"
+        );
+    }
+
+    // Every stream shares the batched threshold, so a small second-stream record stays local.
+    let batched = SinkConfig::Nats {
+        servers: vec![server.clone()],
+        subject: subject.to_string(),
+        stream: stream_name.to_string(),
+        links_subject: None,
+        profiles_subject: None,
+        credentials: NatsCredentials::Anonymous,
+        flush_mode: NatsFlushMode::Batched {
+            threshold_bytes: 64 * 1024,
+        },
+        dead_letter: None,
+        retry: SinkRetry::default(),
+    };
+    let mut sink = create_sink(&batched)
+        .await
+        .expect("create batched nats sink");
+    sink.write(b"{\"id\":\"batched\",\"ts\":0}\n")
+        .await
+        .expect("write");
+    sink.flush().await.expect("flush");
+
+    for (kind, payload) in [
+        (RecordKind::Link, b"{\"link\":\"itest\"}\n".as_slice()),
+        (
+            RecordKind::CollectionProfile,
+            b"{\"profile\":\"itest\"}\n".as_slice(),
+        ),
+    ] {
+        assert!(
+            sink.last_write_delivered(),
+            "{kind:?}: the preceding flush left nothing buffered"
+        );
+        sink.write_kind(kind, payload).await.expect("write");
+        assert!(
+            !sink.last_write_delivered(),
+            "{kind:?}: a record buffered under the batched threshold has not reached the stream"
+        );
+        sink.flush().await.expect("flush");
+        assert!(
+            sink.last_write_delivered(),
+            "{kind:?}: flush publishes the second-stream buffer too"
         );
     }
 }

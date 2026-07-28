@@ -83,6 +83,7 @@ impl Sink for MemorySink {
             // Drop the whole write rather than erroring so the scan still completes; each write is one NDJSON record, so skipping keeps the buffer whole lines under the cap.
             if buffer.len() + data.len() > max {
                 self.inner.truncated.store(true, Ordering::SeqCst);
+                self.inner.delivered.store(false, Ordering::SeqCst);
                 return Ok(());
             }
         }
@@ -151,6 +152,30 @@ mod tests {
         sink.write(b"x").await.expect("write");
         assert!(sink.last_write_delivered());
         assert!(handle.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_over_cap_write_is_not_reported_as_delivered() {
+        let mut sink = MemorySink::with_max_bytes(8);
+        let handle = sink.handle();
+        sink.write(b"{\"a\":1}\n").await.expect("write that fits");
+        assert!(sink.last_write_delivered());
+
+        sink.write(b"{\"b\":2}\n")
+            .await
+            .expect("write that is dropped");
+        assert!(
+            !sink.last_write_delivered(),
+            "a write thrown away by the byte cap never reached the buffer"
+        );
+        assert!(!handle.last_write_delivered());
+
+        sink.flush().await.expect("flush");
+        assert!(
+            !sink.last_write_delivered(),
+            "no flush can deliver bytes the sink threw away"
+        );
+        assert!(!handle.last_write_delivered());
     }
 
     #[test]

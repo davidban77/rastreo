@@ -1647,6 +1647,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
             fn kind(&self) -> SinkType {
                 SinkType::Kafka
             }
@@ -1768,6 +1771,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             self.inner.flushes.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+        fn last_write_delivered(&self) -> bool {
+            true
         }
         fn kind(&self) -> SinkType {
             SinkType::Memory
@@ -2108,6 +2114,9 @@ mod tests {
             self.flushes.fetch_add(1, Ordering::SeqCst);
             self.delegate.flush().await
         }
+        fn last_write_delivered(&self) -> bool {
+            self.delegate.last_write_delivered()
+        }
         fn kind(&self) -> SinkType {
             SinkType::Memory
         }
@@ -2446,6 +2455,9 @@ mod tests {
             self.inner.closes.fetch_add(1, Ordering::SeqCst);
             self.commit();
             Ok(())
+        }
+        fn last_write_delivered(&self) -> bool {
+            self.buffer.is_empty()
         }
         fn kind(&self) -> SinkType {
             SinkType::Memory
@@ -3873,6 +3885,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
             fn kind(&self) -> SinkType {
                 SinkType::Memory
             }
@@ -4004,6 +4019,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 self.delegate.flush().await
             }
+            fn last_write_delivered(&self) -> bool {
+                self.delegate.last_write_delivered()
+            }
             fn kind(&self) -> SinkType {
                 SinkType::Memory
             }
@@ -4093,6 +4111,9 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 self.delegate.flush().await
+            }
+            fn last_write_delivered(&self) -> bool {
+                self.delegate.last_write_delivered()
             }
             fn kind(&self) -> SinkType {
                 SinkType::Memory
@@ -4288,6 +4309,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             self.delegate.flush().await
+        }
+        fn last_write_delivered(&self) -> bool {
+            self.delegate.last_write_delivered()
         }
         fn kind(&self) -> SinkType {
             SinkType::Memory
@@ -4826,6 +4850,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
             fn kind(&self) -> SinkType {
                 SinkType::Memory
             }
@@ -5050,6 +5077,9 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
+            }
+            fn last_write_delivered(&self) -> bool {
+                true
             }
             // A local kind under a structured answer, so the guard must read the sink's answer, not its kind.
             fn kind(&self) -> SinkType {

@@ -1,6 +1,9 @@
 #![cfg(feature = "kafka")]
 
-use rastreo_core::sink::{create_sink, KafkaFlushMode, SinkConfig, SinkRetry};
+use rastreo_core::sink::{
+    create_sink, KafkaFlushMode, RecordKind, SinkConfig, SinkRetry, DEFAULT_LINKS_DESTINATION,
+    DEFAULT_PROFILES_DESTINATION,
+};
 use rskafka::client::{
     partition::{OffsetAt, UnknownTopicHandling},
     ClientBuilder,
@@ -22,16 +25,23 @@ async fn kafka_create_sink_batched_close_delivers_one_message_per_record() {
     let broker = format!("127.0.0.1:{port}");
     let topic = "rastreo.itest";
 
-    // Pre-create the topic so the sink's partition-client resolves without waiting on auto-create.
-    ClientBuilder::new(vec![broker.clone()])
+    // Pre-create the topics so the sink's partition-clients resolve without waiting on auto-create.
+    let controller = ClientBuilder::new(vec![broker.clone()])
         .build()
         .await
         .expect("admin client")
         .controller_client()
-        .expect("controller client")
-        .create_topic(topic, 1, 1, 5_000)
-        .await
-        .expect("create topic");
+        .expect("controller client");
+    for name in [
+        topic,
+        DEFAULT_LINKS_DESTINATION,
+        DEFAULT_PROFILES_DESTINATION,
+    ] {
+        controller
+            .create_topic(name, 1, 1, 5_000)
+            .await
+            .unwrap_or_else(|e| panic!("create topic {name}: {e}"));
+    }
 
     let config = SinkConfig::Kafka {
         brokers: vec![broker.clone()],
@@ -110,5 +120,28 @@ async fn kafka_create_sink_batched_close_delivers_one_message_per_record() {
     );
     for (got, want) in values.iter().zip(written.iter()) {
         assert_eq!(got.as_slice(), want.as_bytes(), "payload round-trip");
+    }
+
+    for (kind, payload) in [
+        (RecordKind::Link, b"{\"link\":\"itest\"}\n".as_slice()),
+        (
+            RecordKind::CollectionProfile,
+            b"{\"profile\":\"itest\"}\n".as_slice(),
+        ),
+    ] {
+        assert!(
+            sink.last_write_delivered(),
+            "{kind:?}: the preceding flush left nothing buffered"
+        );
+        sink.write_kind(kind, payload).await.expect("write");
+        assert!(
+            !sink.last_write_delivered(),
+            "{kind:?}: a record buffered under the batched threshold has not reached the broker"
+        );
+        sink.flush().await.expect("flush");
+        assert!(
+            sink.last_write_delivered(),
+            "{kind:?}: flush publishes the second-stream buffer too"
+        );
     }
 }
