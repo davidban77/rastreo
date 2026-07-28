@@ -1,4 +1,3 @@
-use std::io::IsTerminal;
 use std::net::IpAddr;
 #[cfg(feature = "config")]
 use std::path::Path;
@@ -23,8 +22,8 @@ use rastreo_core::KafkaFlushMode;
 use rastreo_core::Resolver;
 use rastreo_core::{
     resolve_scenario_targets, run_discovery, CheckpointConfig, ConfigError, DiscoveryPlan,
-    DiscoveryProgress, DiscoverySummary, HickoryResolver, PlanKnobs, ProbeKind, RastreoError,
-    ResolvedScenarioTarget, RunOptions, SinkConfig, Target,
+    DiscoveryProgress, DiscoverySummary, EncoderConfig, HickoryResolver, PlanKnobs, ProbeKind,
+    RastreoError, ResolvedScenarioTarget, RunOptions, SinkConfig, Target,
 };
 use tokio::sync::watch;
 
@@ -35,7 +34,8 @@ use super::output::{
 };
 use super::output::{
     enrich_scan_error_hint, print_complete, print_hint, print_note, print_runtime_hints,
-    print_start, progress_display_loop, rebuild_hint, Verbosity,
+    print_start, progress_display_loop, progress_style, rebuild_hint, stdout_table_width,
+    OutputMode, Verbosity,
 };
 #[cfg(feature = "snmp")]
 use super::probe_args::SnmpVersionArg;
@@ -149,6 +149,11 @@ pub struct DiscoverArgs {
     #[arg(short = 'f', long)]
     pub file: Option<PathBuf>,
 
+    /// Record format: `table` (default on stdout) or `json` for one NDJSON object per line.
+    /// With --file, overrides the scenario's `encoder`.
+    #[arg(long, value_enum, env = "RASTREO_FORMAT")]
+    pub format: Option<OutputFormat>,
+
     /// Output sink kind. When --file is set and this flag is omitted, the sink from the YAML file is used.
     #[arg(long, value_enum)]
     pub sink: Option<SinkKind>,
@@ -157,11 +162,13 @@ pub struct DiscoverArgs {
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// Kafka brokers (comma-separated) for --sink kafka. Requires --features kafka build.
+    /// Kafka brokers (comma-separated) for --sink kafka.
+    #[cfg(feature = "kafka")]
     #[arg(long, value_delimiter = ',')]
     pub brokers: Vec<String>,
 
     /// Kafka topic for --sink kafka.
+    #[cfg(feature = "kafka")]
     #[arg(long)]
     pub topic: Option<String>,
 
@@ -195,9 +202,9 @@ pub struct DiscoverArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Format for --dry-run output: `text` (default, human-readable) or `json` (a machine-readable array of plans). Only meaningful with --dry-run.
-    #[arg(long, value_enum, default_value_t = DryRunFormat::Text)]
-    pub dry_run_format: DryRunFormat,
+    // Retired: parsed so a run can name the replacement instead of clap reporting an unknown flag.
+    #[arg(long, hide = true, value_name = "FORMAT")]
+    pub dry_run_format: Option<String>,
 
     /// Write a resume checkpoint to this path during the scan. The scenario must be resume-safe (durable sink, no identity fuser, no LLDP/gNMI prober) or the scan is refused before probing. The file is removed on successful completion and kept on cancellation.
     #[arg(long)]
@@ -227,11 +234,150 @@ fn parse_checkpoint_interval(s: &str) -> Result<usize, String> {
     }
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum DryRunFormat {
-    #[default]
-    Text,
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormat {
+    #[value(alias = "text")]
+    Table,
+    #[value(alias = "ndjson")]
     Json,
+}
+
+fn encoder_for_format(format: OutputFormat, table_width: u16) -> EncoderConfig {
+    match format {
+        OutputFormat::Table => EncoderConfig::Table { width: table_width },
+        OutputFormat::Json => EncoderConfig::Ndjson,
+    }
+}
+
+// Only stdout is read by a person; every other destination holds machine data.
+fn record_encoder(
+    format: Option<OutputFormat>,
+    writes_to_stdout: bool,
+    table_width: u16,
+) -> EncoderConfig {
+    match format {
+        Some(format) => encoder_for_format(format, table_width),
+        None if writes_to_stdout => encoder_for_format(OutputFormat::Table, table_width),
+        None => EncoderConfig::Ndjson,
+    }
+}
+
+fn writes_to_stdout(sink: Option<&SinkConfig>) -> bool {
+    matches!(sink, None | Some(SinkConfig::Stdout))
+}
+
+// The plan itself always goes to stdout, so it reads as text unless the caller asked for machine output.
+fn dry_run_plan_format(args: &DiscoverArgs) -> OutputFormat {
+    args.format.unwrap_or(OutputFormat::Table)
+}
+
+/// The sink a run will write to, or `None` when only the scenario file knows.
+fn effective_sink_kind(args: &DiscoverArgs) -> Option<SinkKind> {
+    if let Some(kind) = args.sink {
+        return Some(kind);
+    }
+    #[cfg(feature = "config")]
+    if args.file.is_some() {
+        return None;
+    }
+    Some(SinkKind::Stdout)
+}
+
+const RETIRED_DRY_RUN_FORMAT: &str =
+    "--dry-run-format was retired: use --format, which now sets the dry-run plan and the record \
+     stream alike. Pass --format table where you passed text, or --format json where you passed \
+     json.";
+
+fn ensure_no_retired_flags(args: &DiscoverArgs) -> Result<()> {
+    match args.dry_run_format {
+        Some(_) => Err(anyhow!(RETIRED_DRY_RUN_FORMAT)),
+        None => Ok(()),
+    }
+}
+
+/// A flag naming where records go, or how to reach that destination; inert unless its sink is selected.
+struct SinkFlag {
+    flag: &'static str,
+    sink: SinkKind,
+    supplied: bool,
+}
+
+fn sink_flags(args: &DiscoverArgs) -> Vec<SinkFlag> {
+    #[cfg_attr(not(feature = "kafka"), allow(unused_mut))]
+    let mut flags = vec![SinkFlag {
+        flag: "--output",
+        sink: SinkKind::File,
+        supplied: args.output.is_some(),
+    }];
+    #[cfg(feature = "kafka")]
+    flags.extend([
+        SinkFlag {
+            flag: "--brokers",
+            sink: SinkKind::Kafka,
+            supplied: !args.brokers.is_empty(),
+        },
+        SinkFlag {
+            flag: "--topic",
+            sink: SinkKind::Kafka,
+            supplied: args.topic.is_some(),
+        },
+        SinkFlag {
+            flag: "--kafka-flush-per-record",
+            sink: SinkKind::Kafka,
+            supplied: args.kafka_flush_per_record,
+        },
+        SinkFlag {
+            flag: "--kafka-batch-threshold",
+            sink: SinkKind::Kafka,
+            supplied: args.kafka_batch_threshold.is_some(),
+        },
+    ]);
+    flags
+}
+
+// A discarded destination flag leaves the operator believing records went somewhere they did not.
+fn ensure_sink_flags_reach_their_sink(args: &DiscoverArgs) -> Result<()> {
+    match sink_flags(args)
+        .iter()
+        .find(|flag| flag.supplied && args.sink != Some(flag.sink))
+    {
+        Some(flag) => Err(anyhow!(sink_flag_mismatch(flag, &destination_label(args)))),
+        None => Ok(()),
+    }
+}
+
+fn sink_flag_mismatch(flag: &SinkFlag, destination: &str) -> String {
+    let sink = sink_kind_value(flag.sink);
+    format!(
+        "{name} only applies to --sink {sink}, and this run writes to {destination}. \
+         Add --sink {sink}, or drop {name}.",
+        name = flag.flag
+    )
+}
+
+fn destination_label(args: &DiscoverArgs) -> String {
+    match effective_sink_kind(args) {
+        Some(kind) => sink_kind_label(kind).to_string(),
+        None => "the destination named in the scenario file".to_string(),
+    }
+}
+
+fn sink_kind_value(kind: SinkKind) -> &'static str {
+    match kind {
+        SinkKind::Stdout => "stdout",
+        SinkKind::File => "file",
+        #[cfg(feature = "kafka")]
+        SinkKind::Kafka => "kafka",
+    }
+}
+
+fn sink_kind_label(kind: SinkKind) -> &'static str {
+    match kind {
+        SinkKind::Stdout => "stdout",
+        SinkKind::File => "a file",
+        #[cfg(feature = "kafka")]
+        SinkKind::Kafka => "kafka",
+    }
 }
 
 #[cfg(feature = "kafka")]
@@ -258,29 +404,32 @@ pub async fn run(
     cancel: watch::Receiver<bool>,
     verbosity: Verbosity,
 ) -> Result<()> {
+    let mode = OutputMode::new(verbosity, args.format == Some(OutputFormat::Json));
+    ensure_no_retired_flags(&args)?;
+    ensure_sink_flags_reach_their_sink(&args)?;
     if args.dry_run {
-        return run_dry_run(&args, verbosity).await;
+        return run_dry_run(&args, mode).await;
     }
     #[cfg(feature = "config")]
     if args.file.is_some() {
-        run_from_file(&args, cancel, verbosity).await?;
+        run_from_file(&args, cancel, mode).await?;
         return Ok(());
     }
-    run_legacy(&args, cancel, verbosity).await
+    run_legacy(&args, cancel, mode).await
 }
 
-async fn run_dry_run(args: &DiscoverArgs, verbosity: Verbosity) -> Result<()> {
+async fn run_dry_run(args: &DiscoverArgs, mode: OutputMode) -> Result<()> {
     let resolver = HickoryResolver::from_system()?;
 
     #[cfg(feature = "config")]
     if args.file.is_some() {
-        return run_dry_run_from_file(args, &resolver, verbosity).await;
+        return run_dry_run_from_file(args, &resolver, mode).await;
     }
 
-    let scenario = scenario_from_flags(args, verbosity)?;
+    let scenario = scenario_from_flags(args, mode)?;
     let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
     let plan = build_scenario_plan("discovery", &scenario, &resolutions, args);
-    render_dry_run(&[plan], args.dry_run_format)?;
+    render_dry_run(&[plan], dry_run_plan_format(args))?;
     dry_run_exit_status(&[resolutions])
 }
 
@@ -288,11 +437,11 @@ async fn run_dry_run(args: &DiscoverArgs, verbosity: Verbosity) -> Result<()> {
 async fn run_dry_run_from_file(
     args: &DiscoverArgs,
     resolver: &dyn Resolver,
-    verbosity: Verbosity,
+    mode: OutputMode,
 ) -> Result<()> {
     let raw = args.file.as_deref().expect("file present per dispatch");
     let path = resolve_scenario_source(raw)?;
-    let file = load_scenario_file(&path).map_err(|e| e.report(verbosity))?;
+    let file = load_scenario_file(&path).map_err(|e| e.report(mode))?;
 
     if file.version != 1 {
         return Err(anyhow!(
@@ -313,6 +462,8 @@ async fn run_dry_run_from_file(
     }
 
     let cli_sink = build_cli_sink_override(args)?;
+    let cli_encoder = build_cli_encoder_override(args);
+    let plan_format = dry_run_plan_format(args);
     let total = file.scenarios.len();
 
     let mut scenarios: Vec<(String, DiscoverScenarioConfig)> = Vec::with_capacity(total);
@@ -323,8 +474,8 @@ async fn run_dry_run_from_file(
             _ => return Err(anyhow!("unsupported scenario entry variant")),
         };
         merge_defaults(&mut cfg.base, &file.defaults);
-        apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref());
-        let label = scenario_plan_label(&cfg.base, idx, total, args.dry_run_format);
+        apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref(), cli_encoder.as_ref());
+        let label = scenario_plan_label(&cfg.base, idx, total, plan_format);
         scenarios.push((label, cfg));
     }
 
@@ -335,7 +486,7 @@ async fn run_dry_run_from_file(
         plans.push(build_scenario_plan(label, scenario, &resolutions, args));
         all_resolutions.push(resolutions);
     }
-    render_dry_run(&plans, args.dry_run_format)?;
+    render_dry_run(&plans, plan_format)?;
     dry_run_exit_status(&all_resolutions)
 }
 
@@ -345,11 +496,11 @@ fn scenario_plan_label(
     base: &BaseProbeConfig,
     idx: usize,
     total: usize,
-    format: DryRunFormat,
+    format: OutputFormat,
 ) -> String {
     match format {
-        DryRunFormat::Text => dry_run_scenario_label(base, idx, total),
-        DryRunFormat::Json => base.name.clone().unwrap_or_else(|| "unnamed".to_string()),
+        OutputFormat::Table => dry_run_scenario_label(base, idx, total),
+        OutputFormat::Json => base.name.clone().unwrap_or_else(|| "unnamed".to_string()),
     }
 }
 
@@ -401,10 +552,10 @@ fn build_scenario_plan(
     )
 }
 
-fn render_dry_run(plans: &[DiscoveryPlan], format: DryRunFormat) -> Result<()> {
+fn render_dry_run(plans: &[DiscoveryPlan], format: OutputFormat) -> Result<()> {
     match format {
-        DryRunFormat::Text => print!("{}", render_dry_run_text(plans)),
-        DryRunFormat::Json => println!("{}", render_dry_run_json(plans)?),
+        OutputFormat::Table => print!("{}", render_dry_run_text(plans)),
+        OutputFormat::Json => println!("{}", render_dry_run_json(plans)?),
     }
     Ok(())
 }
@@ -469,11 +620,11 @@ async fn run_discovery_reporting_progress(
     scenario: &DiscoverScenarioConfig,
     cancel: watch::Receiver<bool>,
     checkpoint: Option<CheckpointConfig>,
-    verbosity: Verbosity,
+    mode: OutputMode,
 ) -> std::result::Result<DiscoverySummary, RastreoError> {
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
-    let is_tty = std::io::stderr().is_terminal();
-    let display = tokio::spawn(progress_display_loop(progress_rx, is_tty, verbosity));
+    let style = progress_style(writes_to_stdout(scenario.base.sink.as_ref()));
+    let display = tokio::spawn(progress_display_loop(progress_rx, style, mode));
     let mut opts = RunOptions::new(scenario)
         .cancel(cancel)
         .progress(progress_tx);
@@ -510,26 +661,24 @@ fn checkpoint_config(args: &DiscoverArgs) -> Option<CheckpointConfig> {
 async fn run_legacy(
     args: &DiscoverArgs,
     cancel: watch::Receiver<bool>,
-    verbosity: Verbosity,
+    mode: OutputMode,
 ) -> Result<()> {
-    let scenario = scenario_from_flags(args, verbosity)?;
+    let scenario = scenario_from_flags(args, mode)?;
     // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
     print_start(
         &build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, &[], args),
         scenario.targets.len(),
-        verbosity,
+        mode,
     );
-    match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args), verbosity)
-        .await
-    {
+    match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args), mode).await {
         Ok(summary) => {
-            print_complete(FLAG_DRIVEN_LABEL, &summary, verbosity);
-            print_runtime_hints(&summary, verbosity);
+            print_complete(FLAG_DRIVEN_LABEL, &summary, mode);
+            print_runtime_hints(&summary, mode);
             Ok(())
         }
         Err(err) => {
             if let Some(hint) = enrich_scan_error_hint(&render_error_chain(&err)) {
-                print_hint(&hint, verbosity);
+                print_hint(&hint, mode);
             }
             Err(err.into())
         }
@@ -540,11 +689,11 @@ async fn run_legacy(
 async fn run_from_file(
     args: &DiscoverArgs,
     cancel: watch::Receiver<bool>,
-    verbosity: Verbosity,
+    mode: OutputMode,
 ) -> Result<(ScenarioTally, DiscoverySummary)> {
     let raw = args.file.as_deref().expect("file present per dispatch");
     let path = resolve_scenario_source(raw)?;
-    let file = load_scenario_file(&path).map_err(|e| e.report(verbosity))?;
+    let file = load_scenario_file(&path).map_err(|e| e.report(mode))?;
 
     if file.version != 1 {
         return Err(anyhow!(
@@ -574,6 +723,7 @@ async fn run_from_file(
     }
 
     let cli_sink = build_cli_sink_override(args)?;
+    let cli_encoder = build_cli_encoder_override(args);
     let total = file.scenarios.len();
     let mut tally = ScenarioTally {
         total,
@@ -585,7 +735,7 @@ async fn run_from_file(
         if *cancel.borrow() {
             print_notice(
                 &format!("cancelled before scenario {} of {total}", idx + 1),
-                verbosity,
+                mode,
             );
             aggregate.cancelled = true;
             break;
@@ -596,18 +746,15 @@ async fn run_from_file(
             _ => return Err(anyhow!("unsupported scenario entry variant")),
         };
         merge_defaults(&mut cfg.base, &file.defaults);
-        apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref());
+        apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref(), cli_encoder.as_ref());
 
         let label = scenario_label(&cfg.base, idx, total);
         if idx > 0 {
-            print_blank(verbosity);
+            print_blank(mode);
         }
 
         if cfg.probers.is_empty() {
-            print_notice(
-                &format!("{label}: no probers configured, skipping"),
-                verbosity,
-            );
+            print_notice(&format!("{label}: no probers configured, skipping"), mode);
             continue;
         }
 
@@ -615,20 +762,15 @@ async fn run_from_file(
         print_start(
             &build_scenario_plan(&label, &cfg, &[], args),
             cfg.targets.len(),
-            verbosity,
+            mode,
         );
 
-        match run_discovery_reporting_progress(
-            &cfg,
-            cancel.clone(),
-            checkpoint_config(args),
-            verbosity,
-        )
-        .await
+        match run_discovery_reporting_progress(&cfg, cancel.clone(), checkpoint_config(args), mode)
+            .await
         {
             Ok(summary) => {
-                print_complete(&label, &summary, verbosity);
-                print_runtime_hints(&summary, verbosity);
+                print_complete(&label, &summary, mode);
+                print_runtime_hints(&summary, mode);
                 accumulate(&mut aggregate, &summary);
                 tally.completed += 1;
             }
@@ -637,15 +779,15 @@ async fn run_from_file(
                 let rendered = render_error_chain(&err);
                 print_failed(&label, &rendered);
                 if let Some(hint) = enrich_scan_error_hint(&rendered) {
-                    print_hint(&hint, verbosity);
+                    print_hint(&hint, mode);
                 }
             }
         }
     }
 
     if total > 1 {
-        print_blank(verbosity);
-        print_aggregate(tally, &aggregate, verbosity);
+        print_blank(mode);
+        print_aggregate(tally, &aggregate, mode);
     }
 
     if tally.failed > 0 {
@@ -674,9 +816,9 @@ pub(crate) struct ScenarioLoadError {
 
 #[cfg(feature = "config")]
 impl ScenarioLoadError {
-    pub(crate) fn report(self, verbosity: Verbosity) -> anyhow::Error {
+    pub(crate) fn report(self, mode: OutputMode) -> anyhow::Error {
         if let Some(hint) = &self.hint {
-            print_hint(hint, verbosity);
+            print_hint(hint, mode);
         }
         self.source
     }
@@ -736,6 +878,7 @@ fn apply_cli_overrides(
     base: &mut BaseProbeConfig,
     args: &DiscoverArgs,
     cli_sink: Option<&SinkConfig>,
+    cli_encoder: Option<&EncoderConfig>,
 ) {
     if let Some(c) = args.concurrency {
         base.max_concurrent = Some(c);
@@ -752,6 +895,17 @@ fn apply_cli_overrides(
     if let Some(sink) = cli_sink {
         base.sink = Some(sink.clone());
     }
+    match cli_encoder {
+        Some(encoder) => base.encoder = Some(encoder.clone()),
+        None if base.encoder.is_none() => {
+            base.encoder = Some(record_encoder(
+                None,
+                writes_to_stdout(base.sink.as_ref()),
+                stdout_table_width(),
+            ));
+        }
+        None => {}
+    }
 }
 
 #[cfg(feature = "config")]
@@ -763,6 +917,12 @@ fn build_cli_sink_override(args: &DiscoverArgs) -> Result<Option<SinkConfig>> {
         args.sink.expect("checked above"),
         args,
     )?))
+}
+
+#[cfg(feature = "config")]
+fn build_cli_encoder_override(args: &DiscoverArgs) -> Option<EncoderConfig> {
+    args.format
+        .map(|format| encoder_for_format(format, stdout_table_width()))
 }
 
 #[cfg(feature = "config")]
@@ -798,25 +958,27 @@ fn build_scenario_with_notes(args: &DiscoverArgs) -> Result<(DiscoverScenarioCon
     base.probe_rate = args.rate;
     base.retries = args.retries;
     base.timeout_ms = Some(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    base.encoder = Some(record_encoder(
+        args.format,
+        writes_to_stdout(Some(&sink_config)),
+        stdout_table_width(),
+    ));
     base.sink = Some(sink_config);
 
     Ok((DiscoverScenarioConfig::new(base, targets, probers), notes))
 }
 
-fn scenario_from_flags(
-    args: &DiscoverArgs,
-    verbosity: Verbosity,
-) -> Result<DiscoverScenarioConfig> {
+fn scenario_from_flags(args: &DiscoverArgs, mode: OutputMode) -> Result<DiscoverScenarioConfig> {
     match build_scenario_with_notes(args) {
         Ok((scenario, notes)) => {
             for note in &notes {
-                print_note(note, verbosity);
+                print_note(note, mode);
             }
             Ok(scenario)
         }
         Err(err) => {
             if let Some(hint) = probe_selection_hint(&err) {
-                print_hint(&hint, verbosity);
+                print_hint(&hint, mode);
             }
             Err(err)
         }
@@ -1253,7 +1415,9 @@ mod tests {
             file: None,
             sink: None,
             output: None,
+            #[cfg(feature = "kafka")]
             brokers: Vec::new(),
+            #[cfg(feature = "kafka")]
             topic: None,
             #[cfg(feature = "kafka")]
             kafka_flush_per_record: false,
@@ -1264,7 +1428,8 @@ mod tests {
             retries: None,
             timeout_ms: None,
             dry_run: false,
-            dry_run_format: DryRunFormat::Text,
+            dry_run_format: None,
+            format: None,
             checkpoint: None,
             checkpoint_interval: None,
             resume: false,
@@ -1787,7 +1952,7 @@ mod tests {
         base.sink = Some(SinkConfig::Stdout);
         let mut a = args(&[], &[]);
         a.concurrency = Some(99);
-        apply_cli_overrides(&mut base, &a, None);
+        apply_cli_overrides(&mut base, &a, None, None);
         assert_eq!(base.max_concurrent, Some(99));
         assert_eq!(base.probe_rate, None);
         assert_eq!(base.timeout_ms, Some(2));
@@ -1801,7 +1966,7 @@ mod tests {
         base.probe_rate = Some(5);
         let mut a = args(&[], &[]);
         a.rate = Some(200);
-        apply_cli_overrides(&mut base, &a, None);
+        apply_cli_overrides(&mut base, &a, None, None);
         assert_eq!(base.probe_rate, Some(200));
     }
 
@@ -1812,7 +1977,7 @@ mod tests {
         base.retries = Some(1);
         let mut a = args(&[], &[]);
         a.retries = Some(4);
-        apply_cli_overrides(&mut base, &a, None);
+        apply_cli_overrides(&mut base, &a, None, None);
         assert_eq!(base.retries, Some(4));
     }
 
@@ -1835,7 +2000,7 @@ mod tests {
         let new_sink = SinkConfig::File {
             path: PathBuf::from("/tmp/out.ndjson"),
         };
-        apply_cli_overrides(&mut base, &a, Some(&new_sink));
+        apply_cli_overrides(&mut base, &a, Some(&new_sink), None);
         match &base.sink {
             Some(SinkConfig::File { path }) => assert_eq!(path, &PathBuf::from("/tmp/out.ndjson")),
             other => panic!("expected File sink, got {other:?}"),
@@ -2011,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_dry_run_format_defaults_to_text() {
+    fn the_dry_run_plan_is_text_unless_json_is_asked_for() {
         let parsed = DiscoverArgs::try_parse_from([
             "discover",
             "--target",
@@ -2021,12 +2186,11 @@ mod tests {
             "--dry-run",
         ])
         .expect("parses");
-        assert_eq!(parsed.dry_run_format, DryRunFormat::Text);
+        assert_eq!(dry_run_plan_format(&parsed), OutputFormat::Table);
     }
 
-    #[test]
-    fn parse_dry_run_format_accepts_json() {
-        let parsed = DiscoverArgs::try_parse_from([
+    fn parse_with_dry_run_format(value: &str) -> DiscoverArgs {
+        DiscoverArgs::try_parse_from([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2034,25 +2198,37 @@ mod tests {
             "22",
             "--dry-run",
             "--dry-run-format",
-            "json",
+            value,
         ])
-        .expect("parses");
-        assert_eq!(parsed.dry_run_format, DryRunFormat::Json);
+        .expect("the retired flag still parses so the run can name its replacement")
     }
 
     #[test]
-    fn parse_dry_run_format_rejects_unknown_value() {
-        let result = DiscoverArgs::try_parse_from([
-            "discover",
-            "--target",
-            "127.0.0.1",
-            "--port",
-            "22",
-            "--dry-run",
-            "--dry-run-format",
-            "yaml",
-        ]);
-        assert!(result.is_err(), "unknown dry-run format must be rejected");
+    fn the_retired_dry_run_format_flag_points_at_the_format_it_became() {
+        for (retired, replacement) in [("text", "--format table"), ("json", "--format json")] {
+            let err = ensure_no_retired_flags(&parse_with_dry_run_format(retired))
+                .expect_err("--dry-run-format no longer drives anything");
+            let msg = format!("{err}");
+            assert!(msg.contains("--dry-run-format"), "msg: {msg}");
+            assert!(msg.contains(replacement), "msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn a_run_without_the_retired_flag_is_accepted() {
+        ensure_no_retired_flags(&args(&["127.0.0.1"], &[])).expect("nothing to reject");
+    }
+
+    #[test]
+    fn the_retired_dry_run_format_flag_is_hidden_from_help() {
+        use clap::CommandFactory as _;
+
+        let command = DiscoverArgs::command();
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "dry_run_format")
+            .expect("the retired flag is still declared");
+        assert!(arg.is_hide_set(), "a retired flag is not a documented one");
     }
 
     #[tokio::test]
@@ -2283,7 +2459,7 @@ mod tests {
         let mut base = BaseProbeConfig::new();
         base.name = Some("routers".into());
         assert_eq!(
-            scenario_plan_label(&base, 0, 3, DryRunFormat::Text),
+            scenario_plan_label(&base, 0, 3, OutputFormat::Table),
             "'routers' (1 of 3)"
         );
     }
@@ -2294,7 +2470,7 @@ mod tests {
         let mut base = BaseProbeConfig::new();
         base.name = Some("routers".into());
         assert_eq!(
-            scenario_plan_label(&base, 0, 3, DryRunFormat::Json),
+            scenario_plan_label(&base, 0, 3, OutputFormat::Json),
             "routers"
         );
     }
@@ -2304,7 +2480,7 @@ mod tests {
     fn scenario_plan_label_json_falls_back_to_unnamed_when_no_name() {
         let base = BaseProbeConfig::new();
         assert_eq!(
-            scenario_plan_label(&base, 1, 2, DryRunFormat::Json),
+            scenario_plan_label(&base, 1, 2, OutputFormat::Json),
             "unnamed"
         );
     }
@@ -2377,7 +2553,7 @@ scenarios:
         a.file = Some(file.path().to_path_buf());
         let (_tx, cancel) = watch::channel(true);
 
-        let (tally, aggregate) = run_from_file(&a, cancel, Verbosity::Normal)
+        let (tally, aggregate) = run_from_file(&a, cancel, OutputMode::from(Verbosity::Normal))
             .await
             .expect("a cancelled run with no failed scenario exits ok");
 
@@ -2402,7 +2578,7 @@ scenarios:
         a.timeout_ms = Some(50);
         let (_tx, cancel) = watch::channel(false);
 
-        let (tally, aggregate) = run_from_file(&a, cancel, Verbosity::Quiet)
+        let (tally, aggregate) = run_from_file(&a, cancel, OutputMode::from(Verbosity::Quiet))
             .await
             .expect("both scenarios run to completion against loopback");
 
@@ -2927,6 +3103,7 @@ scenarios:
             "probe",
             "port",
             "file",
+            "format",
             "sink",
             "output",
             "brokers",
@@ -3226,6 +3403,7 @@ scenarios:
         const LEGAL_WITH_FILE: &[&str] = &[
             "help",
             "file",
+            "format",
             "sink",
             "output",
             "brokers",
@@ -3279,5 +3457,425 @@ scenarios:
                  conflicts_with = \"file\""
             );
         }
+    }
+
+    #[test]
+    fn format_defaults_to_absent_so_yaml_keeps_its_encoder() {
+        let parsed =
+            DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1"]).expect("parses");
+        assert_eq!(parsed.format, None);
+    }
+
+    #[test]
+    fn format_accepts_table_and_its_text_alias() {
+        for value in ["table", "text"] {
+            let parsed = DiscoverArgs::try_parse_from([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--format",
+                value,
+            ])
+            .expect("parses");
+            assert_eq!(parsed.format, Some(OutputFormat::Table), "value: {value}");
+        }
+    }
+
+    #[test]
+    fn format_accepts_json_and_its_ndjson_alias() {
+        for value in ["json", "ndjson"] {
+            let parsed = DiscoverArgs::try_parse_from([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--format",
+                value,
+            ])
+            .expect("parses");
+            assert_eq!(parsed.format, Some(OutputFormat::Json), "value: {value}");
+        }
+    }
+
+    #[test]
+    fn format_rejects_an_unknown_value() {
+        let result =
+            DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1", "--format", "yaml"]);
+        assert!(result.is_err(), "unknown record format must be rejected");
+    }
+
+    #[test]
+    fn table_format_carries_the_measured_width() {
+        assert!(matches!(
+            encoder_for_format(OutputFormat::Table, 137),
+            EncoderConfig::Table { width: 137 }
+        ));
+    }
+
+    #[test]
+    fn json_format_is_the_ndjson_encoder() {
+        assert!(matches!(
+            encoder_for_format(OutputFormat::Json, 137),
+            EncoderConfig::Ndjson
+        ));
+    }
+
+    #[test]
+    fn stdout_defaults_to_the_table_encoder() {
+        assert!(matches!(
+            record_encoder(None, true, 100),
+            EncoderConfig::Table { width: 100 }
+        ));
+    }
+
+    #[test]
+    fn every_other_destination_defaults_to_ndjson() {
+        assert!(matches!(
+            record_encoder(None, false, 100),
+            EncoderConfig::Ndjson
+        ));
+    }
+
+    #[test]
+    fn an_explicit_format_beats_the_per_destination_default() {
+        assert!(matches!(
+            record_encoder(Some(OutputFormat::Json), true, 100),
+            EncoderConfig::Ndjson
+        ));
+        assert!(matches!(
+            record_encoder(Some(OutputFormat::Table), false, 100),
+            EncoderConfig::Table { width: 100 }
+        ));
+    }
+
+    #[test]
+    fn an_unset_sink_is_the_stdout_destination_core_defaults_to() {
+        assert!(writes_to_stdout(None));
+        assert!(writes_to_stdout(Some(&SinkConfig::Stdout)));
+        assert!(!writes_to_stdout(Some(&SinkConfig::File {
+            path: PathBuf::from("/tmp/x")
+        })));
+    }
+
+    #[test]
+    fn build_scenario_puts_a_table_on_stdout() {
+        let scenario = build_scenario(&tcp_args(&["10.0.0.1"], &[80])).expect("scenario");
+        assert!(
+            matches!(scenario.base.encoder, Some(EncoderConfig::Table { .. })),
+            "got {:?}",
+            scenario.base.encoder
+        );
+    }
+
+    #[test]
+    fn build_scenario_puts_ndjson_in_a_file() {
+        let mut a = tcp_args(&["10.0.0.1"], &[80]);
+        a.sink = Some(SinkKind::File);
+        a.output = Some(PathBuf::from("/tmp/out.ndjson"));
+        let scenario = build_scenario(&a).expect("scenario");
+        assert!(
+            matches!(scenario.base.encoder, Some(EncoderConfig::Ndjson)),
+            "got {:?}",
+            scenario.base.encoder
+        );
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn build_scenario_puts_ndjson_on_a_broker() {
+        let mut a = tcp_args(&["10.0.0.1"], &[80]);
+        a.sink = Some(SinkKind::Kafka);
+        a.brokers = vec!["localhost:9092".into()];
+        a.topic = Some("rastreo.devices".into());
+        let scenario = build_scenario(&a).expect("scenario");
+        assert!(
+            matches!(scenario.base.encoder, Some(EncoderConfig::Ndjson)),
+            "got {:?}",
+            scenario.base.encoder
+        );
+    }
+
+    #[test]
+    fn build_scenario_honours_an_explicit_json_format_on_stdout() {
+        let mut a = tcp_args(&["10.0.0.1"], &[80]);
+        a.format = Some(OutputFormat::Json);
+        let scenario = build_scenario(&a).expect("scenario");
+        assert!(
+            matches!(scenario.base.encoder, Some(EncoderConfig::Ndjson)),
+            "got {:?}",
+            scenario.base.encoder
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_cli_overrides_replaces_the_scenario_encoder_when_format_is_given() {
+        let mut base = BaseProbeConfig::new();
+        base.encoder = Some(EncoderConfig::Ndjson);
+        let mut a = args(&[], &[]);
+        a.format = Some(OutputFormat::Table);
+        let cli_encoder = build_cli_encoder_override(&a);
+        apply_cli_overrides(&mut base, &a, None, cli_encoder.as_ref());
+        assert!(
+            matches!(base.encoder, Some(EncoderConfig::Table { .. })),
+            "got {:?}",
+            base.encoder
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn apply_cli_overrides_leaves_the_scenario_encoder_alone_without_format() {
+        let mut base = BaseProbeConfig::new();
+        base.encoder = Some(EncoderConfig::Table { width: 61 });
+        let a = args(&[], &[]);
+        assert!(build_cli_encoder_override(&a).is_none());
+        apply_cli_overrides(&mut base, &a, None, None);
+        assert!(
+            matches!(base.encoder, Some(EncoderConfig::Table { width: 61 })),
+            "got {:?}",
+            base.encoder
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_scenario_without_an_encoder_gets_the_table_on_stdout() {
+        let mut base = BaseProbeConfig::new();
+        base.sink = Some(SinkConfig::Stdout);
+        apply_cli_overrides(&mut base, &args(&[], &[]), None, None);
+        assert!(
+            matches!(base.encoder, Some(EncoderConfig::Table { .. })),
+            "got {:?}",
+            base.encoder
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_scenario_without_a_sink_still_gets_the_table_because_core_defaults_to_stdout() {
+        let mut base = BaseProbeConfig::new();
+        apply_cli_overrides(&mut base, &args(&[], &[]), None, None);
+        assert!(
+            matches!(base.encoder, Some(EncoderConfig::Table { .. })),
+            "got {:?}",
+            base.encoder
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_scenario_without_an_encoder_keeps_ndjson_off_stdout() {
+        let mut base = BaseProbeConfig::new();
+        base.sink = Some(SinkConfig::File {
+            path: PathBuf::from("/tmp/out.ndjson"),
+        });
+        apply_cli_overrides(&mut base, &args(&[], &[]), None, None);
+        assert!(
+            matches!(base.encoder, Some(EncoderConfig::Ndjson)),
+            "got {:?}",
+            base.encoder
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn the_destination_default_reads_the_sink_the_cli_overrode_it_with() {
+        let mut base = BaseProbeConfig::new();
+        base.sink = Some(SinkConfig::Stdout);
+        apply_cli_overrides(
+            &mut base,
+            &args(&[], &[]),
+            Some(&SinkConfig::File {
+                path: PathBuf::from("/tmp/out.ndjson"),
+            }),
+            None,
+        );
+        assert!(
+            matches!(base.encoder, Some(EncoderConfig::Ndjson)),
+            "got {:?}",
+            base.encoder
+        );
+    }
+
+    #[test]
+    fn the_dry_run_plan_follows_format_json() {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.format = Some(OutputFormat::Json);
+        assert_eq!(dry_run_plan_format(&a), OutputFormat::Json);
+    }
+
+    #[test]
+    fn the_dry_run_plan_follows_format_table() {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.format = Some(OutputFormat::Table);
+        assert_eq!(dry_run_plan_format(&a), OutputFormat::Table);
+    }
+
+    #[test]
+    fn a_flag_driven_run_knows_it_writes_to_stdout() {
+        assert_eq!(
+            effective_sink_kind(&args(&["127.0.0.1"], &[])),
+            Some(SinkKind::Stdout)
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_file_run_without_sink_leaves_the_destination_to_the_scenario() {
+        let mut a = args(&[], &[]);
+        a.file = Some(PathBuf::from("/tmp/x.yml"));
+        assert_eq!(effective_sink_kind(&a), None);
+    }
+
+    fn args_with_every_sink_flag() -> DiscoverArgs {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.output = Some(PathBuf::from("/tmp/x.txt"));
+        #[cfg(feature = "kafka")]
+        {
+            a.brokers = vec!["localhost:9092".into()];
+            a.topic = Some("t".into());
+            a.kafka_flush_per_record = true;
+            a.kafka_batch_threshold = Some(1024);
+        }
+        a
+    }
+
+    #[test]
+    fn every_sink_scoped_argument_is_covered_by_the_sink_flag_table() {
+        use clap::CommandFactory as _;
+
+        const NOT_SINK_SCOPED: &[&str] = &[
+            "help",
+            "target",
+            "probe",
+            "port",
+            "probe_ports",
+            "udp_protocol",
+            "dns_query",
+            "dns_query_type",
+            "snmp_community",
+            "snmp_version",
+            "http_path",
+            "icmp_count",
+            "interface",
+            "file",
+            "format",
+            "sink",
+            "concurrency",
+            "rate",
+            "retries",
+            "timeout_ms",
+            "dry_run",
+            "dry_run_format",
+            "checkpoint",
+            "checkpoint_interval",
+            "resume",
+        ];
+
+        let covered: Vec<&str> = sink_flags(&args_with_every_sink_flag())
+            .into_iter()
+            .map(|flag| flag.flag)
+            .collect();
+        for arg in DiscoverArgs::command().get_arguments() {
+            let id = arg.get_id().as_str();
+            if NOT_SINK_SCOPED.contains(&id) {
+                continue;
+            }
+            let long = format!(
+                "--{}",
+                arg.get_long()
+                    .unwrap_or_else(|| panic!("{id} has no long form"))
+            );
+            assert!(
+                covered.contains(&long.as_str()),
+                "{long} names a destination but is missing from the sink-flag table, so it \
+                 would be discarded in silence under a sink that cannot consume it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_sink_flag_reports_the_sink_that_would_have_consumed_it() {
+        for flag in sink_flags(&args_with_every_sink_flag()) {
+            assert!(flag.supplied, "{} was not read back", flag.flag);
+            let msg = sink_flag_mismatch(&flag, "stdout");
+            assert!(msg.contains(flag.flag), "{msg}");
+            assert!(
+                msg.contains(&format!("--sink {}", sink_kind_value(flag.sink))),
+                "{msg}"
+            );
+            assert!(msg.contains("this run writes to stdout"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_sink_flag_is_accepted_by_its_own_sink() {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.sink = Some(SinkKind::File);
+        a.output = Some(PathBuf::from("/tmp/x.txt"));
+        ensure_sink_flags_reach_their_sink(&a).expect("a file sink takes --output");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn the_kafka_flags_are_accepted_by_a_broker_sink() {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.sink = Some(SinkKind::Kafka);
+        a.brokers = vec!["localhost:9092".into()];
+        a.topic = Some("t".into());
+        a.kafka_flush_per_record = true;
+        ensure_sink_flags_reach_their_sink(&a).expect("a broker sink takes its own flags");
+    }
+
+    #[test]
+    fn a_run_with_no_sink_flags_is_always_accepted() {
+        ensure_sink_flags_reach_their_sink(&args(&["127.0.0.1"], &[])).expect("nothing to check");
+    }
+
+    #[test]
+    fn output_without_a_file_sink_names_the_destination_it_would_have_missed() {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.output = Some(PathBuf::from("/tmp/x.txt"));
+        let err = ensure_sink_flags_reach_their_sink(&a).expect_err("stdout cannot take --output");
+        let msg = format!("{err}");
+        assert!(msg.contains("--sink file"), "msg: {msg}");
+        assert!(msg.contains("stdout"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn output_alongside_a_broker_sink_is_refused() {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.sink = Some(SinkKind::Kafka);
+        a.brokers = vec!["localhost:9092".into()];
+        a.topic = Some("t".into());
+        a.output = Some(PathBuf::from("/tmp/x.txt"));
+        let err = ensure_sink_flags_reach_their_sink(&a).expect_err("kafka cannot take --output");
+        assert!(format!("{err}").contains("kafka"), "{err}");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn broker_flags_without_a_broker_sink_are_refused() {
+        let mut a = args(&["127.0.0.1"], &[]);
+        a.brokers = vec!["localhost:9092".into()];
+        a.topic = Some("t".into());
+        let err = ensure_sink_flags_reach_their_sink(&a).expect_err("stdout cannot reach a broker");
+        let msg = format!("{err}");
+        assert!(msg.contains("--brokers"), "msg: {msg}");
+        assert!(msg.contains("--sink kafka"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn output_alongside_a_scenario_file_is_refused_because_it_reaches_no_sink() {
+        let mut a = args(&[], &[]);
+        a.file = Some(PathBuf::from("/tmp/x.yml"));
+        a.output = Some(PathBuf::from("/tmp/x.ndjson"));
+        let err = ensure_sink_flags_reach_their_sink(&a)
+            .expect_err("--output is only ever read through --sink file");
+        let msg = format!("{err}");
+        assert!(msg.contains("--sink file"), "msg: {msg}");
+        assert!(msg.contains("scenario file"), "msg: {msg}");
     }
 }

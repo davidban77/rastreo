@@ -5,6 +5,7 @@ mod progress;
 #[cfg(feature = "config")]
 mod report;
 pub(crate) mod theme;
+mod width;
 
 #[cfg(feature = "config")]
 pub(crate) use banner::ScenarioTally;
@@ -16,9 +17,10 @@ pub(crate) use hints::enrich_feature_hint;
 pub(crate) use hints::{
     enrich_scan_error_hint, print_hint, print_note, print_runtime_hints, rebuild_hint,
 };
-pub(crate) use progress::progress_display_loop;
+pub(crate) use progress::{progress_display_loop, progress_style};
 #[cfg(feature = "config")]
 pub(crate) use report::{print_catalog_empty, print_scenario_invalid};
+pub(crate) use width::stdout_table_width;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Verbosity {
@@ -44,6 +46,43 @@ impl Verbosity {
 
     pub(crate) fn prints_detail(self) -> bool {
         self == Verbosity::Verbose
+    }
+}
+
+/// What stderr carries, given the verbosity flags and whether the user asked for machine output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OutputMode {
+    verbosity: Verbosity,
+    machine_output: bool,
+}
+
+impl OutputMode {
+    pub(crate) fn new(verbosity: Verbosity, machine_output: bool) -> Self {
+        Self {
+            verbosity,
+            machine_output,
+        }
+    }
+
+    /// Banners and the progress line.
+    pub(crate) fn prints_chrome(self) -> bool {
+        self.verbosity.prints_chrome()
+            && (!self.machine_output || self.verbosity == Verbosity::Verbose)
+    }
+
+    /// Hints, notes, and notices.
+    pub(crate) fn prints_advisories(self) -> bool {
+        self.verbosity.prints_chrome()
+    }
+
+    pub(crate) fn prints_detail(self) -> bool {
+        self.verbosity.prints_detail()
+    }
+}
+
+impl From<Verbosity> for OutputMode {
+    fn from(verbosity: Verbosity) -> Self {
+        Self::new(verbosity, false)
     }
 }
 
@@ -157,5 +196,44 @@ mod tests {
     fn verbose_prints_both() {
         assert!(Verbosity::Verbose.prints_chrome());
         assert!(Verbosity::Verbose.prints_detail());
+    }
+
+    #[test]
+    fn human_output_prints_chrome_and_advisories() {
+        let mode = OutputMode::new(Verbosity::Normal, false);
+        assert!(mode.prints_chrome());
+        assert!(mode.prints_advisories());
+    }
+
+    #[test]
+    fn machine_output_drops_chrome_but_keeps_advisories() {
+        let mode = OutputMode::new(Verbosity::Normal, true);
+        assert!(!mode.prints_chrome());
+        assert!(mode.prints_advisories());
+    }
+
+    #[test]
+    fn verbose_restores_chrome_under_machine_output() {
+        let mode = OutputMode::new(Verbosity::Verbose, true);
+        assert!(mode.prints_chrome());
+        assert!(mode.prints_detail());
+    }
+
+    #[test]
+    fn quiet_silences_machine_and_human_output_alike() {
+        for machine_output in [false, true] {
+            let mode = OutputMode::new(Verbosity::Quiet, machine_output);
+            assert!(!mode.prints_chrome());
+            assert!(!mode.prints_advisories());
+            assert!(!mode.prints_detail());
+        }
+    }
+
+    #[test]
+    fn a_bare_verbosity_converts_to_human_output() {
+        assert_eq!(
+            OutputMode::from(Verbosity::Normal),
+            OutputMode::new(Verbosity::Normal, false)
+        );
     }
 }

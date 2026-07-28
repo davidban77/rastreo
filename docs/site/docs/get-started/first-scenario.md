@@ -19,7 +19,7 @@ The same scan written as a scenario file uses a few named fields:
 - `version` and `kind` — the file header. Always `version: 1` and `kind: discovery`.
 - `scenarios` — the list of runs. Each entry is one scan.
 - `signal_type` — the run type. Use `discover` for a discovery scan.
-- `name` — a label for the scenario. It appears in the progress lines.
+- `name` — a label for the scenario. It appears in the banners on stderr and in each record's `scan_metadata.scenario_name`.
 - `targets` — what to probe. `Ip` names a single address.
 - `probers` — how to probe. `tcp_connect` with `ports` is the flag scan's prober.
 - `sink` — where records go. `stdout` is the default.
@@ -45,7 +45,14 @@ Run it with `--file` instead of the scan flags:
 rastreo discover --file scenario.yaml
 ```
 
-The output is the same one-line `DeviceRecord` you saw on the first scan: one `OpenPort` signal for port 443. The scenario file changed how you asked, not what came back.
+The output is the same table row you saw on the first scan. The destination picks the format here as well, so a `stdout` sink with no `encoder:` renders the grid:
+
+```text
+ADDRESS                      NAME                      PLATFORM              PORTS
+1.1.1.1                      -                         -                     443
+```
+
+The scenario file changed how you asked, not what came back. Add `--format json` for the full record, or set `encoder: {type: ndjson}` in the file to make that the scenario's own choice.
 
 !!! tip "Check the file before you run it"
     `rastreo validate scenario.yaml` checks the file offline — no probing, no network. It catches a typo in the sink or prober config before a real scan. See [Validate](../discover/validate.md).
@@ -76,7 +83,14 @@ Run it again:
 rastreo discover --file scenario.yaml
 ```
 
-Now the record carries two signals. The `tcp_connect` prober found the open port, and `reverse_dns` resolved the address to its hostname. The record below is trimmed to the fields that changed:
+Now `NAME` fills in, because `reverse_dns` resolved the address to its hostname:
+
+```text
+ADDRESS                      NAME                      PLATFORM              PORTS
+1.1.1.1                      one.one.one.one           -                     443
+```
+
+The record behind that row carries two signals. `rastreo discover --file scenario.yaml --format json` prints it in full; trimmed to the fields that changed:
 
 ```json
 {
@@ -93,7 +107,7 @@ Confidence rises from `0.2` to `0.3` because a second signal was observed. `reve
 
 ## Send records to a file
 
-stdout is fine for a first look. To keep the records, point the sink at a file. Change the `sink` block from `stdout` to `file` and give it a `path`:
+stdout is fine for a first look. To keep the records, point the sink at a file. Change the `sink` block from `stdout` to `file` and give it a `path` — a file destination writes NDJSON, so the records land parseable without any extra flag:
 
 ```yaml title="scenario.yaml" hl_lines="7 8"
 version: 1

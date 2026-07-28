@@ -2,40 +2,36 @@ use rastreo_core::{DiscoveryPlan, DiscoverySummary};
 
 use super::humanize;
 use super::theme::{self, glyphs};
-use super::Verbosity;
+use super::OutputMode;
 
 const DETAIL_LABEL_WIDTH: usize = 14;
 
-pub(crate) fn print_start(plan: &DiscoveryPlan, target_specs: usize, verbosity: Verbosity) {
-    if !verbosity.prints_chrome() {
+pub(crate) fn print_start(plan: &DiscoveryPlan, target_specs: usize, mode: OutputMode) {
+    if !mode.prints_chrome() {
         return;
     }
     eprintln!("{}", start_line(plan, target_specs));
 }
 
-pub(crate) fn print_complete(label: &str, summary: &DiscoverySummary, verbosity: Verbosity) {
-    if !verbosity.prints_chrome() {
+pub(crate) fn print_complete(label: &str, summary: &DiscoverySummary, mode: OutputMode) {
+    if !mode.prints_chrome() {
         return;
     }
     eprintln!("{}", complete_line(label, summary));
-    print_detail(summary, verbosity);
+    print_detail(summary, mode);
 }
 
 #[cfg(feature = "config")]
-pub(crate) fn print_aggregate(
-    tally: ScenarioTally,
-    summary: &DiscoverySummary,
-    verbosity: Verbosity,
-) {
-    if !verbosity.prints_chrome() {
+pub(crate) fn print_aggregate(tally: ScenarioTally, summary: &DiscoverySummary, mode: OutputMode) {
+    if !mode.prints_chrome() {
         return;
     }
     eprintln!("{}", aggregate_line(tally, summary));
-    print_detail(summary, verbosity);
+    print_detail(summary, mode);
 }
 
-fn print_detail(summary: &DiscoverySummary, verbosity: Verbosity) {
-    if !verbosity.prints_detail() {
+fn print_detail(summary: &DiscoverySummary, mode: OutputMode) {
+    if !mode.prints_detail() {
         return;
     }
     for line in detail_lines(summary) {
@@ -44,8 +40,8 @@ fn print_detail(summary: &DiscoverySummary, verbosity: Verbosity) {
 }
 
 #[cfg(feature = "config")]
-pub(crate) fn print_blank(verbosity: Verbosity) {
-    if !verbosity.prints_chrome() {
+pub(crate) fn print_blank(mode: OutputMode) {
+    if !mode.prints_chrome() {
         return;
     }
     eprintln!();
@@ -57,9 +53,10 @@ pub(crate) fn print_failed(label: &str, error: &str) {
     eprintln!("{}", failed_line(label, error));
 }
 
+// An advisory, not chrome: a skipped or cancelled scenario is the only explanation for its missing records.
 #[cfg(feature = "config")]
-pub(crate) fn print_notice(text: &str, verbosity: Verbosity) {
-    if !verbosity.prints_chrome() {
+pub(crate) fn print_notice(text: &str, mode: OutputMode) {
+    if !mode.prints_advisories() {
         return;
     }
     eprintln!("{} {}", theme::label(glyphs().bullet), theme::label(text));

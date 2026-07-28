@@ -1,7 +1,7 @@
 use rastreo_core::hint_for_error_kind;
 
 use super::theme::{self, glyphs};
-use super::Verbosity;
+use super::OutputMode;
 
 #[cfg(feature = "config")]
 const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
@@ -60,22 +60,22 @@ fn runtime_hint_line(summary: &rastreo_core::DiscoverySummary) -> Option<String>
     None
 }
 
-pub(crate) fn print_hint(hint: &str, verbosity: Verbosity) {
-    if !verbosity.prints_chrome() {
+pub(crate) fn print_hint(hint: &str, mode: OutputMode) {
+    if !mode.prints_advisories() {
         return;
     }
     eprintln!("{}", hint_line(hint));
 }
 
-pub(crate) fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary, verbosity: Verbosity) {
+pub(crate) fn print_runtime_hints(summary: &rastreo_core::DiscoverySummary, mode: OutputMode) {
     if let Some(hint) = runtime_hint_line(summary) {
-        print_hint(&hint, verbosity);
+        print_hint(&hint, mode);
     }
 }
 
 /// Pre-scan advisory about how the requested scan was interpreted; not a failure.
-pub(crate) fn print_note(note: &str, verbosity: Verbosity) {
-    if !verbosity.prints_chrome() {
+pub(crate) fn print_note(note: &str, mode: OutputMode) {
+    if !mode.prints_advisories() {
         return;
     }
     eprintln!("{}", note_line(note));
@@ -119,6 +119,7 @@ pub(crate) fn enrich_feature_hint(error_msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Verbosity;
     use super::*;
 
     #[cfg(feature = "config")]
@@ -328,7 +329,7 @@ mod tests {
             runtime_hint_line(&summary).is_none(),
             "records emitted with no fault must produce no hint"
         );
-        print_runtime_hints(&summary, Verbosity::Normal);
+        print_runtime_hints(&summary, OutputMode::from(Verbosity::Normal));
     }
 
     #[test]
@@ -352,8 +353,16 @@ mod tests {
     }
 
     #[test]
+    fn advisories_survive_machine_output() {
+        let mode = OutputMode::new(Verbosity::Normal, true);
+        assert!(mode.prints_advisories());
+        print_hint("still printed", mode);
+        print_note("still printed", mode);
+    }
+
+    #[test]
     fn print_note_is_silent_under_quiet() {
-        print_note("suppressed", Verbosity::Quiet);
+        print_note("suppressed", OutputMode::from(Verbosity::Quiet));
     }
 
     #[test]
@@ -423,6 +432,6 @@ mod tests {
             "permission denied",
         ));
         assert!(runtime_hint_line(&summary).is_none());
-        print_runtime_hints(&summary, Verbosity::Normal);
+        print_runtime_hints(&summary, OutputMode::from(Verbosity::Normal));
     }
 }

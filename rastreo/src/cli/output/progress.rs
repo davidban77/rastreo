@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use rastreo_core::DiscoveryProgress;
@@ -6,7 +6,7 @@ use tokio::sync::watch;
 
 use super::humanize;
 use super::theme;
-use super::Verbosity;
+use super::OutputMode;
 
 const TTY_REDRAW_INTERVAL: Duration = Duration::from_millis(250);
 // Plain output accumulates one line per redraw, so a CI log gets a heartbeat, not a flood.
@@ -14,17 +14,47 @@ const PLAIN_REDRAW_INTERVAL: Duration = Duration::from_secs(5);
 // Below a few completed targets, a linear ETA extrapolation is too noisy to be useful.
 const ETA_MIN_COMPLETED: usize = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProgressStyle {
+    InPlace,
+    Lines,
+    Silent,
+}
+
+pub(crate) fn progress_style(records_on_stdout: bool) -> ProgressStyle {
+    style_for(
+        std::io::stderr().is_terminal(),
+        std::io::stdout().is_terminal(),
+        records_on_stdout,
+    )
+}
+
+// An in-place redraw owns the row it paints, and it cannot own one that records are landing on.
+fn style_for(
+    stderr_is_terminal: bool,
+    stdout_is_terminal: bool,
+    records_on_stdout: bool,
+) -> ProgressStyle {
+    if records_on_stdout && stdout_is_terminal && stderr_is_terminal {
+        ProgressStyle::Silent
+    } else if stderr_is_terminal {
+        ProgressStyle::InPlace
+    } else {
+        ProgressStyle::Lines
+    }
+}
+
 pub(crate) async fn progress_display_loop(
     mut rx: watch::Receiver<DiscoveryProgress>,
-    is_tty: bool,
-    verbosity: Verbosity,
+    style: ProgressStyle,
+    mode: OutputMode,
 ) {
-    if !verbosity.prints_chrome() {
+    if !mode.prints_chrome() || style == ProgressStyle::Silent {
         return;
     }
-    let interval = redraw_interval(is_tty);
+    let interval = redraw_interval(style);
     // A TTY redraws in place so it draws at once; plain output waits an interval to stay quiet on short scans.
-    let mut last_draw: Option<Instant> = (!is_tty).then(Instant::now);
+    let mut last_draw: Option<Instant> = (style == ProgressStyle::Lines).then(Instant::now);
     while rx.changed().await.is_ok() {
         let snapshot = rx.borrow().clone();
         if snapshot.targets_total == 0 {
@@ -32,22 +62,17 @@ pub(crate) async fn progress_display_loop(
         }
         let now = Instant::now();
         if should_redraw(last_draw, now, interval) {
-            if is_tty {
-                render_progress_tty(&snapshot);
-            } else {
-                render_progress_plain(&snapshot);
-            }
+            render_progress(style, &snapshot);
             last_draw = Some(now);
         }
     }
-    finalize_progress_line(is_tty);
+    finalize_progress_line(style);
 }
 
-fn redraw_interval(is_tty: bool) -> Duration {
-    if is_tty {
-        TTY_REDRAW_INTERVAL
-    } else {
-        PLAIN_REDRAW_INTERVAL
+fn redraw_interval(style: ProgressStyle) -> Duration {
+    match style {
+        ProgressStyle::InPlace => TTY_REDRAW_INTERVAL,
+        ProgressStyle::Lines | ProgressStyle::Silent => PLAIN_REDRAW_INTERVAL,
     }
 }
 
@@ -110,20 +135,19 @@ pub(super) fn format_progress_line(p: &DiscoveryProgress) -> String {
 }
 
 // stderr, not stdout: records stream to stdout and the progress line must not corrupt them.
-fn render_progress_tty(p: &DiscoveryProgress) {
+fn render_progress(style: ProgressStyle, p: &DiscoveryProgress) {
     let mut err = std::io::stderr();
-    let _ = write!(err, "{}{}", theme::ERASE_LINE, format_progress_line(p));
+    let line = format_progress_line(p);
+    let _ = match style {
+        ProgressStyle::InPlace => write!(err, "{}{line}", theme::ERASE_LINE),
+        ProgressStyle::Lines => writeln!(err, "{line}"),
+        ProgressStyle::Silent => return,
+    };
     let _ = err.flush();
 }
 
-fn render_progress_plain(p: &DiscoveryProgress) {
-    let mut err = std::io::stderr();
-    let _ = writeln!(err, "{}", format_progress_line(p));
-    let _ = err.flush();
-}
-
-fn finalize_progress_line(is_tty: bool) {
-    if is_tty {
+fn finalize_progress_line(style: ProgressStyle) {
+    if style == ProgressStyle::InPlace {
         let mut err = std::io::stderr();
         let _ = write!(err, "{}", theme::ERASE_LINE);
         let _ = err.flush();
@@ -133,6 +157,7 @@ fn finalize_progress_line(is_tty: bool) {
 #[cfg(test)]
 mod tests {
     use super::super::theme::strip_ansi;
+    use super::super::Verbosity;
     use super::*;
 
     fn progress(
@@ -151,12 +176,43 @@ mod tests {
 
     #[test]
     fn tty_redraws_four_times_a_second() {
-        assert_eq!(redraw_interval(true), Duration::from_millis(250));
+        assert_eq!(
+            redraw_interval(ProgressStyle::InPlace),
+            Duration::from_millis(250)
+        );
     }
 
     #[test]
     fn plain_output_redraws_once_every_five_seconds() {
-        assert_eq!(redraw_interval(false), Duration::from_secs(5));
+        assert_eq!(
+            redraw_interval(ProgressStyle::Lines),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn records_streaming_to_the_same_terminal_silence_the_progress_line() {
+        assert_eq!(style_for(true, true, true), ProgressStyle::Silent);
+    }
+
+    #[test]
+    fn a_terminal_stderr_redraws_in_place_when_records_go_elsewhere() {
+        assert_eq!(style_for(true, true, false), ProgressStyle::InPlace);
+        assert_eq!(style_for(true, false, true), ProgressStyle::InPlace);
+        assert_eq!(style_for(true, false, false), ProgressStyle::InPlace);
+    }
+
+    #[test]
+    fn a_redirected_stderr_always_gets_whole_lines() {
+        for stdout_is_terminal in [false, true] {
+            for records_on_stdout in [false, true] {
+                assert_eq!(
+                    style_for(false, stdout_is_terminal, records_on_stdout),
+                    ProgressStyle::Lines,
+                    "stdout_is_terminal: {stdout_is_terminal}, records_on_stdout: {records_on_stdout}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -239,10 +295,48 @@ mod tests {
         let (tx, rx) = watch::channel(DiscoveryProgress::default());
         let finished = tokio::time::timeout(
             Duration::from_millis(50),
-            progress_display_loop(rx, false, Verbosity::Quiet),
+            progress_display_loop(rx, ProgressStyle::Lines, OutputMode::from(Verbosity::Quiet)),
         )
         .await;
         assert!(finished.is_ok(), "quiet must not start the display loop");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn machine_output_returns_before_the_loop_ever_watches_the_channel() {
+        let (tx, rx) = watch::channel(DiscoveryProgress::default());
+        let finished = tokio::time::timeout(
+            Duration::from_millis(50),
+            progress_display_loop(
+                rx,
+                ProgressStyle::Lines,
+                OutputMode::new(Verbosity::Normal, true),
+            ),
+        )
+        .await;
+        assert!(
+            finished.is_ok(),
+            "machine output must not start the display loop"
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn a_silent_style_returns_before_the_loop_ever_watches_the_channel() {
+        let (tx, rx) = watch::channel(DiscoveryProgress::default());
+        let finished = tokio::time::timeout(
+            Duration::from_millis(50),
+            progress_display_loop(
+                rx,
+                ProgressStyle::Silent,
+                OutputMode::from(Verbosity::Normal),
+            ),
+        )
+        .await;
+        assert!(
+            finished.is_ok(),
+            "a shared terminal must not start the display loop"
+        );
         drop(tx);
     }
 
@@ -251,7 +345,11 @@ mod tests {
         let (tx, rx) = watch::channel(DiscoveryProgress::default());
         let finished = tokio::time::timeout(
             Duration::from_millis(50),
-            progress_display_loop(rx, false, Verbosity::Normal),
+            progress_display_loop(
+                rx,
+                ProgressStyle::Lines,
+                OutputMode::from(Verbosity::Normal),
+            ),
         )
         .await;
         assert!(

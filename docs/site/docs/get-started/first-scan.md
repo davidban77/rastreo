@@ -1,10 +1,10 @@
 ---
-description: Run a discovery scan against a single host with no flags beyond the target, read the resulting DeviceRecord on stdout, and learn what each field means.
+description: Run a discovery scan against a single host with no flags beyond the target, read the resulting table on stdout, and learn what each field of the full record means.
 ---
 
 # First scan
 
-In this walkthrough you probe a single host and read the resulting `DeviceRecord` off stdout. The scan takes one command, no config file, and prints one NDJSON line per device found.
+In this walkthrough you probe a single host, read the result off stdout as a table, then switch to JSON and learn what each field means. The scan takes one command and no config file.
 
 ## Pick a target
 
@@ -23,7 +23,33 @@ rastreo discover --target 1.1.1.1
 
 That is the whole command. With no `--probe` flag, rastreo runs its **default probe set** — every prober the binary carries that needs no extra parameter. On a release binary that is `icmp`, `tcp_connect`, `http`, `ssh`, `tls`, `snmp`, and `reverse_dns`. See [Choosing probers](../discover/cli.md#choosing-probers) to pick your own.
 
-`rastreo discover` writes one NDJSON `DeviceRecord` per line to stdout. The progress summary and any log lines go to stderr, so stdout stays clean for downstream tools.
+On stdout you get one row per device, in a table sized to your terminal:
+
+```text
+ADDRESS                      NAME                      PLATFORM              PORTS
+1.1.1.1                      one.one.one.one           -                     80,443,8080,8443
+```
+
+Stderr:
+
+```text
+▶ discover  targets: 1 | probes: icmp (count 3, interval_ms 200), tcp_connect (ports 22, 23, 80, 443, 830, 8080), http (ports 80, 443, 8080, 8443), ssh (ports 22), tls (ports 443), snmp (ports 161, V2c), reverse_dns (system resolvers) | concurrency: 64 | timeout: 1000ms | sink: stdout
+■ discover  completed in 1.0s | hosts: 1 | records: 1 | probes: 7 | faults: 0 | sink: stdout
+```
+
+The start banner tells you what is about to run; the completion banner tells you what happened. Add `-v` for a per-prober breakdown under the completion banner, or `-q` to silence stderr entirely.
+
+`probes: 7` counts probers, not ports — the seven default probers each ran once against the one target. A `-` in a column means the scan learned nothing for it: no SNMP `sysName` and no PTR record leaves `NAME` empty, no classifier match leaves `PLATFORM` empty.
+
+The table is a triage view of four columns. Everything the scan learned is in the record behind it, which `--format json` prints in full.
+
+## Get the whole record
+
+```bash
+rastreo discover --target 1.1.1.1 --format json
+```
+
+`--format json` writes one `DeviceRecord` per line as JSON, and drops the banners so stdout is a clean stream for `jq` and friends. Hints still print on stderr, where they cannot corrupt the stream.
 
 Stdout (one line, formatted here across multiple lines for reading):
 
@@ -75,18 +101,7 @@ Stdout (one line, formatted here across multiple lines for reading):
 }
 ```
 
-Stderr:
-
-```text
-▶ discover  targets: 1 | probes: icmp (count 3, interval_ms 200), tcp_connect (ports 22, 23, 80, 443, 830, 8080), http (ports 80, 443, 8080, 8443), ssh (ports 22), tls (ports 443), snmp (ports 161, V2c), reverse_dns (system resolvers) | concurrency: 64 | timeout: 1000ms | sink: stdout
-■ discover  completed in 1.0s | hosts: 1 | records: 1 | probes: 7 | faults: 0 | sink: stdout
-```
-
-The start banner tells you what is about to run; the completion banner tells you what happened. Add `-v` for a per-prober breakdown under the completion banner, or `-q` to silence stderr entirely.
-
-`probes: 7` counts probers, not ports — the seven default probers each ran once against the one target. The record's `probe_kinds` lists the five that actually observed something; `ssh` and `snmp` got no answer on this host, which is a normal negative result rather than a failure.
-
-Your `signals` list will differ. It is whatever the host answered with, so a switch, a printer, and a DNS resolver all produce different sets.
+The record's `probe_kinds` lists the five probers that actually observed something; `ssh` and `snmp` got no answer on this host, which is a normal negative result rather than a failure. Your `signals` list will differ — it is whatever the host answered with, so a switch, a printer, and a DNS resolver all produce different sets.
 
 !!! tip "Preview a scan before it sends anything"
     `rastreo discover --target 1.1.1.1 --dry-run` resolves the targets and prints the probers and ports that would run, then exits without touching the network.
@@ -97,7 +112,7 @@ If a scan returns zero records and at least one probe attempt happened, the CLI 
 
 ## Read the output
 
-Each NDJSON line is one `DeviceRecord`.
+Each JSON line is one `DeviceRecord`.
 
 | Field | Meaning |
 |---|---|
@@ -126,11 +141,16 @@ rastreo discover --target 1.1.1.1 --probe tcp_connect --port 443
 ```
 
 ```text
+ADDRESS                      NAME                      PLATFORM              PORTS
+1.1.1.1                      -                         -                     443
+```
+
+```text
 ▶ discover  targets: 1 | probes: tcp_connect (ports 443) | concurrency: 64 | timeout: 1000ms | sink: stdout
 ■ discover  completed in 34ms | hosts: 1 | records: 1 | probes: 1 | faults: 0 | sink: stdout
 ```
 
-That record carries a single `{ "OpenPort": 443 }` signal, `probe_kinds: ["TcpConnect"]`, and `confidence: 0.2` — one prober, one observation.
+That record carries a single `{ "OpenPort": 443 }` signal, `probe_kinds: ["TcpConnect"]`, and `confidence: 0.2` — one prober, one observation. `NAME` is empty because `reverse_dns` was not in the selection.
 
 Pass `--port` without `--probe` and rastreo prints a note on stderr, because a port list on the default set is not the port-only scan it looks like:
 
@@ -142,12 +162,14 @@ See [Ports](../discover/cli.md#ports) for the full rules, including `--probe-por
 
 ## Pipe into jq
 
-Because tracing logs go to stderr and records go to stdout, you can pipe stdout straight into `jq` (or any NDJSON tool) without log noise.
+Add `--format json` and stdout becomes a clean NDJSON stream. The banners and the progress line are dropped, so a scripted run prints no decoration. Stderr stays empty unless something is worth saying; hints and log lines still go there when there is. Nothing but records reaches the pipe.
 
 ```bash
-rastreo discover --target 1.1.1.1 | jq .
-rastreo discover --target 1.1.1.1 | jq -r '.signals[].OpenPort | select(. != null)'
+rastreo discover --target 1.1.1.1 --format json | jq .
+rastreo discover --target 1.1.1.1 --format json | jq -r '.signals[].OpenPort | select(. != null)'
 ```
+
+Set `RASTREO_FORMAT=json` in your shell profile or your CI environment to make that the default for every run.
 
 ## See also
 

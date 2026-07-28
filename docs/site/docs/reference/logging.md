@@ -92,13 +92,19 @@ RUST_LOG=info,rastreo_core::pipeline=debug rastreo-server --log-format json
 
 ## stderr vs stdout
 
-Logs always go to **stderr**, in both text and JSON formats. Stdout is reserved for structured event output — specifically, the NDJSON `DeviceRecord` stream from the `rastreo` CLI's stdout sink. This split lets you pipe stdout straight into `jq`, a Kafka producer, or any NDJSON consumer without log noise. See [Discover · Sinks](../discover/sinks.md) for the sink options.
+Logs always go to **stderr**, in both text and JSON formats. Stdout is reserved for the `rastreo` CLI's record stream — the triage table by default, or NDJSON `DeviceRecord` lines under `--format json`. This split lets you pipe stdout straight into `jq`, a Kafka producer, or any NDJSON consumer without log noise. See [Discover · Sinks](../discover/sinks.md) for the sink options.
 
-`--log-format` governs only `tracing`-emitted events. The `rastreo` CLI also writes brief human-readable progress lines (`running <label>`, per-scenario summary, `hint:` notices) directly to stderr via `eprintln!`; those are NOT wrapped in JSON even when `--log-format json` is selected. `rastreo-server` emits exclusively via `tracing`, so its stderr stream is uniformly JSON when the flag is set.
+`--log-format` governs log lines only. The `rastreo` CLI writes status lines of its own to stderr as well:
+
+- the `▶` start banner and the `■` completion banner,
+- the live progress line,
+- `⚠ hint:` notices.
+
+Those stay human-readable even under `--log-format json`. Two flags keep them out of a log pipeline. `--format json` drops all of them except the hints. `-q` drops every one. `rastreo-server` writes only log lines, so its stderr is uniformly JSON when the flag is set.
 
 ## Aggregator ingestion
 
-The JSON format is one-JSON-object-per-line NDJSON, which every mainstream log aggregator understands out of the box. The snippets below are minimal drop-in fragments — merge them into your existing shipping config.
+The JSON format is one JSON object per line, which every mainstream log aggregator reads with no setup. The snippets below are the smallest working fragments. Merge them into the collector config you already run.
 
 ### Loki via Promtail
 

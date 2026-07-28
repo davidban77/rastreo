@@ -193,10 +193,10 @@ Collection profiles travel on their own stream, separate from the device and top
 
 === "stdout / file"
 
-    All record kinds share one NDJSON stream. Tell a collection profile apart by `schema_id`: it carries the `collection-profile-record-v1.json` URL.
+    All record kinds share one stream. Under `--format json` that stream is NDJSON — tell a collection profile apart by `schema_id`: it carries the `collection-profile-record-v1.json` URL. The table has no row shape for a profile, so this needs `--format json`.
 
     ```bash
-    rastreo discover --file scenario.yaml \
+    rastreo discover --file scenario.yaml --format json \
       | jq 'select(.schema_id | contains("collection-profile-record"))'
     ```
 
