@@ -103,6 +103,7 @@ This is the typical shape inside a lab container that already has cluster DNS po
 
 - [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [DNS prober](dns.md) — treats the target as a DNS server and issues forward queries against it. Opposite direction from this prober.
-- [Identity fuser](../discover/identity.md) — reverse-DNS hostnames are a candidate correlation signal for future identity fusion; today the fuser correlates on MAC, `SnmpSysName`, and SSH host key.
+- [Identity fuser](../discover/identity.md#signals-used-for-identity-fusion) — a shared `ReverseDnsName` is a correlation signal worth +0.5, matched case-insensitively. It reaches the merge threshold when it agrees with another signal such as MAC, `SnmpSysName`, or `TlsSanName`.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `reverse_dns` is in the default probe set. Custom resolvers need `--file`.
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

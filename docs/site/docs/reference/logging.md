@@ -16,8 +16,8 @@ Both `rastreo` and `rastreo-server` emit tracing logs to stderr. The default for
 The flag is available on both binaries. On the `rastreo` CLI it is a global flag — set it before or after the subcommand:
 
 ```bash
-rastreo --log-format json discover --target 10.0.0.0/24 -p 22,80
-rastreo discover --log-format json --target 10.0.0.0/24 -p 22,80
+rastreo --log-format json discover --target 10.0.0.0/24 --probe tcp_connect -p 22,80
+rastreo discover --log-format json --target 10.0.0.0/24 --probe tcp_connect -p 22,80
 ```
 
 On `rastreo-server` it is a top-level flag:

@@ -79,5 +79,6 @@ probers:
 - [HTTP prober](http.md) — adds the web-server banner on top of the open-port signal.
 - [SSH prober](ssh.md) — adds the SSH banner and host key on port 22.
 - [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent port is not a probe error.
+- [Discover CLI](../discover/cli.md#ports) — `tcp_connect` is in the default probe set, and `--port` sets the ports it tries.
 - [Scenario schema](../reference/scenario.md#tcp_connect) — the `tcp_connect` field table in the scenario reference.
 - [Probe index](index.md) — pointers to every prober.

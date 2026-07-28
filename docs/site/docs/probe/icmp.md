@@ -119,6 +119,7 @@ probers:
 - [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [ARP prober](arp.md) — IPv4 link-layer discovery. Also uses `CAP_NET_RAW`, but without an unprivileged fallback.
 - [NDP prober](ndp.md) — IPv6 link-layer discovery.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `icmp` is in the default probe set, and `--icmp-count` sets how many requests go out.
 - [Scenario schema](../reference/scenario.md#icmp) — the full `icmp` field table.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.
 - [Probe index](index.md) — pointers to every prober.

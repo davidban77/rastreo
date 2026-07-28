@@ -20,8 +20,8 @@ If every target in the scan is a single-IP host (a laptop, a container, a VM wit
 
 ```mermaid
 flowchart LR
-    D[DirectFuser] --> O[OuiEnrichmentFuser]
-    O --> I[IdentityFuser]
+    D[direct] --> O[oui_enrichment]
+    O --> I[identity]
 ```
 
 `direct` does per-IP fusion. `oui_enrichment` looks up the vendor from the MAC. `identity` then runs across the enriched records — order matters because the identity fuser uses the `manufacturer` field to detect conflicting-vendor pairs and refuse to merge them, so `oui_enrichment` needs to run first.

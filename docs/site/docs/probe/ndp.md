@@ -38,8 +38,10 @@ When `interface` is empty, the prober picks an interface at probe time by walkin
 
 Two failure modes surface when auto-selection cannot find a candidate:
 
-- No local interface has an IPv6 subnet containing the target: the probe returns `ProbeError::Other("no local interface reaches <ip>")`. The target is not on any locally-reachable L2 segment.
-- The selected interface has no MAC or no IPv6 address: the probe returns `ProbeError::Other("interface <name> has no ipv6 address")`. Assign an IPv6 address to the interface or pin the prober to a different one.
+Both are probe faults of kind `other`, reported under `-v` as `first fault  other → <message>`:
+
+- No local interface has an IPv6 subnet containing the target. The message is `no local interface reaches <ip>`. The target is not on any locally-reachable L2 segment.
+- The selected interface has no MAC or no IPv6 address. The message is `interface <name> has no ipv6 address`. Assign an IPv6 address to the interface or pin the prober to a different one.
 
 ## Solicited-Node multicast
 
@@ -52,7 +54,7 @@ The prober computes both addresses at send time from the target IPv6; there is n
 
 ## Degenerate case: probing your own address
 
-Probing an IPv6 address that is assigned to one of your interfaces returns `ProbeError::Other("ndp target <ip> is a local interface address")`. Same rationale as ARP — the kernel already knows the MAC and would not answer its own multicast.
+Probing an IPv6 address assigned to one of your interfaces is a probe fault of kind `other`. The message is `ndp target <ip> is a local interface address`. Same rationale as ARP — the kernel already knows the MAC and would not answer its own multicast.
 
 ## Signals emitted
 
@@ -133,6 +135,6 @@ A successful probe emits a single `Mac` signal:
 
 - [ARP prober](arp.md) — the IPv4 equivalent of NDP.
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
-- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the NDP prober from the CLI via `--file`.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `--probe ndp` runs it from the command line, with `--interface` to pin the interface.
 - [Kubernetes deployment](../deploy/kubernetes.md#podsecuritynetraw-arp-and-ndp-probers) — the `podSecurity.netRaw` toggle for granting the capability in-cluster.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

@@ -20,13 +20,30 @@ The prober speaks one of four UDP services. Each runs on different gear, so the 
 
 ## Configuration
 
-Add a `udp` entry to a scenario's `probers` array. Both fields are mandatory — every protocol runs on a different well-known port, so there is no sensible default for either.
+Add a `udp` entry to a scenario's `probers` array. It takes two required fields: `protocol` names which of the four services to speak, and `ports` lists the ports to send to. A scenario must set both. One entry speaks exactly one protocol, and the port a service listens on is a deployment choice.
 
 ```yaml
 probers:
   - type: udp
     ports: [123]
     protocol: ntp
+```
+
+From the command line, `--probe udp --udp-protocol ntp` is enough. The protocol you name carries its own well-known port, so `--port` is optional here. Each protocol has its own: 123 for `ntp`, 5060 for `sip_options`, 11211 for `memcached_stats`, and 3478 for `stun_binding`. Pass `--port` to override them.
+
+```console
+$ rastreo discover --target 192.0.2.1 --probe udp --udp-protocol ntp --dry-run
+[dry-run] would run 1 scenario
+  scenario: discovery
+    targets:
+      192.0.2.1 → 192.0.2.1
+    probers: udp (ports 123, protocol Ntp)
+    sink: stdout
+    concurrency: 64
+    rate: unlimited
+    retries: 0
+    timeout_ms: 1000
+total probes: 1
 ```
 
 | Field | Type | Required | Notes |
@@ -147,4 +164,4 @@ The parsed `XOR-MAPPED-ADDRESS` attribute lands as `StunMappedAddress`:
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
 - [Probe index](index.md) — pointers to every prober.
-- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the UDP prober from the CLI via `--file`.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `--probe udp --udp-protocol <protocol>` runs it from the command line.

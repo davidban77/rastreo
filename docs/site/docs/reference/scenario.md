@@ -374,7 +374,7 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 | `links_topic` | string | no | Topic for the `LinkRecord` stream. Defaults to `rastreo.discovery.links.v1`. Used only when an [LLDP prober](../probe/lldp.md) produces links. See [Topology](../discover/topology.md#where-links-are-emitted). |
 | `profiles_topic` | string | no | Topic for the `CollectionProfileRecord` stream. Defaults to `rastreo.discovery.profiles.v1`. Used only when a [gNMI prober](../probe/gnmi.md) produces collection profiles. See [CollectionProfileRecord](schema/collection-profile-record.md). |
 | `flush_mode` | object | no | Defaults to `batched` with a 64 KiB threshold. See below. |
-| `dead_letter` | object | no | Optional quarantine topic for records the primary produce refused. Omit to preserve the pre-existing "return error, retain buffer" behavior on produce failure. |
+| `dead_letter` | object | no | Quarantine topic for records the primary produce refused. Omit it and a produce failure returns an error with the records left in the sink buffer, so nothing is quarantined and nothing is dropped. |
 | `tls` | object | no | Optional TLS for the broker connection. `verify` defaults to `false`. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
 | `sasl` | object | no | Optional SASL credentials (`plain`, `scram_sha_256`, or `scram_sha_512`). See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication). |
 | `retry` | object | no | Bounded backoff on the primary produce before the DLQ. Defaults to 3 attempts, 100 ms initial / 2000 ms max backoff. Set `max_attempts: 1` to disable. See below. |
@@ -434,7 +434,7 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
 | `stream` | string | yes | JetStream stream name bound to the subject. |
 | `credentials` | object | no | Auth details. Defaults to anonymous. See below. |
 | `flush_mode` | object | no | Flush mode. Defaults to `per_record`. See below. |
-| `dead_letter` | object | no | Optional quarantine subject for records the primary publish or JetStream ack refused. Omit to preserve the pre-existing "return error, retain buffer/pending" behavior on failure. |
+| `dead_letter` | object | no | Quarantine subject for records the primary publish or JetStream ack refused. Omit it and either failure returns an error with the records left in the sink buffer and the pending-ack queue, so nothing is quarantined and nothing is dropped. |
 | `retry` | object | no | Bounded backoff on the primary publish before the DLQ. Same shape and defaults as the `kafka` sink. Set `max_attempts: 1` to disable. See below. |
 
 ```json

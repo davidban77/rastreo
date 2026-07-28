@@ -237,6 +237,7 @@ probers:
 - [SNMP prober](snmp.md) — the same "keep the device that answered even when it withheld data" behavior, applied to SNMP, plus the credential-redaction approach.
 - [TLS prober](tls.md) — the same accept-any-certificate fingerprinting posture over TLS.
 - [Topology](../discover/topology.md) — how LLDP neighbors from `lldp: true` become topology links.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `--probe gnmi` selects it, but the username and password it needs come from `--file`.
 - [Scenario schema](../reference/scenario.md#gnmi) — the `gnmi` prober's field table in the scenario reference.
 - [Secrets](../reference/secrets.md) — `${VAR}` and `!file` syntax for the password.
 - [Device record schema](../reference/schema/device-record.md) — every signal variant in the emitted record.

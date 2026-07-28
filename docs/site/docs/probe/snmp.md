@@ -105,7 +105,7 @@ The default community `public` matches the read-only community configured on the
 
 USM passwords never travel on the wire. They are used only to derive localized keys via the RFC 3414 password-to-key algorithm; only the localized keys are used to authenticate and encrypt messages. HMAC verification of the response is constant-time. Received messages whose HMAC does not match the expected value are dropped and the target is reported as reachable with no signals.
 
-The prober does not log the community string or any USM password at any level. Configuration is logged only by field name, and error messages wrap only the operation and target address, never the credentials. The `community` field and every USM `password` field are redacted from `Debug` output of `SnmpProber`, `ProberConfig::Snmp`, `UsmCredentials`, `UsmAuth`, and `UsmPrivacy` — any accidental `dbg!` / `tracing::debug!` on those types prints `<redacted>` in place of the credential. USM `username` is not treated as secret per RFC 3414 §2.2 and is printed as-is.
+The prober does not log the community string or any USM password at any level. Configuration is logged only by field name, and error messages carry only the operation and the target address. The `community` field and every USM `password` print as `<redacted:HHHHHHHH>` instead of their value. Those eight hex characters are derived from the secret. The same secret always yields the same eight, so you can tell two log lines apart without exposing either plaintext. USM `username` is not treated as secret per RFC 3414 §2.2 and is printed as-is.
 
 Report PDUs with `msgFlags.authFlag == 0` (unauthenticated Reports) are accepted for classification only — enough to conclude the target speaks SNMPv3 and either mark it reachable-with-no-signals or, for `usmStatsNotInTimeWindow`, drive the single retry with the reported `msgAuthoritativeEngineBoots` and `msgAuthoritativeEngineTime` used verbatim. No secrets are derived from unauthenticated Reports and no varbind data is trusted; the acceptance is bounded to the classification decision.
 
@@ -229,6 +229,6 @@ probers:
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
-- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the SNMP prober from the CLI via `--file`.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `snmp` is in the default probe set, and `--snmp-community` / `--snmp-version` tune it. SNMPv3 credentials need `--file`.
 - [UDP prober](udp.md) — for non-SNMP UDP fingerprinting (NTP, SIP, memcached, STUN).
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

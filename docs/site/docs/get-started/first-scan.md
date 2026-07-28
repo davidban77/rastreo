@@ -21,7 +21,7 @@ The rest of this page uses `1.1.1.1` because it works without any extra setup.
 rastreo discover --target 1.1.1.1
 ```
 
-That is the whole command. With no `--probe` flag, rastreo runs its **default probe set** — every prober the binary carries that needs no extra parameter. On a release binary that is `icmp`, `tcp_connect`, `http`, `ssh`, `tls`, `snmp`, and `reverse_dns`. See [Choosing probers](../discover/cli.md#choosing-probers) to pick your own.
+That is the whole command. With no `--probe` flag, rastreo runs its **default probe set**. A prober joins that set when it needs no extra parameter, works across routers, and produces no second output stream. On a release binary that is `icmp`, `tcp_connect`, `http`, `ssh`, `tls`, `snmp`, and `reverse_dns`. See [Choosing probers](../discover/cli.md#choosing-probers) to pick your own.
 
 On stdout you get one row per device, in a table sized to your terminal:
 
@@ -123,7 +123,7 @@ Each JSON line is one `DeviceRecord`.
 | `platform` | Platform fingerprint set by the [classifier](../discover/classification.md). `null` here because Cloudflare's banners match no platform rule — point the same command at a switch or a router and it fills in. |
 | `os_version` | OS version string set by the classifier alongside `platform`. `null` for the same reason. |
 | `role` | Device role from the [classifier](../discover/classification.md). `null` here: the default role rules need multi-port evidence such as SSH + BGP, or SSH + HTTPS + NETCONF. |
-| `confidence` | [Fuser](../reference/glossary.md#fuser) confidence score in the range `0.0` to `1.0`. With the default `DirectFuser` it climbs with the number of distinct signals, so a well-answered host saturates at `1.0`. |
+| `confidence` | [Fuser](../reference/glossary.md#fuser) confidence score in the range `0.0` to `1.0`. Under the default `direct` fuser it climbs with the number of distinct signals, so a well-answered host saturates at `1.0`. |
 | `last_seen` | When the last probe touched this device, as an RFC 3339 UTC timestamp. |
 | `signals` | Observed [signals](../reference/glossary.md#signal). One entry per fact a prober read: open ports, an HTTP banner, TLS certificate names, a reverse-DNS name, an ICMP round-trip time. |
 | `probe_kinds` | Which probers observed this device. Probers that ran and got nothing are not listed. |

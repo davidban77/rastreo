@@ -43,7 +43,9 @@ Some kinds are never in the default set, each for a reason:
 
 - `udp` and `dns` need a parameter you have to supply (`--udp-protocol`, `--dns-query`). There is no sensible guess.
 - `arp` and `ndp` only work on the local segment and need an interface, so they would fault on every routed target.
-- `lldp` and `gnmi` build a [topology](topology.md) or [collection-profile](collection-profile.md) stream and need credentials, so they belong in a scenario file.
+- `lldp` and `gnmi` write a second output stream — a [topology](topology.md) or a [collection profile](collection-profile.md) — rather than only `DeviceRecord` rows.
+
+Every one of them is still selectable by name. `--probe lldp` shares the SNMP prober's transport, so `--snmp-community` and `--snmp-version` reach it and a v1 or v2c walk runs entirely from flags; only its SNMPv3 USM credentials need a scenario file. `--probe gnmi` runs, but no flag carries a gNMI username or password, so a real gNMI scan needs `--file`.
 
 A prober whose runtime precondition fails is dropped from the *default* set and reported, rather than faulting on every target. On a host where rastreo cannot open an ICMP socket:
 
@@ -53,14 +55,19 @@ A prober whose runtime precondition fails is dropped from the *default* set and 
 
 Naming a kind explicitly always wins over that filter. `--probe icmp` attempts the socket anyway and reports the fault, which is what you want when you are diagnosing why ICMP is unavailable.
 
-A kind your binary was not built with is a different error from a typo:
+A kind your binary was not built with is a different error from a typo. Naming a real kind the build omits tells you which feature to rebuild with:
 
 ```console
 $ rastreo discover --target 10.0.0.1 --probe gnmi
+⚠ hint: 'gnmi' requires the 'gnmi' Cargo feature. Rebuild with --features gnmi or use the release Docker image which bundles kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls, gnmi, lldp.
 Error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
+```
 
+A misspelling gets no hint. Instead it lists every kind the running binary does carry, so you can spot the name you meant. On a release binary that is all thirteen:
+
+```console
 $ rastreo discover --target 10.0.0.1 --probe gnnmi
-Error: unknown probe kind 'gnnmi'; available in this build: tcp_connect, udp, http, dns, snmp, arp, ndp, ssh, icmp, tls, reverse_dns, default, tcp
+Error: unknown probe kind 'gnnmi'; available in this build: tcp_connect, udp, http, dns, snmp, arp, ndp, ssh, icmp, tls, reverse_dns, gnmi, lldp, default, tcp
 ```
 
 Run `rastreo discover --help` for the full kind list annotated with the feature each one needs, and `--dry-run` to see exactly which probers and ports a command would use before it sends anything.
