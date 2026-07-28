@@ -358,6 +358,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
         }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
+        }
     }
 
     struct FailingFlush;
@@ -369,6 +372,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Err(sink_err(SinkErrorClass::FlushFailure, "flush failed"))
+        }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
         }
     }
 
@@ -385,6 +391,9 @@ mod tests {
         async fn close(&mut self) -> Result<(), RastreoError> {
             Err(sink_err(SinkErrorClass::FlushFailure, "close failed"))
         }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
+        }
     }
 
     struct FailingProbe(&'static str);
@@ -399,6 +408,9 @@ mod tests {
         }
         async fn probe(&self) -> Result<(), io::Error> {
             Err(io::Error::other(self.0))
+        }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
         }
     }
 
@@ -828,6 +840,10 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
         }
+        // A local kind under a structured answer, so the tee must OR children's answers, not their kinds.
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
+        }
         async fn requires_structured_records(&self) -> bool {
             true
         }
@@ -898,6 +914,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
+        }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
         }
     }
 

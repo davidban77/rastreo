@@ -1769,6 +1769,9 @@ mod tests {
             self.inner.flushes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
+        }
     }
 
     async fn open_loopback_port() -> u16 {
@@ -2105,6 +2108,9 @@ mod tests {
             self.flushes.fetch_add(1, Ordering::SeqCst);
             self.delegate.flush().await
         }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
+        }
     }
 
     #[tokio::test]
@@ -2440,6 +2446,9 @@ mod tests {
             self.inner.closes.fetch_add(1, Ordering::SeqCst);
             self.commit();
             Ok(())
+        }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
         }
     }
 
@@ -3864,6 +3873,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
+            }
         }
 
         // An emit error must not truncate the scan: streaming stops emitting but keeps draining, so
@@ -3992,6 +4004,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 self.delegate.flush().await
             }
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
+            }
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4078,6 +4093,9 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 self.delegate.flush().await
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
             }
         }
 
@@ -4270,6 +4288,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             self.delegate.flush().await
+        }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
         }
     }
 
@@ -4805,6 +4826,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
+            }
         }
 
         struct GnmiProber;
@@ -5026,6 +5050,10 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
+            }
+            // A local kind under a structured answer, so the guard must read the sink's answer, not its kind.
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
             }
             async fn requires_structured_records(&self) -> bool {
                 true

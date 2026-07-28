@@ -8,7 +8,8 @@ use std::cell::Cell;
 
 use rastreo_core::pipeline::write_encoded;
 use rastreo_core::{
-    DeviceRecord, Encoder, NdjsonEncoder, RastreoError, RecordKind, Sink, TeeChild, TeeSink,
+    DeviceRecord, Encoder, NdjsonEncoder, RastreoError, RecordKind, Sink, SinkType, TeeChild,
+    TeeSink,
 };
 use tokio::runtime::Runtime;
 
@@ -94,6 +95,10 @@ impl Sink for CountingSink {
     async fn flush(&mut self) -> Result<(), RastreoError> {
         Ok(())
     }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Memory
+    }
 }
 
 #[derive(Default)]
@@ -118,6 +123,10 @@ impl Sink for InlineKindSink {
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
         Ok(())
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Memory
     }
 }
 
