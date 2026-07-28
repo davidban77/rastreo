@@ -30,6 +30,10 @@ impl Sink for CountingSink {
         Ok(())
     }
 
+    fn last_write_delivered(&self) -> bool {
+        true
+    }
+
     fn kind(&self) -> SinkType {
         SinkType::Memory
     }
@@ -63,6 +67,10 @@ impl Sink for InlineKindSink {
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
         Ok(())
+    }
+
+    fn last_write_delivered(&self) -> bool {
+        true
     }
 
     fn kind(&self) -> SinkType {

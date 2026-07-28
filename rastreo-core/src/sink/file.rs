@@ -30,6 +30,7 @@ fn flush_error(e: std::io::Error) -> RastreoError {
 
 pub struct FileSink {
     writer: BufWriter<File>,
+    delivered: bool,
 }
 
 impl FileSink {
@@ -44,6 +45,7 @@ impl FileSink {
             .map_err(|e| open_error(path, e))?;
         Ok(Self {
             writer: BufWriter::new(file),
+            delivered: false,
         })
     }
 }
@@ -51,13 +53,20 @@ impl FileSink {
 #[async_trait::async_trait]
 impl Sink for FileSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+        // write_all may drain the buffer to the fd when it fills, but not observably: only a successful flush proves the bytes left.
+        self.delivered = false;
         self.writer.write_all(data).await.map_err(write_error)?;
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
         self.writer.flush().await.map_err(flush_error)?;
+        self.delivered = true;
         Ok(())
+    }
+
+    fn last_write_delivered(&self) -> bool {
+        self.delivered
     }
 
     fn kind(&self) -> SinkType {
@@ -223,6 +232,56 @@ mod tests {
 
         let content = std::fs::read(&path).expect("read");
         assert_eq!(content, b"hello\n");
+    }
+
+    #[tokio::test]
+    async fn a_buffered_write_is_not_delivered_until_flush_puts_it_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("delivery.ndjson");
+        let mut sink = FileSink::new(&path).await.expect("open file");
+        assert!(!sink.last_write_delivered());
+
+        sink.write(b"{\"a\":1}\n").await.expect("write");
+        assert!(!sink.last_write_delivered());
+        assert!(
+            std::fs::read(&path).expect("read").is_empty(),
+            "the bytes are still in the BufWriter, so the claim would be a lie"
+        );
+
+        sink.flush().await.expect("flush");
+        assert!(sink.last_write_delivered());
+        assert_eq!(std::fs::read(&path).expect("read"), b"{\"a\":1}\n");
+    }
+
+    #[tokio::test]
+    async fn a_write_after_a_flush_revokes_the_delivery_claim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("revoke.ndjson");
+        let mut sink = FileSink::new(&path).await.expect("open file");
+        sink.write(b"first\n").await.expect("write");
+        sink.flush().await.expect("flush");
+        assert!(sink.last_write_delivered());
+
+        sink.write(b"second\n").await.expect("write");
+        assert!(!sink.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn a_failed_flush_does_not_claim_delivery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seed = dir.path().join("failed-flush.ndjson");
+        std::fs::File::create(&seed).expect("create seed");
+        let mut sink = FileSink::new(&seed).await.expect("open sink");
+        let read_only = std::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(&seed)
+            .expect("reopen read-only");
+        sink.writer = BufWriter::new(File::from_std(read_only));
+        sink.write(b"buffered\n").await.expect("buffer write");
+
+        sink.flush().await.expect_err("flush must fail");
+        assert!(!sink.last_write_delivered());
     }
 
     #[test]

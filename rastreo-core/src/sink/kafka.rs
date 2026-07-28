@@ -606,6 +606,7 @@ impl KafkaSink {
     }
 
     async fn write_link(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+        self.last_write_delivered = false;
         if self.links_client.is_none() {
             let client = connect_partition_client(
                 &self.brokers,
@@ -619,6 +620,7 @@ impl KafkaSink {
         buffer_record(&mut self.links_buffer, &mut self.links_buffered_bytes, data);
         if should_flush_after_append(self.links_buffered_bytes, self.buffer_threshold) {
             self.publish_links_buffer().await?;
+            self.last_write_delivered = true;
         }
         Ok(())
     }
@@ -627,6 +629,8 @@ impl KafkaSink {
         if self.links_buffer.is_empty() {
             return Ok(());
         }
+        // A buffered record with no client would leave flush claiming delivery it never made.
+        debug_assert!(self.links_client.is_some());
         let Some(client) = self.links_client.as_ref() else {
             return Ok(());
         };
@@ -652,6 +656,7 @@ impl KafkaSink {
     }
 
     async fn write_profile(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+        self.last_write_delivered = false;
         if self.profiles_client.is_none() {
             let client = connect_partition_client(
                 &self.brokers,
@@ -669,6 +674,7 @@ impl KafkaSink {
         );
         if should_flush_after_append(self.profiles_buffered_bytes, self.buffer_threshold) {
             self.publish_profiles_buffer().await?;
+            self.last_write_delivered = true;
         }
         Ok(())
     }
@@ -677,6 +683,8 @@ impl KafkaSink {
         if self.profiles_buffer.is_empty() {
             return Ok(());
         }
+        // A buffered record with no client would leave flush claiming delivery it never made.
+        debug_assert!(self.profiles_client.is_some());
         let Some(client) = self.profiles_client.as_ref() else {
             return Ok(());
         };
@@ -723,16 +731,10 @@ impl Sink for KafkaSink {
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
-        if !self.buffer.is_empty() {
-            self.publish_buffer().await?;
-            self.last_write_delivered = true;
-        }
-        if !self.links_buffer.is_empty() {
-            self.publish_links_buffer().await?;
-        }
-        if !self.profiles_buffer.is_empty() {
-            self.publish_profiles_buffer().await?;
-        }
+        self.publish_buffer().await?;
+        self.publish_links_buffer().await?;
+        self.publish_profiles_buffer().await?;
+        self.last_write_delivered = true;
         Ok(())
     }
 

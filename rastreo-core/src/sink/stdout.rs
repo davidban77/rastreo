@@ -20,12 +20,14 @@ fn flush_error(e: std::io::Error) -> RastreoError {
 
 pub struct StdoutSink {
     writer: BufWriter<Stdout>,
+    delivered: bool,
 }
 
 impl StdoutSink {
     pub fn new() -> Self {
         Self {
             writer: BufWriter::new(tokio::io::stdout()),
+            delivered: false,
         }
     }
 }
@@ -39,13 +41,20 @@ impl Default for StdoutSink {
 #[async_trait::async_trait]
 impl Sink for StdoutSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+        // write_all may drain the buffer to the fd when it fills, but not observably: only a successful flush proves the bytes left.
+        self.delivered = false;
         self.writer.write_all(data).await.map_err(write_error)?;
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
         self.writer.flush().await.map_err(flush_error)?;
+        self.delivered = true;
         Ok(())
+    }
+
+    fn last_write_delivered(&self) -> bool {
+        self.delivered
     }
 
     fn kind(&self) -> SinkType {
@@ -73,6 +82,26 @@ mod tests {
         let mut sink = StdoutSink::new();
         sink.write(b"").await.expect("empty write");
         sink.flush().await.expect("flush");
+    }
+
+    #[tokio::test]
+    async fn a_buffered_write_is_not_delivered_until_flush() {
+        let mut sink = StdoutSink::new();
+        assert!(!sink.last_write_delivered());
+        sink.write(b"\n").await.expect("write");
+        assert!(!sink.last_write_delivered());
+        sink.flush().await.expect("flush");
+        assert!(sink.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn a_write_after_a_flush_revokes_the_delivery_claim() {
+        let mut sink = StdoutSink::new();
+        sink.write(b"\n").await.expect("write");
+        sink.flush().await.expect("flush");
+        assert!(sink.last_write_delivered());
+        sink.write(b"\n").await.expect("write");
+        assert!(!sink.last_write_delivered());
     }
 
     #[test]

@@ -204,6 +204,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
         }
+        fn last_write_delivered(&self) -> bool {
+            true
+        }
         fn kind(&self) -> SinkType {
             SinkType::Stdout
         }
@@ -221,6 +224,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
+        }
+        fn last_write_delivered(&self) -> bool {
+            true
         }
         fn kind(&self) -> SinkType {
             SinkType::Kafka
@@ -242,6 +248,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
         }
+        fn last_write_delivered(&self) -> bool {
+            true
+        }
         fn kind(&self) -> SinkType {
             SinkType::Nats
         }
@@ -261,6 +270,9 @@ mod tests {
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
+        }
+        fn last_write_delivered(&self) -> bool {
+            true
         }
         fn kind(&self) -> SinkType {
             SinkType::Kafka

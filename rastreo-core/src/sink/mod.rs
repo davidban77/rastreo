@@ -189,10 +189,11 @@ pub trait Sink: Send + Sync {
         self.flush().await
     }
 
-    // Default: every write is delivered. Batching sinks override to reflect buffered state.
-    fn last_write_delivered(&self) -> bool {
-        true
-    }
+    /// `true` only once the bytes of the most recent `write` / `write_kind` have been accepted by
+    /// the destination; `false` while they are still held in a local buffer. Report `true` only
+    /// from a point that proves acceptance — normally a successful `flush`. A buffered writer
+    /// draining to its fd part-way through a write does not prove it.
+    fn last_write_delivered(&self) -> bool;
 
     /// Concrete sink kind — drives DLQ/metric attribution and, through [`Sink::requires_structured_records`], whether an aligned-text encoder may write here.
     fn kind(&self) -> SinkType;
@@ -530,15 +531,13 @@ mod tests {
             Ok(())
         }
 
+        fn last_write_delivered(&self) -> bool {
+            true
+        }
+
         fn kind(&self) -> SinkType {
             SinkType::Memory
         }
-    }
-
-    #[test]
-    fn default_last_write_delivered_is_true() {
-        let s: Box<dyn Sink> = Box::new(MockSink::new());
-        assert!(s.last_write_delivered());
     }
 
     #[tokio::test]
@@ -590,6 +589,9 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
+            }
+            fn last_write_delivered(&self) -> bool {
+                true
             }
             fn kind(&self) -> SinkType {
                 SinkType::Kafka
@@ -720,6 +722,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
             fn kind(&self) -> SinkType {
                 SinkType::Kafka
             }
@@ -747,6 +752,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
             fn kind(&self) -> SinkType {
                 SinkType::Memory
             }
@@ -771,6 +779,9 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
+            }
+            fn last_write_delivered(&self) -> bool {
+                true
             }
             fn kind(&self) -> SinkType {
                 SinkType::Kafka
@@ -1202,6 +1213,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             Ok(())
         }
+        fn last_write_delivered(&self) -> bool {
+            true
+        }
         fn kind(&self) -> SinkType {
             self.0
         }
@@ -1237,6 +1251,90 @@ mod tests {
                 sink.requires_structured_records().await,
                 "config and sink disagree for {config:?}"
             );
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DeliveryClaim {
+        InsideWrite,
+        OnFlush,
+        /// Answered per (flush mode × buffer occupancy), so only a live broker settles it.
+        FlushModeDependent,
+    }
+
+    fn delivery_claim(config: &SinkConfig) -> DeliveryClaim {
+        match config {
+            SinkConfig::Memory => DeliveryClaim::InsideWrite,
+            SinkConfig::Stdout | SinkConfig::File { .. } => DeliveryClaim::OnFlush,
+            #[cfg(feature = "kafka")]
+            SinkConfig::Kafka { .. } => DeliveryClaim::FlushModeDependent,
+            #[cfg(feature = "nats")]
+            SinkConfig::Nats { .. } => DeliveryClaim::FlushModeDependent,
+        }
+    }
+
+    fn every_sink_config(dir: &std::path::Path) -> Vec<SinkConfig> {
+        #[allow(unused_mut)]
+        let mut configs = vec![
+            SinkConfig::Stdout,
+            SinkConfig::File {
+                path: dir.join("delivery.ndjson"),
+            },
+            SinkConfig::Memory,
+        ];
+        #[cfg(feature = "kafka")]
+        configs.push(kafka_config(vec!["kafka:9092"], "rastreo.devices"));
+        #[cfg(feature = "nats")]
+        configs.push(nats_config(
+            vec!["nats://n:4222"],
+            "rastreo.records",
+            "rastreo",
+        ));
+        configs
+    }
+
+    #[tokio::test]
+    async fn every_constructible_sink_claims_delivery_only_once_the_bytes_left_its_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut family: Vec<(String, Box<dyn Sink>, DeliveryClaim)> = Vec::new();
+        for config in every_sink_config(dir.path()) {
+            let claim = delivery_claim(&config);
+            if claim == DeliveryClaim::FlushModeDependent {
+                continue;
+            }
+            let label = format!("{config:?}");
+            family.push((label, create_sink(&config).await.expect("create"), claim));
+        }
+
+        // TeeSink is no SinkConfig variant, so the loop above cannot reach it.
+        let child = FileSink::new(dir.path().join("tee-delivery.ndjson"))
+            .await
+            .expect("file child");
+        family.push((
+            "TeeSink(FileSink)".to_string(),
+            Box::new(TeeSink::new(vec![TeeChild::Owned(Box::new(child))])),
+            DeliveryClaim::OnFlush,
+        ));
+
+        for (label, sink, claim) in &mut family {
+            assert!(
+                !sink.last_write_delivered(),
+                "{label}: nothing written is nothing delivered"
+            );
+            // On the first cycle `false` is indistinguishable from "nothing has happened yet".
+            for cycle in 0..2 {
+                sink.write(b"\n").await.expect("write");
+                assert_eq!(
+                    sink.last_write_delivered(),
+                    *claim == DeliveryClaim::InsideWrite,
+                    "{label} cycle {cycle}: only a sink that publishes inside write may claim delivery before flush"
+                );
+                sink.flush().await.expect("flush");
+                assert!(
+                    sink.last_write_delivered(),
+                    "{label} cycle {cycle}: a flushed write is delivered"
+                );
+            }
         }
     }
 

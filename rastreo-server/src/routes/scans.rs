@@ -533,6 +533,9 @@ mod tests {
                 committed.extend(self.buffer.drain(..));
                 Ok(())
             }
+            fn last_write_delivered(&self) -> bool {
+                self.buffer.is_empty()
+            }
             fn kind(&self) -> SinkType {
                 SinkType::Kafka
             }

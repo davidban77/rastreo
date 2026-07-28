@@ -1,5 +1,5 @@
 use crate::error::{EncoderError, RastreoError};
-use crate::model::DeviceRecord;
+use crate::model::{CollectionProfileRecord, DeviceRecord, LinkRecord};
 
 use super::Encoder;
 
@@ -21,6 +21,22 @@ impl Encoder for NdjsonEncoder {
     fn encode_record(&self, record: &DeviceRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError> {
         serde_json::to_writer(&mut *buf, record).map_err(EncoderError::SerializationFailed)?;
         // NDJSON: one record per line.
+        buf.push(b'\n');
+        Ok(())
+    }
+
+    fn encode_link(&self, link: &LinkRecord, buf: &mut Vec<u8>) -> Result<(), RastreoError> {
+        serde_json::to_writer(&mut *buf, link).map_err(EncoderError::SerializationFailed)?;
+        buf.push(b'\n');
+        Ok(())
+    }
+
+    fn encode_profile(
+        &self,
+        profile: &CollectionProfileRecord,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), RastreoError> {
+        serde_json::to_writer(&mut *buf, profile).map_err(EncoderError::SerializationFailed)?;
         buf.push(b'\n');
         Ok(())
     }
