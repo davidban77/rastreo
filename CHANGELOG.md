@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.0](https://github.com/davidban77/rastreo/compare/v0.9.0...v0.10.0) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** require every sink to declare its kind ([#227](https://github.com/davidban77/rastreo/issues/227))
+
+`Sink::kind()` lost its default body and is now a required trait method, so an `impl Sink` outside this workspace no longer compiles until it returns a `SinkType`. The old default claimed `SinkType::Memory`, and because `Sink::requires_structured_records` reads `kind()`, a custom sink backed by a broker silently inherited permission to accept the aligned-text table encoder and publish space-padded rows to its topic. Declaring the kind moves that from a runtime surprise to a compile error.
+
+### Features
+
+* **cli:** add run banners, colour grammar, and a working --quiet ([#219](https://github.com/davidban77/rastreo/issues/219)) ([4e106cb](https://github.com/davidban77/rastreo/commit/4e106cbba95aec1a7c721bde2719d708882f322b))
+* **cli:** default stdout to a table and add --format ([#228](https://github.com/davidban77/rastreo/issues/228)) ([26b4115](https://github.com/davidban77/rastreo/commit/26b4115a70673dec28d9ea6364d96e543550aabb))
+* **cli:** select probers by kind and make --port optional ([#222](https://github.com/davidban77/rastreo/issues/222)) ([685ae08](https://github.com/davidban77/rastreo/commit/685ae0877639ccc098bb71db70512b4be932103d))
+* **core:** add probe-kind selection and expansion ([#218](https://github.com/davidban77/rastreo/issues/218)) ([6c0fbb4](https://github.com/davidban77/rastreo/commit/6c0fbb4f8a46e9d50d586ab73c3c1350e1a37598))
+* **core:** classify platform and role by default ([#220](https://github.com/davidban77/rastreo/issues/220)) ([06aaf72](https://github.com/davidban77/rastreo/commit/06aaf728550e4bde89f7c32697ae519c4ea37326))
+* **core:** render device records as a fixed-width table ([#225](https://github.com/davidban77/rastreo/issues/225)) ([cc9fe58](https://github.com/davidban77/rastreo/commit/cc9fe581e978f331ac1d116a6d57fa72d60b121b))
+* **core:** require every sink to declare its kind ([#227](https://github.com/davidban77/rastreo/issues/227)) ([6320e39](https://github.com/davidban77/rastreo/commit/6320e399a9f1f6619aec36f5704bbacbe9bde75e))
+
+
+### Bug Fixes
+
+* **core:** stop errors printing their message twice ([#224](https://github.com/davidban77/rastreo/issues/224)) ([15b3e84](https://github.com/davidban77/rastreo/commit/15b3e84f50c01ab46553f5721b9bae0db8c314aa))
+* sync Cargo.lock with the 0.9.0 workspace version ([#216](https://github.com/davidban77/rastreo/issues/216)) ([acb7e8f](https://github.com/davidban77/rastreo/commit/acb7e8f5a74906441ab8e505506e0dc26aecafc1))
+
+
+### Documentation
+
+* align the pages the CLI overhaul left behind ([#229](https://github.com/davidban77/rastreo/issues/229)) ([c8c4b00](https://github.com/davidban77/rastreo/commit/c8c4b002a76217da7df6d30efa57799bf269bad0))
+* drop the upgrade note from the changelog page ([#223](https://github.com/davidban77/rastreo/issues/223)) ([63b3f9d](https://github.com/davidban77/rastreo/commit/63b3f9d7af2cc25550eb7b85168763674690badb))
+
+
+### CI/CD
+
+* move cargo audit to a dedicated scheduled workflow ([#214](https://github.com/davidban77/rastreo/issues/214)) ([ac9be8f](https://github.com/davidban77/rastreo/commit/ac9be8f5abc00144b4d6e363dbd859ec46082612))
+
+
+### Refactoring
+
+* **cli:** move terminal output into cli/output/ ([#217](https://github.com/davidban77/rastreo/issues/217)) ([5da8ea5](https://github.com/davidban77/rastreo/commit/5da8ea58899c5ecbbd2b0c32d1376dbe4cbce6bc))
+
 ## [0.9.0](https://github.com/davidban77/rastreo/compare/v0.8.0...v0.9.0) (2026-07-26)
 
 
