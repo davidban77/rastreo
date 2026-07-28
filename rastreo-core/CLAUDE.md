@@ -37,8 +37,9 @@ src/
 │   ├── tls.rs           ← TlsProber (feature: tls)
 │   └── redacted.rs      ← Password, Community — Debug + Serialize redact plaintext
 ├── encoder/
-│   ├── mod.rs       ← Encoder trait + EncoderConfig + create_encoder factory
-│   └── ndjson.rs    ← NdjsonEncoder
+│   ├── mod.rs       ← Encoder trait + EncoderConfig + create_encoder factory + ensure_encoder_output_fits_sink
+│   ├── ndjson.rs    ← NdjsonEncoder
+│   └── table.rs     ← TableEncoder (fixed-width ADDRESS/NAME/PLATFORM/PORTS triage view; device records only)
 ├── sink/
 │   ├── mod.rs       ← Sink trait + SinkConfig + create_sink factory
 │   ├── stdout.rs    ← StdoutSink
@@ -137,6 +138,14 @@ The SSH prober follows the same permissive posture without a toggle: it offers l
 **Constructor signature.** `<Prober>::new(fields...)` takes concrete types (never `Option<T>`) and returns `Result<Self, RastreoError>`. Validation errors surface as `ConfigError::InvalidValue`. Empty required collections (like `ports` for network-layer probers) are validated at construction time. The factory arm in `prober::create_prober` clones the fields out of the config variant and hands them to the constructor.
 
 **Documentation page.** Every prober gets a page under `docs/site/docs/probe/<name>.md` with these sections in order: intro paragraph, `## Configuration` (field table matching the struct), any protocol-specific resolution table (e.g. HTTP's scheme resolution), TLS or security notes, `## Signals emitted`, `## Build feature`, `## Example scenario`, `## See also`. Update `docs/site/docs/probe/index.md` and `docs/site/docs/reference/scenario.md` when adding a new prober.
+
+## Encoders and Sinks
+
+`Encoder` renders into a caller-provided `Vec<u8>`. An encoder with nothing to render for a record kind leaves the buffer untouched; `pipeline::write_encoded` — the single guard every emit site in `stream_discovery` and the batch reference goes through — skips the write and does not count the record. Never publish an empty message. `TableEncoder` is the case that exercises it: it renders device rows and returns `Ok(())` without writing for links and collection profiles.
+
+`SinkType::requires_structured_records` is the single source of truth for destinations whose consumers parse each write as one structured record (`Kafka`, `Nats`). `Sink::requires_structured_records` defaults to `self.kind().requires_structured_records()`, so `KafkaSink` and `NatsSink` carry no override; `TeeSink` overrides with the disjunction over its children. The trait method is `async` for the same reason `probe` is — a fan-out sink answers by locking children held behind a `tokio::sync::Mutex`. `SinkConfig::requires_structured_records` reads the same table through `SinkConfig::sink_type`, so `rastreo validate` can check a config without constructing (and, for a broker, dialling) the sink. A new sink variant has to discharge two exhaustive matches — `SinkType::requires_structured_records` and `SinkConfig::sink_type` — neither of which an empty arm satisfies. `sink::tests::every_constructible_sink_config_agrees_with_the_sink_it_builds` pins kind and structuredness parity for the locally-constructible variants; the `#[ignore]`d broker integration tests pin Kafka and NATS against a live sink.
+
+`encoder::ensure_encoder_output_fits_sink` owns the comparison. `run_discovery` calls it twice: once against `SinkConfig` before the sink is built, so a broker is rejected before the connect, and once against the resolved `Box<dyn Sink>`, which is the only guard a sink injected through `RunOptions::sink` passes.
 
 ## Error Handling
 

@@ -296,11 +296,42 @@ Connects to a device's gRPC/gNMI endpoint on each configured port, issues a Capa
 
 ## Encoders
 
-The `encoder` field is an internally-tagged object. One encoder is available today: `ndjson`. It writes one JSON-encoded `DeviceRecord` per line, separated by `\n`. When the field is omitted, NDJSON is used.
+The `encoder` field is an internally-tagged object. Two encoders are available: `ndjson` and `table`. When the field is omitted, NDJSON is used.
+
+### ndjson
+
+Writes one JSON-encoded record per line, separated by `\n`. This is the complete view: every field of the `DeviceRecord`, plus the link and collection-profile second streams.
 
 ```json
 {"type": "ndjson"}
 ```
+
+### table
+
+Writes an aligned fixed-width table for reading a scan directly, with one header line and one row per device. It is a triage view — four columns answering "which host, what is it called, what is it, what is open" — not a complete record. Use `ndjson` when you need every field.
+
+```json
+{"type": "table", "width": 100}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `width` | integer | `100` | Total line width the columns are laid out within. Clamped up to 55 (the sum of the column minimums) and capped at 153 (the sum of the column maximums), so any larger value renders the same table as 153. |
+
+| Column | Source |
+|---|---|
+| `ADDRESS` | `mgmt_ip`, falling back to `identity_key` when the device was not probed on an IP. |
+| `NAME` | The SNMP `sysName` signal, falling back to the reverse-DNS (PTR) name. |
+| `PLATFORM` | `platform`, falling back to `model`, then `product_family`. |
+| `PORTS` | Every `OpenPort` signal on the record, comma-separated, in record order. |
+
+A cell with no value renders as `-`. Columns start at their minimum width and share the surplus round-robin up to a per-column maximum, so a wider `width` grows every column rather than only the last.
+
+A value longer than its column is truncated with a trailing `…`, except in the last column: `PORTS` runs past `width` rather than dropping ports, because it has no following column to stay aligned with. Truncation counts characters, so a cell of full-width CJK text still fits its character budget but will overflow the column visually.
+
+Links and collection profiles are not rendered as table rows. A scan that collects LLDP or gNMI capability data still assembles them, but nothing is written for those streams and `links_emitted` / `profiles_emitted` report `0`. Use `ndjson` to capture them.
+
+The `table` encoder is rejected against the `kafka` and `nats` sinks, whose consumers read one structured record per message. `rastreo validate` reports it offline, without contacting the broker.
 
 ## Sinks
 

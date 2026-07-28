@@ -195,28 +195,30 @@ fn render_prober(config: &ProberConfig) -> String {
 }
 
 fn render_sink(sink: Option<&SinkConfig>) -> String {
+    let Some(sink) = sink else {
+        return "stdout (default)".to_string();
+    };
+    let label = sink.sink_type().as_label();
     match sink {
-        None => "stdout (default)".to_string(),
-        Some(SinkConfig::Stdout) => "stdout".to_string(),
-        Some(SinkConfig::File { path }) => format!("file: {}", path.display()),
-        Some(SinkConfig::Memory) => "memory".to_string(),
+        SinkConfig::Stdout | SinkConfig::Memory => label.to_string(),
+        SinkConfig::File { path } => format!("{label}: {}", path.display()),
         #[cfg(feature = "kafka")]
-        Some(SinkConfig::Kafka { brokers, topic, .. }) => {
-            format!("kafka: brokers={} topic={topic}", brokers.join(","))
+        SinkConfig::Kafka { brokers, topic, .. } => {
+            format!("{label}: brokers={} topic={topic}", brokers.join(","))
         }
         #[cfg(feature = "nats")]
-        Some(SinkConfig::Nats {
+        SinkConfig::Nats {
             servers,
             subject,
             stream,
             ..
-        }) => {
+        } => {
             let servers = servers
                 .iter()
                 .map(|s| strip_userinfo(s))
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("nats: servers={servers} subject={subject} stream={stream}")
+            format!("{label}: servers={servers} subject={subject} stream={stream}")
         }
     }
 }

@@ -289,6 +289,27 @@
             "type"
           ],
           "type": "object"
+        },
+        {
+          "description": "Aligned fixed-width text for reading a scan directly; links and collection profiles are not rendered.",
+          "properties": {
+            "type": {
+              "const": "table",
+              "type": "string"
+            },
+            "width": {
+              "default": 100,
+              "description": "Total line width the columns are laid out within, clamped to `55..=153`.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ]
     },

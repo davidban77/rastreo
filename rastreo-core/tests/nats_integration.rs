@@ -60,6 +60,17 @@ async fn nats_create_sink_delivers_each_record_to_the_stream() {
         retry: SinkRetry::default(),
     };
     let mut sink = create_sink(&config).await.expect("create nats sink");
+    assert_eq!(
+        config.sink_type(),
+        sink.kind(),
+        "structuredness is read off the sink kind, so the kind must match the config"
+    );
+    assert_eq!(
+        config.requires_structured_records(),
+        sink.requires_structured_records().await,
+        "the offline config twin must match the live sink"
+    );
+    assert!(sink.requires_structured_records().await);
 
     let written: Vec<String> = (0..4)
         .map(|i| format!("{{\"id\":\"itest-{i}\",\"ts\":0}}\n"))

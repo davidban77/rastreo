@@ -1,0 +1,8 @@
+---
+source: rastreo-core/src/encoder/table.rs
+expression: rendered
+---
+ADDRESS                      NAME                      PLATFORM              PORTS
+1.1.1.1                      one.one.one.one           -                     80,443,8080,8443
+198.51.100.11                access-sw-01              cisco_ios             22,443
+10.0.0.1                     -                         -                     -
