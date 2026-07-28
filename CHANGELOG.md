@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 * **core:** require every sink to declare its kind ([#227](https://github.com/davidban77/rastreo/issues/227))
 
+`Sink::kind()` lost its default body and is now a required trait method, so an `impl Sink` outside this workspace no longer compiles until it returns a `SinkType`. The old default claimed `SinkType::Memory`, and because `Sink::requires_structured_records` reads `kind()`, a custom sink backed by a broker silently inherited permission to accept the aligned-text table encoder and publish space-padded rows to its topic. Declaring the kind moves that from a runtime surprise to a compile error.
+
 ### Features
 
 * **cli:** add run banners, colour grammar, and a working --quiet ([#219](https://github.com/davidban77/rastreo/issues/219)) ([4e106cb](https://github.com/davidban77/rastreo/commit/4e106cbba95aec1a7c721bde2719d708882f322b))
