@@ -23,7 +23,7 @@ The minimum upsert flow is:
 
 `confidence` is a float in the range 0.0 to 1.0 produced by the fuser. A consumer can drop records below a chosen threshold to filter out weak observations. A reasonable default is `< 0.3` for "drop"; tune higher when the source of truth is sensitive to noise, lower when you want every signal in.
 
-A record from a single TCP-connect probe (one open port) lands at `confidence: 0.2` with the default `DirectFuser`. The score rises as more signals fuse into the same `identity_key`.
+A record from a single TCP-connect probe (one open port) lands at `confidence: 0.2` under the default `direct` fuser. The score rises as more signals fuse into the same `identity_key`.
 
 ## Mapping signals to source-of-truth fields
 

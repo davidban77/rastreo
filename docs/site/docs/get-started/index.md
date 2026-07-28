@@ -20,7 +20,7 @@ This section walks you from a fresh checkout to a running discovery scan that em
 
     ---
 
-    Run an end-to-end TCP-connect scan and read the resulting `DeviceRecord`.
+    Run a scan with no flags but the target, read the table, then get the full `DeviceRecord`.
 
     [:octicons-arrow-right-24: First scan](first-scan.md)
 

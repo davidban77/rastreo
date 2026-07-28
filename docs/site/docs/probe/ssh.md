@@ -109,7 +109,7 @@ A record produced against a stock OpenSSH server contains the banner and the hos
 - [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [Identity fuser](../discover/identity.md#signals-used-for-identity-fusion) — how `SshHostKey` participates as a high-weight correlation signal (0.8, enough to auto-merge alone).
 - [TLS prober](tls.md#certificate-handling) — the same fingerprint-not-authenticate posture applied to TLS certificates.
-- [Scenario schema](../reference/scenario.md#ssh) — the full `ProberConfig::Ssh` field table.
-- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the SSH prober from the CLI via `--file`.
+- [Scenario schema](../reference/scenario.md#ssh) — the full `ssh` prober field table.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `ssh` is in the default probe set; `--probe-ports ssh=<port>` moves it off port 22.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.
 - [Probe index](index.md) — pointers to every prober.

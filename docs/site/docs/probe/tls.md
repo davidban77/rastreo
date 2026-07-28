@@ -153,6 +153,7 @@ probers:
 - [Reachable, unreachable, and probe faults](index.md#reachable-unreachable-and-probe-faults) — why a silent target is not a probe error.
 - [HTTP prober](http.md) — also runs over TLS on ports 443 and 8443. Emits the `Server:` header rather than the certificate identity, so the two are complementary — `http` says what software answers, `tls` says what name the certificate carries.
 - [SSH prober](ssh.md) — the same "identity fingerprint over an unauthenticated transport" philosophy applied to SSH. `TlsSubject` plays a role analogous to `SshHostKey` in tying together IPs that answer with the same claimed identity.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `tls` is in the default probe set; `--probe-ports tls=<port>` moves it off port 443.
 - [Scenario schema](../reference/scenario.md#tls) — the `tls` prober's field table in the scenario reference.
 - [Device record schema](../reference/schema/device-record.md) — every signal variant in the emitted record, including the TLS connection signals.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.

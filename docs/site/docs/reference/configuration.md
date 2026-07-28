@@ -12,7 +12,7 @@ The **Scope** column tells you which binary reads the variable:
 - **CLI** — read by the `rastreo` CLI only.
 - **both** — read by both binaries.
 
-Four server variables are also command-line flags. When both are set, the flag wins over the environment variable. See the [CLI reference](cli.md) for flag details.
+Several variables are also command-line flags — `RASTREO_SERVER_PORT`, `RASTREO_SERVER_BIND`, `RASTREO_SERVER_REQUEST_TIMEOUT_MS`, `RASTREO_LOG_FORMAT`, and `RASTREO_FORMAT`. Where a variable has a flag, the flag wins. See the [CLI reference](cli.md) for flag details.
 
 ## rastreo-server
 
@@ -41,13 +41,18 @@ These variables tune the HTTP control plane: bind address, authentication, reque
 
 ## rastreo CLI
 
-The CLI reads these to resolve `@name` catalog references. `RASTREO_CATALOG_DIR` takes priority; when it is unset, the CLI falls back to the standard `XDG_CONFIG_HOME` and `HOME` paths. See the [CLI reference](cli.md).
+These control the record format, the terminal output, the SNMP community, and where `@name` catalog references resolve. For the record format and the terminal surface in depth, see the [CLI reference](cli.md#colour-and-glyphs).
 
 | Variable | Default | Scope | Description |
 |---|---|---|---|
+| `RASTREO_FORMAT` | unset | CLI | Record format: `table` (aliased `text`) or `json` (aliased `ndjson`). Also the `--format` flag, which wins. Unset, the destination decides — stdout gets the table, every other sink gets NDJSON. A value here also overrides a scenario's `encoder`, so `RASTREO_FORMAT=table` left exported refuses every Kafka or NATS scenario. See [Record format](../discover/cli.md#record-format). |
+| `RASTREO_ASCII` | unset | CLI | Any non-empty value other than `0` renders the banners with the ASCII glyphs `>`, `#`, `!`, `*`, and `->` instead of `▶`, `■`, `⚠`, `•`, and `→`. Use it on a terminal that cannot render the Unicode set. |
+| `RASTREO_SNMP_COMMUNITY` | `public` | CLI | SNMP read community for a flag-driven scan. Prefer it over `--snmp-community`, whose value is visible to anyone who can run `ps`. A `--file` run ignores it and reads the scenario's `community:` field. |
 | `RASTREO_CATALOG_DIR` | unset | CLI | Colon-separated directories searched for `@name` catalog scenarios. When set, it is the only search path. Unset falls back to the two variables below, then `/etc/rastreo/catalog`. |
 | `XDG_CONFIG_HOME` | unset | CLI | Standard base directory. When `RASTREO_CATALOG_DIR` is unset, the catalog search starts at `$XDG_CONFIG_HOME/rastreo/catalog`. |
 | `HOME` | unset | CLI | Standard home directory. Used for the catalog fallback `$HOME/.config/rastreo/catalog` when `XDG_CONFIG_HOME` is unset. |
+
+The CLI also honours `LC_ALL`, `LC_CTYPE`, and `LANG`: a non-UTF-8 locale selects the same ASCII glyphs `RASTREO_ASCII` forces. Colour follows the three standard variables — `NO_COLOR` turns it off, `CLICOLOR_FORCE` and `FORCE_COLOR` turn it on. See [Colour and glyphs](cli.md#colour-and-glyphs).
 
 !!! info "Scenario files can read any environment variable"
     A `${VAR}` reference inside a scenario YAML file expands to the value of the named environment variable at load time. The variable name is chosen by the scenario author, not fixed by rastreo, so those names are not listed here. See [Secrets](secrets.md) for the `${VAR}` and `!file` syntaxes.

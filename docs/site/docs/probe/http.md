@@ -100,6 +100,6 @@ A record produced against a default nginx install contains at least one `HttpBan
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
-- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the HTTP prober from the CLI via `--file`.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `http` is in the default probe set, and `--port` / `--http-path` tune it.
 - [Probe index](index.md) — pointers to every prober.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.

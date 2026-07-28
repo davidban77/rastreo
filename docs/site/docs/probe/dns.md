@@ -119,5 +119,5 @@ Probing an authoritative name server for the same zone would use `recursion_desi
 ## See also
 
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
-- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the DNS prober from the CLI via `--file`.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `--probe dns --dns-query <name>` runs it from the command line, with `--dns-query-type` for the record type.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

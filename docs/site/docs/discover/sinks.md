@@ -254,7 +254,7 @@ The stdout, file, and memory sinks carry any encoding: they hand bytes to a term
 Kafka and NATS are different. Their consumers read each message as one structured record, so an aligned-text message is unparseable garbage that a reconciler would ingest silently. A scenario pairing the `table` encoder with a `kafka` or `nats` sink is rejected before probing starts, and `rastreo validate` reports it offline without contacting the broker:
 
 ```
-scenario 'inventory': the table encoder writes aligned text rows, which this sink cannot carry: its consumers read one structured record per message. Use the ndjson encoder with this sink.
+scenario 'inventory' (1 of 1): the table encoder writes aligned text rows, which this sink cannot carry: its consumers read one structured record per message. Use the ndjson encoder with this sink.
 ```
 
 The same check runs against the sink object itself, so it also holds when a sink is supplied through the library API rather than through configuration — including a fan-out sink with a broker among its children.

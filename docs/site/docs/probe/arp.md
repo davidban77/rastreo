@@ -34,14 +34,16 @@ When `interface` is empty, the prober picks an interface at probe time by walkin
 
 Two failure modes surface when auto-selection cannot find a candidate:
 
-- No local interface has a subnet containing the target IP: the probe returns `ProbeError::Other("no local interface reaches <ip>")`. The target is not on any locally-reachable L2 segment — most commonly, it is behind a router.
-- The auto-selected interface exists but has no MAC address (loopback, `lo`) or no IPv4 address of its own: the probe returns `ProbeError::Other("interface <name> has no ipv4 address")`. Configure a subnet on the interface, or pin the prober to a different interface with `interface: eth1`.
+Both are probe faults of kind `other`, reported under `-v` as `first fault  other → <message>`:
+
+- No local interface has a subnet containing the target IP. The message is `no local interface reaches <ip>`. The target is not on any locally-reachable L2 segment — most commonly, it is behind a router.
+- The auto-selected interface exists but has no MAC address (loopback, `lo`) or no IPv4 address of its own. The message is `interface <name> has no ipv4 address`. Configure a subnet on the interface, or pin the prober to a different interface with `interface: eth1`.
 
 When `interface` is set explicitly and the target IP is not on that interface's subnet, the prober still sends the request on that interface. ARP Replies from off-subnet targets will not arrive; the probe times out. Set the interface explicitly only when you know the target is reachable via it.
 
 ## Degenerate case: probing your own address
 
-Probing the IP of one of your own interfaces returns `ProbeError::Other("arp target <ip> is a local interface address")`. This is caught at probe time rather than sending a broadcast for a MAC the kernel already knows. Configure a different target if you want to inspect your own interface's MAC — most operating systems expose it via `ip link show <iface>` or `ifconfig`.
+Probing the IP of one of your own interfaces is a probe fault of kind `other`. The message is `arp target <ip> is a local interface address`. This is caught at probe time rather than sending a broadcast for a MAC the kernel already knows. Configure a different target if you want to inspect your own interface's MAC — most operating systems expose it via `ip link show <iface>` or `ifconfig`.
 
 ## Signals emitted
 
@@ -130,6 +132,6 @@ probers:
 
 - [NDP prober](ndp.md) — the IPv6 equivalent of ARP.
 - [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
-- [Discover CLI](../discover/cli.md#yaml-driven-mode) — running the ARP prober from the CLI via `--file`.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `--probe arp` runs it from the command line, with `--interface` to pin the interface.
 - [Kubernetes deployment](../deploy/kubernetes.md#podsecuritynetraw-arp-and-ndp-probers) — the `podSecurity.netRaw` toggle for granting the capability in-cluster.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

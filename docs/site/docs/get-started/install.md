@@ -56,6 +56,15 @@ cargo install --path rastreo-server     # installs `rastreo-server`
 
 Both binaries are installed into `~/.cargo/bin/`. If `cargo` was set up by `rustup`, that directory is already on your `$PATH`.
 
+!!! warning "A source build carries fewer probers than a release binary"
+    The commands above build with default features, so only `tcp_connect`, `udp`, `dns`, and `reverse_dns` are compiled in. A scan with no `--probe` then runs `tcp_connect` and `reverse_dns` alone, where the released binaries run seven kinds. Name the features you want to match them:
+
+    ```bash
+    cargo install --path rastreo --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp
+    ```
+
+    That is the set the release tarballs and the Docker image are built with. `--probe <kind>` on a build without the matching feature fails with a message naming the feature to add. See [Choosing probers](../discover/cli.md#choosing-probers).
+
 ## For development
 
 When you are changing rastreo itself, build the whole workspace and run the debug binary directly out of `target/`.
@@ -73,7 +82,7 @@ rastreo --version
 rastreo discover --help
 ```
 
-`rastreo --version` prints a version line such as `rastreo 0.8.0`. `rastreo discover --help` prints the full flag reference for the discovery subcommand — see [CLI](../discover/cli.md) for the same surface in long form.
+`rastreo --version` prints the binary name and its version on one line. `rastreo discover --help` prints the full flag reference for the discovery subcommand — see [CLI](../discover/cli.md) for the same surface in long form.
 
 ## See also
 

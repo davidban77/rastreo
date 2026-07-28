@@ -55,7 +55,7 @@ flowchart LR
 
     ---
 
-    stdout, file, Kafka, and NATS output, plus the NDJSON contract.
+    stdout, file, Kafka, and NATS output, and how the destination picks the table or NDJSON.
 
     [:octicons-arrow-right-24: Sinks](sinks.md)
 

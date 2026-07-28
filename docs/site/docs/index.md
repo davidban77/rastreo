@@ -52,8 +52,10 @@ One line on Linux or macOS. Docker and Cargo work too.
 === "Cargo"
 
     ```bash
-    cargo install --path rastreo
+    cargo install --path rastreo --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp
     ```
+
+    Naming the features matches what the script and the image install. Plain `cargo install --path rastreo` compiles only four probers.
 
 See [Install](get-started/install.md) for every path, including the Helm chart for Kubernetes.
 

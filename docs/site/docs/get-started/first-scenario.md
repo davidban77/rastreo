@@ -59,7 +59,7 @@ The scenario file changed how you asked, not what came back. Add `--format json`
 
 ## Add a second prober
 
-Flag mode always runs `tcp_connect` and nothing else. A scenario file can list any prober, and it can list several at once. Add a `reverse_dns` prober to the same file. It looks up the PTR record for each target IP and returns the hostname:
+A scenario file lists probers one entry at a time, and each entry carries that prober's own settings. Add a `reverse_dns` prober to the same file. It looks up the PTR record for each target IP and returns the hostname:
 
 ```yaml title="scenario.yaml" hl_lines="13"
 version: 1
@@ -104,6 +104,14 @@ The record behind that row carries two signals. `rastreo discover --file scenari
 ```
 
 Confidence rises from `0.2` to `0.3` because a second signal was observed. `reverse_dns` needs no build feature, so this runs on any install. You reach every other prober — HTTP, DNS, UDP, SNMP, ARP, and more — the same way: add an entry to `probers`. See [Probe](../probe/index.md) for the full set.
+
+`--probe` reaches the same two probers without a file, so this step is not what a scenario file is *for*:
+
+```bash
+rastreo discover --target 1.1.1.1 --probe tcp_connect,reverse_dns --port 443
+```
+
+What the file adds is every setting no flag exposes: SNMPv3 credentials, gNMI usernames, per-prober TLS verification, and custom reverse-DNS resolvers. It also lets you run several scenarios at once, and gives you a file you can commit.
 
 ## Send records to a file
 

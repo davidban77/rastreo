@@ -27,7 +27,7 @@ The completion banner reads `faults:` equal to `probes:`. Every probe hit a faul
 The CLI prints a hint under the banner, chosen from the fault's typed kind. A `permission_denied` fault, for example, tells you to grant `CAP_NET_RAW` or check local egress policy. Then check the usual causes:
 
 - The ARP, NDP, or ICMP prober is running without `CAP_NET_RAW`. See [ARP · Runtime privilege](../probe/arp.md#runtime-privilege).
-- An SNMP probe is blocked by a local firewall REJECT in the OUTPUT chain. This now surfaces as a `permission_denied` fault with the same egress-policy hint.
+- An SNMP probe is blocked by a local firewall REJECT in the OUTPUT chain. That surfaces as a `permission_denied` fault with the same egress-policy hint.
 - The ARP prober is aimed at IPv6 targets, or the NDP prober at IPv4 targets. Each is bound to one address family.
 - The selected interface has no address in the target's family, or no interface reaches the target subnet at all.
 - The scan host has run out of file descriptors or is denied a socket. A local socket failure is the one fault the connection-based probers report.
@@ -38,7 +38,7 @@ The same rule applies to `rastreo-server`: `rastreo_server_probes_total{outcome=
 
 ## DNS resolution failures
 
-A scan against a hostname fails with `ResolverError::DnsNoRecords` (the name resolved but returned no `A` / `AAAA` records) or `ResolverError::DnsLookupFailed` (the lookup itself failed — system resolver unreachable, timeout, or refused). `rastreo-server` maps these to `400 Bad Request` and `503 Service Unavailable` respectively.
+A scan against a hostname fails with one of two messages. `DNS lookup returned no records for <name>` means the name resolved but carried no `A` or `AAAA` record. `DNS lookup failed for <name>` means the lookup itself failed — system resolver unreachable, timed out, or refused. `rastreo-server` maps them to `400 Bad Request` and `503 Service Unavailable` respectively.
 
 Check `/etc/resolv.conf` on the host running the scan. When the scan runs inside a container, the resolver inside the container is rarely the host's resolver — Docker rewrites `resolv.conf` to point at the embedded resolver. If the embedded resolver can not reach your internal DNS, hostnames will not resolve. The fix is to add the right upstreams to the container's resolver config (`--dns` flag on `docker run`, or `dns:` in `docker-compose.yml`).
 
@@ -58,7 +58,7 @@ rastreo discover --sink kafka --brokers kafka:29092 --topic rastreo.discovery.re
 
 ## Unexpected low confidence scores
 
-Every record arrives with `confidence: 0.2`, no matter how many probes ran against it. This is expected output from the default `DirectFuser`: `confidence = confidence_baseline + (signals_observed * confidence_per_signal)`, where the defaults are `confidence_baseline = 0.1` and `confidence_per_signal = 0.1`. One TCP-connect signal yields `0.2`.
+Every record arrives with `confidence: 0.2`, no matter how many probes ran against it. This is expected output from the default `direct` fuser: `confidence = confidence_baseline + (signals_observed * confidence_per_signal)`, where the defaults are `confidence_baseline = 0.1` and `confidence_per_signal = 0.1`. One TCP-connect signal yields `0.2`.
 
 To tune the curve, set `fuser.confidence_baseline` and `fuser.confidence_per_signal` on the scenario JSON sent to `rastreo-server`'s `POST /scans`. The CLI does not expose these directly today.
 

@@ -130,4 +130,5 @@ probers:
 - [Topology](../discover/topology.md) — the `LinkRecord` shape, link de-duplication, and where links are emitted.
 - [SNMP prober](snmp.md) — the shared transport, versions, USM credentials, and security notes.
 - [LinkRecord schema](../reference/schema/link-record.md) — every field on the emitted link record.
+- [Discover CLI](../discover/cli.md#choosing-probers) — `--probe lldp` selects it, and `--snmp-community` / `--snmp-version` tune it exactly as they do the SNMP prober. SNMPv3 USM credentials need `--file`.
 - [Scenario schema](../reference/scenario.md#lldp) — the full `ProberConfig` reference.
