@@ -233,19 +233,8 @@ A single regex-based platform-detection rule.
 | `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. When absent, or when the group is not present in the actual match, `os_version` stays null. |
 | `pattern` | string | yes | — |
 | `platform` | string | yes | — |
-| `signal` | [`PlatformSignal`](#platformsignal) | yes | — |
+| `signal` | [`SignalKind`](#signalkind) | yes | — |
 | `ssh_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`. |
-
-### `PlatformSignal` {#platformsignal}
-
-Which probe-emitted signal a `PlatformRule` matches against.
-
-One of:
-
-- `snmp_sys_descr`
-- `ssh_banner`
-- `http_banner`
-- `snmp_sys_name`
 
 ### `ProberConfig` {#proberconfig}
 
@@ -267,11 +256,12 @@ One of:
 
 ### `RoleRule` {#rolerule}
 
-A single role-detection rule. Two match strategies are supported: exact byte-prefix on `SnmpSysObjectId` and all-of set membership over `OpenPort` signals.
+A single role-detection rule. Three match strategies are supported: OID-subtree containment on `SnmpSysObjectId`, regex over any signal kind, and all-of set membership over `OpenPort` signals.
 
 One of:
 
 - { `prefix`: string, `role`: string, `type`: `sys_object_id_prefix` }
+- { `pattern`: string, `role`: string, `signal`: [`SignalKind`](#signalkind), `type`: `signal_match` }
 - { `ports`: array<uint16>, `role`: string, `type`: `ports_open` }
 
 ### `SaslMechanism` {#saslmechanism}
@@ -293,6 +283,18 @@ One of:
 One of:
 
 - `discovery`
+
+### `SignalKind` {#signalkind}
+
+Which probe-emitted signal a classifier rule matches against. Shared by `PlatformRule` and `RoleRule::SignalMatch`.
+
+One of:
+
+- `snmp_sys_descr`
+- `ssh_banner`
+- `http_banner`
+- `snmp_sys_name`
+- `snmp_sys_object_id`
 
 ### `SinkConfig` {#sinkconfig}
 

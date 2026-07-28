@@ -703,7 +703,7 @@
           "type": "string"
         },
         "signal": {
-          "$ref": "#/$defs/PlatformSignal"
+          "$ref": "#/$defs/SignalKind"
         },
         "ssh_version_capture": {
           "description": "Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`.",
@@ -719,16 +719,6 @@
         "platform"
       ],
       "type": "object"
-    },
-    "PlatformSignal": {
-      "description": "Which probe-emitted signal a `PlatformRule` matches against.",
-      "enum": [
-        "snmp_sys_descr",
-        "ssh_banner",
-        "http_banner",
-        "snmp_sys_name"
-      ],
-      "type": "string"
     },
     "ProberConfig": {
       "oneOf": [
@@ -1132,10 +1122,10 @@
       ]
     },
     "RoleRule": {
-      "description": "A single role-detection rule. Two match strategies are supported: exact byte-prefix on `SnmpSysObjectId` and all-of set membership over `OpenPort` signals.",
+      "description": "A single role-detection rule. Three match strategies are supported: OID-subtree containment on `SnmpSysObjectId`, regex over any signal kind, and all-of set membership over `OpenPort` signals.",
       "oneOf": [
         {
-          "description": "Matches when the record carries any `Signal::SnmpSysObjectId(oid)` whose dotted string starts with `prefix`. Case-sensitive byte comparison.",
+          "description": "Matches when the record carries a `Signal::SnmpSysObjectId` equal to `prefix` or inside its subtree. Whole arcs are compared, so `1.3.6.1.4.1.9.1` does not match `1.3.6.1.4.1.9.15`. `prefix` must be dotted-decimal with no leading dot, and is rejected at classifier construction otherwise.",
           "properties": {
             "prefix": {
               "type": "string"
@@ -1151,6 +1141,31 @@
           "required": [
             "type",
             "prefix",
+            "role"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Matches when `pattern` matches the text of any `signal`-kind signal on the record.",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "signal": {
+              "$ref": "#/$defs/SignalKind"
+            },
+            "type": {
+              "const": "signal_match",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "signal",
+            "pattern",
             "role"
           ],
           "type": "object"
@@ -1212,6 +1227,17 @@
     "ScenarioKind": {
       "enum": [
         "discovery"
+      ],
+      "type": "string"
+    },
+    "SignalKind": {
+      "description": "Which probe-emitted signal a classifier rule matches against. Shared by `PlatformRule` and `RoleRule::SignalMatch`.",
+      "enum": [
+        "snmp_sys_descr",
+        "ssh_banner",
+        "http_banner",
+        "snmp_sys_name",
+        "snmp_sys_object_id"
       ],
       "type": "string"
     },

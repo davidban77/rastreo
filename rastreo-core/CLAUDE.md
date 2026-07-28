@@ -54,9 +54,10 @@ src/
 │   ├── mib.rs       ← MibEnrichmentFuser + MibTable (feature: mib_enrichment)
 │   └── identity.rs  ← IdentityFuser (MAC + SnmpSysName + SshHostKey + TlsSubject + TlsSanName + ReverseDnsName correlation)
 ├── classifier/
-│   ├── mod.rs           ← Classifier trait + ClassifierConfig + create_classifier factory + NoopClassifier / RulesClassifier (Rules over the baked tables is the pipeline default)
+│   ├── mod.rs           ← Classifier trait + ClassifierConfig + create_classifier factory + NoopClassifier / RulesClassifier (Rules over the baked tables is the pipeline default) + SignalKind, the rule vocabulary shared by PlatformRule and RoleRule::SignalMatch
 │   ├── platform_rules.rs ← Baked-in default PlatformRule table
 │   └── role_rules.rs    ← Baked-in default RoleRule table (multi-port evidence only) + the opt-in single-port heuristics
+├── oid.rs           ← crate-private dotted-decimal validation + arc-boundary subtree containment, shared by the classifier and the MIB table parser
 ├── observability/
 │   ├── mod.rs           ← module root
 │   └── otlp_config.rs   ← OtlpProtocol enum + shared env-var parsers (parse_env_bool / parse_env_u64 / parse_env_protocol / parse_env_headers) + http_endpoint_for_signal; consumed by rastreo and rastreo-server. No OpenTelemetry deps — pure types + string parsing.

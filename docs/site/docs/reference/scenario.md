@@ -645,7 +645,7 @@ Each `PlatformRule` has:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `signal` | string | yes | Which probe signal the pattern matches against. One of `snmp_sys_descr`, `snmp_sys_name`, `ssh_banner`, `http_banner`. |
+| `signal` | string | yes | Which probe signal the pattern matches against. One of `snmp_sys_descr`, `snmp_sys_object_id`, `snmp_sys_name`, `ssh_banner`, `http_banner`. See [Signal kinds](../discover/classification.md#signal-kinds). |
 | `pattern` | string | yes | Regex pattern. Validated when the classifier is built; a bad pattern is rejected before the scan starts. |
 | `platform` | string | yes | Canonical platform label assigned on match (e.g. `cisco_ios`, `linux`, `nginx`). |
 | `os_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.os_version`. When absent, `os_version` stays `null` even on a platform match. |
@@ -653,15 +653,24 @@ Each `PlatformRule` has:
 | `http_server_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_server`. Only meaningful for `signal: http_banner`. |
 | `http_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_version`. Only meaningful for `signal: http_banner`. |
 
-Each `RoleRule` is an internally-tagged object. Two variants exist.
+Each `RoleRule` is an internally-tagged object. Three variants exist.
 
-`sys_object_id_prefix` matches when the record carries any `SnmpSysObjectId` signal whose dotted-string form starts with `prefix` (case-sensitive byte comparison).
+`sys_object_id_prefix` matches when the record carries an `SnmpSysObjectId` signal equal to `prefix` or inside its subtree. Whole OID arcs are compared, so `1.3.6.1.4.1.9.1` matches `1.3.6.1.4.1.9.1.2050` but not `1.3.6.1.4.1.9.15.2`.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"sys_object_id_prefix"`. |
-| `prefix` | string | yes | SNMP `sysObjectID` byte prefix (e.g. `"1.3.6.1.4.1.9.1"`). |
+| `prefix` | string | yes | SNMP `sysObjectID` subtree (e.g. `"1.3.6.1.4.1.9.1"`). Must be dotted-decimal — two or more digit arcs, no leading dot, no whitespace — and is rejected when the classifier is built otherwise. |
 | `role` | string | yes | Role label assigned on match (e.g. `router`, `switch`). |
+
+`signal_match` matches when `pattern` matches the text of any signal of kind `signal` on the record. Same signal vocabulary and regex engine as a `PlatformRule`; capture groups are allowed but ignored.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Must be `"signal_match"`. |
+| `signal` | string | yes | Which probe signal the pattern matches against. Same values as a `PlatformRule`'s `signal`. |
+| `pattern` | string | yes | Regex pattern. Validated when the classifier is built; a bad pattern is rejected before the scan starts. |
+| `role` | string | yes | Role label assigned on match. |
 
 `ports_open` matches when the record carries a `Signal::OpenPort(p)` for every `p` in `ports`. Extra open ports do not cause a mismatch; only the listed ones must all be present.
 
@@ -685,6 +694,7 @@ Each `RoleRule` is an internally-tagged object. Two variants exist.
   ],
   "role_rules": [
     {"type": "sys_object_id_prefix", "prefix": "1.3.6.1.4.1.9.1", "role": "router"},
+    {"type": "signal_match", "signal": "snmp_sys_name", "pattern": "-spine\\d+$", "role": "spine"},
     {"type": "ports_open", "ports": [22, 179], "role": "router"}
   ]
 }

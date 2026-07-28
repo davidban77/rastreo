@@ -33,7 +33,7 @@ consumers should tag legacy records with an explicit v0 marker before ingest.
 | `possible_alias_of` | string \| null | no | This record may be the same device as another (referenced by its `identity_key`), but the evidence wasn't strong enough to merge them (unlike the high-confidence `alt_ips` merge). |
 | `probe_kinds` | array<[`ProbeKind`](#probekind)> | no | Deduplicated `ProbeKind` values whose outcomes contributed to this record. Preserves authoritative provenance from ingest through fusion so consumers do not infer prober attribution from signals. |
 | `product_family` | string \| null | no | Product family resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched. |
-| `role` | string \| null | no | Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open` and `sys_object_id_prefix` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on. |
+| `role` | string \| null | no | Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open`, `sys_object_id_prefix`, and `signal_match` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on. |
 | `scan_metadata` | [`ScanMetadata`](#scanmetadata) | no | Provenance stamped by the pipeline at scan entry. |
 | `schema_id` | string | yes | Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build. |
 | `schema_version` | string | yes | Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build. |
