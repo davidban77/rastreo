@@ -4,7 +4,7 @@ description: Reference for the rastreo discover subcommand — required flags, o
 
 # CLI
 
-`rastreo discover` is the entry point for one-shot discovery scans. It runs in two modes: **flag-driven** (`--target`, plus `--probe` to pick the probers) for a scan you type in one line, or **YAML-driven** (`--file`) to execute a full `ScenarioFile` when you want a scan committed to version control. Both modes emit one NDJSON `DeviceRecord` per discovered device to the chosen sink.
+`rastreo discover` is the entry point for one-shot discovery scans. It runs in two modes: **flag-driven** (`--target`, plus `--probe` to pick the probers) for a scan you type in one line, or **YAML-driven** (`--file`) to execute a full `ScenarioFile` when you want a scan committed to version control. Both modes emit one `DeviceRecord` per discovered device to the chosen sink. [`--format`](#record-format) decides whether that record leaves as a table row or as JSON; unset, the destination decides for you.
 
 ## Usage
 
@@ -137,7 +137,7 @@ Anything past these flags — SNMPv3 USM credentials, gNMI usernames, per-prober
 
 `--file <PATH>` (`-f <PATH>`) loads a `ScenarioFile` and runs every scenario entry in order. The file must set `version: 1` and `kind: discovery`; other values are rejected. See [Scenario schema](../reference/scenario.md) for the full field list. The argument also accepts a `@name` catalog reference that resolves to a scenario file in `~/.config/rastreo/catalog/` or `/etc/rastreo/catalog/` — see [Catalog](catalog.md) for the search order and setup.
 
-Reach for a scenario file when the scan needs more than the flags expose — SNMPv3 credentials, gNMI authentication, several scenarios in one run, or a scan you want reviewed and committed.
+Use a scenario file when the scan needs more than the flags expose — SNMPv3 credentials, gNMI authentication, several scenarios in one run, or a scan you want reviewed and committed.
 
 A single-scenario file that probes an HTTP target and a DNS resolver. The numbered markers explain each part — click one to expand it:
 
@@ -164,7 +164,7 @@ scenarios: # (3)!
 1.  **`version`** — the scenario file format version. Always `1` today.
 2.  **`kind`** — declares the file as a discovery run. Always `discovery`.
 3.  **`scenarios`** — the list of runs. Each entry is one independent scan, and the CLI runs them in order.
-4.  **`sink`** — where records go. Here, one NDJSON line per device on stdout. See [Sinks](sinks.md).
+4.  **`sink`** — where records go. Here, one table row per device on stdout. See [Sinks](sinks.md).
 5.  **`targets`** — what to probe. Two single IPs here. See [Targets](targets.md) for CIDR, range, and DNS forms.
 6.  **`probers`** — how to probe each target. This scan runs the HTTP and DNS probers against every target.
 
@@ -216,18 +216,18 @@ Each scenario prints its own status line to stderr, and the CLI runs every scena
 | `-p`, `--port <PORT>` | per-prober defaults | Ports for `tcp_connect`, `http`, and `udp`. Repeatable or comma-separated. See [Ports](#ports). |
 | `--probe-ports <KIND>=<PORT>` | — | Port list for one prober, beating both `--port` and the prober's own default. See [Ports](#ports). |
 | `--udp-protocol`, `--dns-query`, `--dns-query-type`, `--snmp-community`, `--snmp-version`, `--http-path`, `--icmp-count`, `--interface` | see below | Per-prober parameters. See [Per-prober parameters](#per-prober-parameters). |
+| `--format <table\|json>` | `table` on stdout, `json` everywhere else | How each record is rendered. `table` (alias `text`) is the aligned triage grid; `json` (alias `ndjson`) is one JSON object per line. Env var `RASTREO_FORMAT`. Overrides the scenario's `encoder` in YAML-driven mode. See [Record format](#record-format). |
 | `--sink <SINK>` | `stdout` (flag-driven) / YAML `sink` (YAML-driven) | Where records are emitted. Possible values: `stdout`, `file`. `kafka` is available when the binary is built with `--features kafka`. In YAML-driven mode, setting `--sink` overrides the sink configured in the file. See [Sinks](sinks.md). |
-| `--output <PATH>` | — | Output file path for `--sink file`. Required when the file sink is selected. |
-| `--brokers <BROKERS>` | — | Comma-separated Kafka brokers for `--sink kafka`. Requires the `kafka` build feature. |
-| `--topic <TOPIC>` | — | Kafka topic for `--sink kafka`. Requires the `kafka` build feature. |
-| `--kafka-flush-per-record` | — | Flush every `DeviceRecord` to Kafka as a separate message. Mutually exclusive with `--kafka-batch-threshold`. Only meaningful with `--sink kafka`. |
-| `--kafka-batch-threshold <BYTES>` | `65536` (64 KiB) | Batch threshold in bytes. Records accumulate until the buffer reaches this size, then flush in one produce request that carries one message per record. Minimum 1. Only meaningful with `--sink kafka`. |
+| `--output <PATH>` | — | Output file path. Required by `--sink file`, and refused without it. See [Destination flags](#destination-flags). |
+| `--brokers <BROKERS>` | — | Comma-separated Kafka brokers. Requires `--sink kafka` and the `kafka` build feature. |
+| `--topic <TOPIC>` | — | Kafka topic. Requires `--sink kafka` and the `kafka` build feature. |
+| `--kafka-flush-per-record` | — | Flush every `DeviceRecord` to Kafka as a separate message. Mutually exclusive with `--kafka-batch-threshold`. Requires `--sink kafka`. |
+| `--kafka-batch-threshold <BYTES>` | `65536` (64 KiB) | Batch threshold in bytes. Records accumulate until the buffer reaches this size, then flush in one produce request that carries one message per record. Minimum 1. Requires `--sink kafka`. |
 | `--concurrency <N>` | `64` (flag-driven) / YAML `max_concurrent` (YAML-driven) | Maximum number of probes in flight at once. Minimum value is 1. In YAML-driven mode, setting `--concurrency` overrides the scenario's `max_concurrent`. |
 | `--rate <N>` | unset — no pacing (flag-driven) / YAML `probe_rate` (YAML-driven) | Maximum number of probes started per second. Minimum value is 1. When unset, probes start as fast as concurrency allows. In YAML-driven mode, setting `--rate` overrides the scenario's `probe_rate`. |
 | `--retries <N>` | `0` (flag-driven) / YAML `retries` (YAML-driven) | Retransmit attempts for the connectionless probers (UDP, SNMP, DNS, reverse DNS). Range 0–1024; `0` is single-shot. In YAML-driven mode, setting `--retries` overrides the scenario's `retries`. See [Retries on lossy links](#retries-on-lossy-links). |
 | `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
 | `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
-| `--dry-run-format <text\|json>` | `text` | Output format for `--dry-run`. `text` is the human-readable plan. `json` emits a machine-readable JSON array of plan objects, one per scenario, ready to pipe to `jq`. Only meaningful with `--dry-run`. See [Machine-readable output](#machine-readable-output) below. |
 | `--checkpoint <PATH>` | — | Write a resume checkpoint to this file during the scan, so a scan that dies can be resumed later. The scenario must be resume-safe or the scan is refused before probing. See [Checkpoints](#checkpoints). |
 | `--checkpoint-interval <N>` | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. See [Checkpoints](#checkpoints). |
 | `--resume` | off | Continue an interrupted scan from the checkpoint at `--checkpoint <PATH>`: skip the targets already written and probe the rest. Requires `--checkpoint`. Works for a single scenario only. See [Resuming](#resuming). |
@@ -236,6 +236,69 @@ Each scenario prints its own status line to stderr, and the CLI runs every scena
 
 !!! info "Concurrency vs rate"
     These are two different limits. `--concurrency` (YAML `max_concurrent`) sets how many probes run at the same time. `--rate` (YAML `probe_rate`) sets how many probes start each second. They compose: with `--concurrency 64 --rate 50`, up to 64 probes run at once, but no more than 50 start per second. The rate bounds the scan whenever it is the tighter limit. Leave `--rate` unset to let probes start as fast as concurrency allows — useful to be gentle on a fragile network.
+
+## Record format
+
+A flag-driven scan writes to stdout by default, and stdout is read by a person, so the default there is the table:
+
+```text
+ADDRESS                      NAME                      PLATFORM              PORTS
+10.0.0.1                     core-sw-1                 Cisco IOS             22,80,443
+10.0.0.2                     -                         -                     443
+```
+
+Four columns of triage, not the whole record: the management address (or the identity key when there is no address), the device's own name — its SNMP `sysName`, else its PTR record — the [classifier](classification.md)'s platform, and the open ports. A `-` means the scan learned nothing for that column. A value too wide for its column is truncated with `…`. `PORTS` is the exception: it runs past the line rather than dropping a port, because no column follows it. Links and collection profiles have no row shape and are not rendered. A scan that emits them needs `--format json`.
+
+`--format json` writes one `DeviceRecord` per line as compact JSON — the wire format every sink and every consumer speaks:
+
+```bash
+rastreo discover --target 10.0.0.0/24 --format json | jq -r '.mgmt_ip'
+```
+
+`json` also drops the banners and the progress line, so stdout is a clean stream and stderr is quiet. Hints survive on stderr, where they cannot corrupt the stream and where they are the most useful thing to read when a scan comes back empty. `-v` brings the banners back alongside the JSON.
+
+Each value accepts a second spelling: `text` for `table`, and `ndjson` for `json`. Both spellings do the same thing.
+
+### Where the default comes from
+
+**The destination decides, whether you typed flags or loaded a scenario file.** Ask for no format and the sink the records are headed for picks one:
+
+| Destination | Default format | Why |
+|---|---|---|
+| stdout | `table` | A person is reading it. |
+| a file | `json` | A file is an artifact something else will parse. |
+| Kafka or NATS | `json` | Broker consumers read one structured record per message; the table is refused outright. |
+
+The rule is the same for `rastreo discover --target ...` and for `rastreo discover --file scenario.yml`. A scenario whose `sink:` is `stdout` and which sets no `encoder:` gets the table, exactly as the flag-driven form does; one that writes to a file or a broker gets NDJSON. A scenario that *does* set `encoder:` keeps it — including its own `width:`, which is never re-measured.
+
+An explicit `--format` beats all of these, including the scenario's `encoder`. Ask for `--format table` on a Kafka or NATS sink and the run is refused before it connects — aligned text is not something a broker's consumers can parse.
+
+`RASTREO_FORMAT` sets the same value from the environment, which makes it a per-shell or per-pipeline default:
+
+```bash
+export RASTREO_FORMAT=json
+```
+
+Because the environment is an explicit statement of intent, `RASTREO_FORMAT` overrides a scenario's `encoder` exactly as the flag does — including on a scenario the value cannot work for. `RASTREO_FORMAT=table` exported in your shell will refuse every scenario with a broker sink until you unset it or pass `--format json` on that run.
+
+### Terminal width
+
+The table is laid out to the width of your terminal, measured from stdout, and clamps to the range the grid supports — narrower than 55 columns renders at 55, wider than 153 renders at 153. When stdout is a pipe or a file there is no width to read and no way to know what will consume it, so the table renders at a fixed 100 columns and stays byte-identical between runs. A scenario file's `encoder: {type: table, width: N}` is never re-measured: the file said what it wanted.
+
+## Destination flags
+
+`--output`, `--brokers`, `--topic`, and the two `--kafka-*` tuning flags each belong to exactly one sink. Give one without selecting its sink and the run is refused before any probe:
+
+```console
+$ rastreo discover --target 1.1.1.1 --output /tmp/scan.ndjson
+Error: --output only applies to --sink file, and this run writes to stdout. Add --sink file, or drop --output.
+```
+
+That is deliberately stricter than the per-prober parameters, which only print a note. An unused `--snmp-community` means one prober did not run, which the banner already shows. A discarded `--output` means you believe you have a file and do not.
+
+The same holds under `--file`: a scenario file names its own sink, and these flags are only ever read through `--sink`. Pair them — `--file scan.yml --sink file --output /tmp/scan.ndjson` overrides the scenario's destination and works.
+
+On a build without the `kafka` feature there is no Kafka sink to reach, so `--brokers`, `--topic`, and the `--kafka-*` flags do not exist at all and the parser rejects them by name.
 
 ## Retries on lossy links
 
@@ -287,10 +350,16 @@ rastreo discover --file wan-snmp.yml --retries 3
 
 ## Examples
 
-A minimum-flags scan against one host, running the default probe set. Stdout receives one NDJSON record per discovered device; stderr receives the start and completion banners.
+A minimum-flags scan against one host, running the default probe set. Stdout receives a table row per discovered device; stderr receives the start and completion banners.
 
 ```bash
 rastreo discover --target 1.1.1.1
+```
+
+The same scan as a machine-readable stream, ready to pipe:
+
+```bash
+rastreo discover --target 1.1.1.1 --format json | jq .
 ```
 
 A port sweep across many targets. Each `--target` is expanded independently and the combined set is scheduled with up to `--concurrency` probes in flight.
@@ -312,7 +381,7 @@ RASTREO_SNMP_COMMUNITY=lab-ro rastreo discover \
   --probe-ports snmp=1161
 ```
 
-Persist results to an NDJSON file instead of stdout. The file is opened in append mode, so repeated runs accumulate rather than overwrite.
+Persist results to an NDJSON file instead of stdout. A file sink defaults to JSON, so no `--format` is needed. The file is opened in append mode, so repeated runs accumulate rather than overwrite.
 
 ```bash
 rastreo discover \
@@ -368,11 +437,14 @@ total probes: 254
 
 ### Machine-readable output
 
-`--dry-run-format` chooses how the plan is printed. The default `text` is the human-readable plan shown above, unchanged. Set `json` to emit a plan you can pipe to `jq` or store as an artifact. Like the text plan, `json` resolves targets only — it never probes a host or opens a sink.
+`--format` chooses how the plan is printed. `table` gives the human-readable plan shown above, unchanged; `json` emits a plan you can pipe to `jq` or store as an artifact. Like the text plan, `json` resolves targets only — it never probes a host or opens a sink.
 
 ```bash
-rastreo discover --file @lab --dry-run --dry-run-format json
+rastreo discover --file @lab --dry-run --format json
 ```
+
+!!! note "One flag, two shapes"
+    `--format json` means "a JSON array of plans" under `--dry-run` and "one JSON record per line" without it. The flag names the encoding; `--dry-run` decides what is being encoded.
 
 The output is a JSON array with one object per scenario. Each object carries these fields:
 
@@ -417,9 +489,11 @@ CLI flags override YAML values. Merge order per scenario, lowest to highest:
 
 1. `defaults:` block in the scenario file.
 2. Per-scenario fields (`max_concurrent`, `probe_rate`, `retries`, `timeout_ms`, `sink`, `encoder`, `fuser`, `name`).
-3. CLI flags (`--concurrency`, `--rate`, `--retries`, `--timeout-ms`, `--sink` + `--output` / Kafka flags).
+3. CLI flags (`--concurrency`, `--rate`, `--retries`, `--timeout-ms`, `--format`, `--sink` + `--output` / Kafka flags).
 
-Only fields the CLI flag was explicitly set for are overridden. `rastreo discover --file scan.yml --concurrency 32` overrides the YAML `max_concurrent`, but leaves the rate, sink, and timeout untouched. Omitting a flag entirely lets the YAML value win.
+Only fields you passed a flag for are overridden. `rastreo discover --file scan.yml --concurrency 32` overrides the YAML `max_concurrent` and leaves the rate, sink, and timeout untouched. Omitting a flag lets the YAML value win.
+
+`encoder` has one extra step, because it is the only field the CLI fills in when the scenario left it out. Omitting `--format` keeps the scenario's `encoder` when the scenario set one. When it set none, the [destination decides](#where-the-default-comes-from): the table for a stdout sink, NDJSON everywhere else. That choice is made after `--sink` is applied. So `--file scan.yml --sink file --output scan.ndjson` writes NDJSON, even when the file said `sink: {type: stdout}`.
 
 ## Progress
 
@@ -435,7 +509,15 @@ On a terminal the line redraws in place four times a second and clears when the 
 
 When stderr is not a terminal, each update prints as a new line every five seconds instead. Piping stderr to another program or redirecting it to a file keeps the full history in order.
 
-Progress goes to stderr, never stdout. Records stream to stdout on the default sink, so the progress line never mixes into them. If you pipe stdout to `jq` or a file, only the records pass through.
+Progress goes to stderr, never stdout. An in-place redraw owns the terminal row it paints, so rastreo only draws one when nothing else writes to that terminal. **On the default stdout sink the records go to the same screen, so the progress line is dropped.** Otherwise a table row and a redraw would end up on the same row and overwrite each other.
+
+Three ways to get it back. Each one takes a stream off the terminal:
+
+- Redirect stdout: `> scan.txt`, `| jq`, `| tee`. Records leave the terminal and the line redraws in place.
+- Use `--sink file`. Same result, and the records are kept.
+- Redirect stderr: `2> scan.log`. The line is written to the file as whole lines every five seconds.
+
+A long scan usually runs in one of these shapes anyway, and that is where progress helps most.
 
 ```bash
 rastreo discover --target 192.0.2.0/24 --probe tcp_connect --port 80 --concurrency 8 2> scan.log

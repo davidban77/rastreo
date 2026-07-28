@@ -92,7 +92,7 @@ scenarios:
         type: direct
 ```
 
-Resulting NDJSON records now carry the vendor name:
+Resulting records now carry the vendor name, shown here under `--format json`:
 
 ```json
 {"identity_key":"mac:aa:bb:cc:11:22:33","mgmt_ip":"192.168.1.5","mac":"aa:bb:cc:11:22:33","manufacturer":"Cisco Systems, Inc",...}

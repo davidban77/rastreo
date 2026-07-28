@@ -10,6 +10,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use discover::DiscoverArgs;
+#[cfg(feature = "config")]
+use output::OutputMode;
 use output::Verbosity;
 
 pub(crate) use output::theme::stderr_supports_colour;
@@ -90,6 +92,6 @@ pub async fn run(cli: Cli, cancel: tokio::sync::watch::Receiver<bool>) -> Result
             CatalogAction::List => catalog::run_list(),
         },
         #[cfg(feature = "config")]
-        Command::Validate(args) => validate::run(args, verbosity),
+        Command::Validate(args) => validate::run(args, OutputMode::from(verbosity)),
     }
 }

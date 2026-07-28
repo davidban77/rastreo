@@ -116,10 +116,10 @@ When any key matches, the endpoint's `identity_key` is set to that device's key 
 
 === "stdout / file"
 
-    Both record kinds share one NDJSON stream. Tell them apart by `schema_id`: a device record carries the `device-record-v1.json` URL, a link record carries the `link-record-v1.json` URL.
+    Both record kinds share one stream. Under `--format json` that stream is NDJSON — tell them apart by `schema_id`: a device record carries the `device-record-v1.json` URL, a link record carries the `link-record-v1.json` URL. The table has no row shape for a link, so a topology scan needs `--format json` to see the links at all.
 
     ```bash
-    rastreo discover --file scenario.yaml \
+    rastreo discover --file scenario.yaml --format json \
       | jq 'select(.schema_id | contains("link-record"))'
     ```
 

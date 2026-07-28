@@ -22,7 +22,7 @@ Any string scalar in the scenario may use `${VAR}` to interpolate an environment
 | `probe_rate` | integer \| null | `null` | Maximum number of probes started per second. When unset, probes start as fast as `max_concurrent` allows. |
 | `timeout_ms` | integer \| null | `null` | Per-probe timeout in milliseconds. |
 | `retries` | integer \| null | `null` (0, single-shot) | Retransmit attempts for the connectionless probers (UDP, SNMP, DNS, reverse DNS) on lossy links. `0` sends one request and never resends. Range 0–1024; a larger value is rejected at load. It divides `timeout_ms` across `retries + 1` attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. See [CLI · Retries on lossy links](../discover/cli.md#retries-on-lossy-links). |
-| `encoder` | object \| null | `null` (NDJSON) | Output encoding. See [Encoders](#encoders). |
+| `encoder` | object \| null | `null` (the destination decides) | Output encoding. Unset, the CLI renders the table for a stdout sink and NDJSON everywhere else; the HTTP server always pins NDJSON. See [Encoders](#encoders). |
 | `fuser` | object \| null | `null` (Direct, baseline 0.1 / per-signal 0.1) | Signal-fusion strategy. See [Fusers](#fusers). |
 | `classifier` | object \| null | `null` (Rules, baked-in tables, merge_mode extend) | Platform / os_version / role classifier applied after fusion. See [Classifier](#classifier). |
 | `sink` | object \| null | `null` | Output destination. See [Sinks](#sinks). On `POST /scans` the server strips this and writes records to an internal buffer that is returned in the response body. |
@@ -296,7 +296,9 @@ Connects to a device's gRPC/gNMI endpoint on each configured port, issues a Capa
 
 ## Encoders
 
-The `encoder` field is an internally-tagged object. Two encoders are available: `ndjson` and `table`. When the field is omitted, NDJSON is used.
+The `encoder` field is an internally-tagged object. Two encoders are available: `ndjson` and `table`.
+
+When the field is omitted, the destination decides: a `stdout` sink renders the table, and every other sink renders NDJSON. Setting `encoder` pins the choice regardless of destination — subject to the `table`-against-a-broker rejection below. `rastreo discover --format` overrides the field on any scenario. The HTTP server ignores it entirely and pins NDJSON.
 
 ### ndjson
 
@@ -339,7 +341,7 @@ The `sink` field is an internally-tagged object. Five variants exist; the `kafka
 
 ### stdout
 
-Write each NDJSON line to standard output:
+Write each encoded record to standard output. With no `encoder` set, `rastreo discover` renders the [table](#table) here. See [Encoders](#encoders).
 
 ```json
 {"type": "stdout"}
@@ -347,7 +349,7 @@ Write each NDJSON line to standard output:
 
 ### file
 
-Append each NDJSON line to a file. The path is opened in append mode; repeated runs accumulate rather than overwrite.
+Append each encoded record to a file, one per line. With no `encoder` set, that is NDJSON. The path is opened in append mode; repeated runs accumulate rather than overwrite.
 
 ```json
 {"type": "file", "path": "/tmp/scan.ndjson"}

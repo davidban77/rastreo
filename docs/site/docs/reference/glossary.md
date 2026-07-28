@@ -70,7 +70,7 @@ This glossary defines the terms used across rastreo's documentation and source. 
 
 **Classifier** — The stage that assigns canonical `platform`, `os_version`, and `role` values to a `DeviceRecord` from its signals, using a table of rules. rastreo includes default rules and lets you add your own. See [Classification](../discover/classification.md).
 
-**Encoder** — The stage that serialises a record to bytes. rastreo encodes records as NDJSON: one JSON object per line.
+**Encoder** — The stage that renders a record to bytes. rastreo ships two: `ndjson`, one JSON object per line, and `table`, an aligned fixed-width grid for reading a scan directly. `--format` picks between them. See [Record format](../discover/cli.md#record-format).
 
 **Sink**{ #sink } — The destination that writes encoded records. rastreo includes five sinks: `stdout`, `file`, `memory`, `kafka`, and `nats`. See [Sinks](../discover/sinks.md).
 
@@ -102,7 +102,7 @@ This glossary defines the terms used across rastreo's documentation and source. 
 
 **Confidence** — A score in `[0.0, 1.0]` summarising how strong the evidence for a record is. The default fuser computes `baseline + signals_observed × per_signal`, clamped at `1.0`, so more signals raise confidence.
 
-**NDJSON** — Newline-Delimited JSON. One JSON object per line, separated by `\n`. NDJSON is rastreo's wire format: every encoder writes it and every sink emits it, so a consumer can parse one line at a time without buffering the whole stream.
+**NDJSON** — Newline-Delimited JSON. One JSON object per line, separated by `\n`. NDJSON is rastreo's wire format: it is what every sink but stdout emits by default, and what every broker sink is required to carry, so a consumer can parse one line at a time without buffering the whole stream.
 
 **ULID** — Universally Unique Lexicographically Sortable Identifier. A 26-character identifier that sorts by creation time. Each scan gets a ULID `scan_id`, so consumers can order and correlate the records from one scan.
 

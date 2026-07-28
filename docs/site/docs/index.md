@@ -65,7 +65,18 @@ One command, no config file, no flags beyond the target:
 rastreo discover --target 1.1.1.1
 ```
 
-It prints one record per device it finds, as a single line of JSON on stdout. The scan summary goes to stderr, so stdout stays clean for tools like `jq`.
+It prints one row per device it finds, as a table sized to your terminal. The scan summary goes to stderr, so stdout carries nothing but records.
+
+```text
+ADDRESS                      NAME                      PLATFORM              PORTS
+1.1.1.1                      one.one.one.one           -                     80,443,8080,8443
+```
+
+Four columns are a triage view, not the whole record. Add `--format json` for everything the scan learned, one JSON object per line and ready to pipe:
+
+```bash
+rastreo discover --target 1.1.1.1 --format json
+```
 
 === "Output"
 
@@ -73,7 +84,7 @@ It prints one record per device it finds, as a single line of JSON on stdout. Th
     {"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"os_version":null,"role":null,"confidence":1.0,"last_seen":"2026-07-26T23:28:06.581327Z","signals":[{"IcmpEchoRttMicros":16128},{"OpenPort":80},{"OpenPort":443},{"OpenPort":8080},{"HttpBanner":"cloudflare"},{"OpenPort":8443},{"TlsProtocolVersion":"TLSv1.3"},{"TlsCipherSuite":"TLS_AES_256_GCM_SHA384"},{"TlsAlpn":"h2"},{"TlsSubject":"cloudflare-dns.com"},{"TlsSanName":"cloudflare-dns.com"},{"TlsSanName":"*.cloudflare-dns.com"},{"TlsSanName":"ip:1.0.0.1"},{"TlsSanName":"ip:1.1.1.1"},{"TlsSanName":"ip:162.159.36.1"},{"TlsSanName":"ip:162.159.46.1"},{"TlsSanName":"ip:2606:4700:4700::1001"},{"TlsSanName":"ip:2606:4700:4700::1111"},{"TlsSanName":"ip:2606:4700:4700::64"},{"TlsSanName":"ip:2606:4700:4700::6400"},{"TlsSanName":"one.one.one.one"},{"ReverseDnsName":"one.one.one.one"}],"probe_kinds":["Icmp","TcpConnect","Http","Tls","ReverseDns"],"schema_version":"v1","schema_id":"https://davidban77.github.io/rastreo/schemas/device-record-v1.json","possible_alias_of":null,"scan_metadata":{"scan_id":"01KYGC3NE0253PQ008C94HFW13","scenario_name":null,"initiated_at":"2026-07-26T23:28:05.568266Z","source_config_hash":"sha256:4e688bf2179b5b97b79369e4fc15e69289b74371da9d84f0dd792b7d137393ba"}}
     ```
 
-=== "Same record, expanded"
+=== "The same record through `jq .`"
 
     ```json
     {
@@ -123,7 +134,7 @@ It prints one record per device it finds, as a single line of JSON on stdout. Th
     }
     ```
 
-The banners on stderr confirm what ran:
+`--format json` also drops the banners, so stdout carries records and nothing else. Without it, the banners on stderr confirm what ran:
 
 ```text
 ▶ discover  targets: 1 | probes: icmp (count 3, interval_ms 200), tcp_connect (ports 22, 23, 80, 443, 830, 8080), http (ports 80, 443, 8080, 8443), ssh (ports 22), tls (ports 443), snmp (ports 161, V2c), reverse_dns (system resolvers) | concurrency: 64 | timeout: 1000ms | sink: stdout

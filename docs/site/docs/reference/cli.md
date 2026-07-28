@@ -31,6 +31,16 @@ Everything in this table goes to **stderr**. Records always go to the sink (stdo
 
 A successful `-q` run writes nothing at all to stderr, which makes it the right choice for a cron job or a pipeline step. Errors still print — `-q` suppresses status output, not failures.
 
+`--format json` cuts the same rows as `-q` except hints, which stay: they cannot reach stdout and they are the most useful thing to read when a scan comes back empty. `-v` brings the banners back.
+
+| | start banner | progress line | completion banner | detail lines | hints |
+|---|---|---|---|---|---|
+| `--format json` | no | no | no | no | yes |
+| `--format json -v` | yes | yes | yes | yes | yes |
+| `--format json -q` | no | no | no | no | no |
+
+The progress line has a second condition on top of these. It is dropped whenever the records share your terminal, which is the case on the default stdout sink. Redirect stdout, redirect stderr, or use `--sink file` and it comes back. See [Progress](../discover/cli.md#progress).
+
 ### Log-level precedence
 
 An explicit `-q` or `-v` typed on the invocation wins over `RUST_LOG`. With neither flag given, `RUST_LOG` wins over the built-in `info` default. So `RUST_LOG=debug rastreo discover -q ...` is silent, while `RUST_LOG=debug rastreo discover ...` logs at debug.
@@ -46,6 +56,7 @@ The completion glyph is blue on a clean run and turns yellow when the scan needs
 | Env var | Effect |
 |---|---|
 | `RUST_LOG` | Tracing filter directive. Overridden by an explicit `-q` / `-v`. |
+| `RASTREO_FORMAT` | Record format, same values as `--format`. Overridden by the flag. Because it is an explicit statement, it also overrides a scenario's `encoder` — `RASTREO_FORMAT=table` left exported in a shell will refuse every scenario with a Kafka or NATS sink, which cannot carry an aligned grid. |
 | `NO_COLOR` | Any value but `0` disables colour on stderr. |
 | `CLICOLOR_FORCE`, `FORCE_COLOR` | Force colour on even when stderr is not a terminal. |
 | `RASTREO_ASCII` | Any non-empty value other than `0` forces the ASCII glyph table. |
@@ -69,23 +80,25 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` i
 | `--http-path <PATH>` | string | `/` | Request path for the HTTP prober. Requires the `http` build feature. |
 | `--icmp-count <N>` | u32 | `3` | Echo requests per target for the ICMP prober. Minimum 1. Requires the `icmp` build feature. |
 | `--interface <NAME>` | string | auto-select | Interface the ARP and NDP probers send from. Unset means auto-select per target from the local subnets. Requires the `arp` or `ndp` build feature. See [ARP](../probe/arp.md) and [NDP](../probe/ndp.md). |
-| `--sink <SINK>` | enum | `stdout` | Output destination. Values: `stdout`, `file`. `kafka` is available only when the binary is built with the `kafka` Cargo feature. See [Sinks](../discover/sinks.md). |
-| `--output <PATH>` | path | — | File path for `--sink file`. Required when the file sink is selected; rejected before any probe runs if missing. |
-| `--brokers <BROKERS>` | string list | — | Comma-separated Kafka brokers for `--sink kafka`. Requires the `kafka` build feature. |
-| `--topic <TOPIC>` | string | — | Kafka topic for `--sink kafka`. Requires the `kafka` build feature. |
-| `--kafka-flush-per-record` | flag | — | Flush every `DeviceRecord` as a separate Kafka message. Mutually exclusive with `--kafka-batch-threshold`. Requires the `kafka` build feature. |
-| `--kafka-batch-threshold <BYTES>` | usize | `65536` | Bytes accumulated in the sink buffer before one produce request goes out, carrying one message per record. Minimum 1. Requires the `kafka` build feature. |
+| `--format <FORMAT>` | enum | `table` on stdout, `json` elsewhere | Record format. Values: `table` (aliased `text`) for the aligned triage grid, `json` (aliased `ndjson`) for one JSON object per line. Env var: `RASTREO_FORMAT`. Unset, the destination decides: a `--file` scenario with a stdout sink and no `encoder:` renders the table too. An explicit value overrides the scenario's `encoder`. See [Record format](../discover/cli.md#record-format). |
+| `--sink <SINK>` | enum | `stdout`, or the scenario's `sink` under `--file` | Output destination. Values: `stdout`, `file`. `kafka` is available only when the binary is built with the `kafka` Cargo feature. Setting it under `--file` overrides the scenario's own `sink`. See [Sinks](../discover/sinks.md). |
+| `--output <PATH>` | path | — | File path for `--sink file`. Required when the file sink is selected, and rejected before any probe runs otherwise — `--output` without `--sink file` is an error, not a silent no-op, on the flag-driven and the `--file` surface alike. See [Destination flags](../discover/cli.md#destination-flags). |
+| `--brokers <BROKERS>` | string list | — | Comma-separated Kafka brokers. Requires `--sink kafka`, and rejected before any probe runs without it. Requires the `kafka` build feature. |
+| `--topic <TOPIC>` | string | — | Kafka topic. Requires `--sink kafka`, and rejected before any probe runs without it. Requires the `kafka` build feature. |
+| `--kafka-flush-per-record` | flag | — | Flush every `DeviceRecord` as a separate Kafka message. Mutually exclusive with `--kafka-batch-threshold`. Requires `--sink kafka` and the `kafka` build feature. |
+| `--kafka-batch-threshold <BYTES>` | usize | `65536` | Bytes accumulated in the sink buffer before one produce request goes out, carrying one message per record. Minimum 1. Requires `--sink kafka` and the `kafka` build feature. |
 | `--concurrency <N>` | u32 | `64` | Maximum number of probes in flight at once. Minimum 1. |
 | `--rate <N>` | u32 | unset | Maximum number of probes started per second. Minimum 1. Unset means probes start as fast as concurrency allows. |
 | `--retries <N>` | u32 | `0` | Retransmit attempts for the connectionless probers — UDP, SNMP, DNS, and reverse DNS. `0` is single-shot (default). Range 0–1024. It divides `--timeout-ms` across attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. With `--file`, it overrides the scenario `retries`. See [Discover · CLI](../discover/cli.md#retries-on-lossy-links). |
 | `--timeout-ms <MS>` | u64 | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum 1. |
+| `--dry-run` | flag | — | Resolve targets and print the plan without probing or opening a sink. With `--format json` the plan is a JSON array instead of the text plan. See [Discover · CLI](../discover/cli.md#dry-run-mode). |
 | `--checkpoint <PATH>` | path | — | Write a resume checkpoint to this file during the scan. The scenario must be resume-safe — a durable sink (`file`, `kafka`, `nats`), no `identity` fuser, no `lldp` / `gnmi` prober — or the scan is refused before probing. Removed on success, kept on cancellation. See [Discover · CLI](../discover/cli.md#checkpoints). |
 | `--checkpoint-interval <N>` | usize | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. |
 | `--resume` | flag | — | Resume from the checkpoint at `--checkpoint <PATH>`: skip the already-flushed targets, restore the original scan identity, and continue. The checkpoint must exist and still match the scenario's targets and sink destination, or the resume is refused before probing. Single-scenario runs only. Requires `--checkpoint`. See [Discover · CLI](../discover/cli.md#resuming). |
 | `-v`, `--verbose` | counter | — | See top-level flags above. |
 | `-q`, `--quiet` | flag | — | See top-level flags above. |
 
-The `--kafka-flush-per-record` and `--kafka-batch-threshold` flags are only present in the help output and the parser when the binary was built with `--features kafka`. The default build omits them entirely. The same holds for the per-prober parameters: `--snmp-community` and `--snmp-version` need `--features snmp`, `--http-path` needs `http`, `--icmp-count` needs `icmp`, and `--interface` needs `arp` or `ndp`.
+The `--brokers`, `--topic`, `--kafka-flush-per-record`, and `--kafka-batch-threshold` flags are only present in the help output and the parser when the binary was built with `--features kafka`. The default build omits them entirely, because it carries no sink that could consume them. The same holds for the per-prober parameters: `--snmp-community` and `--snmp-version` need `--features snmp`, `--http-path` needs `http`, `--icmp-count` needs `icmp`, and `--interface` needs `arp` or `ndp`.
 
 `--probe` and `--probe-ports` always accept every kind name, whatever the build. Naming a kind this binary was not built with fails with a message that says which Cargo feature is missing, so a typo and a missing feature never look the same:
 

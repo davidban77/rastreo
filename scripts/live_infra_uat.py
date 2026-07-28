@@ -473,6 +473,7 @@ def build_cli_stdout_argv(
         *(arg for ip in target_ips for arg in ("--target", ip)),
         "--port", str(port),
         "--sink", "stdout",
+        "--format", "json",
     ]
 
 
@@ -1029,6 +1030,7 @@ def build_cli_ssh_argv(
         rastreo_image,
         "discover",
         "--file", "/scenario.yaml",
+        "--format", "json",
     ]
 
 
@@ -1157,6 +1159,7 @@ def build_cli_icmp_argv(
         rastreo_image,
         "discover",
         "--file", "/scenario.yaml",
+        "--format", "json",
     ]
 
 
@@ -1278,6 +1281,7 @@ def build_cli_tls_argv(
         rastreo_image,
         "discover",
         "--file", "/scenario.yaml",
+        "--format", "json",
     ]
 
 
@@ -1410,6 +1414,7 @@ def build_cli_reverse_dns_argv(
         rastreo_image,
         "discover",
         "--file", "/scenario.yaml",
+        "--format", "json",
     ]
 
 
@@ -1874,7 +1879,10 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertEqual(argv.count("--target"), 2)
         self.assertIn("10.0.0.1", argv)
         self.assertIn("10.0.0.2", argv)
-        self.assertEqual(argv[-4:], ["--port", "80", "--sink", "stdout"])
+        self.assertEqual(
+            argv[-6:],
+            ["--port", "80", "--sink", "stdout", "--format", "json"],
+        )
 
     def test_cli_kafka_argv_includes_brokers_topic_and_flush_flag(self) -> None:
         argv = build_cli_kafka_argv(
@@ -1991,6 +1999,7 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("discover", argv)
         self.assertIn("--file", argv)
         self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+        self.assertEqual(argv[argv.index("--format") + 1], "json")
 
     def test_build_cli_ssh_scenario_yaml_shape(self) -> None:
         yaml_text = build_cli_ssh_scenario_yaml(
@@ -2023,6 +2032,7 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("discover", argv)
         self.assertIn("--file", argv)
         self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+        self.assertEqual(argv[argv.index("--format") + 1], "json")
 
     def test_build_cli_icmp_scenario_yaml_shape(self) -> None:
         yaml_text = build_cli_icmp_scenario_yaml()
@@ -2054,6 +2064,7 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("discover", argv)
         self.assertIn("--file", argv)
         self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+        self.assertEqual(argv[argv.index("--format") + 1], "json")
 
     def test_build_cli_tls_scenario_yaml_shape(self) -> None:
         yaml_text = build_cli_tls_scenario_yaml()
@@ -2084,6 +2095,7 @@ class _ArgvBuildersTests(unittest.TestCase):
         self.assertIn("discover", argv)
         self.assertIn("--file", argv)
         self.assertEqual(argv[argv.index("--file") + 1], "/scenario.yaml")
+        self.assertEqual(argv[argv.index("--format") + 1], "json")
 
     def test_build_cli_reverse_dns_scenario_yaml_shape(self) -> None:
         yaml_text = build_cli_reverse_dns_scenario_yaml()

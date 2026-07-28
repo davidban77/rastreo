@@ -4,28 +4,29 @@ description: Output sinks for rastreo discover — stdout (default), file, Kafka
 
 # Sinks
 
-A sink is where `DeviceRecord` events go after they are encoded. rastreo ships four sinks today: stdout (the default), a file sink that writes NDJSON to a path, a Kafka sink that publishes events to a topic, and a NATS JetStream sink that publishes events to a subject. Every sink uses the same NDJSON encoder, so the on-the-wire shape is identical regardless of destination.
+A sink is where `DeviceRecord` events go after they are encoded. rastreo ships four sinks today: stdout (the default), a file sink that writes to a path, a Kafka sink that publishes events to a topic, and a NATS JetStream sink that publishes events to a subject. The sink decides *where* records go; [`--format`](cli.md#record-format) decides *how* they are rendered on the way out. Every sink but stdout renders JSON by default, so the on-the-wire shape downstream is identical regardless of destination.
 
 ## Choosing a sink
 
-- **stdout** for ad-hoc shell pipelines: piping into `jq`, `grep`, or a script that consumes NDJSON. The default for a reason — no setup, no extra flags.
+- **stdout** for reading a scan yourself, and — with `--format json` — for ad-hoc shell pipelines into `jq`, `grep`, or any NDJSON consumer. The default for a reason: no setup, no extra flags.
 - **file** for one-shot dumps you want to keep, share, or feed into another tool later. Append-mode means repeated scans accumulate into one file.
 - **Kafka** for streaming into a topic that downstream consumers reconcile into a source of truth such as NetBox, Nautobot, or Infrahub. Consumer offset management belongs to the downstream system. See [Integrate](../integrate/index.md) for the wire contract.
 - **NATS** for a lighter-weight streaming transport with at-least-once JetStream delivery. Pick NATS when the reconcilers already speak NATS or when you want to avoid the Kafka broker footprint. See [Integrate · NATS](../integrate/nats.md) for the wire contract.
 
 ## stdout (default)
 
-The default sink writes one NDJSON `DeviceRecord` per line to stdout. Tracing logs and the end-of-run summary go to stderr, which keeps stdout clean for downstream tools.
+The default sink writes records to stdout, as a table by default and as one NDJSON `DeviceRecord` per line under `--format json`. That holds for a scenario file too: `sink: {type: stdout}` with no `encoder:` renders the table. Log lines and the end-of-run summary go to stderr, which keeps stdout clean for downstream tools. The live progress line is dropped while records share the terminal — see [Progress](cli.md#progress).
 
 ```bash
-rastreo discover --target 1.1.1.1 | jq .
+rastreo discover --target 1.1.1.1
+rastreo discover --target 1.1.1.1 --format json | jq .
 ```
 
-The example above pipes stdout into `jq` without any log noise, because `jq` reads stdin and rastreo's logs went to stderr.
+The second example pipes stdout into `jq` without any log noise, because `jq` reads stdin and rastreo's banners and logs went to stderr.
 
 ## file
 
-The file sink appends one NDJSON record per line to the path you give. The file is opened in append mode, so repeated runs add to the existing file rather than overwriting it.
+The file sink appends one NDJSON record per line to the path you give. The file is opened in append mode, so repeated runs add to the existing file rather than overwriting it. Pass `--format table` to write the aligned grid there instead.
 
 ```bash
 rastreo discover \
@@ -36,7 +37,7 @@ rastreo discover \
   --output /tmp/scan.ndjson
 ```
 
-`--sink file` without `--output` is rejected before any probe runs.
+`--sink file` without `--output` is rejected before any probe runs, and so is `--output` without `--sink file`. See [Destination flags](cli.md#destination-flags).
 
 ## Kafka
 
@@ -60,7 +61,7 @@ rastreo discover \
   --topic rastreo.discovery.records.v1
 ```
 
-`--sink kafka` requires both `--brokers` and `--topic`; either missing is rejected before any probe runs.
+`--sink kafka` requires both `--brokers` and `--topic`; either missing is rejected before any probe runs, and so is either one given without `--sink kafka`. See [Destination flags](cli.md#destination-flags).
 
 Secured brokers — Confluent Cloud, Amazon MSK, any `SASL_SSL` listener — need TLS and SASL settings that the CLI flags do not cover. Configure them with `tls` and `sasl` blocks in a scenario file. The TLS `verify` field defaults to `false` (accept any certificate); set `verify: true` on production brokers. See [Integrate · Kafka](../integrate/kafka.md#tls-and-sasl-authentication) for the full config surface and a Confluent Cloud example.
 
@@ -92,11 +93,11 @@ sink:
 Only the primary produce is retried. The DLQ produce is never retried. The total time is bounded: worst case is `max_attempts` produce attempts plus the capped waits between them. A failing sink cannot hang.
 
 !!! tip "Disabling retry"
-    Set `max_attempts: 1` to keep the earlier behavior: the record goes to the DLQ on the first primary failure, with no retry in between.
+    Set `max_attempts: 1` when you want a failure visible in the DLQ immediately. The record is quarantined on the first primary failure, with no retry in between.
 
 ### Dead-letter queue
 
-The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). When the primary produce fails and a DLQ is configured, the sink publishes the same payload to the DLQ topic, logs a `WARN`, and returns success — the buffer is drained and the pipeline moves on. When no DLQ is configured, the primary failure surfaces as an error and the buffer is retained for `flush()` retry (the pre-existing behavior).
+The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). When the primary produce fails and a DLQ is configured, the sink publishes the same payload to the DLQ topic, logs a `WARN`, and returns success — the buffer is drained and the pipeline moves on. When no DLQ is configured, the primary failure surfaces as an error. The buffered records are kept, so the next flush retries them.
 
 ```yaml
 sink:
@@ -116,7 +117,7 @@ DLQ messages default to carrying a small header envelope so downstream consumers
 | `x-rastreo-error-class` | `produce_failure` — the class of a failed Kafka produce | UTF-8 bytes |
 | `x-rastreo-dlq-timestamp` | RFC 3339 UTC timestamp of the DLQ publish | UTF-8 bytes |
 
-Set `include_error_metadata: false` to ship the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary topic.
+Set `include_error_metadata: false` to send the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary topic.
 
 **Failure model.** Primary produce succeeds → the payload lands on the primary topic. Primary fails and DLQ succeeds → the payload lands on the DLQ topic, a `WARN` log is emitted, and the pipeline continues. Primary fails and DLQ also fails → an `ERROR` log records both failures, the sink returns the primary error, and the buffer is retained for the caller to retry via `flush()` (identical to the no-DLQ path).
 
@@ -191,7 +192,7 @@ sink:
 Retry covers the synchronous publish only. A JetStream ack rejection is not retried, because the message may already be stored and re-publishing it could duplicate the record. An ack rejection goes straight to the DLQ with error class `ack_rejection`. The DLQ publish is never retried either.
 
 !!! tip "Disabling retry"
-    Set `max_attempts: 1` to keep the earlier behavior: the record goes to the DLQ on the first primary publish failure, with no retry in between.
+    Set `max_attempts: 1` when you want a failure visible in the DLQ immediately. The record is quarantined on the first primary publish failure, with no retry in between.
 
 ### Dead-letter queue
 
@@ -226,7 +227,7 @@ The two error classes are diagnostically distinct so an ops team can triage DLQ 
 | `publish_failure` | The synchronous `publish()` to the primary subject failed. Typically broker unreachable or the subject/stream binding is wrong. |
 | `ack_rejection` | JetStream accepted the publish for routing but refused durable storage. Typically stream retention hit, quota exceeded, or the subject is bound to a different stream than expected. |
 
-Set `include_error_metadata: false` to ship the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary subject.
+Set `include_error_metadata: false` to send the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary subject.
 
 **Failure model.** Primary publish OK, ack OK → the payload lands on the primary subject. Primary publish fails, DLQ publish + ack succeed → the payload lands on the DLQ subject, a `WARN` log is emitted, and the pipeline continues. Primary publish OK but ack fails, DLQ publish + ack succeed → same outcome, `WARN` log, pipeline continues. Any DLQ publish or ack failure → an `ERROR` log records the DLQ failure, the sink returns the original error, and the buffer / pending queue is retained for the caller to retry via `flush()`.
 
@@ -238,7 +239,7 @@ Set `include_error_metadata: false` to ship the payload with no headers — the 
 
 ## NDJSON contract
 
-The stdout and file sinks emit one `DeviceRecord` per NDJSON line. Each line is a complete JSON object — no surrounding array, no trailing comma. The Kafka and NATS sinks use the same JSON encoding, and each message they publish carries exactly one `DeviceRecord`. See the [Integrate](../integrate/index.md) section for the full transport contract.
+Under the `ndjson` encoding, the stdout and file sinks emit one `DeviceRecord` per line. Each line is a complete JSON object — no surrounding array, no trailing comma. The Kafka and NATS sinks use the same JSON encoding, and each message they publish carries exactly one `DeviceRecord`. See the [Integrate](../integrate/index.md) section for the full transport contract.
 
 ```json
 {"identity_key":"ip:1.1.1.1","mgmt_ip":"1.1.1.1","mac":null,"manufacturer":null,"platform":null,"role":null,"confidence":0.2,"last_seen":"2026-07-05T11:22:51.423959000Z","signals":[{"OpenPort":443}]}

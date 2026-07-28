@@ -4,6 +4,7 @@ use std::process::Command;
 const SCRUBBED: &[&str] = &[
     "RUST_LOG",
     "RASTREO_LOG_FORMAT",
+    "RASTREO_FORMAT",
     "RASTREO_CATALOG_DIR",
     "XDG_CONFIG_HOME",
     "RASTREO_ASCII",

@@ -43,11 +43,15 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 ipnet = { workspace = true }
 owo-colors = { version = "4", features = ["supports-colors"] }
+terminal_size = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
 rstest = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [lints]
 workspace = true
