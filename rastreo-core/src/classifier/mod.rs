@@ -92,8 +92,10 @@ pub enum MergeMode {
 pub struct PlatformRule {
     pub signal: SignalKind,
     pub pattern: String,
-    pub platform: String,
-    /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. When absent, or when the group is not present in the actual match, `os_version` stays null.
+    /// Platform label assigned on match. Omit it for a rule that only extracts `ssh_version`, `http_server`, or `http_version` from a service banner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. Requires `platform`, and is rejected at classifier construction without it. When absent, or when the group is not present in the actual match, `os_version` stays null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_version_capture: Option<String>,
     /// Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`.
@@ -102,7 +104,7 @@ pub struct PlatformRule {
     /// Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_server_capture: Option<String>,
-    /// Named regex capture group whose matched text populates the record's `http_version`. Only meaningful for `signal: http_banner`.
+    /// Named regex capture group whose matched text populates the record's `http_version`. Requires `http_server_capture`, and is rejected at classifier construction without it. Only meaningful for `signal: http_banner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version_capture: Option<String>,
 }
@@ -158,7 +160,7 @@ pub fn create_classifier(config: &ClassifierConfig) -> Result<Box<dyn Classifier
 struct CompiledRule {
     signal: SignalKind,
     regex: Regex,
-    platform: String,
+    platform: Option<String>,
     os_version_capture: Option<String>,
     ssh_version_capture: Option<String>,
     http_server_capture: Option<String>,
@@ -188,7 +190,7 @@ struct PlatformMatch {
     http_version: Option<String>,
 }
 
-/// Classifier that walks a device's `signals` and assigns `platform` + `os_version` from the first matching platform rule, then `role` from the first matching role rule.
+/// Classifier that assigns `platform` + `os_version` from the first matching rule that claims a platform, `ssh_version` from the first matching rule that captures it, `http_server` + `http_version` from the first matching rule that captures a server, and `role` from the first matching role rule.
 pub struct RulesClassifier {
     platform_rules: Vec<CompiledRule>,
     role_rules: Vec<CompiledRoleRule>,
@@ -213,6 +215,22 @@ impl RulesClassifier {
 
         let mut compiled = Vec::with_capacity(effective_platform.len());
         for rule in effective_platform {
+            if rule.platform.is_none() {
+                if let Some(group) = &rule.os_version_capture {
+                    return Err(ClassifierError::InvalidPlatformRule(format!(
+                        "platform rule `{}` captures os_version from `{group}` but claims no platform; os_version is the version of the platform, so a rule without one can never write it",
+                        rule.pattern
+                    )));
+                }
+            }
+            if rule.http_server_capture.is_none() {
+                if let Some(group) = &rule.http_version_capture {
+                    return Err(ClassifierError::InvalidPlatformRule(format!(
+                        "platform rule `{}` captures http_version from `{group}` but captures no http_server; http_version is the version of the http_server, so a rule without one can never write it",
+                        rule.pattern
+                    )));
+                }
+            }
             let regex =
                 Regex::new(&rule.pattern).map_err(|source| ClassifierError::InvalidRegex {
                     pattern: rule.pattern.clone(),
@@ -288,38 +306,67 @@ fn compile_role_rule(rule: RoleRule) -> Result<CompiledRoleRule, ClassifierError
     }
 }
 
+impl RulesClassifier {
+    fn apply_platform_rules(&self, record: &mut DeviceRecord) {
+        let mut want_platform = record.platform.is_none();
+        let mut want_ssh_version = record.ssh_version.is_none();
+        let mut want_http_server = record.http_server.is_none();
+
+        for rule in &self.platform_rules {
+            if !(want_platform || want_ssh_version || want_http_server) {
+                return;
+            }
+            let claims_platform = want_platform && rule.platform.is_some();
+            let claims_ssh_version = want_ssh_version && rule.ssh_version_capture.is_some();
+            let claims_http_server = want_http_server && rule.http_server_capture.is_some();
+            if !(claims_platform || claims_ssh_version || claims_http_server) {
+                continue;
+            }
+            let Some(matched) = platform_rule_match(rule, record) else {
+                continue;
+            };
+            if claims_platform {
+                record.platform = rule.platform.clone();
+                if let Some(v) = matched.os_version {
+                    record.os_version = Some(v);
+                }
+                want_platform = false;
+            }
+            if claims_ssh_version {
+                if let Some(v) = matched.ssh_version {
+                    record.ssh_version = Some(v);
+                }
+                want_ssh_version = false;
+            }
+            if claims_http_server {
+                if let Some(server) = matched.http_server {
+                    record.http_server = Some(server);
+                    if let Some(version) = matched.http_version {
+                        record.http_version = Some(version);
+                    }
+                }
+                want_http_server = false;
+            }
+        }
+    }
+
+    fn apply_role_rules(&self, record: &mut DeviceRecord) {
+        if record.role.is_some() {
+            return;
+        }
+        for rule in &self.role_rules {
+            if role_rule_matches(rule, record) {
+                record.role = Some(role_of(rule).to_string());
+                return;
+            }
+        }
+    }
+}
+
 impl Classifier for RulesClassifier {
     fn classify(&self, record: &mut DeviceRecord) -> Result<(), RastreoError> {
-        if record.platform.is_none() {
-            for rule in &self.platform_rules {
-                if let Some(matched) = platform_rule_match(rule, record) {
-                    record.platform = Some(rule.platform.clone());
-                    if let Some(v) = matched.os_version {
-                        record.os_version = Some(v);
-                    }
-                    if let Some(v) = matched.ssh_version {
-                        record.ssh_version = Some(v);
-                    }
-                    if let Some(v) = matched.http_server {
-                        record.http_server = Some(v);
-                    }
-                    if let Some(v) = matched.http_version {
-                        record.http_version = Some(v);
-                    }
-                    break;
-                }
-            }
-        }
-
-        if record.role.is_none() {
-            for rule in &self.role_rules {
-                if role_rule_matches(rule, record) {
-                    record.role = Some(role_of(rule).to_string());
-                    break;
-                }
-            }
-        }
-
+        self.apply_platform_rules(record);
+        self.apply_role_rules(record);
         Ok(())
     }
 }
@@ -449,6 +496,13 @@ mod tests {
     fn cisco_ios_sys_descr() -> Signal {
         Signal::SnmpSysDescr(
             "Cisco IOS Software, C3560E Software (C3560E-UNIVERSALK9-M), Version 15.7(3)M, RELEASE"
+                .to_string(),
+        )
+    }
+
+    fn srlinux_sys_descr() -> Signal {
+        Signal::SnmpSysDescr(
+            "SRLinux-v26.3.3-392-g480f5fa2d04 7220 IXR-D2L Copyright (c) 2000-2026 Nokia. Kernel 7.0.11-orbstack-00360-gc9bc4d96ac70 #1 SMP PREEMPT Thu Jun  4 16:40:25 UTC 2026"
                 .to_string(),
         )
     }
@@ -600,7 +654,7 @@ mod tests {
         let user = vec![PlatformRule {
             signal: SignalKind::SnmpSysDescr,
             pattern: r"Cisco".to_string(),
-            platform: "user_cisco".to_string(),
+            platform: Some("user_cisco".to_string()),
             os_version_capture: None,
             ssh_version_capture: None,
             http_server_capture: None,
@@ -627,87 +681,369 @@ mod tests {
     }
 
     #[test]
-    fn rules_classifier_ssh_banner_infers_linux() {
-        let c = create_classifier(&extend_rules(vec![])).expect("create");
-        let mut record = empty_record();
-        record.signals.push(Signal::SshBanner(
-            "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13".into(),
-        ));
-        c.classify(&mut record).expect("classify ok");
-        assert_eq!(record.platform.as_deref(), Some("linux"));
-        assert_eq!(record.os_version.as_deref(), Some("Ubuntu"));
-        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.6p1"));
-    }
-
-    #[test]
-    fn baked_ssh_rule_populates_platform_linux_os_version_ubuntu_and_ssh_version() {
+    fn baked_ssh_rule_captures_ssh_version_and_claims_no_platform() {
         let c = create_classifier(&extend_rules(vec![])).expect("create");
         let mut record = empty_record();
         record.signals.push(Signal::SshBanner(
             "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1".into(),
         ));
         c.classify(&mut record).expect("classify ok");
-        assert_eq!(record.platform.as_deref(), Some("linux"));
-        assert_eq!(record.os_version.as_deref(), Some("Ubuntu"));
         assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_8.9p1"));
+        assert!(record.platform.is_none());
+        assert!(record.os_version.is_none());
         assert!(record.http_server.is_none());
         assert!(record.http_version.is_none());
     }
 
     #[test]
-    fn baked_ssh_rule_populates_debian_os_version_and_ssh_version() {
+    fn baked_ssh_rule_captures_ssh_version_from_a_debian_banner() {
         let c = create_classifier(&extend_rules(vec![])).expect("create");
         let mut record = empty_record();
         record
             .signals
             .push(Signal::SshBanner("SSH-2.0-OpenSSH_9.2p1 Debian-1".into()));
         c.classify(&mut record).expect("classify ok");
-        assert_eq!(record.platform.as_deref(), Some("linux"));
-        assert_eq!(record.os_version.as_deref(), Some("Debian"));
         assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.2p1"));
+        assert!(record.platform.is_none());
+        assert!(record.os_version.is_none());
     }
 
     #[test]
-    fn baked_http_rule_populates_platform_linux_and_http_server_and_http_version() {
+    fn baked_http_rule_captures_server_and_version_and_claims_no_platform() {
         let c = create_classifier(&extend_rules(vec![])).expect("create");
         let mut record = empty_record();
         record
             .signals
             .push(Signal::HttpBanner("nginx/1.24.0".into()));
         c.classify(&mut record).expect("classify ok");
-        assert_eq!(record.platform.as_deref(), Some("linux"));
         assert_eq!(record.http_server.as_deref(), Some("nginx"));
         assert_eq!(record.http_version.as_deref(), Some("1.24.0"));
+        assert!(record.platform.is_none());
         assert!(record.os_version.is_none());
         assert!(record.ssh_version.is_none());
     }
 
     #[test]
-    fn baked_http_rule_populates_apache_server_and_version() {
+    fn baked_http_rule_captures_apache_server_and_version() {
         let c = create_classifier(&extend_rules(vec![])).expect("create");
         let mut record = empty_record();
         record
             .signals
             .push(Signal::HttpBanner("Apache/2.4.58".into()));
         c.classify(&mut record).expect("classify ok");
-        assert_eq!(record.platform.as_deref(), Some("linux"));
         assert_eq!(record.http_server.as_deref(), Some("Apache"));
         assert_eq!(record.http_version.as_deref(), Some("2.4.58"));
+        assert!(record.platform.is_none());
         assert!(record.os_version.is_none());
     }
 
     #[test]
-    fn prepopulated_platform_skips_classifier_and_preserves_ssh_version_none() {
+    fn baked_srlinux_rule_populates_platform_and_os_version_from_sys_descr() {
         let c = create_classifier(&extend_rules(vec![])).expect("create");
         let mut record = empty_record();
-        record.platform = Some("manual_override".into());
-        record.ssh_version = Some("manual".into());
+        record.signals.push(srlinux_sys_descr());
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("nokia_srlinux"));
+        assert_eq!(record.os_version.as_deref(), Some("26.3.3"));
+    }
+
+    #[test]
+    fn srlinux_sys_descr_does_not_match_the_generic_linux_rule() {
+        let linux_rules: Vec<PlatformRule> = platform_rules::baked_platform_rules()
+            .into_iter()
+            .filter(|r| r.platform.as_deref() == Some("linux"))
+            .collect();
+        let c = create_classifier(&replace_rules(linux_rules)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(srlinux_sys_descr());
+        c.classify(&mut record).expect("classify ok");
+        assert!(record.platform.is_none());
+    }
+
+    #[test]
+    fn an_srlinux_device_keeps_its_platform_and_still_reports_ssh_version() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record.signals.push(srlinux_sys_descr());
+        record.signals.push(Signal::SshBanner(
+            "SSH-2.0-OpenSSH_10.0p2 Debian-7+deb13u2".into(),
+        ));
+        record
+            .signals
+            .push(Signal::HttpBanner("gunicorn".to_string()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("nokia_srlinux"));
+        assert_eq!(record.os_version.as_deref(), Some("26.3.3"));
+        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_10.0p2"));
+    }
+
+    #[test]
+    fn a_platform_win_on_sys_descr_does_not_suppress_the_ssh_version_capture() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record.signals.push(cisco_ios_sys_descr());
+        record.signals.push(Signal::SshBanner(
+            "SSH-2.0-OpenSSH_9.2p1 Debian-1".to_string(),
+        ));
+        record
+            .signals
+            .push(Signal::HttpBanner("nginx/1.24.0".to_string()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("cisco_ios"));
+        assert_eq!(record.os_version.as_deref(), Some("15.7"));
+        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.2p1"));
+        assert_eq!(record.http_server.as_deref(), Some("nginx"));
+        assert_eq!(record.http_version.as_deref(), Some("1.24.0"));
+    }
+
+    #[test]
+    fn each_attribute_is_taken_from_the_first_rule_that_captures_it() {
+        let user = vec![
+            PlatformRule {
+                signal: SignalKind::SshBanner,
+                pattern: r"(?P<v>OpenSSH_[\d\.p]+)".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: Some("v".to_string()),
+                http_server_capture: None,
+                http_version_capture: None,
+            },
+            PlatformRule {
+                signal: SignalKind::SshBanner,
+                pattern: r"^SSH-(?P<v>2\.0)".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: Some("v".to_string()),
+                http_server_capture: None,
+                http_version_capture: None,
+            },
+        ];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
         record
             .signals
             .push(Signal::SshBanner("SSH-2.0-OpenSSH_9.2p1 Debian-1".into()));
         c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.2p1"));
+    }
+
+    #[test]
+    fn a_rule_that_claims_no_platform_never_writes_one() {
+        let user = vec![PlatformRule {
+            signal: SignalKind::HttpBanner,
+            pattern: r"^(?P<server>gunicorn)".to_string(),
+            platform: None,
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: Some("server".to_string()),
+            http_version_capture: None,
+        }];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::HttpBanner("gunicorn".to_string()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.http_server.as_deref(), Some("gunicorn"));
+        assert!(record.platform.is_none());
+    }
+
+    #[test]
+    fn a_rule_capturing_os_version_without_a_platform_fails_construction() {
+        let user = vec![PlatformRule {
+            signal: SignalKind::SshBanner,
+            pattern: r"^SSH-2\.0-OpenSSH.*(?P<osv>Debian)".to_string(),
+            platform: None,
+            os_version_capture: Some("osv".to_string()),
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
+        }];
+        let err = match create_classifier(&replace_rules(user)) {
+            Ok(_) => panic!("os_version without a platform can never fire and must fail"),
+            Err(e) => e,
+        };
+        let RastreoError::Classifier(ClassifierError::InvalidPlatformRule(message)) = err else {
+            panic!("expected InvalidPlatformRule, got {err:?}");
+        };
+        assert!(message.contains("os_version"), "message was: {message}");
+    }
+
+    #[test]
+    fn a_rule_capturing_http_version_without_an_http_server_fails_construction() {
+        let user = vec![PlatformRule {
+            signal: SignalKind::HttpBanner,
+            pattern: r"(?P<version>[0-9.]+)$".to_string(),
+            platform: None,
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: Some("version".to_string()),
+        }];
+        let err = match create_classifier(&replace_rules(user)) {
+            Ok(_) => panic!("http_version without an http_server can never fire and must fail"),
+            Err(e) => e,
+        };
+        let RastreoError::Classifier(ClassifierError::InvalidPlatformRule(message)) = err else {
+            panic!("expected InvalidPlatformRule, got {err:?}");
+        };
+        assert!(message.contains("http_version"), "message was: {message}");
+    }
+
+    #[test]
+    fn http_version_never_comes_from_a_different_banner_than_http_server() {
+        let user = vec![
+            PlatformRule {
+                signal: SignalKind::HttpBanner,
+                pattern: r"^(?P<server>nginx)$".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: None,
+                http_server_capture: Some("server".to_string()),
+                http_version_capture: None,
+            },
+            PlatformRule {
+                signal: SignalKind::HttpBanner,
+                pattern: r"^(?P<server>Apache)/(?P<version>[\d\.]+)".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: None,
+                http_server_capture: Some("server".to_string()),
+                http_version_capture: Some("version".to_string()),
+            },
+        ];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::HttpBanner("nginx".into()));
+        record
+            .signals
+            .push(Signal::HttpBanner("Apache/2.4.58".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.http_server.as_deref(), Some("nginx"));
+        assert!(
+            record.http_version.is_none(),
+            "http_version is the version of http_server; it must not be stamped from another server's banner"
+        );
+    }
+
+    #[test]
+    fn http_version_is_not_written_when_the_server_group_did_not_participate() {
+        let user = vec![PlatformRule {
+            signal: SignalKind::HttpBanner,
+            pattern: r"^(?:(?P<server>nginx)|Apache)/(?P<version>[\d\.]+)".to_string(),
+            platform: None,
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: Some("server".to_string()),
+            http_version_capture: Some("version".to_string()),
+        }];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::HttpBanner("Apache/2.4.58".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert!(record.http_server.is_none());
+        assert!(
+            record.http_version.is_none(),
+            "http_version is the version of http_server; it must not be written without one"
+        );
+    }
+
+    #[test]
+    fn a_matching_http_rule_spends_its_slot_even_when_its_server_group_did_not_participate() {
+        let user = vec![
+            PlatformRule {
+                signal: SignalKind::HttpBanner,
+                pattern: r"^(?:(?P<server>nginx)|Apache)/[\d\.]+".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: None,
+                http_server_capture: Some("server".to_string()),
+                http_version_capture: None,
+            },
+            PlatformRule {
+                signal: SignalKind::HttpBanner,
+                pattern: r"^(?P<server>Apache)/(?P<version>[\d\.]+)".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: None,
+                http_server_capture: Some("server".to_string()),
+                http_version_capture: Some("version".to_string()),
+            },
+        ];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::HttpBanner("Apache/2.4.58".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert!(record.http_server.is_none());
+        assert!(record.http_version.is_none());
+    }
+
+    #[test]
+    fn a_matching_rule_spends_its_slot_even_when_its_capture_group_did_not_participate() {
+        let user = vec![
+            PlatformRule {
+                signal: SignalKind::SshBanner,
+                pattern: r"^SSH-2\.0(?:-(?P<v>OpenSSH_[\d\.p]+))?".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: Some("v".to_string()),
+                http_server_capture: None,
+                http_version_capture: None,
+            },
+            PlatformRule {
+                signal: SignalKind::SshBanner,
+                pattern: r"-(?P<v>Cisco-[\d\.]+)".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: Some("v".to_string()),
+                http_server_capture: None,
+                http_version_capture: None,
+            },
+        ];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SshBanner("SSH-2.0-Cisco-1.25".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert!(record.ssh_version.is_none());
+    }
+
+    #[test]
+    fn prepopulated_values_are_preserved_field_by_field() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record.platform = Some("manual_override".into());
+        record.ssh_version = Some("manual".into());
+        record.signals.push(cisco_ios_sys_descr());
+        record
+            .signals
+            .push(Signal::SshBanner("SSH-2.0-OpenSSH_9.2p1 Debian-1".into()));
+        record
+            .signals
+            .push(Signal::HttpBanner("nginx/1.24.0".into()));
+        c.classify(&mut record).expect("classify ok");
         assert_eq!(record.platform.as_deref(), Some("manual_override"));
         assert_eq!(record.ssh_version.as_deref(), Some("manual"));
+        assert!(record.os_version.is_none());
+        assert_eq!(record.http_server.as_deref(), Some("nginx"));
+    }
+
+    #[test]
+    fn a_prepopulated_http_server_keeps_its_value_and_receives_no_http_version() {
+        let c = create_classifier(&extend_rules(vec![])).expect("create");
+        let mut record = empty_record();
+        record.http_server = Some("manual_override".into());
+        record
+            .signals
+            .push(Signal::HttpBanner("nginx/1.24.0".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.http_server.as_deref(), Some("manual_override"));
+        assert!(record.http_version.is_none());
     }
 
     #[test]
@@ -715,7 +1051,7 @@ mod tests {
         let user = vec![PlatformRule {
             signal: SignalKind::SnmpSysDescr,
             pattern: r"^Cisco IOS Software".to_string(),
-            platform: "user_defined".to_string(),
+            platform: Some("user_defined".to_string()),
             os_version_capture: None,
             ssh_version_capture: None,
             http_server_capture: None,
@@ -733,7 +1069,7 @@ mod tests {
         let user = vec![PlatformRule {
             signal: SignalKind::SnmpSysDescr,
             pattern: r"^SomethingElse".to_string(),
-            platform: "user_only".to_string(),
+            platform: Some("user_only".to_string()),
             os_version_capture: None,
             ssh_version_capture: None,
             http_server_capture: None,
@@ -754,7 +1090,7 @@ mod tests {
         let user = vec![PlatformRule {
             signal: SignalKind::SnmpSysDescr,
             pattern: r"(unclosed".to_string(),
-            platform: "irrelevant".to_string(),
+            platform: Some("irrelevant".to_string()),
             os_version_capture: None,
             ssh_version_capture: None,
             http_server_capture: None,
@@ -773,7 +1109,7 @@ mod tests {
         let user = vec![PlatformRule {
             signal: SignalKind::SshBanner,
             pattern: r"^SSH-2\.0-OpenSSH".to_string(),
-            platform: "openssh".to_string(),
+            platform: Some("openssh".to_string()),
             os_version_capture: Some("nonexistent".to_string()),
             ssh_version_capture: None,
             http_server_capture: None,
@@ -794,7 +1130,7 @@ mod tests {
         let user = vec![PlatformRule {
             signal: SignalKind::SnmpSysName,
             pattern: r"^Cisco-Nexus-(?P<version>\d+)".to_string(),
-            platform: "cisco_nxos".to_string(),
+            platform: Some("cisco_nxos".to_string()),
             os_version_capture: Some("version".to_string()),
             ssh_version_capture: None,
             http_server_capture: None,
@@ -814,126 +1150,27 @@ mod tests {
     fn baked_platform_rules_snapshot_matches_expected_count() {
         assert_eq!(
             platform_rules::baked_platform_rules().len(),
-            11,
+            12,
             "if you added or removed a baked-in rule, update docs/site/docs/discover/classification.md AND this count"
+        );
+        assert_eq!(
+            platform_rules::baked_platform_rules_with_banner_heuristics().len(),
+            12,
+            "the banner heuristics enrich the default rules rather than appending to them"
         );
     }
 
-    #[test]
-    fn baked_rules_match_realistic_fixtures() {
-        struct Case {
-            signal_kind: SignalKind,
-            input: &'static str,
-            platform: &'static str,
-            os_version: Option<&'static str>,
-            ssh_version: Option<&'static str>,
-            http_server: Option<&'static str>,
-            http_version: Option<&'static str>,
-        }
+    struct Case {
+        signal_kind: SignalKind,
+        input: &'static str,
+        platform: Option<&'static str>,
+        os_version: Option<&'static str>,
+        ssh_version: Option<&'static str>,
+        http_server: Option<&'static str>,
+        http_version: Option<&'static str>,
+    }
 
-        let cases: &[Case] = &[
-            Case {
-                signal_kind: SignalKind::SnmpSysDescr,
-                input: "Cisco IOS Software, C3560CX Software (C3560CX-UNIVERSALK9-M), Version 15.2(7)E4, RELEASE SOFTWARE",
-                platform: "cisco_ios",
-                os_version: Some("15.2"),
-                ssh_version: None,
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SnmpSysDescr,
-                input: "Cisco IOS XR Software, Version 7.5.2, RELEASE SOFTWARE",
-                platform: "cisco_ios_xr",
-                os_version: Some("7.5.2"),
-                ssh_version: None,
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SnmpSysDescr,
-                input: "Cisco NX-OS(tm) n9000, Software (nxos), Version 9.3(10), RELEASE SOFTWARE",
-                platform: "cisco_nxos",
-                os_version: Some("9.3"),
-                ssh_version: None,
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SnmpSysDescr,
-                input: "Juniper Networks, Inc. mx240 internet router, kernel JUNOS 21.4R3-S4.9",
-                platform: "junos",
-                os_version: Some("21.4"),
-                ssh_version: None,
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SnmpSysDescr,
-                input: "Arista Networks EOS version 4.29.3M running on an Arista Networks DCS-7060CX2-32S",
-                platform: "arista_eos",
-                os_version: Some("4.29.3"),
-                ssh_version: None,
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SnmpSysDescr,
-                input: "Linux hostname 5.15.0-91-generic #101-Ubuntu SMP Wed Nov 15 20:12:47 UTC 2023",
-                platform: "linux",
-                os_version: Some("5.15.0"),
-                ssh_version: None,
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SshBanner,
-                input: "SSH-2.0-OpenSSH_9.0p1 Ubuntu-3ubuntu0.1",
-                platform: "linux",
-                os_version: Some("Ubuntu"),
-                ssh_version: Some("OpenSSH_9.0p1"),
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SshBanner,
-                input: "SSH-2.0-OpenSSH_9.2p1 Debian-1",
-                platform: "linux",
-                os_version: Some("Debian"),
-                ssh_version: Some("OpenSSH_9.2p1"),
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::SshBanner,
-                input: "SSH-2.0-OpenSSH_9.5 FreeBSD-20231016",
-                platform: "freebsd",
-                os_version: Some("FreeBSD"),
-                ssh_version: Some("OpenSSH_9.5"),
-                http_server: None,
-                http_version: None,
-            },
-            Case {
-                signal_kind: SignalKind::HttpBanner,
-                input: "nginx/1.24.0",
-                platform: "linux",
-                os_version: None,
-                ssh_version: None,
-                http_server: Some("nginx"),
-                http_version: Some("1.24.0"),
-            },
-            Case {
-                signal_kind: SignalKind::HttpBanner,
-                input: "Apache/2.4.58 (Ubuntu)",
-                platform: "linux",
-                os_version: None,
-                ssh_version: None,
-                http_server: Some("Apache"),
-                http_version: Some("2.4.58"),
-            },
-        ];
-
-        let classifier = create_classifier(&extend_rules(vec![])).expect("create");
+    fn assert_cases(classifier: &dyn Classifier, cases: &[Case]) {
         for case in cases {
             let mut record = empty_record();
             let signal = match case.signal_kind {
@@ -948,8 +1185,8 @@ mod tests {
             let input = case.input;
             assert_eq!(
                 record.platform.as_deref(),
-                Some(case.platform),
-                "input `{input}` should classify as `{}`",
+                case.platform,
+                "input `{input}` should classify as {:?}",
                 case.platform
             );
             assert_eq!(
@@ -977,6 +1214,180 @@ mod tests {
                 case.http_version
             );
         }
+    }
+
+    #[test]
+    fn baked_rules_match_realistic_fixtures() {
+        let cases: &[Case] = &[
+            Case {
+                signal_kind: SignalKind::SnmpSysDescr,
+                input: "Cisco IOS Software, C3560CX Software (C3560CX-UNIVERSALK9-M), Version 15.2(7)E4, RELEASE SOFTWARE",
+                platform: Some("cisco_ios"),
+                os_version: Some("15.2"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SnmpSysDescr,
+                input: "Cisco IOS XR Software, Version 7.5.2, RELEASE SOFTWARE",
+                platform: Some("cisco_ios_xr"),
+                os_version: Some("7.5.2"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SnmpSysDescr,
+                input: "Cisco NX-OS(tm) n9000, Software (nxos), Version 9.3(10), RELEASE SOFTWARE",
+                platform: Some("cisco_nxos"),
+                os_version: Some("9.3"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SnmpSysDescr,
+                input: "Juniper Networks, Inc. mx240 internet router, kernel JUNOS 21.4R3-S4.9",
+                platform: Some("junos"),
+                os_version: Some("21.4"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SnmpSysDescr,
+                input: "Arista Networks EOS version 4.29.3M running on an Arista Networks DCS-7060CX2-32S",
+                platform: Some("arista_eos"),
+                os_version: Some("4.29.3"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SnmpSysDescr,
+                input: "SRLinux-v26.3.3-392-g480f5fa2d04 7220 IXR-D2L Copyright (c) 2000-2026 Nokia. Kernel 7.0.11-orbstack-00360-gc9bc4d96ac70 #1 SMP PREEMPT Thu Jun  4 16:40:25 UTC 2026",
+                platform: Some("nokia_srlinux"),
+                os_version: Some("26.3.3"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SnmpSysDescr,
+                input: "Linux hostname 5.15.0-91-generic #101-Ubuntu SMP Wed Nov 15 20:12:47 UTC 2023",
+                platform: Some("linux"),
+                os_version: Some("5.15.0"),
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.0p1 Ubuntu-3ubuntu0.1",
+                platform: None,
+                os_version: None,
+                ssh_version: Some("OpenSSH_9.0p1"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.2p1 Debian-1",
+                platform: None,
+                os_version: None,
+                ssh_version: Some("OpenSSH_9.2p1"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.5 FreeBSD-20231016",
+                platform: None,
+                os_version: None,
+                ssh_version: Some("OpenSSH_9.5"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::HttpBanner,
+                input: "nginx/1.24.0",
+                platform: None,
+                os_version: None,
+                ssh_version: None,
+                http_server: Some("nginx"),
+                http_version: Some("1.24.0"),
+            },
+            Case {
+                signal_kind: SignalKind::HttpBanner,
+                input: "Apache/2.4.58 (Ubuntu)",
+                platform: None,
+                os_version: None,
+                ssh_version: None,
+                http_server: Some("Apache"),
+                http_version: Some("2.4.58"),
+            },
+        ];
+
+        let classifier = create_classifier(&extend_rules(vec![])).expect("create");
+        assert_cases(classifier.as_ref(), cases);
+    }
+
+    #[test]
+    fn banner_heuristics_restore_platform_on_the_same_fixtures() {
+        let cases: &[Case] = &[
+            Case {
+                signal_kind: SignalKind::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.0p1 Ubuntu-3ubuntu0.1",
+                platform: Some("linux"),
+                os_version: Some("Ubuntu"),
+                ssh_version: Some("OpenSSH_9.0p1"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.2p1 Debian-1",
+                platform: Some("linux"),
+                os_version: Some("Debian"),
+                ssh_version: Some("OpenSSH_9.2p1"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::SshBanner,
+                input: "SSH-2.0-OpenSSH_9.5 FreeBSD-20231016",
+                platform: Some("freebsd"),
+                os_version: Some("FreeBSD"),
+                ssh_version: Some("OpenSSH_9.5"),
+                http_server: None,
+                http_version: None,
+            },
+            Case {
+                signal_kind: SignalKind::HttpBanner,
+                input: "nginx/1.24.0",
+                platform: Some("linux"),
+                os_version: None,
+                ssh_version: None,
+                http_server: Some("nginx"),
+                http_version: Some("1.24.0"),
+            },
+            Case {
+                signal_kind: SignalKind::HttpBanner,
+                input: "Apache/2.4.58 (Ubuntu)",
+                platform: Some("linux"),
+                os_version: None,
+                ssh_version: None,
+                http_server: Some("Apache"),
+                http_version: Some("2.4.58"),
+            },
+        ];
+
+        let classifier = create_classifier(&replace_rules(
+            platform_rules::baked_platform_rules_with_banner_heuristics(),
+        ))
+        .expect("create");
+        assert_cases(classifier.as_ref(), cases);
     }
 
     #[cfg(feature = "config")]
@@ -1022,12 +1433,12 @@ platform_rules:
             } => {
                 assert_eq!(merge_mode, MergeMode::Replace);
                 assert_eq!(platform_rules.len(), 2);
-                assert_eq!(platform_rules[0].platform, "cisco_ios");
+                assert_eq!(platform_rules[0].platform.as_deref(), Some("cisco_ios"));
                 assert_eq!(
                     platform_rules[0].os_version_capture.as_deref(),
                     Some("version")
                 );
-                assert_eq!(platform_rules[1].platform, "linux");
+                assert_eq!(platform_rules[1].platform.as_deref(), Some("linux"));
                 assert!(platform_rules[1].os_version_capture.is_none());
                 assert!(role_rules.is_empty());
             }
@@ -1543,7 +1954,7 @@ role: router
         let user = vec![PlatformRule {
             signal: SignalKind::SnmpSysObjectId,
             pattern: r"^1\.3\.6\.1\.4\.1\.6527\.".to_string(),
-            platform: "nokia_srlinux".to_string(),
+            platform: Some("nokia_srlinux".to_string()),
             os_version_capture: None,
             ssh_version_capture: None,
             http_server_capture: None,

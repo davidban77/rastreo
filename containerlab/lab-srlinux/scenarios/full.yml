@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json
+# Full-matrix scan of both SR Linux nodes to stdout. Mirrors kafka-scan.yml's prober
+# set without the broker, so the combined snmp + ssh + http evidence path has a golden.
+version: 1
+kind: discovery
+scenarios:
+  - signal_type: discover
+    name: srlinux-full
+    # 1.3.6.1.4.1.6527.1.20 is Nokia's SR Linux product subtree; read off the nodes with
+    # `snmpget -v2c -c rastreo-lab 198.51.100.11 sysObjectID.0`.
+    classifier:
+      type: rules
+      role_rules:
+        - type: sys_object_id_prefix
+          prefix: "1.3.6.1.4.1.6527.1.20"
+          role: switch
+    targets:
+      - Ip: "198.51.100.11"
+      - Ip: "198.51.100.12"
+    probers:
+      - type: tcp_connect
+        ports: [22, 161, 443, 50051]
+      - type: snmp
+        version: v2c
+        community: rastreo-lab
+      - type: ssh
+        ports: [22]
+      - type: http
+        ports: [443]
+        scheme: https
+        tls_verify: false

@@ -229,10 +229,10 @@ A single regex-based platform-detection rule.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `http_server_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`. |
-| `http_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_version`. Only meaningful for `signal: http_banner`. |
-| `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. When absent, or when the group is not present in the actual match, `os_version` stays null. |
+| `http_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_version`. Requires `http_server_capture`, and is rejected at classifier construction without it. Only meaningful for `signal: http_banner`. |
+| `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. Requires `platform`, and is rejected at classifier construction without it. When absent, or when the group is not present in the actual match, `os_version` stays null. |
 | `pattern` | string | yes | — |
-| `platform` | string | yes | — |
+| `platform` | string \| null | no | Platform label assigned on match. Omit it for a rule that only extracts `ssh_version`, `http_server`, or `http_version` from a service banner. |
 | `signal` | [`SignalKind`](#signalkind) | yes | — |
 | `ssh_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`. |
 

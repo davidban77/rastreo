@@ -1444,22 +1444,32 @@ mod tests {
 
     #[test]
     fn model_signal_render_still_matches_the_openconfig_path_table_key() {
-        let model = ModelData {
-            name: "openconfig-interfaces".to_string(),
-            organization: "OpenConfig".to_string(),
-            version: "3.0.0".to_string(),
-        };
-        let Some(Signal::GnmiSupportedModel(rendered)) = model_signal(&model) else {
-            panic!("model_signal must render a supported-model signal");
-        };
-        let subs = crate::collection_profile::openconfig_paths::suggested_subscriptions(
-            std::slice::from_ref(&rendered),
-        );
-        assert!(
-            !subs.is_empty(),
-            "model_signal's render format must keep matching the path table key: {rendered}"
-        );
-        assert_eq!(subs[0].matched_model, rendered);
+        let advertised = [
+            ModelData {
+                name: "openconfig-interfaces".to_string(),
+                organization: "OpenConfig".to_string(),
+                version: "3.0.0".to_string(),
+            },
+            // verbatim from a Nokia SR Linux 26.3 Capabilities response
+            ModelData {
+                name: "http://openconfig.net/yang/interfaces:openconfig-interfaces".to_string(),
+                organization: "OpenConfig working group".to_string(),
+                version: "2024-12-05".to_string(),
+            },
+        ];
+        for model in advertised {
+            let Some(Signal::GnmiSupportedModel(rendered)) = model_signal(&model) else {
+                panic!("model_signal must render a supported-model signal");
+            };
+            let subs = crate::collection_profile::openconfig_paths::suggested_subscriptions(
+                std::slice::from_ref(&rendered),
+            );
+            assert!(
+                !subs.is_empty(),
+                "model_signal's render format must keep matching the path table key: {rendered}"
+            );
+            assert_eq!(subs[0].matched_model, rendered);
+        }
     }
 
     #[test]

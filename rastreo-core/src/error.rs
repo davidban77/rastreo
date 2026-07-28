@@ -228,6 +228,8 @@ pub enum ClassifierError {
         #[source]
         source: regex::Error,
     },
+    #[error("invalid platform rule: {0}")]
+    InvalidPlatformRule(String),
     #[error("invalid role rule: {0}")]
     InvalidRoleRule(String),
 }
@@ -439,6 +441,9 @@ mod tests {
             ClassifierError::InvalidRegex { .. } => ClassifierError::InvalidRegex {
                 pattern: "(unclosed".into(),
                 source: bad_regex_error(),
+            },
+            ClassifierError::InvalidPlatformRule(_) => {
+                ClassifierError::InvalidPlatformRule("rule captures os_version but claims no platform".into())
             },
             ClassifierError::InvalidRoleRule(_) => {
                 ClassifierError::InvalidRoleRule("role 'spine' matches on no ports".into())

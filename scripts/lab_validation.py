@@ -29,11 +29,13 @@ GOLDEN_DIR = LAB_ROOT / "golden"
 DEFAULT_IMAGE = "ghcr.io/davidban77/rastreo:main"
 DEFAULT_NETWORK = "rastreo-lab"
 
+# Every lab node, keyed as rastreo emits it. Each scenario must observe all of them.
+EXPECTED_IDENTITY_KEYS = ["ip:198.51.100.11", "ip:198.51.100.12"]
+
 # The kafka-scan scenario sinks records to Kafka instead of stdout; it is
 # NOT compared against goldens by the scenario-loop. The `--sot <name>` flow
 # uses it end-to-end.
 SOT_SCAN_SCENARIO = "kafka-scan.yml"
-EXPECTED_IDENTITY_KEYS = ["ip:198.51.100.11", "ip:198.51.100.12"]
 
 # Per-SoT reconciliation query. Each returns the count of devices whose
 # identity key matches one of the expected values. Called via urllib inside
@@ -70,19 +72,21 @@ SOT_CONFIG: dict[str, dict[str, str]] = {
 }
 
 # Fields whose values are non-deterministic across runs. Set to a fixed
-# placeholder before comparing to (or writing) the golden.
-VOLATILE_FIELDS = ("last_seen", "scan_id", "initiated_at")
+# placeholder before comparing to (or writing) the golden. `last_seen` is on
+# device records, `observed_at` on collection-profile records.
+VOLATILE_RECORD_FIELDS = ("last_seen", "observed_at")
+VOLATILE_SCAN_METADATA_FIELDS = ("scan_id", "initiated_at")
 
 
 def mask_volatile(record: dict[str, Any]) -> dict[str, Any]:
-    if "last_seen" in record:
-        record["last_seen"] = "<masked>"
+    for field in VOLATILE_RECORD_FIELDS:
+        if field in record:
+            record[field] = "<masked>"
     meta = record.get("scan_metadata")
     if isinstance(meta, dict):
-        if "scan_id" in meta:
-            meta["scan_id"] = "<masked>"
-        if "initiated_at" in meta:
-            meta["initiated_at"] = "<masked>"
+        for field in VOLATILE_SCAN_METADATA_FIELDS:
+            if field in meta:
+                meta[field] = "<masked>"
     return record
 
 
@@ -97,6 +101,7 @@ def run_scenario(scenario_path: pathlib.Path, image: str, network: str, orb_mach
         "discover",
         "--file", f"/scenarios/{scenario_name}",
         "--sink", "stdout",
+        "--format", "json",
     ]
     if orb_machine:
         cmd = ["orb", "-m", orb_machine, "bash", "-c", " ".join(docker_cmd)]
@@ -116,8 +121,21 @@ def run_scenario(scenario_path: pathlib.Path, image: str, network: str, orb_mach
             records.append(json.loads(line))
         except json.JSONDecodeError as e:
             raise RuntimeError(f"invalid JSON on {scenario_name}: {line}\n{e}") from e
-    records.sort(key=lambda r: r.get("identity_key", ""))
-    return [mask_volatile(r) for r in records]
+    if not records:
+        raise RuntimeError(
+            f"{scenario_name} emitted no records; an empty golden compares equal to anything\nstdout:\n{proc.stdout}"
+        )
+    observed = {r.get("identity_key") for r in records}
+    missing = [key for key in EXPECTED_IDENTITY_KEYS if key not in observed]
+    if missing:
+        raise RuntimeError(
+            f"{scenario_name} observed {sorted(k for k in observed if k)} but not {missing}; "
+            f"a golden written from a partial scan compares equal on every later run\nstdout:\n{proc.stdout}"
+        )
+    records = [mask_volatile(r) for r in records]
+    # identity_key is not unique: gnmi emits a device and a profile record per key.
+    records.sort(key=lambda r: (r.get("identity_key", ""), json.dumps(r, sort_keys=True)))
+    return records
 
 
 def write_golden(scenario_path: pathlib.Path, records: list[dict[str, Any]]) -> pathlib.Path:
@@ -174,6 +192,21 @@ def run_sot_scan(image: str, network: str, orb_machine: str | None) -> None:
         raise RuntimeError(f"kafka-scan failed:\n{proc.stderr}")
 
 
+def reconciled_exactly_one(payload_text: str) -> bool:
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("count"), int):
+        return payload["count"] == 1
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return any(isinstance(v, dict) and v.get("count") == 1 for v in data.values())
+    return False
+
+
 def poll_sot(sot: str, network: str, orb_machine: str | None, timeout_s: int) -> int:
     import time
     config = SOT_CONFIG[sot]
@@ -202,8 +235,7 @@ def poll_sot(sot: str, network: str, orb_machine: str | None, timeout_s: int) ->
             else:
                 cmd = probe_cmd
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            out = proc.stdout
-            if proc.returncode == 0 and ('"identity_key"' in out or '"count": 1' in out or '"count":1' in out):
+            if proc.returncode == 0 and reconciled_exactly_one(proc.stdout):
                 found += 1
         if found == len(entries):
             return found
@@ -284,6 +316,9 @@ def main() -> int:
             print(f"  pass ({len(actual)} records)")
 
     if args.update:
+        if failed:
+            print(f"\n{failed} scenario(s) failed to capture a complete record set", file=sys.stderr)
+            return 1
         return 0
     if failed:
         print(f"\n{failed} scenario(s) failed", file=sys.stderr)

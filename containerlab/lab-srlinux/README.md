@@ -114,7 +114,7 @@ Not exposed: `BGP4-MIB` (1.3.6.1.2.1.15). BGP peer signals for SR Linux need to 
 
 **Slice 2d (this commit)** — Rolling `:main` docker tag published by `.github/workflows/docker-main.yml` on every push to `main`, unblocking use of features that haven't been tagged yet. SSH prober now captures OpenSSH banner + ED25519 host key from real SR Linux nodes.
 
-**Slice 3a** — `scripts/lab_validation.py` harness + golden NDJSON snapshots for all four stdout scenarios. Regression pass on `rastreo:lab`.
+**Slice 3a** — `scripts/lab_validation.py` harness + golden NDJSON snapshots for all six stdout scenarios. Regression pass on `rastreo:lab`.
 
 **Slice 3b** — Three SoT stacks + shared Kafka broker + per-SoT bootstrap scripts + `--sot` flag on the harness. `kafka-scan.yml` publishes to Kafka; the target SoT's consumer reconciles; the harness polls the SoT API and asserts 2 devices reconciled.
 
