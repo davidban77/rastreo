@@ -12,12 +12,25 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+## Benchmarks
+
+```bash
+cargo bench -p rastreo-core            # full run, ~3 minutes
+cargo bench -p rastreo-core -- --test  # one iteration of each, ~2 seconds
+```
+
+`rastreo-core/benches/emit_path.rs` measures sink dispatch and encoder cost at 65, 650, and 6500 records. Both sides of every comparison are hard-coded as separate arms so criterion measures them within a single process. Do not compare `--save-baseline` snapshots taken from different runs: arms within one run resolve differences down to ~0.4%, while the same arm measured in two runs on an otherwise idle laptop drifts by up to 6%. Report results in ns/record — a percentage means nothing until you name which arm is the denominator.
+
+The benchmark does not run in CI, but `cargo clippy --workspace --all-targets` compiles it, so a bench that stops building fails the lint job. The permanent regression guard is `rastreo-core/tests/emit_path_guards.rs`: it counts heap allocations per record, which is deterministic and machine-independent, and it runs as part of `cargo test --workspace`.
+
+Criterion depends on `alloca`, whose build script compiles a small C source file, so any `--all-targets` build needs a working C compiler. Linking Rust binaries on Linux and macOS already requires one, so this is normally satisfied.
+
 ## Linting and Formatting
 
 Both must pass before committing:
 
 ```bash
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 

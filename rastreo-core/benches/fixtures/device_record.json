@@ -1,0 +1,37 @@
+{
+  "identity_key": "mac:__MAC__",
+  "mgmt_ip": "__ADDRESS__",
+  "mac": "__MAC__",
+  "manufacturer": "Cisco Systems, Inc",
+  "platform": "cisco_ios",
+  "os_version": "15.7(3)M2",
+  "role": "router",
+  "confidence": 0.9,
+  "last_seen": "2026-07-27T09:14:23.917897Z",
+  "signals": [
+    { "IcmpEchoRttMicros": 812 },
+    { "OpenPort": 22 },
+    { "OpenPort": 23 },
+    { "OpenPort": 80 },
+    { "OpenPort": 443 },
+    { "OpenPort": 161 },
+    { "OpenPort": 830 },
+    { "SshBanner": "SSH-2.0-Cisco-1.25" },
+    { "HttpBanner": "cisco-IOS" },
+    { "SnmpSysName": "__NAME__" },
+    { "SnmpSysDescr": "Cisco IOS Software, C2900 Software (C2900-UNIVERSALK9-M), Version 15.7(3)M2, RELEASE SOFTWARE (fc2)" },
+    { "SnmpSysObjectId": "1.3.6.1.4.1.9.1.1045" },
+    { "Mac": "__MAC__" },
+    { "ReverseDnsName": "__NAME__" }
+  ],
+  "probe_kinds": ["Icmp", "TcpConnect", "Http", "Ssh", "Snmp", "ReverseDns"],
+  "schema_version": "v1",
+  "schema_id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
+  "possible_alias_of": null,
+  "scan_metadata": {
+    "scan_id": "01KYGBAJ1R9D6R0548FP88TY3X",
+    "scenario_name": "emit-path-bench",
+    "initiated_at": "2026-07-27T09:14:22.904079Z",
+    "source_config_hash": "sha256:4e688bf2179b5b97b79369e4fc15e69289b74371da9d84f0dd792b7d137393ba"
+  }
+}

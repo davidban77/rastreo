@@ -432,7 +432,11 @@ fn accumulate_target(
 
 /// Delivers one encoded record, skipping the write when the encoder rendered nothing for this
 /// kind. Returns whether anything was written, so callers count only what the sink received.
-async fn write_encoded(
+///
+/// Exposed for `benches/emit_path.rs` and `tests/emit_path_guards.rs`; not part of the
+/// supported API.
+#[doc(hidden)]
+pub async fn write_encoded(
     sink: &mut dyn Sink,
     kind: RecordKind,
     buf: &[u8],
