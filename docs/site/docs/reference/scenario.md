@@ -647,11 +647,11 @@ Each `PlatformRule` has:
 |---|---|---|---|
 | `signal` | string | yes | Which probe signal the pattern matches against. One of `snmp_sys_descr`, `snmp_sys_object_id`, `snmp_sys_name`, `ssh_banner`, `http_banner`. See [Signal kinds](../discover/classification.md#signal-kinds). |
 | `pattern` | string | yes | Regex pattern. Validated when the classifier is built; a bad pattern is rejected before the scan starts. |
-| `platform` | string | yes | Canonical platform label assigned on match (e.g. `cisco_ios`, `linux`, `nginx`). |
-| `os_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.os_version`. When absent, `os_version` stays `null` even on a platform match. |
+| `platform` | string \| null | no | Canonical OS label assigned on match (e.g. `cisco_ios`, `nokia_srlinux`, `linux`). Omit it for a rule that only extracts `ssh_version`, `http_server`, or `http_version` from a service banner. |
+| `os_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.os_version`. Requires `platform` — a rule capturing `os_version` without one is rejected when the classifier is built. When absent, `os_version` stays `null` even on a platform match. |
 | `ssh_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.ssh_version`. Only meaningful for `signal: ssh_banner`. |
 | `http_server_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_server`. Only meaningful for `signal: http_banner`. |
-| `http_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_version`. Only meaningful for `signal: http_banner`. |
+| `http_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_version`. Requires `http_server_capture` — a rule capturing `http_version` without one is rejected when the classifier is built. Only meaningful for `signal: http_banner`. |
 
 Each `RoleRule` is an internally-tagged object. Three variants exist.
 

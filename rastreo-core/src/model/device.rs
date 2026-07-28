@@ -139,7 +139,7 @@ pub struct DeviceRecord {
     /// Product family resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_family: Option<String>,
-    /// Fielded platform identifier (e.g. `cisco_ios`, `linux`, `junos`) derived from SNMP `sysDescr` or SSH banner parsing.
+    /// Fielded platform identifier (e.g. `cisco_ios`, `nokia_srlinux`, `linux`, `junos`) derived from SNMP `sysDescr`. SSH and HTTP banners name the software on a port rather than the device OS, so they claim a platform only under the opt-in banner heuristics.
     pub platform: Option<String>,
     /// Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.
     #[serde(default)]

@@ -112,13 +112,16 @@ pub(crate) fn suggested_subscriptions(supported_models: &[String]) -> Vec<Subscr
     out
 }
 
-// `Signal::GnmiSupportedModel` carries `model_signal`'s rendered "<name> <version> (<org>)"; model
-// names are whitespace-free, so the leading token is the bare model name the table keys on.
+// A device may namespace-qualify the model name ("http://openconfig.net/yang/interfaces:openconfig-interfaces"); the table keys on the bare name.
 fn model_key(rendered_model: &str) -> &str {
-    rendered_model
+    let name = rendered_model
         .split_whitespace()
         .next()
-        .unwrap_or(rendered_model)
+        .unwrap_or(rendered_model);
+    match name.rsplit_once(':') {
+        Some((_, bare)) => bare,
+        None => name,
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +235,46 @@ mod tests {
             "openconfig-interfaces"
         );
         assert_eq!(model_key("openconfig-system"), "openconfig-system");
+    }
+
+    #[test]
+    fn model_key_drops_the_namespace_a_real_device_qualifies_the_name_with() {
+        assert_eq!(
+            model_key(
+                "http://openconfig.net/yang/interfaces:openconfig-interfaces 2024-12-05 (OpenConfig working group)"
+            ),
+            "openconfig-interfaces"
+        );
+        assert_eq!(
+            model_key(
+                "https://github.com/openconfig/yang/gnsi/acctz:openconfig-gnsi-acctz 2024-12-24 (OpenConfig Working Group)"
+            ),
+            "openconfig-gnsi-acctz"
+        );
+        assert_eq!(
+            model_key("urn:nokia.com:srlinux:aaa:aaa:srl_nokia-aaa 2026-03-31 (Nokia)"),
+            "srl_nokia-aaa"
+        );
+    }
+
+    #[test]
+    fn a_namespace_qualified_openconfig_model_yields_its_curated_paths() {
+        let advertised =
+            "http://openconfig.net/yang/system:openconfig-system 2024-09-24 (OpenConfig working group)";
+        let subs = suggested_subscriptions(&models(&[advertised]));
+        assert!(subs
+            .iter()
+            .any(|s| s.path == "/system/cpus/cpu/state/total/instant"));
+        for sub in &subs {
+            assert_eq!(sub.matched_model, advertised);
+        }
+    }
+
+    #[test]
+    fn a_namespace_qualified_native_model_still_yields_no_subscriptions() {
+        let subs = suggested_subscriptions(&models(&[
+            "urn:nokia.com:srlinux:interfaces:srl_nokia-interfaces 2026-03-31 (Nokia)",
+        ]));
+        assert!(subs.is_empty());
     }
 }

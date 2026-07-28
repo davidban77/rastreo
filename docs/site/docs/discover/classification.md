@@ -12,6 +12,11 @@ All six fields exist so downstream reconcilers (NetBox, Nautobot, Infrahub) rece
 
 Two classifier variants ship: `rules` (the default — regex-driven platform detection plus signal-driven role detection, each backed by a table that ships with rastreo) and `noop` (pass-through). The `rules` classifier populates `platform`, `os_version`, `ssh_version`, `http_server`, and `http_version` in its platform phase, then `role` in its role phase.
 
+!!! info "Each field is written only from evidence about the thing it names"
+    `platform` and `os_version` name the device's operating system, so they are written only from a signal that identifies the device — an SNMP `sysDescr`, not a service banner. `ssh_version`, `http_server`, and `http_version` name software listening on a port, so they are written from that port's banner regardless of what identified the platform.
+
+    A Nokia SR Linux switch answers SSH with `SSH-2.0-OpenSSH_10.0p2 Debian-7+deb13u2`. That banner is a fact about the sshd binary, not about the switch: it yields `ssh_version: OpenSSH_10.0p2` and nothing else, while `platform: nokia_srlinux` and `os_version: 26.3.3` come from the device's `sysDescr`. Scan the same switch with only the SSH prober and `platform` stays `null` — a `null` never overwrites the curated platform in your source of truth, and `linux` would. If you scan a server estate where a service banner really does identify the machine, opt into the [banner heuristics](#banner-heuristics-opt-in).
+
 ## Available classifiers
 
 | Classifier | Behaviour |
@@ -62,9 +67,11 @@ Classification is configurable only from a scenario file. A flag-driven `rastreo
 
 ## Rules classifier
 
-The `rules` classifier walks each `DeviceRecord`'s signals in two phases. The platform phase evaluates an ordered list of regex rules and, on first match, sets `platform` (and `os_version` when the pattern names a capture group). The role phase then evaluates an ordered list of role rules and, on first match, sets `role`. Each phase preserves prepopulated values on the record.
+The `rules` classifier walks each `DeviceRecord`'s signals in two phases. The platform phase evaluates an ordered list of regex rules, filling each of `platform` (with its paired `os_version`), `ssh_version`, and `http_server` (with its paired `http_version`) from the first rule that both matches and claims that slot. The role phase then evaluates an ordered list of role rules and, on first match, sets `role`. Both phases preserve prepopulated values on the record.
 
-Because it is the default, every scan populates `platform` and `role` on records reaching your downstream (NetBox, Nautobot, Infrahub) wherever the signals support it. That makes the default tables a write path into your source of truth, so they follow one principle: **a device gets a role when rastreo has evidence, and stays `null` when rastreo only has a guess.** A `null` never overwrites anything downstream; a guess does. The platform table is banner-based — a `sysDescr` or an SSH banner naming a vendor and version is evidence. The default role table is multi-port only: `[22, 179]` (SSH + BGP) says router in a way a lone open port never can. The single-port heuristics ship too, but you opt into them — see [Port heuristics](#port-heuristics-opt-in).
+The fields fill independently, so a rule winning `platform` does not stop a later rule from contributing `ssh_version`. A Cisco IOS device whose `sysDescr` sets `platform: cisco_ios` still reports the `ssh_version` its SSH banner carries.
+
+Because it is the default, every scan populates `platform` and `role` on records reaching your downstream (NetBox, Nautobot, Infrahub) wherever the signals support it. That makes the default tables a write path into your source of truth, so they follow one principle: **a device gets a platform or a role when rastreo has evidence about the device, and stays `null` when rastreo only has a guess.** A `null` never overwrites anything downstream; a guess does. The default platform table claims a platform only from an SNMP `sysDescr`, which names the vendor and version of the device itself. The default role table is multi-port only: `[22, 179]` (SSH + BGP) says router in a way a lone open port never can. The banner and single-port heuristics ship too, but you opt into them — see [Banner heuristics](#banner-heuristics-opt-in) and [Port heuristics](#port-heuristics-opt-in).
 
 Add your own rules for anything the defaults do not cover — in particular, `sys_object_id_prefix` role rules against your own devices' `sysObjectID` values (rastreo ships no baked defaults for OID prefixes; see [Baked-in role rules](#baked-in-role-rules) for why).
 
@@ -86,7 +93,7 @@ A rule naming a signal kind the record does not carry simply does not match — 
 
 ## Baked-in platform rules
 
-The baked-in rules are evaluated in the order shown below. SNMP `sysDescr` rules run first (most specific), followed by SSH banner rules, then HTTP banner rules.
+The baked-in rules are evaluated in the order shown below. SNMP `sysDescr` rules run first (most specific), followed by SSH banner rules, then HTTP banner rules. Only the `sysDescr` rules claim a `platform`; the banner rules contribute the software fields for the port they read.
 
 | # | Signal | Pattern | `platform` | `os_version` | `ssh_version` | `http_server` | `http_version` |
 |---|---|---|---|---|---|---|---|
@@ -95,15 +102,85 @@ The baked-in rules are evaluated in the order shown below. SNMP `sysDescr` rules
 | 3 | `snmp_sys_descr` | `^Cisco NX-OS.*Version (?P<version>[\d\.]+)` | `cisco_nxos` | `version` | — | — | — |
 | 4 | `snmp_sys_descr` | `^Juniper Networks, Inc\..*JUNOS (?P<version>[\d\.]+)` | `junos` | `version` | — | — | — |
 | 5 | `snmp_sys_descr` | `^Arista Networks EOS version (?P<version>[\d\.]+)` | `arista_eos` | `version` (numeric prefix; the `M`/`F` maintenance/feature suffix is not captured) | — | — | — |
-| 6 | `snmp_sys_descr` | `^Linux\s+\S+\s+(?P<version>[\d\.]+)-` | `linux` | `version` (kernel release, e.g. `5.15.0`, not the distro name like `Ubuntu 22.04`) | — | — | — |
-| 7 | `ssh_banner` | `^SSH-2\.0-(?P<sshv>OpenSSH_[\d\.p]+)\s+(?P<osv>Ubuntu)` | `linux` | `osv` → `Ubuntu` | `sshv` → `OpenSSH_9.6p1` | — | — |
-| 8 | `ssh_banner` | `^SSH-2\.0-(?P<sshv>OpenSSH_[\d\.p]+)\s+(?P<osv>Debian)` | `linux` | `osv` → `Debian` | `sshv` → `OpenSSH_9.2p1` | — | — |
-| 9 | `ssh_banner` | `^SSH-2\.0-(?P<sshv>OpenSSH_[\d\.p]+)\s+(?P<osv>FreeBSD)` | `freebsd` | `osv` → `FreeBSD` | `sshv` → `OpenSSH_9.5` | — | — |
-| 10 | `http_banner` | `^(?P<server>nginx)/(?P<version>[\d\.]+)` | `linux` | — | — | `server` → `nginx` | `version` → `1.24.0` |
-| 11 | `http_banner` | `^(?P<server>Apache)/(?P<version>[\d\.]+)` | `linux` | — | — | `server` → `Apache` | `version` → `2.4.58` |
+| 6 | `snmp_sys_descr` | `^SRLinux-v(?P<version>[\d\.]+)` | `nokia_srlinux` | `version` → `26.3.3` (the build suffix after the version, `-392-g480f5fa2d04`, is not captured) | — | — | — |
+| 7 | `snmp_sys_descr` | `^Linux\s+\S+\s+(?P<version>[\d\.]+)-` | `linux` | `version` (kernel release, e.g. `5.15.0`, not the distro name like `Ubuntu 22.04`) | — | — | — |
+| 8 | `ssh_banner` | `^SSH-2\.0-(?P<sshv>OpenSSH_[\d\.p]+)\s+(?P<osv>Ubuntu)` | — | — | `sshv` → `OpenSSH_9.6p1` | — | — |
+| 9 | `ssh_banner` | `^SSH-2\.0-(?P<sshv>OpenSSH_[\d\.p]+)\s+(?P<osv>Debian)` | — | — | `sshv` → `OpenSSH_9.2p1` | — | — |
+| 10 | `ssh_banner` | `^SSH-2\.0-(?P<sshv>OpenSSH_[\d\.p]+)\s+(?P<osv>FreeBSD)` | — | — | `sshv` → `OpenSSH_9.5` | — | — |
+| 11 | `http_banner` | `^(?P<server>nginx)/(?P<version>[\d\.]+)` | — | — | — | `server` → `nginx` | `version` → `1.24.0` |
+| 12 | `http_banner` | `^(?P<server>Apache)/(?P<version>[\d\.]+)` | — | — | — | `server` → `Apache` | `version` → `2.4.58` |
 
-!!! info "Three-dimensional split for SSH and HTTP banners"
-    SSH and HTTP banners describe two dimensions: the OS the device runs and the software product answering on the port. The baked-in table honours that split. An SSH banner like `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` sets `platform: linux` (the OS), `os_version: Ubuntu` (the distro token), and `ssh_version: OpenSSH_8.9p1` (the SSH software). An HTTP banner like `nginx/1.24.0` sets `platform: linux` (nginx runs on Linux and BSD with high confidence in enterprise environments), `http_server: nginx` (the web-server product), and `http_version: 1.24.0` (the product version). Downstream reconcilers map these to distinct source-of-truth fields — see [Source of truth reconciliation](../integrate/source-of-truth.md).
+!!! warning "Match `sysObjectID` by subtree, not by regex"
+    Rules 1–7 key on `sysDescr` rather than `sysObjectID` for two reasons: `sysDescr` carries the OS version that populates `os_version`, and a platform rule can only reach `sysObjectID` through a regex. A regex has no notion of an OID arc boundary — `^1\.3\.6\.1\.4\.1\.6527` matches `1.3.6.1.4.1.65271`, a different vendor's tree. If you write a platform rule against `snmp_sys_object_id`, anchor the pattern at an arc boundary with a trailing `\.` or `$`: `^1\.3\.6\.1\.4\.1\.6527\.` or `^1\.3\.6\.1\.4\.1\.6527$`. Role rules have `sys_object_id_prefix`, which compares whole arcs and needs no such care — prefer it when you are classifying by OID.
+
+### Banner heuristics (opt-in)
+
+An SSH or HTTP banner names the software answering on a port. On a general-purpose server that software usually does imply the OS; on a network appliance it does not. A Nokia SR Linux switch answers SSH from a Debian-packaged OpenSSH and HTTPS from gunicorn, and neither says the switch runs Linux as far as a source-of-truth platform field is concerned.
+
+Guessing a platform from a banner is off by default for that reason. Turn it on where the estate justifies it — a fleet of Ubuntu and FreeBSD servers, say — by listing the whole table under `platform_rules` and leaving `merge_mode` at its default `extend`. Your rules are checked first, so the baked-in copies appended behind them are never reached and the platform phase behaves as if they had replaced the table — while the baked-in *role* table stays in play. `merge_mode: replace` would drop it, and every record would come back with `role: null`. The `sysDescr` rules come first so a device that identifies itself still wins over a banner guess:
+
+```yaml
+classifier:
+  type: rules
+  platform_rules:
+    - signal: snmp_sys_descr
+      pattern: "^Cisco IOS Software.*Version (?P<version>[\\d\\.]+)"
+      platform: "cisco_ios"
+      os_version_capture: "version"
+    - signal: snmp_sys_descr
+      pattern: "^Cisco IOS XR.*Version (?P<version>[\\d\\.]+)"
+      platform: "cisco_ios_xr"
+      os_version_capture: "version"
+    - signal: snmp_sys_descr
+      pattern: "^Cisco NX-OS.*Version (?P<version>[\\d\\.]+)"
+      platform: "cisco_nxos"
+      os_version_capture: "version"
+    - signal: snmp_sys_descr
+      pattern: "^Juniper Networks, Inc\\..*JUNOS (?P<version>[\\d\\.]+)"
+      platform: "junos"
+      os_version_capture: "version"
+    - signal: snmp_sys_descr
+      pattern: "^Arista Networks EOS version (?P<version>[\\d\\.]+)"
+      platform: "arista_eos"
+      os_version_capture: "version"
+    - signal: snmp_sys_descr
+      pattern: "^SRLinux-v(?P<version>[\\d\\.]+)"
+      platform: "nokia_srlinux"
+      os_version_capture: "version"
+    - signal: snmp_sys_descr
+      pattern: "^Linux\\s+\\S+\\s+(?P<version>[\\d\\.]+)-"
+      platform: "linux"
+      os_version_capture: "version"
+    - signal: ssh_banner
+      pattern: "^SSH-2\\.0-(?P<sshv>OpenSSH_[\\d\\.p]+)\\s+(?P<osv>Ubuntu)"
+      platform: "linux"
+      os_version_capture: "osv"
+      ssh_version_capture: "sshv"
+    - signal: ssh_banner
+      pattern: "^SSH-2\\.0-(?P<sshv>OpenSSH_[\\d\\.p]+)\\s+(?P<osv>Debian)"
+      platform: "linux"
+      os_version_capture: "osv"
+      ssh_version_capture: "sshv"
+    - signal: ssh_banner
+      pattern: "^SSH-2\\.0-(?P<sshv>OpenSSH_[\\d\\.p]+)\\s+(?P<osv>FreeBSD)"
+      platform: "freebsd"
+      os_version_capture: "osv"
+      ssh_version_capture: "sshv"
+    - signal: http_banner
+      pattern: "^(?P<server>nginx)/(?P<version>[\\d\\.]+)"
+      platform: "linux"
+      http_server_capture: "server"
+      http_version_capture: "version"
+    - signal: http_banner
+      pattern: "^(?P<server>Apache)/(?P<version>[\\d\\.]+)"
+      platform: "linux"
+      http_server_capture: "server"
+      http_version_capture: "version"
+```
+
+Rust callers get the same ordered list from `rastreo_core::classifier::platform_rules::baked_platform_rules_with_banner_heuristics()`.
+
+If every device in range is a server with no SNMP agent, the short form is enough — prepend just the banner rules. Only do this when no device in scope publishes a `sysDescr`, because `extend` puts your rules ahead of the baked table and a banner guess would then beat a device's own self-description.
 
 !!! info "What the baked-in table does not cover"
     The default rules target the platforms most common in enterprise network and lab environments. They intentionally leave gaps that would benefit from richer probes than a single banner:
@@ -113,6 +190,7 @@ The baked-in rules are evaluated in the order shown below. SNMP `sysDescr` rules
     - No load-balancer, proxy, or CDN detection — HAProxy, Envoy, Traefik, Cloudflare, and similar are not matched.
     - No firewall or SD-WAN detection — Palo Alto, Fortinet, Check Point, and similar require SNMP OID or vendor-specific probes not yet implemented.
     - SNMP `sysName` and `sysObjectID` rules ship no defaults — both signal kinds are available to platform rules, but only user rules use them today.
+    - The three `ssh_banner` rules read `ssh_version` only off an OpenSSH banner carrying an Ubuntu, Debian, or FreeBSD token. A bare `SSH-2.0-OpenSSH_9.6` or a vendor banner like `SSH-2.0-Cisco-1.25` leaves `ssh_version` null.
 
     Add your own rules under `platform_rules` to cover any of these — see [Extending the rule set](#extending-the-rule-set).
 
@@ -240,7 +318,9 @@ The `merge_mode` field controls how user-supplied rules combine with the baked-i
 - `extend` (the default) — user rules are checked first, then the baked-in defaults. Use this when the defaults cover your baseline and you want to add narrower or extra rules on top.
 - `replace` — only user rules run; the baked-in defaults are ignored. Use this when you want full control over what `platform` and `role` are assigned.
 
-Each user `PlatformRule` has three required fields — `signal` (which signal kind to match, one of the values in [Signal kinds](#signal-kinds)), `pattern` (the regex to compile), and `platform` (the OS label to assign on match) — plus four optional named-capture-group fields that populate the paired fields on the record: `os_version_capture` → `os_version`, `ssh_version_capture` → `ssh_version` (meaningful only with `signal: ssh_banner`), `http_server_capture` → `http_server`, and `http_version_capture` → `http_version` (both meaningful only with `signal: http_banner`). Any capture-group field that is absent, or that names a group not present in the actual match, leaves the paired record field `null`.
+Each user `PlatformRule` has two required fields — `signal` (which signal kind to match, one of the values in [Signal kinds](#signal-kinds)) and `pattern` (the regex to compile) — plus `platform` (the OS label to assign on match) and four optional named-capture-group fields that populate the paired fields on the record: `os_version_capture` → `os_version`, `ssh_version_capture` → `ssh_version` (meaningful only with `signal: ssh_banner`), `http_server_capture` → `http_server`, and `http_version_capture` → `http_version` (both meaningful only with `signal: http_banner`). Any capture-group field that is absent, or that names a group not present in the actual match, leaves the paired record field `null`.
+
+Omit `platform` for a rule that reads a service banner for its software fields without claiming the device's OS — that is how the baked-in `ssh_banner` and `http_banner` rules are written. Two of the capture fields are paired to what they version and are rejected when the classifier is built rather than silently never firing: `os_version_capture` requires `platform`, and `http_version_capture` requires `http_server_capture`. A version belongs to the thing it versions, so splitting the pair across two rules would let a record report one server's version under another server's name.
 
 Each user `RoleRule` is a tagged object. Three variants exist. A `sys_object_id_prefix` rule carries `prefix` (a dotted-decimal SNMP `sysObjectID` subtree) and `role` (the label to assign on match). A `signal_match` rule carries `signal`, `pattern`, and `role`. A `ports_open` rule carries `ports` (a non-empty list of ports that must all be present) and `role`.
 
@@ -293,11 +373,13 @@ With `replace`, only the user rules above run. A Cisco IOS device with an `SnmpS
 
 ## Precedence
 
-- Platform rules run before role rules. Both phases evaluate rules in list order; first match per phase wins.
+- Platform rules run before role rules. Both phases evaluate rules in list order.
+- The platform phase fills three independent slots — `platform` (with its paired `os_version`), `ssh_version`, and `http_server` (with its paired `http_version`). Each slot goes to the first rule in list order that both matches a signal on the record and claims that slot. A rule winning one slot does not stop a later rule from winning another, so a `sysDescr` rule taking `platform` still leaves `ssh_version` to the SSH banner rule below it. A paired field is only ever written by the rule that won its slot, and only alongside the field it versions — so `1.24.0` can never be read off an `Apache/2.4.58` banner onto an `http_server` of `nginx`, and a rule that wins the `http_server` slot without capturing a server writes no `http_version` either.
+- The role phase is single-slot: first matching rule wins and the phase stops.
 - Under `merge_mode: extend`, user rules are checked before the baked-in defaults for both phases. Under `merge_mode: replace`, only user rules run.
-- A record whose `platform` is already set (for example by an upstream custom pipeline) is left untouched by the platform phase — `os_version`, `ssh_version`, `http_server`, and `http_version` are not populated either, because the phase skips the rule loop entirely. A record whose `role` is already set is left untouched by the role phase. The classifier never overwrites existing values.
-- Invalid rules are rejected when the classifier is built, before any record is classified. A pattern that fails to compile — in a platform rule or a `signal_match` role rule — a `ports_open` rule with an empty `ports` list, and a `sys_object_id_prefix` that is not dotted-decimal all surface as construction errors.
-- When the winning platform pattern names any capture-group field (`os_version_capture`, `ssh_version_capture`, `http_server_capture`, `http_version_capture`) that does not appear in the actual match, `platform` is set and the paired field stays `null`.
+- Any field already set on the record — by an upstream custom pipeline, say — is left alone, and its slot is not contested, so a record arriving with `platform` already set never receives `os_version` from the classifier either. A record arriving with `platform` set still gets `ssh_version` from a banner rule. The classifier never overwrites existing values.
+- Invalid rules are rejected when the classifier is built, before any record is classified. A pattern that fails to compile — in a platform rule or a `signal_match` role rule — a platform rule capturing `os_version` without claiming a `platform` or `http_version` without capturing an `http_server`, a `ports_open` rule with an empty `ports` list, and a `sys_object_id_prefix` that is not dotted-decimal all surface as construction errors.
+- When a winning rule names a capture group that does not appear in the actual match — an absent group, or an optional one that did not participate — the slot is spent and the paired field stays `null`.
 
 ## See also
 

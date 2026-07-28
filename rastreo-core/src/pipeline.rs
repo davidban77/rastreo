@@ -2749,11 +2749,11 @@ mod tests {
 
     #[cfg(feature = "ssh")]
     #[tokio::test]
-    async fn scan_without_classifier_config_classifies_an_ssh_banner() {
+    async fn scan_without_classifier_config_reads_ssh_version_not_platform() {
         let record = scan_ssh_banner_stub(None).await;
-        assert_eq!(record.platform.as_deref(), Some("linux"));
-        assert_eq!(record.os_version.as_deref(), Some("Ubuntu"));
         assert_eq!(record.ssh_version.as_deref(), Some("OpenSSH_9.6p1"));
+        assert!(record.platform.is_none());
+        assert!(record.os_version.is_none());
     }
 
     #[cfg(feature = "ssh")]
