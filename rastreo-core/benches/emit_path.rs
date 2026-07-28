@@ -3,7 +3,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rastreo_core::pipeline::write_encoded;
 use rastreo_core::{
-    DeviceRecord, Encoder, NdjsonEncoder, RastreoError, RecordKind, Sink, TableEncoder,
+    DeviceRecord, Encoder, NdjsonEncoder, RastreoError, RecordKind, Sink, SinkType, TableEncoder,
 };
 
 // A /16 swept at a 1% answer rate lands on the middle size; the smallest carries visible fixed harness cost, so quote 6500.
@@ -28,6 +28,10 @@ impl Sink for CountingSink {
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
         Ok(())
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Memory
     }
 }
 
@@ -59,6 +63,10 @@ impl Sink for InlineKindSink {
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
         Ok(())
+    }
+
+    fn kind(&self) -> SinkType {
+        SinkType::Memory
     }
 }
 

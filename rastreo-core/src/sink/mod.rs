@@ -194,10 +194,8 @@ pub trait Sink: Send + Sync {
         true
     }
 
-    /// Concrete sink kind; overridden by every built-in implementation.
-    fn kind(&self) -> SinkType {
-        SinkType::Memory
-    }
+    /// Concrete sink kind — drives DLQ/metric attribution and, through [`Sink::requires_structured_records`], whether an aligned-text encoder may write here.
+    fn kind(&self) -> SinkType;
 
     /// Reads [`SinkType::requires_structured_records`] off `kind()`. Async like [`Sink::probe`],
     /// because a fan-out sink overrides it to consult children held behind an async mutex.
@@ -531,6 +529,10 @@ mod tests {
             self.flushes += 1;
             Ok(())
         }
+
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
+        }
     }
 
     #[test]
@@ -588,6 +590,9 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Kafka
             }
         }
 
@@ -742,6 +747,9 @@ mod tests {
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
             }
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
+            }
         }
         assert!(Plain.dlq_records_by_type_and_class().is_empty());
     }
@@ -763,6 +771,9 @@ mod tests {
             }
             async fn flush(&mut self) -> Result<(), RastreoError> {
                 Ok(())
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Kafka
             }
             fn dlq_records_delivered(&self) -> u64 {
                 self.delivered
@@ -1178,6 +1189,29 @@ mod tests {
     #[tokio::test]
     async fn default_sink_does_not_require_structured_records() {
         let s: Box<dyn Sink> = Box::new(MockSink::new());
+        assert!(!s.requires_structured_records().await);
+    }
+
+    struct KindOnlySink(SinkType);
+
+    #[async_trait::async_trait]
+    impl Sink for KindOnlySink {
+        async fn write(&mut self, _: &[u8]) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        fn kind(&self) -> SinkType {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn the_trait_default_reads_structuredness_off_the_sink_kind() {
+        let s: Box<dyn Sink> = Box::new(KindOnlySink(SinkType::Kafka));
+        assert!(s.requires_structured_records().await);
+        let s: Box<dyn Sink> = Box::new(KindOnlySink(SinkType::Stdout));
         assert!(!s.requires_structured_records().await);
     }
 

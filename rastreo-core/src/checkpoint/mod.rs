@@ -922,6 +922,9 @@ mod tests {
                 std::io::Error::other("flush boom"),
             )))
         }
+        fn kind(&self) -> crate::sink::SinkType {
+            crate::sink::SinkType::Memory
+        }
     }
 
     #[derive(Default)]
@@ -937,6 +940,9 @@ mod tests {
         async fn flush(&mut self) -> Result<(), RastreoError> {
             self.flushes += 1;
             Ok(())
+        }
+        fn kind(&self) -> crate::sink::SinkType {
+            crate::sink::SinkType::Memory
         }
     }
 
