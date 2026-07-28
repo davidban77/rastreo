@@ -156,7 +156,7 @@ fn parse_mib<R: BufRead>(reader: R) -> Result<MibTable, ParseError> {
         }
 
         let oid = cols[0].trim();
-        if !is_dotted_decimal_oid(oid) {
+        if !crate::oid::is_dotted_decimal(oid) {
             return Err(ParseError::Line {
                 line: line_no,
                 message: format!(
@@ -187,19 +187,6 @@ fn parse_mib<R: BufRead>(reader: R) -> Result<MibTable, ParseError> {
     }
 
     Ok(MibTable(entries))
-}
-
-// The SNMP prober emits `oid_to_dotted` output: arcs joined by '.', no leading dot. A table key in
-// any other form reviews fine but matches nothing in production, so reject it at parse time.
-fn is_dotted_decimal_oid(s: &str) -> bool {
-    let mut arcs = 0;
-    for part in s.split('.') {
-        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-        arcs += 1;
-    }
-    arcs >= 2
 }
 
 #[cfg(test)]

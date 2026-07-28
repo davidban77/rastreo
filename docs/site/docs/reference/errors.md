@@ -92,8 +92,8 @@ The scan summary reports faults in three fields. `error_counts` tallies them by 
 
 | Variant | Display message | Common cause | Likely fix |
 |---|---|---|---|
-| `ClassifierError::InvalidRegex { pattern }` | ``invalid regex `<pattern>` `` (`source`: the underlying `regex::Error`) | A `platform_rules` entry carries a `pattern` that is not a valid regular expression. | Read the cause — it points at the offending position in the pattern. Escape the literal that broke it, or close the unbalanced group. |
-| `ClassifierError::InvalidRoleRule(msg)` | `invalid role rule: <msg>` | A `role_rules` entry is structurally empty — a `ports_open` rule with no ports, or a `sys_object_id_prefix` rule with an empty prefix. | The message names the role. Give the rule the ports or prefix it matches on, or remove it. |
+| `ClassifierError::InvalidRegex { pattern }` | ``invalid regex `<pattern>` `` (`source`: the underlying `regex::Error`) | A `platform_rules` entry — or a `signal_match` role rule, which compiles its `pattern` the same way — carries a `pattern` that is not a valid regular expression. | Read the cause — it points at the offending position in the pattern. Escape the literal that broke it, or close the unbalanced group. |
+| `ClassifierError::InvalidRoleRule(msg)` | `invalid role rule: <msg>` | A `role_rules` entry can never match: a `ports_open` rule with no ports, or a `sys_object_id_prefix` rule whose `prefix` is empty or is not dotted-decimal. The leading-dot form a MIB browser prints (`.1.3.6.1.4.1.9.1`) is the common case. | The message names the role. Give a `ports_open` rule the ports it matches on. For a `sys_object_id_prefix` rule, strip any leading dot and make the prefix two or more digit arcs joined by `.`, as in `1.3.6.1.4.1.9.1`. |
 
 ## Resume errors
 

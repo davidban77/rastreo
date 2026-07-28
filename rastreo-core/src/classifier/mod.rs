@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use crate::error::{ClassifierError, RastreoError};
 use crate::model::device::DeviceRecord;
 use crate::model::outcome::Signal;
+use crate::oid;
 
 /// Assigns canonical `platform` / `role` values on a `DeviceRecord` based on the signals fused into it.
 ///
@@ -26,15 +27,49 @@ impl Classifier for NoopClassifier {
     }
 }
 
-/// Which probe-emitted signal a `PlatformRule` matches against.
+/// Which probe-emitted signal a classifier rule matches against. Shared by `PlatformRule` and `RoleRule::SignalMatch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum PlatformSignal {
+pub enum SignalKind {
     SnmpSysDescr,
     SshBanner,
     HttpBanner,
     SnmpSysName,
+    SnmpSysObjectId,
+}
+
+/// Number of `SignalKind` variants — sizes fixed-size arrays indexed by [`SignalKind::index`].
+pub const SIGNAL_KIND_COUNT: usize = 5;
+
+impl SignalKind {
+    /// Every variant in a stable, deterministic order.
+    pub const fn all() -> &'static [SignalKind; SIGNAL_KIND_COUNT] {
+        &[
+            SignalKind::SnmpSysDescr,
+            SignalKind::SshBanner,
+            SignalKind::HttpBanner,
+            SignalKind::SnmpSysName,
+            SignalKind::SnmpSysObjectId,
+        ]
+    }
+
+    /// Stable index for use in fixed-size `[T; SIGNAL_KIND_COUNT]` arrays.
+    pub const fn index(self) -> usize {
+        // Const-evaluated per arm, so an index past the count fails to build even
+        // when the arm is never reached.
+        const fn slot(index: usize) -> usize {
+            assert!(index < SIGNAL_KIND_COUNT);
+            index
+        }
+        match self {
+            SignalKind::SnmpSysDescr => const { slot(0) },
+            SignalKind::SshBanner => const { slot(1) },
+            SignalKind::HttpBanner => const { slot(2) },
+            SignalKind::SnmpSysName => const { slot(3) },
+            SignalKind::SnmpSysObjectId => const { slot(4) },
+        }
+    }
 }
 
 /// How user-supplied rules combine with the baked-in default rules.
@@ -55,7 +90,7 @@ pub enum MergeMode {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PlatformRule {
-    pub signal: PlatformSignal,
+    pub signal: SignalKind,
     pub pattern: String,
     pub platform: String,
     /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. When absent, or when the group is not present in the actual match, `os_version` stays null.
@@ -72,13 +107,19 @@ pub struct PlatformRule {
     pub http_version_capture: Option<String>,
 }
 
-/// A single role-detection rule. Two match strategies are supported: exact byte-prefix on `SnmpSysObjectId` and all-of set membership over `OpenPort` signals.
+/// A single role-detection rule. Three match strategies are supported: OID-subtree containment on `SnmpSysObjectId`, regex over any signal kind, and all-of set membership over `OpenPort` signals.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RoleRule {
-    /// Matches when the record carries any `Signal::SnmpSysObjectId(oid)` whose dotted string starts with `prefix`. Case-sensitive byte comparison.
+    /// Matches when the record carries a `Signal::SnmpSysObjectId` equal to `prefix` or inside its subtree. Whole arcs are compared, so `1.3.6.1.4.1.9.1` does not match `1.3.6.1.4.1.9.15`. `prefix` must be dotted-decimal with no leading dot, and is rejected at classifier construction otherwise.
     SysObjectIdPrefix { prefix: String, role: String },
+    /// Matches when `pattern` matches the text of any `signal`-kind signal on the record.
+    SignalMatch {
+        signal: SignalKind,
+        pattern: String,
+        role: String,
+    },
     /// Matches when the record carries a `Signal::OpenPort(p)` for every `p` in `ports`. Empty `ports` is rejected at classifier construction.
     PortsOpen { ports: Vec<u16>, role: String },
 }
@@ -115,13 +156,29 @@ pub fn create_classifier(config: &ClassifierConfig) -> Result<Box<dyn Classifier
 }
 
 struct CompiledRule {
-    signal: PlatformSignal,
+    signal: SignalKind,
     regex: Regex,
     platform: String,
     os_version_capture: Option<String>,
     ssh_version_capture: Option<String>,
     http_server_capture: Option<String>,
     http_version_capture: Option<String>,
+}
+
+enum CompiledRoleRule {
+    SysObjectIdPrefix {
+        prefix: String,
+        role: String,
+    },
+    SignalMatch {
+        signal: SignalKind,
+        regex: Regex,
+        role: String,
+    },
+    PortsOpen {
+        ports: Vec<u16>,
+        role: String,
+    },
 }
 
 struct PlatformMatch {
@@ -134,11 +191,11 @@ struct PlatformMatch {
 /// Classifier that walks a device's `signals` and assigns `platform` + `os_version` from the first matching platform rule, then `role` from the first matching role rule.
 pub struct RulesClassifier {
     platform_rules: Vec<CompiledRule>,
-    role_rules: Vec<RoleRule>,
+    role_rules: Vec<CompiledRoleRule>,
 }
 
 impl RulesClassifier {
-    /// Builds a classifier by resolving `merge_mode` into an effective platform + role rule list, compiling each platform pattern, and validating each role rule.
+    /// Builds a classifier by resolving `merge_mode` into an effective rule list per phase, compiling every pattern, and validating each role rule.
     /// Returns `ClassifierError::InvalidRegex` if any pattern fails to compile, or `ClassifierError::InvalidRoleRule` if a role rule fails validation.
     pub fn new(
         merge_mode: MergeMode,
@@ -180,26 +237,54 @@ impl RulesClassifier {
             }
             MergeMode::Replace => user_role_rules,
         };
-        for rule in &effective_role {
-            match rule {
-                RoleRule::PortsOpen { ports, role } if ports.is_empty() => {
-                    return Err(ClassifierError::InvalidRoleRule(format!(
-                        "ports_open rule for role `{role}` has an empty ports list"
-                    )));
-                }
-                RoleRule::SysObjectIdPrefix { prefix, role } if prefix.is_empty() => {
-                    return Err(ClassifierError::InvalidRoleRule(format!(
-                        "sys_object_id_prefix rule for role `{role}` has an empty prefix"
-                    )));
-                }
-                _ => {}
-            }
+        let mut compiled_roles = Vec::with_capacity(effective_role.len());
+        for rule in effective_role {
+            compiled_roles.push(compile_role_rule(rule)?);
         }
 
         Ok(Self {
             platform_rules: compiled,
-            role_rules: effective_role,
+            role_rules: compiled_roles,
         })
+    }
+}
+
+fn compile_role_rule(rule: RoleRule) -> Result<CompiledRoleRule, ClassifierError> {
+    match rule {
+        RoleRule::SysObjectIdPrefix { prefix, role } => {
+            if prefix.is_empty() {
+                return Err(ClassifierError::InvalidRoleRule(format!(
+                    "sys_object_id_prefix rule for role `{role}` has an empty prefix"
+                )));
+            }
+            if !oid::is_dotted_decimal(&prefix) {
+                return Err(ClassifierError::InvalidRoleRule(format!(
+                    "sys_object_id_prefix rule for role `{role}` has prefix `{prefix}`, which is not a dotted-decimal OID: expected two or more digit arcs joined by `.` with no leading dot, as in `1.3.6.1.4.1.9.1`"
+                )));
+            }
+            Ok(CompiledRoleRule::SysObjectIdPrefix { prefix, role })
+        }
+        RoleRule::SignalMatch {
+            signal,
+            pattern,
+            role,
+        } => {
+            let regex = Regex::new(&pattern)
+                .map_err(|source| ClassifierError::InvalidRegex { pattern, source })?;
+            Ok(CompiledRoleRule::SignalMatch {
+                signal,
+                regex,
+                role,
+            })
+        }
+        RoleRule::PortsOpen { ports, role } => {
+            if ports.is_empty() {
+                return Err(ClassifierError::InvalidRoleRule(format!(
+                    "ports_open rule for role `{role}` has an empty ports list"
+                )));
+            }
+            Ok(CompiledRoleRule::PortsOpen { ports, role })
+        }
     }
 }
 
@@ -260,13 +345,17 @@ fn platform_rule_match(rule: &CompiledRule, record: &DeviceRecord) -> Option<Pla
     None
 }
 
-fn role_rule_matches(rule: &RoleRule, record: &DeviceRecord) -> bool {
+fn role_rule_matches(rule: &CompiledRoleRule, record: &DeviceRecord) -> bool {
     match rule {
-        RoleRule::SysObjectIdPrefix { prefix, .. } => record
+        CompiledRoleRule::SysObjectIdPrefix { prefix, .. } => record.signals.iter().any(
+            |s| matches!(s, Signal::SnmpSysObjectId(value) if oid::has_arc_prefix(value, prefix)),
+        ),
+        CompiledRoleRule::SignalMatch { signal, regex, .. } => record
             .signals
             .iter()
-            .any(|s| matches!(s, Signal::SnmpSysObjectId(oid) if oid.starts_with(prefix.as_str()))),
-        RoleRule::PortsOpen { ports, .. } => ports.iter().all(|want| {
+            .filter_map(|s| signal_text_for(s, *signal))
+            .any(|text| regex.is_match(text)),
+        CompiledRoleRule::PortsOpen { ports, .. } => ports.iter().all(|want| {
             record
                 .signals
                 .iter()
@@ -275,21 +364,36 @@ fn role_rule_matches(rule: &RoleRule, record: &DeviceRecord) -> bool {
     }
 }
 
-fn role_of(rule: &RoleRule) -> &str {
+fn role_of(rule: &CompiledRoleRule) -> &str {
     match rule {
-        RoleRule::SysObjectIdPrefix { role, .. } | RoleRule::PortsOpen { role, .. } => {
-            role.as_str()
-        }
+        CompiledRoleRule::SysObjectIdPrefix { role, .. }
+        | CompiledRoleRule::SignalMatch { role, .. }
+        | CompiledRoleRule::PortsOpen { role, .. } => role.as_str(),
     }
 }
 
-fn signal_text_for(signal: &Signal, want: PlatformSignal) -> Option<&str> {
-    match (signal, want) {
-        (Signal::SnmpSysDescr(s), PlatformSignal::SnmpSysDescr) => Some(s.as_str()),
-        (Signal::SshBanner(s), PlatformSignal::SshBanner) => Some(s.as_str()),
-        (Signal::HttpBanner(s), PlatformSignal::HttpBanner) => Some(s.as_str()),
-        (Signal::SnmpSysName(s), PlatformSignal::SnmpSysName) => Some(s.as_str()),
-        _ => None,
+fn signal_text_for(signal: &Signal, want: SignalKind) -> Option<&str> {
+    match want {
+        SignalKind::SnmpSysDescr => match signal {
+            Signal::SnmpSysDescr(s) => Some(s.as_str()),
+            _ => None,
+        },
+        SignalKind::SshBanner => match signal {
+            Signal::SshBanner(s) => Some(s.as_str()),
+            _ => None,
+        },
+        SignalKind::HttpBanner => match signal {
+            Signal::HttpBanner(s) => Some(s.as_str()),
+            _ => None,
+        },
+        SignalKind::SnmpSysName => match signal {
+            Signal::SnmpSysName(s) => Some(s.as_str()),
+            _ => None,
+        },
+        SignalKind::SnmpSysObjectId => match signal {
+            Signal::SnmpSysObjectId(s) => Some(s.as_str()),
+            _ => None,
+        },
     }
 }
 
@@ -305,6 +409,16 @@ mod tests {
         Confidence, IdentityKey, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
     };
     use crate::model::scan::ScanMetadata;
+
+    fn wire_name(kind: SignalKind) -> &'static str {
+        match kind {
+            SignalKind::SnmpSysDescr => "snmp_sys_descr",
+            SignalKind::SshBanner => "ssh_banner",
+            SignalKind::HttpBanner => "http_banner",
+            SignalKind::SnmpSysName => "snmp_sys_name",
+            SignalKind::SnmpSysObjectId => "snmp_sys_object_id",
+        }
+    }
 
     fn empty_record() -> DeviceRecord {
         DeviceRecord {
@@ -447,7 +561,7 @@ mod tests {
         assert_send_sync::<Box<dyn Classifier>>();
         assert_send_sync::<ClassifierConfig>();
         assert_send_sync::<PlatformRule>();
-        assert_send_sync::<PlatformSignal>();
+        assert_send_sync::<SignalKind>();
         assert_send_sync::<MergeMode>();
         assert_send_sync::<RoleRule>();
     }
@@ -484,7 +598,7 @@ mod tests {
     #[test]
     fn rules_classifier_first_matching_rule_wins() {
         let user = vec![PlatformRule {
-            signal: PlatformSignal::SnmpSysDescr,
+            signal: SignalKind::SnmpSysDescr,
             pattern: r"Cisco".to_string(),
             platform: "user_cisco".to_string(),
             os_version_capture: None,
@@ -599,7 +713,7 @@ mod tests {
     #[test]
     fn rules_classifier_merge_mode_extend_prepends_user_rules() {
         let user = vec![PlatformRule {
-            signal: PlatformSignal::SnmpSysDescr,
+            signal: SignalKind::SnmpSysDescr,
             pattern: r"^Cisco IOS Software".to_string(),
             platform: "user_defined".to_string(),
             os_version_capture: None,
@@ -617,7 +731,7 @@ mod tests {
     #[test]
     fn rules_classifier_merge_mode_replace_uses_only_user_rules() {
         let user = vec![PlatformRule {
-            signal: PlatformSignal::SnmpSysDescr,
+            signal: SignalKind::SnmpSysDescr,
             pattern: r"^SomethingElse".to_string(),
             platform: "user_only".to_string(),
             os_version_capture: None,
@@ -638,7 +752,7 @@ mod tests {
     #[test]
     fn rules_classifier_invalid_regex_fails_at_construction() {
         let user = vec![PlatformRule {
-            signal: PlatformSignal::SnmpSysDescr,
+            signal: SignalKind::SnmpSysDescr,
             pattern: r"(unclosed".to_string(),
             platform: "irrelevant".to_string(),
             os_version_capture: None,
@@ -657,7 +771,7 @@ mod tests {
     #[test]
     fn rules_classifier_missing_capture_group_soft_fails_version() {
         let user = vec![PlatformRule {
-            signal: PlatformSignal::SshBanner,
+            signal: SignalKind::SshBanner,
             pattern: r"^SSH-2\.0-OpenSSH".to_string(),
             platform: "openssh".to_string(),
             os_version_capture: Some("nonexistent".to_string()),
@@ -678,7 +792,7 @@ mod tests {
     #[test]
     fn rules_classifier_snmp_sys_name_signal_kind_matches() {
         let user = vec![PlatformRule {
-            signal: PlatformSignal::SnmpSysName,
+            signal: SignalKind::SnmpSysName,
             pattern: r"^Cisco-Nexus-(?P<version>\d+)".to_string(),
             platform: "cisco_nxos".to_string(),
             os_version_capture: Some("version".to_string()),
@@ -708,7 +822,7 @@ mod tests {
     #[test]
     fn baked_rules_match_realistic_fixtures() {
         struct Case {
-            signal_kind: PlatformSignal,
+            signal_kind: SignalKind,
             input: &'static str,
             platform: &'static str,
             os_version: Option<&'static str>,
@@ -719,7 +833,7 @@ mod tests {
 
         let cases: &[Case] = &[
             Case {
-                signal_kind: PlatformSignal::SnmpSysDescr,
+                signal_kind: SignalKind::SnmpSysDescr,
                 input: "Cisco IOS Software, C3560CX Software (C3560CX-UNIVERSALK9-M), Version 15.2(7)E4, RELEASE SOFTWARE",
                 platform: "cisco_ios",
                 os_version: Some("15.2"),
@@ -728,7 +842,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SnmpSysDescr,
+                signal_kind: SignalKind::SnmpSysDescr,
                 input: "Cisco IOS XR Software, Version 7.5.2, RELEASE SOFTWARE",
                 platform: "cisco_ios_xr",
                 os_version: Some("7.5.2"),
@@ -737,7 +851,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SnmpSysDescr,
+                signal_kind: SignalKind::SnmpSysDescr,
                 input: "Cisco NX-OS(tm) n9000, Software (nxos), Version 9.3(10), RELEASE SOFTWARE",
                 platform: "cisco_nxos",
                 os_version: Some("9.3"),
@@ -746,7 +860,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SnmpSysDescr,
+                signal_kind: SignalKind::SnmpSysDescr,
                 input: "Juniper Networks, Inc. mx240 internet router, kernel JUNOS 21.4R3-S4.9",
                 platform: "junos",
                 os_version: Some("21.4"),
@@ -755,7 +869,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SnmpSysDescr,
+                signal_kind: SignalKind::SnmpSysDescr,
                 input: "Arista Networks EOS version 4.29.3M running on an Arista Networks DCS-7060CX2-32S",
                 platform: "arista_eos",
                 os_version: Some("4.29.3"),
@@ -764,7 +878,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SnmpSysDescr,
+                signal_kind: SignalKind::SnmpSysDescr,
                 input: "Linux hostname 5.15.0-91-generic #101-Ubuntu SMP Wed Nov 15 20:12:47 UTC 2023",
                 platform: "linux",
                 os_version: Some("5.15.0"),
@@ -773,7 +887,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SshBanner,
+                signal_kind: SignalKind::SshBanner,
                 input: "SSH-2.0-OpenSSH_9.0p1 Ubuntu-3ubuntu0.1",
                 platform: "linux",
                 os_version: Some("Ubuntu"),
@@ -782,7 +896,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SshBanner,
+                signal_kind: SignalKind::SshBanner,
                 input: "SSH-2.0-OpenSSH_9.2p1 Debian-1",
                 platform: "linux",
                 os_version: Some("Debian"),
@@ -791,7 +905,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::SshBanner,
+                signal_kind: SignalKind::SshBanner,
                 input: "SSH-2.0-OpenSSH_9.5 FreeBSD-20231016",
                 platform: "freebsd",
                 os_version: Some("FreeBSD"),
@@ -800,7 +914,7 @@ mod tests {
                 http_version: None,
             },
             Case {
-                signal_kind: PlatformSignal::HttpBanner,
+                signal_kind: SignalKind::HttpBanner,
                 input: "nginx/1.24.0",
                 platform: "linux",
                 os_version: None,
@@ -809,7 +923,7 @@ mod tests {
                 http_version: Some("1.24.0"),
             },
             Case {
-                signal_kind: PlatformSignal::HttpBanner,
+                signal_kind: SignalKind::HttpBanner,
                 input: "Apache/2.4.58 (Ubuntu)",
                 platform: "linux",
                 os_version: None,
@@ -823,10 +937,11 @@ mod tests {
         for case in cases {
             let mut record = empty_record();
             let signal = match case.signal_kind {
-                PlatformSignal::SnmpSysDescr => Signal::SnmpSysDescr(case.input.to_string()),
-                PlatformSignal::SshBanner => Signal::SshBanner(case.input.to_string()),
-                PlatformSignal::HttpBanner => Signal::HttpBanner(case.input.to_string()),
-                PlatformSignal::SnmpSysName => Signal::SnmpSysName(case.input.to_string()),
+                SignalKind::SnmpSysDescr => Signal::SnmpSysDescr(case.input.to_string()),
+                SignalKind::SshBanner => Signal::SshBanner(case.input.to_string()),
+                SignalKind::HttpBanner => Signal::HttpBanner(case.input.to_string()),
+                SignalKind::SnmpSysName => Signal::SnmpSysName(case.input.to_string()),
+                SignalKind::SnmpSysObjectId => Signal::SnmpSysObjectId(case.input.to_string()),
             };
             record.signals.push(signal);
             classifier.classify(&mut record).expect("classify ok");
@@ -990,17 +1105,35 @@ role: router
     }
 
     #[test]
-    fn platform_signal_serializes_snake_case() {
-        for (variant, wire) in [
-            (PlatformSignal::SnmpSysDescr, "\"snmp_sys_descr\""),
-            (PlatformSignal::SshBanner, "\"ssh_banner\""),
-            (PlatformSignal::HttpBanner, "\"http_banner\""),
-            (PlatformSignal::SnmpSysName, "\"snmp_sys_name\""),
-        ] {
-            let s = serde_json::to_string(&variant).expect("serialize");
-            assert_eq!(s, wire);
-            let back: PlatformSignal = serde_json::from_str(&s).expect("deserialize");
-            assert_eq!(back, variant);
+    fn signal_kind_all_lists_every_variant_exactly_once() {
+        let mut covered = [false; SIGNAL_KIND_COUNT];
+        for kind in *SignalKind::all() {
+            let index = kind.index();
+            assert!(
+                index < SIGNAL_KIND_COUNT,
+                "{kind:?} indexes past SIGNAL_KIND_COUNT; bump the constant"
+            );
+            assert!(
+                !covered[index],
+                "{kind:?} appears twice in SignalKind::all()"
+            );
+            covered[index] = true;
+        }
+        assert!(
+            covered.iter().all(|seen| *seen),
+            "a SignalKind variant is missing from SignalKind::all()"
+        );
+    }
+
+    #[test]
+    fn signal_kind_serializes_snake_case() {
+        let mut wires = std::collections::HashSet::new();
+        for kind in *SignalKind::all() {
+            let s = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(s, format!("\"{}\"", wire_name(kind)));
+            assert!(wires.insert(s.clone()), "duplicate wire name {s}");
+            let back: SignalKind = serde_json::from_str(&s).expect("deserialize");
+            assert_eq!(back, kind);
         }
     }
 
@@ -1184,10 +1317,10 @@ role: router
             Ok(_) => panic!("empty prefix must fail construction"),
             Err(e) => e,
         };
-        assert!(matches!(
-            err,
-            RastreoError::Classifier(ClassifierError::InvalidRoleRule(_))
-        ));
+        let RastreoError::Classifier(ClassifierError::InvalidRoleRule(message)) = err else {
+            panic!("expected InvalidRoleRule, got {err:?}");
+        };
+        assert!(message.contains("empty prefix"), "message was: {message}");
     }
 
     #[test]
@@ -1253,6 +1386,376 @@ role: router
                 Some(*expected_role),
                 "fixture ports {ports:?} should classify to `{expected_role}`"
             );
+        }
+    }
+
+    #[test]
+    fn sys_object_id_prefix_matches_the_exact_oid() {
+        let user = vec![RoleRule::SysObjectIdPrefix {
+            prefix: "1.3.6.1.4.1.6527.1.20.26".into(),
+            role: "switch".into(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysObjectId("1.3.6.1.4.1.6527.1.20.26".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("switch"));
+    }
+
+    #[test]
+    fn sys_object_id_prefix_does_not_match_a_sibling_subtree() {
+        let user = vec![RoleRule::SysObjectIdPrefix {
+            prefix: "1.3.6.1.4.1.9.1".into(),
+            role: "router".into(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        for sibling in ["1.3.6.1.4.1.9.15.2", "1.3.6.1.4.1.9.12", "1.3.6.1.4.1.9.1x"] {
+            let mut record = empty_record();
+            record
+                .signals
+                .push(Signal::SnmpSysObjectId(sibling.to_string()));
+            c.classify(&mut record).expect("classify ok");
+            assert_eq!(
+                record.role, None,
+                "`{sibling}` is outside the 1.3.6.1.4.1.9.1 subtree"
+            );
+        }
+    }
+
+    #[test]
+    fn sys_object_id_prefix_with_a_leading_dot_fails_construction() {
+        let user = vec![RoleRule::SysObjectIdPrefix {
+            prefix: ".1.3.6.1.4.1.9.1".into(),
+            role: "router".into(),
+        }];
+        let err = match create_classifier(&replace_role_rules(user)) {
+            Ok(_) => panic!("a leading-dot prefix matches nothing and must fail construction"),
+            Err(e) => e,
+        };
+        let RastreoError::Classifier(ClassifierError::InvalidRoleRule(message)) = err else {
+            panic!("expected InvalidRoleRule, got {err:?}");
+        };
+        assert!(message.contains("dotted-decimal"), "message was: {message}");
+    }
+
+    #[test]
+    fn sys_object_id_prefix_with_a_malformed_arc_fails_construction() {
+        for prefix in ["1.3.6.1.4.1.9.", "1.3.6 .1", "iso.3.6.1", "1"] {
+            let user = vec![RoleRule::SysObjectIdPrefix {
+                prefix: prefix.into(),
+                role: "router".into(),
+            }];
+            assert!(
+                matches!(
+                    create_classifier(&replace_role_rules(user)),
+                    Err(RastreoError::Classifier(ClassifierError::InvalidRoleRule(
+                        _
+                    )))
+                ),
+                "`{prefix}` is not a dotted-decimal OID and must fail construction"
+            );
+        }
+    }
+
+    #[test]
+    fn signal_match_role_rule_reads_snmp_sys_object_id() {
+        let user = vec![RoleRule::SignalMatch {
+            signal: SignalKind::SnmpSysObjectId,
+            pattern: r"^1\.3\.6\.1\.4\.1\.6527\.".to_string(),
+            role: "switch".to_string(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysObjectId("1.3.6.1.4.1.6527.1.20.26".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("switch"));
+    }
+
+    #[test]
+    fn signal_match_role_rule_reads_snmp_sys_name() {
+        let user = vec![RoleRule::SignalMatch {
+            signal: SignalKind::SnmpSysName,
+            pattern: r"-spine\d+$".to_string(),
+            role: "spine".to_string(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysName("dc1-spine01".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("spine"));
+    }
+
+    #[test]
+    fn signal_match_role_rule_ignores_other_signal_kinds() {
+        let user = vec![RoleRule::SignalMatch {
+            signal: SignalKind::SnmpSysName,
+            pattern: r"spine".to_string(),
+            role: "spine".to_string(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysDescr("spine switch, Version 1.0".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role, None);
+    }
+
+    #[test]
+    fn signal_match_role_rule_leaves_role_null_when_the_pattern_misses() {
+        let user = vec![RoleRule::SignalMatch {
+            signal: SignalKind::SnmpSysName,
+            pattern: r"^edge-".to_string(),
+            role: "edge".to_string(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysName("dc1-spine01".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role, None);
+    }
+
+    #[test]
+    fn signal_match_role_rule_invalid_regex_fails_at_construction() {
+        let user = vec![RoleRule::SignalMatch {
+            signal: SignalKind::SnmpSysName,
+            pattern: r"(unclosed".to_string(),
+            role: "irrelevant".to_string(),
+        }];
+        assert!(matches!(
+            create_classifier(&replace_role_rules(user)),
+            Err(RastreoError::Classifier(
+                ClassifierError::InvalidRegex { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn platform_rule_reads_snmp_sys_object_id() {
+        let user = vec![PlatformRule {
+            signal: SignalKind::SnmpSysObjectId,
+            pattern: r"^1\.3\.6\.1\.4\.1\.6527\.".to_string(),
+            platform: "nokia_srlinux".to_string(),
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
+        }];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SnmpSysObjectId("1.3.6.1.4.1.6527.1.20.26".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("nokia_srlinux"));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn role_rule_signal_match_deserializes_from_yaml() {
+        let yaml = r#"
+type: signal_match
+signal: snmp_sys_object_id
+pattern: "^1\\.3\\.6\\.1\\.4\\.1\\.6527\\."
+role: switch
+"#;
+        let rule: RoleRule = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        match rule {
+            RoleRule::SignalMatch {
+                signal,
+                pattern,
+                role,
+            } => {
+                assert_eq!(signal, SignalKind::SnmpSysObjectId);
+                assert_eq!(pattern, r"^1\.3\.6\.1\.4\.1\.6527\.");
+                assert_eq!(role, "switch");
+            }
+            _ => panic!("expected SignalMatch"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_scenario_written_against_the_previous_vocabulary_classifies_unchanged() {
+        let yaml = r#"
+type: rules
+merge_mode: replace
+platform_rules:
+  - signal: snmp_sys_descr
+    pattern: "^Cisco IOS Software.*Version (?P<version>[\\d\\.]+)"
+    platform: cisco_ios
+    os_version_capture: version
+  - signal: ssh_banner
+    pattern: "^SSH-2\\.0-(?P<sshv>OpenSSH_[\\d\\.p]+)"
+    platform: linux
+    ssh_version_capture: sshv
+role_rules:
+  - type: sys_object_id_prefix
+    prefix: "1.3.6.1.4.1.9.1"
+    role: router
+  - type: ports_open
+    ports: [22, 179]
+    role: router
+"#;
+        let cfg: ClassifierConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
+        let c = create_classifier(&cfg).expect("create");
+        let mut record = empty_record();
+        record.signals.push(cisco_ios_sys_descr());
+        record
+            .signals
+            .push(Signal::SnmpSysObjectId("1.3.6.1.4.1.9.1.2050".into()));
+        record.signals.push(Signal::OpenPort(22));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("cisco_ios"));
+        assert_eq!(record.os_version.as_deref(), Some("15.7"));
+        assert_eq!(record.role.as_deref(), Some("router"));
+        assert_eq!(record.ssh_version, None);
+    }
+
+    #[test]
+    fn every_signal_is_rule_addressable_or_excluded_with_a_reason() {
+        const SIGNAL_VARIANT_COUNT: usize = 24;
+
+        // Each arm is const-evaluated, so an index past the count fails to build even though the walk never reaches that arm.
+        const fn slot(index: usize) -> usize {
+            assert!(index < SIGNAL_VARIANT_COUNT);
+            index
+        }
+
+        fn variant_index(signal: &Signal) -> usize {
+            match signal {
+                Signal::OpenPort(_) => const { slot(0) },
+                Signal::HttpBanner(_) => const { slot(1) },
+                Signal::SnmpSysObjectId(_) => const { slot(2) },
+                Signal::SnmpSysDescr(_) => const { slot(3) },
+                Signal::Mac(_) => const { slot(4) },
+                Signal::DnsHost(_) => const { slot(5) },
+                Signal::NtpBanner(_) => const { slot(6) },
+                Signal::SipUserAgent(_) => const { slot(7) },
+                Signal::MemcachedVersion(_) => const { slot(8) },
+                Signal::StunMappedAddress(_) => const { slot(9) },
+                Signal::SnmpSysName(_) => const { slot(10) },
+                Signal::SshBanner(_) => const { slot(11) },
+                Signal::SshHostKey(_) => const { slot(12) },
+                Signal::IcmpEchoRttMicros(_) => const { slot(13) },
+                Signal::TlsSubject(_) => const { slot(14) },
+                Signal::TlsSanName(_) => const { slot(15) },
+                Signal::TlsProtocolVersion(_) => const { slot(16) },
+                Signal::TlsCipherSuite(_) => const { slot(17) },
+                Signal::TlsAlpn(_) => const { slot(18) },
+                Signal::ReverseDnsName(_) => const { slot(19) },
+                Signal::GnmiVersion(_) => const { slot(20) },
+                Signal::GnmiSupportedModel(_) => const { slot(21) },
+                Signal::GnmiSupportedEncoding(_) => const { slot(22) },
+                Signal::GnmiState { .. } => const { slot(23) },
+            }
+        }
+
+        enum Reach {
+            Addressable(SignalKind),
+            NoText,
+            Excluded(&'static str),
+        }
+
+        fn declared_reach(signal: &Signal) -> Reach {
+            match signal {
+                Signal::SnmpSysDescr(_) => Reach::Addressable(SignalKind::SnmpSysDescr),
+                Signal::SnmpSysName(_) => Reach::Addressable(SignalKind::SnmpSysName),
+                Signal::SnmpSysObjectId(_) => Reach::Addressable(SignalKind::SnmpSysObjectId),
+                Signal::SshBanner(_) => Reach::Addressable(SignalKind::SshBanner),
+                Signal::HttpBanner(_) => Reach::Addressable(SignalKind::HttpBanner),
+                Signal::OpenPort(_) => Reach::NoText,
+                Signal::IcmpEchoRttMicros(_) => Reach::NoText,
+                Signal::Mac(_) => Reach::Excluded("correlated by IdentityFuser and surfaced as DeviceRecord::mac"),
+                Signal::DnsHost(_) => Reach::Excluded("resolution artefact of the target spec, not an observation of the device"),
+                Signal::ReverseDnsName(_) => Reach::Excluded("correlated by IdentityFuser"),
+                Signal::SshHostKey(_) => Reach::Excluded("correlated by IdentityFuser; a key fingerprint carries no platform or role text"),
+                Signal::TlsSubject(_) => Reach::Excluded("correlated by IdentityFuser"),
+                Signal::TlsSanName(_) => Reach::Excluded("correlated by IdentityFuser"),
+                Signal::TlsProtocolVersion(_) => Reach::Excluded("transport negotiation, not a device attribute"),
+                Signal::TlsCipherSuite(_) => Reach::Excluded("transport negotiation, not a device attribute"),
+                Signal::TlsAlpn(_) => Reach::Excluded("transport negotiation, not a device attribute"),
+                Signal::NtpBanner(_) => Reach::Excluded("service banner; no rule kind reads it yet"),
+                Signal::SipUserAgent(_) => Reach::Excluded("service banner; no rule kind reads it yet"),
+                Signal::MemcachedVersion(_) => Reach::Excluded("service banner; no rule kind reads it yet"),
+                Signal::StunMappedAddress(_) => Reach::Excluded("NAT observation, not a device attribute"),
+                Signal::GnmiVersion(_) => Reach::Excluded("capability data owned by the collection profile"),
+                Signal::GnmiSupportedModel(_) => Reach::Excluded("capability data owned by the collection profile"),
+                Signal::GnmiSupportedEncoding(_) => Reach::Excluded("capability data owned by the collection profile"),
+                Signal::GnmiState { .. } => Reach::Excluded("state values can be sensitive and are kept out of downstream records"),
+            }
+        }
+
+        let text = "text".to_string();
+        let walked: [Signal; SIGNAL_VARIANT_COUNT] = [
+            Signal::OpenPort(22),
+            Signal::HttpBanner(text.clone()),
+            Signal::SnmpSysObjectId(text.clone()),
+            Signal::SnmpSysDescr(text.clone()),
+            Signal::Mac(text.clone()),
+            Signal::DnsHost(text.clone()),
+            Signal::NtpBanner(text.clone()),
+            Signal::SipUserAgent(text.clone()),
+            Signal::MemcachedVersion(text.clone()),
+            Signal::StunMappedAddress(text.clone()),
+            Signal::SnmpSysName(text.clone()),
+            Signal::SshBanner(text.clone()),
+            Signal::SshHostKey(text.clone()),
+            Signal::IcmpEchoRttMicros(1),
+            Signal::TlsSubject(text.clone()),
+            Signal::TlsSanName(text.clone()),
+            Signal::TlsProtocolVersion(text.clone()),
+            Signal::TlsCipherSuite(text.clone()),
+            Signal::TlsAlpn(text.clone()),
+            Signal::ReverseDnsName(text.clone()),
+            Signal::GnmiVersion(text.clone()),
+            Signal::GnmiSupportedModel(text.clone()),
+            Signal::GnmiSupportedEncoding(text.clone()),
+            Signal::GnmiState {
+                path: text.clone(),
+                value: text,
+            },
+        ];
+        let mut covered = [false; SIGNAL_VARIANT_COUNT];
+        for signal in &walked {
+            let index = variant_index(signal);
+            assert!(!covered[index], "{signal:?} appears twice in the walk");
+            covered[index] = true;
+        }
+        assert!(
+            covered.iter().all(|seen| *seen),
+            "a Signal variant is missing from this walk; variant_index names every one"
+        );
+
+        for signal in &walked {
+            match declared_reach(signal) {
+                Reach::Addressable(kind) => assert!(
+                    signal_text_for(signal, kind).is_some(),
+                    "{signal:?} is declared addressable as {kind:?} but signal_text_for does not read it"
+                ),
+                Reach::NoText | Reach::Excluded(_) => {
+                    for kind in *SignalKind::all() {
+                        assert!(
+                            signal_text_for(signal, kind).is_none(),
+                            "{signal:?} is outside the rule vocabulary but {kind:?} reads it"
+                        );
+                    }
+                }
+            }
+            if let Reach::Excluded(reason) = declared_reach(signal) {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{signal:?} is excluded without a stated reason"
+                );
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ pub mod fuser;
 pub mod hints;
 pub mod model;
 pub mod observability;
+pub(crate) mod oid;
 pub mod pipeline;
 pub mod plan;
 pub mod prober;
@@ -23,7 +24,7 @@ pub use checkpoint::{
 };
 pub use classifier::{
     create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
-    PlatformSignal, RoleRule, RulesClassifier,
+    RoleRule, RulesClassifier, SignalKind, SIGNAL_KIND_COUNT,
 };
 pub use collection_profile::CollectionProfileAssembler;
 pub use encoder::{

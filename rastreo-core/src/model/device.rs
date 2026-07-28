@@ -153,7 +153,7 @@ pub struct DeviceRecord {
     /// Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `"1.24.0"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
-    /// Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open` and `sys_object_id_prefix` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.
+    /// Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open`, `sys_object_id_prefix`, and `signal_match` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.
     pub role: Option<String>,
     /// Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.
     pub confidence: Confidence,

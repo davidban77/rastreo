@@ -44,21 +44,12 @@ mod tests {
     }
 
     #[test]
-    fn baked_rules_sys_object_id_precedes_ports_open() {
-        let rules = baked_role_rules();
-        let mut seen_ports = false;
-        for rule in &rules {
-            match rule {
-                RoleRule::SysObjectIdPrefix { .. } => {
-                    assert!(
-                        !seen_ports,
-                        "sys_object_id_prefix rule appeared after a ports_open rule"
-                    );
-                }
-                RoleRule::PortsOpen { .. } => {
-                    seen_ports = true;
-                }
-            }
+    fn baked_rules_ship_no_vendor_oid_or_signal_table() {
+        for rule in baked_role_rules_with_port_heuristics() {
+            assert!(
+                matches!(rule, RoleRule::PortsOpen { .. }),
+                "the shipped tables are port-evidence only; a curated vendor table belongs in a user's scenario"
+            );
         }
     }
 

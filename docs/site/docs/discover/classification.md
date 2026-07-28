@@ -16,7 +16,7 @@ Two classifier variants ship: `rules` (the default — regex-driven platform det
 
 | Classifier | Behaviour |
 |---|---|
-| `rules` | Runs a platform phase (regex patterns against `SnmpSysDescr`, `SnmpSysName`, `SshBanner`, `HttpBanner`) then a role phase (`SnmpSysObjectId` byte-prefix and `OpenPort` set-membership matching). First match per phase wins. Selected when the scenario does not configure a classifier, running the baked-in tables on their own. |
+| `rules` | Runs a platform phase (regex patterns against a named signal kind) then a role phase (`sysObjectID` subtree containment, regex against a named signal kind, and `OpenPort` set-membership matching). First match per phase wins. Selected when the scenario does not configure a classifier, running the baked-in tables on their own. |
 | `noop` | Leaves every `DeviceRecord` unchanged. `platform`, `os_version`, `ssh_version`, `http_server`, `http_version`, and `role` stay `null`. Select it explicitly to get raw signals with no canonical fields derived from them. |
 
 ## Pipeline position
@@ -68,7 +68,21 @@ Because it is the default, every scan populates `platform` and `role` on records
 
 Add your own rules for anything the defaults do not cover — in particular, `sys_object_id_prefix` role rules against your own devices' `sysObjectID` values (rastreo ships no baked defaults for OID prefixes; see [Baked-in role rules](#baked-in-role-rules) for why).
 
-Platform rule patterns are validated when the classifier is built. A pattern that fails to compile is rejected before the scan starts, not silently ignored at match time. Role rules are validated similarly — a `ports_open` rule with an empty `ports` list is rejected at construction.
+Rules are validated when the classifier is built, not at match time: a regex that fails to compile, a `ports_open` rule with an empty `ports` list, and a `sys_object_id_prefix` whose prefix is not a dotted-decimal OID are all rejected before the scan starts.
+
+### Signal kinds
+
+Platform rules and `signal_match` role rules address signals through the same vocabulary. Whichever rule kind you are writing, `signal` takes one of these values:
+
+| `signal` | Emitted by | What it is good for |
+|---|---|---|
+| `snmp_sys_descr` | `snmp` | Platform and OS version. The richest banner most network devices publish. |
+| `snmp_sys_object_id` | `snmp` | Vendor, model, and role. The enterprise arc — `6527` in `1.3.6.1.4.1.6527.1.20.26` — names the vendor unambiguously, which makes it the strongest evidence SNMP hands you. |
+| `snmp_sys_name` | `snmp` | Role, if your fleet follows a hostname convention such as `dc1-spine01`. Weak platform evidence: a hostname is whatever the operator typed. |
+| `ssh_banner` | `ssh` | Platform, OS version, and SSH software. |
+| `http_banner` | `http` | Web-server product and version. Weak platform evidence: nginx and Apache run on every OS. |
+
+A rule naming a signal kind the record does not carry simply does not match — no error, no partial classification. That means you can write rules against `snmp_sys_object_id` and keep them in a scenario you also run without the SNMP prober.
 
 ## Baked-in platform rules
 
@@ -98,7 +112,7 @@ The baked-in rules are evaluated in the order shown below. SNMP `sysDescr` rules
     - No container-runtime detection — Docker, containerd, and Kubernetes ingress do not expose stable identifiers in HTTP `Server` headers.
     - No load-balancer, proxy, or CDN detection — HAProxy, Envoy, Traefik, Cloudflare, and similar are not matched.
     - No firewall or SD-WAN detection — Palo Alto, Fortinet, Check Point, and similar require SNMP OID or vendor-specific probes not yet implemented.
-    - SNMP `sysName` rules ship no defaults — the `snmp_sys_name` signal kind is supported but only user rules use it today.
+    - SNMP `sysName` and `sysObjectID` rules ship no defaults — both signal kinds are available to platform rules, but only user rules use them today.
 
     Add your own rules under `platform_rules` to cover any of these — see [Extending the rule set](#extending-the-rule-set).
 
@@ -153,14 +167,14 @@ The first two entries repeat the defaults so they keep their precedence; the bak
 !!! info "Why no baked-in SNMP `sysObjectID` rules"
     `sys_object_id_prefix` is a first-class role-rule kind — a user can supply their own list under `role_rules` and it will be evaluated before the baked-in port rules. rastreo ships no baked defaults for it because no public vendor MIB tree cleanly maps sub-prefixes to device roles at a level rastreo could ship a defensible default for: the common vendor product subtrees commingle routers, switches, firewalls, and management gear inside the same prefix, so any curated default would misclassify as often as it helps. Users supply their own `sys_object_id_prefix` rules against their fleet's actual OIDs.
 
-    To classify by `sysObjectID` today, add rules that match the exact OID prefixes present on your devices:
+    To classify by `sysObjectID` today, add rules that match the OID subtrees present on your devices. Read the values off the devices themselves (`snmpget -v2c -c <community> <host> sysObjectID.0`) rather than out of a MIB browser's tree: a device reports a product OID, and vendors put those in their own product subtree — Cisco's is `ciscoProducts`, `1.3.6.1.4.1.9.1`, not the `ciscoMgmt` MIB-module tree at `1.3.6.1.4.1.9.9`.
 
     ```yaml
     classifier:
       type: rules
       role_rules:
         - type: sys_object_id_prefix
-          prefix: "1.3.6.1.4.1.9.9.109.1"   # verified against your Cisco ASR fleet
+          prefix: "1.3.6.1.4.1.9.1.2050"
           role: "router"
     ```
 
@@ -174,13 +188,50 @@ The first two entries repeat the defaults so they keep their precedence; the bak
 
     Add your own rules under `role_rules` to cover any of these — see [Extending the rule set](#extending-the-rule-set).
 
+## `sys_object_id_prefix` matching
+
+A `sys_object_id_prefix` rule matches when the record carries an `SnmpSysObjectId` signal that either equals `prefix` or sits inside its subtree. Comparison is on whole OID arcs, so a prefix never matches across a subtree boundary:
+
+| `prefix` | `sysObjectID` on the record | Matches |
+|---|---|---|
+| `1.3.6.1.4.1.9.1` | `1.3.6.1.4.1.9.1` | yes — exact |
+| `1.3.6.1.4.1.9.1` | `1.3.6.1.4.1.9.1.2050` | yes — inside the subtree |
+| `1.3.6.1.4.1.9.1` | `1.3.6.1.4.1.9.15.2` | no — `15` is a different arc from `1` |
+| `1.3.6.1.4.1.9.1` | `1.3.6.1.4.1.9` | no — shorter than the prefix |
+
+`prefix` must be dotted-decimal: two or more digit arcs joined by `.`, with no leading dot and no whitespace. A MIB browser will often print the leading-dot form `.1.3.6.1.4.1.9.1` — strip it. rastreo rejects anything else when the classifier is built, because a prefix in another form would review fine and then match nothing for the life of the scan.
+
+## `signal_match` matching
+
+A `signal_match` role rule applies a regex to the text of every signal of one kind on the record and assigns `role` on the first signal that matches. It is the role-phase counterpart to a platform rule: same `signal` vocabulary, same regex engine, same first-match-wins ordering.
+
+Use it where the evidence is textual rather than a clean OID subtree — a hostname convention, or a vendor string in `sysDescr`:
+
+```yaml
+classifier:
+  type: rules
+  role_rules:
+    - type: signal_match
+      signal: snmp_sys_name
+      pattern: "-spine\\d+$"
+      role: "spine"
+    - type: signal_match
+      signal: snmp_sys_descr
+      pattern: "Firewall"
+      role: "firewall"
+```
+
+The pattern is a [Rust `regex`](https://docs.rs/regex) pattern and is unanchored — it matches anywhere in the signal text unless you anchor it with `^` or `$`. Capture groups are allowed but ignored; only platform rules read captures.
+
+Prefer `sys_object_id_prefix` when the OID subtree distinguishes the role cleanly. A `sysObjectID` is assigned by the vendor and cannot be edited on the device; a hostname can be, and frequently is.
+
 ## `ports_open` matching
 
 `ports_open` rules match when **every** port in the `ports` list appears as an `OpenPort` signal on the record. Extra open ports on the device do not cause a mismatch: `ports: [22, 179]` matches a record that also has `OpenPort(443)`, but does not match a record that only has `OpenPort(22)`.
 
 Every prober that opens a TCP connection to a target port emits `Signal::OpenPort(port)` alongside its protocol-specific signals. `tcp_connect`, `http`, `ssh`, and `tls` all satisfy this contract today. A `ports_open` rule matching `[80]` fires against a record produced by any of them.
 
-Because rule evaluation is first-match-wins, ordering matters for role rules with overlapping port sets. A `[22, 179]` rule for `router` must be listed before a `[22]` rule for `host`, otherwise every router with SSH open would classify as `host`. Keep more specific port sets ahead of less specific ones — and remember that `merge_mode: extend` puts *your* whole list ahead of the baked-in defaults, so a single-port rule you add without repeating the defaults first will shadow them. User-supplied `sys_object_id_prefix` rules run before either kind under `extend`, because SNMP fingerprints are more specific evidence of role than a port-only heuristic.
+Because rule evaluation is first-match-wins, ordering matters for role rules with overlapping port sets. A `[22, 179]` rule for `router` must be listed before a `[22]` rule for `host`, otherwise every router with SSH open would classify as `host`. Keep more specific port sets ahead of less specific ones — and remember that `merge_mode: extend` puts *your* whole list ahead of the baked-in defaults, so a single-port rule you add without repeating the defaults first will shadow them. Within your list, rules run in the order you wrote them: rastreo does not reorder by rule kind or evidence strength, so put `sys_object_id_prefix` and `signal_match` rules ahead of your own `ports_open` rules if you want the stronger fingerprint to win.
 
 ## Extending the rule set
 
@@ -189,9 +240,9 @@ The `merge_mode` field controls how user-supplied rules combine with the baked-i
 - `extend` (the default) — user rules are checked first, then the baked-in defaults. Use this when the defaults cover your baseline and you want to add narrower or extra rules on top.
 - `replace` — only user rules run; the baked-in defaults are ignored. Use this when you want full control over what `platform` and `role` are assigned.
 
-Each user `PlatformRule` has three required fields — `signal` (which signal kind to match, one of `snmp_sys_descr`, `snmp_sys_name`, `ssh_banner`, `http_banner`), `pattern` (the regex to compile), and `platform` (the OS label to assign on match) — plus four optional named-capture-group fields that populate the paired fields on the record: `os_version_capture` → `os_version`, `ssh_version_capture` → `ssh_version` (meaningful only with `signal: ssh_banner`), `http_server_capture` → `http_server`, and `http_version_capture` → `http_version` (both meaningful only with `signal: http_banner`). Any capture-group field that is absent, or that names a group not present in the actual match, leaves the paired record field `null`.
+Each user `PlatformRule` has three required fields — `signal` (which signal kind to match, one of the values in [Signal kinds](#signal-kinds)), `pattern` (the regex to compile), and `platform` (the OS label to assign on match) — plus four optional named-capture-group fields that populate the paired fields on the record: `os_version_capture` → `os_version`, `ssh_version_capture` → `ssh_version` (meaningful only with `signal: ssh_banner`), `http_server_capture` → `http_server`, and `http_version_capture` → `http_version` (both meaningful only with `signal: http_banner`). Any capture-group field that is absent, or that names a group not present in the actual match, leaves the paired record field `null`.
 
-Each user `RoleRule` is a tagged object. Two variants exist. A `sys_object_id_prefix` rule carries `prefix` (an SNMP `sysObjectID` byte prefix) and `role` (the label to assign on match). A `ports_open` rule carries `ports` (a non-empty list of ports that must all be present) and `role`.
+Each user `RoleRule` is a tagged object. Three variants exist. A `sys_object_id_prefix` rule carries `prefix` (a dotted-decimal SNMP `sysObjectID` subtree) and `role` (the label to assign on match). A `signal_match` rule carries `signal`, `pattern`, and `role`. A `ports_open` rule carries `ports` (a non-empty list of ports that must all be present) and `role`.
 
 Extending: prepending narrower rules to the baked-in lists.
 
@@ -208,12 +259,16 @@ classifier:
     - type: sys_object_id_prefix
       prefix: "1.3.6.1.4.1.9.12"
       role: "wireless_controller"
+    - type: signal_match
+      signal: snmp_sys_name
+      pattern: "-spine\\d+$"
+      role: "spine"
     - type: ports_open
       ports: [22, 8443]
       role: "management_appliance"
 ```
 
-The user platform rule runs before the baked-in `cisco_ios` rule, so IOS 15.x devices get the more specific `cisco_ios_15` label while IOS 12.x devices fall through to `cisco_ios`. The user role rules run before the baked-in table, so a device matching the wireless-controller OID or the management-appliance port set gets those roles first.
+The user platform rule runs before the baked-in `cisco_ios` rule, so IOS 15.x devices get the more specific `cisco_ios_15` label while IOS 12.x devices fall through to `cisco_ios`. The user role rules run before the baked-in table, so a device matching the wireless-controller OID, the spine hostname convention, or the management-appliance port set gets those roles first.
 
 Replacing: running only user rules.
 
@@ -241,7 +296,7 @@ With `replace`, only the user rules above run. A Cisco IOS device with an `SnmpS
 - Platform rules run before role rules. Both phases evaluate rules in list order; first match per phase wins.
 - Under `merge_mode: extend`, user rules are checked before the baked-in defaults for both phases. Under `merge_mode: replace`, only user rules run.
 - A record whose `platform` is already set (for example by an upstream custom pipeline) is left untouched by the platform phase — `os_version`, `ssh_version`, `http_server`, and `http_version` are not populated either, because the phase skips the rule loop entirely. A record whose `role` is already set is left untouched by the role phase. The classifier never overwrites existing values.
-- Invalid regex patterns and invalid role rules are rejected when the classifier is built, before any record is classified. A `ports_open` rule with an empty `ports` list surfaces as a construction error.
+- Invalid rules are rejected when the classifier is built, before any record is classified. A pattern that fails to compile — in a platform rule or a `signal_match` role rule — a `ports_open` rule with an empty `ports` list, and a `sys_object_id_prefix` that is not dotted-decimal all surface as construction errors.
 - When the winning platform pattern names any capture-group field (`os_version_capture`, `ssh_version_capture`, `http_server_capture`, `http_version_capture`) that does not appear in the actual match, `platform` is set and the paired field stays `null`.
 
 ## See also
