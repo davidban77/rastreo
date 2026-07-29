@@ -331,7 +331,7 @@ fn tee_multiplies_the_second_boxed_future_by_its_child_count() {
 }
 
 #[test]
-fn ndjson_encoding_allocates_one_string_per_rfc3339_timestamp() {
+fn ndjson_encoding_a_record_into_a_sized_buffer_allocates_nothing() {
     let record = fixture_record();
     let encoder = NdjsonEncoder::new();
     let mut buf = Vec::with_capacity(4096);
@@ -343,15 +343,7 @@ fn ndjson_encoding_allocates_one_string_per_rfc3339_timestamp() {
         }
     });
 
-    // One `String` per RFC-3339 timestamp: `last_seen` and `scan_metadata.initiated_at`.
-    assert_eq!(
-        cost,
-        Allocations {
-            count: 2,
-            bytes: cost.bytes
-        },
-        "two RFC-3339 strings; sizes are chrono's buffer strategy, not an invariant"
-    );
+    assert_eq!(cost, Allocations { count: 0, bytes: 0 });
 
     let metadata_only = per_record(|n| {
         for _ in 0..n {
@@ -359,13 +351,7 @@ fn ndjson_encoding_allocates_one_string_per_rfc3339_timestamp() {
             serde_json::to_writer(&mut buf, &record.scan_metadata).expect("encode");
         }
     });
-    assert_eq!(
-        metadata_only,
-        Allocations {
-            count: 1,
-            bytes: metadata_only.bytes
-        }
-    );
+    assert_eq!(metadata_only, Allocations { count: 0, bytes: 0 });
 }
 
 #[test]
@@ -415,5 +401,5 @@ fn encoding_and_emitting_one_record_costs_the_sum_of_both() {
     });
 
     // The derived in-situ figures in CLAUDE.md sum the two groups; this pins that they are additive.
-    assert_eq!(cost.count, 4, "2 encoding the record + 2 emitting it");
+    assert_eq!(cost.count, 2, "0 encoding the record + 2 emitting it");
 }
