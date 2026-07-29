@@ -223,6 +223,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Every other job runs bare cargo, which rewrites a drifted lock instead of failing on it.
+      - name: Lockfile in sync with manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
