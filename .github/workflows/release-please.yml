@@ -8,13 +8,58 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    # cancel-in-progress is false, so a hung run would otherwise block releases for the 6h default.
+    timeout-minutes: 15
     steps:
       - name: Run release-please
+        id: release
         uses: googleapis/release-please-action@v5
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Resolve release branch
+        id: release-branch
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          BRANCH="$(jq -er '.headBranchName' <<<"$RELEASE_PR")"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release branch
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.release-branch.outputs.name }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Install Rust toolchain
+        if: steps.release.outputs.prs_created == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      # release-type "rust" rejects this workspace: virtual root manifest, members inherit version.workspace.
+      - name: Sync Cargo.lock with the release version
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          RELEASE_BRANCH: ${{ steps.release-branch.outputs.name }}
+        run: |
+          cargo update --workspace
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already matches the release version"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: sync Cargo.lock with the release version" -- Cargo.lock
+          git push origin "HEAD:$RELEASE_BRANCH"
