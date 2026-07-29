@@ -32,6 +32,7 @@
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
         { "type": "fix", "section": "Bug Fixes" },
+        { "type": "perf", "section": "Performance" },
         { "type": "docs", "section": "Documentation" },
         { "type": "chore", "section": "Miscellaneous" },
         { "type": "ci", "section": "CI/CD" },
