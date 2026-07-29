@@ -480,7 +480,7 @@
       ]
     },
     "manufacturer": {
-      "description": "Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser, or from the SNMP `sysObjectID` by the MIB enrichment fuser when the OUI is absent. `null` when neither source matched.",
+      "description": "Vendor name resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.",
       "type": [
         "string",
         "null"

@@ -52,7 +52,7 @@ One line on Linux or macOS. Docker and Cargo work too.
 === "Cargo"
 
     ```bash
-    cargo install --path rastreo --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp
+    cargo install --path rastreo --features kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp
     ```
 
     Naming the features matches what the script and the image install. Plain `cargo install --path rastreo` compiles only four probers.

@@ -6,7 +6,7 @@ description: The identity fuser merges per-IP DeviceRecords for the same device 
 
 A single network device often answers on several IP addresses at once. It has a management address, one address per network interface, and sometimes a shared "virtual" address that two redundant routers answer on together (a failover protocol called VRRP). Every prober in rastreo targets IPs, so without an identity pass each of those IPs produces its own `DeviceRecord` and a downstream reconciler (Nautobot, NetBox, Infrahub) has to figure out on its own that they belong to the same device. That's what `identity` does: it runs after per-IP fusion and merges records that share identity signals into one record whose `mgmt_ip` is the primary address and whose `alt_ips` list the secondary addresses.
 
-The identity fuser is a *wrapper fuser*: it delegates the per-IP fusion to an inner fuser (typically `direct`, optionally wrapped by `oui_enrichment`), then runs union-find over the resulting records to group those that share identity signals.
+The identity fuser is a *wrapper fuser*: it delegates the per-IP fusion to an inner fuser (typically `direct`, optionally wrapped by an enrichment fuser), then runs union-find over the resulting records to group those that share identity signals.
 
 ## When to use it
 
@@ -16,15 +16,12 @@ If every target in the scan is a single-IP host (a laptop, a container, a VM wit
 
 ## Composition
 
-`identity` wraps another fuser. The recommended stack, in the order records pass through it:
+`identity` wraps another fuser and must be the outermost one. The simplest stack, in the order records pass through it:
 
 ```mermaid
 flowchart LR
-    D[direct] --> O[oui_enrichment]
-    O --> I[identity]
+    D[direct] --> I[identity]
 ```
-
-`direct` does per-IP fusion. `oui_enrichment` looks up the vendor from the MAC. `identity` then runs across the enriched records — order matters because the identity fuser uses the `manufacturer` field to detect conflicting-vendor pairs and refuse to merge them, so `oui_enrichment` needs to run first.
 
 In YAML:
 
@@ -32,19 +29,27 @@ In YAML:
 fuser:
   type: identity
   inner:
-    type: oui_enrichment
-    inner:
-      type: direct
+    type: direct
 ```
 
-The three-layer stack is the common case. If you don't have the `oui` build feature enabled or don't care about vendor tagging, wrap `direct` directly:
+Put an [enrichment fuser](enrichment.md) between the two when you want vendor and model on the merged record:
+
+```mermaid
+flowchart LR
+    D[direct] --> M[mib_enrichment]
+    M --> I[identity]
+```
 
 ```yaml
 fuser:
   type: identity
   inner:
-    type: direct
+    type: mib_enrichment
+    inner:
+      type: direct
 ```
+
+Order matters here: the identity fuser reads the `manufacturer` field to spot conflicting-vendor pairs and refuse to merge them, so enrichment has to have run before it.
 
 ## Signals used for identity fusion
 
@@ -58,12 +63,12 @@ The identity fuser weights pairs of records based on the identity signals they s
 | `SnmpSysName` | +0.5 | No | Case-insensitive equality on the `sysName` value from any SNMP prober outcome. Empty strings do not count. |
 | `TlsSanName` | +0.5 | No | Any single overlap in the two records' SAN lists counts once. DNS names and IP-prefixed entries (`ip:10.0.0.1`) match uniformly by byte-exact equality. |
 | `TlsSubject` | +0.3 | No | Byte-exact match on the Subject Common Name. Alone contributes to the low band; combined with a shared `TlsSanName` (+0.5) it reaches the high band. |
-| Conflicting `manufacturer` | −0.3 | penalty | Applied when both records have a non-null `manufacturer` and the values differ. Only meaningful when `oui_enrichment` has populated the field. |
+| Conflicting `manufacturer` | −0.3 | penalty | Applied when both records have a non-null `manufacturer` and the values differ. Only meaningful when an [enrichment fuser](enrichment.md) has populated the field. |
 
 `SshHostKey` is the strongest single-signal correlator the fuser has today. Host keys survive interface changes and IP renumbering, so two IPs that present the same key are the same device. TLS is the newest signal group: `TlsSubject` alone sits in the low band because Subject Common Names are often generic (`localhost`, `nginx`, wildcard-like patterns), and `TlsSanName` alone lands in the medium band; together they stand as high-band evidence that two records present the same certificate identity. `ReverseDnsName` is a third hostname-based correlator alongside `SnmpSysName` and TLS SANs — a PTR name shared across two IPs is a strong hint the same device answers on both addresses.
 
 !!! warning "Conflicting manufacturer with a matching host key"
-    Two records that share a host key (+0.8) but disagree on `manufacturer` (−0.3) land at 0.5, the medium band. The records are **not** auto-merged; instead each record's [`possible_alias_of`](#confidence-bands) is populated with the peer's `identity_key`. That combination is rare and worth investigating. A benign cause is a device that had its primary NIC swapped between scans, which changed the OUI-derived vendor. A suspicious cause is a cloned or stolen host key running on different vendor hardware.
+    Two records that share a host key (+0.8) but disagree on `manufacturer` (−0.3) land at 0.5, the medium band. The records are **not** auto-merged; instead each record's [`possible_alias_of`](#confidence-bands) is populated with the peer's `identity_key`. That combination is rare and worth investigating. A benign cause is a chassis replaced between scans under the same host key, which changed the vendor the enricher resolved. A suspicious cause is a cloned or stolen host key running on different vendor hardware.
 
     A populated `possible_alias_of` means: another record in the same scan looks like the same device, but the evidence is not strong enough to fold them together — a human should decide.
 
@@ -190,9 +195,7 @@ scenarios:
     fuser:
       type: identity
       inner:
-        type: oui_enrichment
-        inner:
-          type: direct
+        type: direct
 ```
 
 With SNMP returning `sysName: core-sw01` on all three IPs and ARP returning the same MAC, the output contains one record:
@@ -213,6 +216,6 @@ With SNMP returning `sysName: core-sw01` on all three IPs and ARP returning the 
 ## See also
 
 - [Scenario reference](../reference/scenario.md#identity) — full field table for `identity` and `identity_hints`.
-- [Enrichment](enrichment.md) — how `oui_enrichment` populates the `manufacturer` field the identity fuser uses for conflict detection.
+- [Enrichment](enrichment.md) — how `mib_enrichment` populates the `manufacturer` field the identity fuser uses for conflict detection.
 - [SNMP prober](../probe/snmp.md) — where the `sysName` signal comes from.
 - [ARP prober](../probe/arp.md) and [NDP prober](../probe/ndp.md) — where the MAC signal comes from.

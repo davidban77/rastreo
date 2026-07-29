@@ -60,7 +60,7 @@ Both binaries are installed into `~/.cargo/bin/`. If `cargo` was set up by `rust
     The commands above build with default features, so only `tcp_connect`, `udp`, `dns`, and `reverse_dns` are compiled in. A scan with no `--probe` then runs `tcp_connect` and `reverse_dns` alone, where the released binaries run seven kinds. Name the features you want to match them:
 
     ```bash
-    cargo install --path rastreo --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp
+    cargo install --path rastreo --features kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp
     ```
 
     That is the set the release tarballs and the Docker image are built with. `--probe <kind>` on a build without the matching feature fails with a message naming the feature to add. See [Choosing probers](../discover/cli.md#choosing-probers).

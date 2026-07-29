@@ -120,7 +120,7 @@ Kept out on purpose — production consumers should add these:
 
 ## Not currently mapped
 
-`manufacturer` is present on the `DeviceRecord` (populated from the OUI database) but is not linked to `dcim.Manufacturer` in Nautobot. Nautobot 2.x derives `Device.manufacturer` from `Device.device_type.manufacturer`, so a reference implementation would need to look up or synthesize a matching `dcim.DeviceType` per (manufacturer, model) pair. That round-trip is out of scope here — an ops team that wants it can extend `nautobot.py`'s create/patch paths to resolve a `device_type` name from `record.manufacturer` (and a model attribute of their choosing) before calling `dcim.devices.create` / `update`.
+`manufacturer` is present on the `DeviceRecord` (populated from the SNMP `sysObjectID` lookup) but is not linked to `dcim.Manufacturer` in Nautobot. Nautobot 2.x derives `Device.manufacturer` from `Device.device_type.manufacturer`, so a reference implementation would need to look up or synthesize a matching `dcim.DeviceType` per (manufacturer, model) pair. That round-trip is out of scope here — an ops team that wants it can extend `nautobot.py`'s create/patch paths to resolve a `device_type` name from `record.manufacturer` (and a model attribute of their choosing) before calling `dcim.devices.create` / `update`.
 
 ## Extending this reference
 

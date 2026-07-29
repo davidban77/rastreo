@@ -111,6 +111,8 @@ sink:
 
 Password and token values are redacted in logs and in `source_config_hash`. Rotating a credential still changes the hash, so consumers can detect config changes — but the plaintext is never logged or serialized. The `creds_file` value is a filesystem path, not a secret, and is written verbatim.
 
+Inline userinfo in a server URL (`nats://user:pass@nats.prod:4222`) is also supported, and the `user:pass@` portion is stripped everywhere the server list is rendered back to you: connect and publish errors, `rastreo discover --dry-run` plans, and the `last_probe_error` field of the server's `/readyz` response. The host, port, and failure reason stay intact, so an unreachable broker is still diagnosable from the error text alone.
+
 ## Delivery modes
 
 `per_record` is the default and the right choice for most workloads. Every record is confirmed on the stream before the sink acknowledges the write, so a graceful shutdown never loses a record.
@@ -223,7 +225,7 @@ cargo build --release --features nats -p rastreo
 cargo build --release --features nats -p rastreo-server
 ```
 
-The docker image and the release tarballs on GitHub Releases ship with the `nats` feature enabled alongside `kafka`, `http`, `snmp`, `arp`, `ndp`, and `oui`.
+The docker image and the release tarballs on GitHub Releases ship with the `nats` feature enabled alongside `kafka`, `http`, `snmp`, `arp`, and `ndp`.
 
 ## See also
 

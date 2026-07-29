@@ -2634,25 +2634,6 @@ mod tests {
                     }
                     Ok(out)
                 }
-                #[cfg(feature = "oui")]
-                FuserConfig::OuiEnrichment { data_path, inner } => {
-                    let mut records = fuse_many_batch(inner, outcomes)?;
-                    let table = if data_path.is_empty() {
-                        crate::fuser::OuiTable::from_bundled()?
-                    } else {
-                        crate::fuser::OuiTable::from_path(data_path)?
-                    };
-                    for record in &mut records {
-                        if record.manufacturer.is_none() {
-                            if let Some(mac) = &record.mac {
-                                if let Some(vendor) = table.lookup(mac) {
-                                    record.manufacturer = Some(vendor.to_string());
-                                }
-                            }
-                        }
-                    }
-                    Ok(records)
-                }
                 #[cfg(feature = "mib_enrichment")]
                 FuserConfig::MibEnrichment { data_path, inner } => {
                     let mut records = fuse_many_batch(inner, outcomes)?;
@@ -2666,16 +2647,14 @@ mod tests {
                             _ => None,
                         });
                         if let Some(entry) = oid.as_deref().and_then(|o| table.lookup(o)) {
-                            if let Some(model) = &entry.model {
-                                record.model = Some(model.clone());
+                            if record.model.is_none() {
+                                record.model.clone_from(&entry.model);
                             }
-                            if let Some(product_family) = &entry.product_family {
-                                record.product_family = Some(product_family.clone());
+                            if record.product_family.is_none() {
+                                record.product_family.clone_from(&entry.product_family);
                             }
                             if record.manufacturer.is_none() {
-                                if let Some(manufacturer) = &entry.manufacturer {
-                                    record.manufacturer = Some(manufacturer.clone());
-                                }
+                                record.manufacturer.clone_from(&entry.manufacturer);
                             }
                         }
                     }
@@ -2725,7 +2704,6 @@ mod tests {
         fn named_corpora() -> Vec<(&'static str, Vec<ProbeOutcome>)> {
             let mac_a = "aa:bb:cc:11:22:33";
             let mac_b = "dd:ee:ff:44:55:66";
-            let oui_mac = "00:04:AC:11:22:33";
             let host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
             let sysname = Signal::SnmpSysName("core-sw01".into());
             let fault = || Some(ProbeFault::new(ProbeErrorKind::Other, "boom"));
@@ -2877,16 +2855,6 @@ mod tests {
                     ],
                 ),
                 (
-                    "oui_enrichable_mac",
-                    vec![oc(
-                        1,
-                        ProbeKind::TcpConnect,
-                        true,
-                        vec![Signal::Mac(oui_mac.into()), Signal::OpenPort(22)],
-                        None,
-                    )],
-                ),
-                (
                     "sys_object_id_shared_across_ips",
                     vec![
                         oc(
@@ -2924,7 +2892,7 @@ mod tests {
             }
         }
 
-        // OUI-free configs; the random test avoids reloading the bundled OUI table per seed.
+        // The random test runs these per seed, so they must not reload a bundled enrichment table.
         fn core_matrix() -> Vec<(String, FuserConfig)> {
             vec![
                 ("direct".to_string(), direct_config()),
@@ -2949,26 +2917,6 @@ mod tests {
         fn matrix() -> Vec<(String, FuserConfig)> {
             #[allow(unused_mut)]
             let mut out = core_matrix();
-            #[cfg(feature = "oui")]
-            {
-                out.push((
-                    "oui(direct)".to_string(),
-                    FuserConfig::OuiEnrichment {
-                        data_path: String::new(),
-                        inner: Box::new(direct_config()),
-                    },
-                ));
-                out.push((
-                    "identity(oui(direct))".to_string(),
-                    FuserConfig::Identity {
-                        identity_hints: IdentityHints::default(),
-                        inner: Box::new(FuserConfig::OuiEnrichment {
-                            data_path: String::new(),
-                            inner: Box::new(direct_config()),
-                        }),
-                    },
-                ));
-            }
             #[cfg(feature = "mib_enrichment")]
             {
                 out.push((

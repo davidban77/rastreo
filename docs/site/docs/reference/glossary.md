@@ -8,8 +8,6 @@ This glossary defines the terms used across rastreo's documentation and source. 
 
 ## Networking and protocols
 
-**OUI** — Organisationally Unique Identifier. The first 24 bits of a MAC address that identify the manufacturer that assigned it. The OUI enrichment fuser looks up this prefix to attach a `manufacturer` name to a `DeviceRecord`.
-
 **MAC address** — Media Access Control address. The link-layer hardware identifier on an interface, usually 48 bits, written as six colon-separated hex octets (`AA:BB:CC:DD:EE:FF`). When a probe reveals a MAC, the fuser uses it as the device's identity key instead of the IP.
 
 **CIDR** — Classless Inter-Domain Routing. The notation for an IP prefix, written as `<address>/<prefix-length>` such as `10.0.0.0/24`. rastreo accepts CIDR blocks as `--target` values and expands them into the list of host addresses to probe.
@@ -64,7 +62,7 @@ This glossary defines the terms used across rastreo's documentation and source. 
 
 **Scheduler** — The runtime that paces probes under two limits. `max_concurrent`, set by `--concurrency`, caps how many probes run at once; `probe_rate`, set by `--rate`, caps how many start each second. When `probe_rate` is unset, probes start as fast as the concurrency cap allows.
 
-**Fuser**{ #fuser } — The stage that groups a device's signals into one `DeviceRecord` and assigns a confidence score. rastreo includes four fusers: `direct`, `oui_enrichment`, `mib_enrichment`, and `identity`. See [Enrichment](../discover/enrichment.md) and [Identity](../discover/identity.md).
+**Fuser**{ #fuser } — The stage that groups a device's signals into one `DeviceRecord` and assigns a confidence score. rastreo includes three fusers: `direct`, `mib_enrichment`, and `identity`. See [Enrichment](../discover/enrichment.md) and [Identity](../discover/identity.md).
 
 **Identity correlation** — The step where the identity fuser merges several records that describe the same physical device, matching on shared values such as MAC, SNMP system name, SSH host key, TLS subject, or reverse DNS name. The extra addresses become `alt_ips` on the surviving record. See [Identity](../discover/identity.md).
 

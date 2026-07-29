@@ -25,7 +25,7 @@ consumers should tag legacy records with an explicit v0 marker before ingest.
 | `identity_key` | string | yes | Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans. |
 | `last_seen` | string (date-time) | yes | RFC 3339 UTC timestamp of the most recent probe that produced signals for this device. |
 | `mac` | string \| null | no | First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex. |
-| `manufacturer` | string \| null | no | Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser, or from the SNMP `sysObjectID` by the MIB enrichment fuser when the OUI is absent. `null` when neither source matched. |
+| `manufacturer` | string \| null | no | Vendor name resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched. |
 | `mgmt_ip` | string (ip) \| null | no | Management IP the device was probed on. For multi-IP devices merged by the identity fuser, this is the first target IP that survived resolution. |
 | `model` | string \| null | no | Hardware model resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched. |
 | `os_version` | string \| null | no | Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched. |

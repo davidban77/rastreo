@@ -235,17 +235,17 @@ mod tests {
         assert!(err.contains("outermost"), "err was: {err}");
     }
 
-    #[cfg(feature = "oui")]
+    #[cfg(feature = "mib_enrichment")]
     #[test]
-    fn validate_scenario_rejects_identity_nested_in_oui() {
-        let cfg = scenario_with_fuser(FuserConfig::OuiEnrichment {
-            data_path: "data/manuf.gz".to_string(),
+    fn validate_scenario_rejects_identity_nested_in_mib_enrichment() {
+        let cfg = scenario_with_fuser(FuserConfig::MibEnrichment {
+            data_path: None,
             inner: Box::new(FuserConfig::Identity {
                 identity_hints: IdentityHints::default(),
                 inner: Box::new(direct(None, None)),
             }),
         });
-        let err = validate_scenario(&cfg).expect_err("identity nested in oui must be invalid");
+        let err = validate_scenario(&cfg).expect_err("identity nested in mib must be invalid");
         assert!(err.contains("outermost"), "err was: {err}");
     }
 

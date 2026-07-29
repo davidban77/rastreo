@@ -1,6 +1,6 @@
 # rastreo — Enrichment-aware Network Discovery
 
-rastreo probes a network across TCP, UDP, HTTP, DNS, SNMP, and ARP, fuses OUI vendor data with active fingerprints into a deduplicated, classified `DeviceRecord`, and emits each record as a Kafka event (or NDJSON file, or stdout). Reconciliation into NetBox, Nautobot, or Infrahub is performed by independent topic consumers — out of core scope.
+rastreo probes a network across TCP, UDP, HTTP, DNS, SNMP, and ARP, fuses SNMP `sysObjectID` vendor data with active fingerprints into a deduplicated, classified `DeviceRecord`, and emits each record as a Kafka event (or NDJSON file, or stdout). Reconciliation into NetBox, Nautobot, or Infrahub is performed by independent topic consumers — out of core scope.
 
 The **core library is the product**. The CLI and HTTP server are delivery mechanisms built on top of it.
 
@@ -25,7 +25,7 @@ Agent definitions and workflow rules live in the user's personal `~/.claude/` di
 - **Error handling**: `thiserror` in `rastreo-core`, `anyhow` in CLI and server. Never `unwrap()` in library code. `expect()` only with a clear message for truly unrecoverable cases.
 - **Allocations**: minimize per-event allocations on hot paths. Pre-build invariant strings, reuse buffers, write into caller-provided `Vec<u8>`.
 - **Testing**: every prober, encoder, and sink gets a unit test. Deterministic seeds for any randomized component. Tests in `#[cfg(test)] mod tests` within the same file; integration tests under `<crate>/tests/`.
-- **Naming**: snake_case for modules/functions, PascalCase for types/traits. No abbreviations except widely understood ones (`tcp`, `udp`, `dns`, `snmp`, `arp`, `oui`).
+- **Naming**: snake_case for modules/functions, PascalCase for types/traits. No abbreviations except widely understood ones (`tcp`, `udp`, `dns`, `snmp`, `arp`, `mib`).
 - **Formatting**: `cargo fmt` before every commit. `cargo clippy -- -D warnings` must pass.
 - **Docs**: public items in `rastreo-core` should carry a `///` doc comment when the name alone is not self-explanatory. Default to no comment when the signature is the doc.
 

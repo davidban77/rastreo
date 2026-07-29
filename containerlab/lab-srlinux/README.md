@@ -53,14 +53,14 @@ Two images available on `ghcr.io/davidban77/rastreo`:
 - `:latest` (or `:v0.5.0`, `:v0.6.0`, …) — pinned to the most recent tagged release.
 - `:main` — rolling build that tracks the `main` branch. Best for lab iteration when you need features that haven't been tagged yet (e.g. the SSH prober before v0.6.0).
 
-Both variants have an `-otlp` sibling with OpenTelemetry export enabled (`:main-otlp`, `:latest-otlp`). All variants ship the same prober set: `kafka`, `http`, `snmp`, `arp`, `ndp`, `oui`, `nats`, `ssh`, `icmp`, `tls`, `gnmi`.
+Both variants have an `-otlp` sibling with OpenTelemetry export enabled (`:main-otlp`, `:latest-otlp`). All variants ship the same prober set: `kafka`, `http`, `snmp`, `arp`, `ndp`, `nats`, `ssh`, `icmp`, `tls`, `gnmi`.
 
 For fully local iteration against uncommitted changes, build inside the VM:
 
 ```
 orb -m clab bash -c "cd /Users/$USER/projects/rastreo && sudo docker build \
   --build-arg TARGETARCH=arm64 \
-  --build-arg FEATURES=kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi \
+  --build-arg FEATURES=kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi \
   -t rastreo:lab ."
 ```
 

@@ -515,21 +515,21 @@ mod tests {
         assert!(!fuser_supports_resume(&identity_over(direct())));
     }
 
-    #[cfg(feature = "oui")]
+    #[cfg(feature = "mib_enrichment")]
     #[test]
-    fn fuser_supports_resume_true_for_oui_over_direct() {
-        let cfg = FuserConfig::OuiEnrichment {
-            data_path: String::new(),
+    fn fuser_supports_resume_true_for_mib_over_direct() {
+        let cfg = FuserConfig::MibEnrichment {
+            data_path: None,
             inner: direct(),
         };
         assert!(fuser_supports_resume(&cfg));
     }
 
-    #[cfg(feature = "oui")]
+    #[cfg(feature = "mib_enrichment")]
     #[test]
-    fn fuser_supports_resume_false_for_identity_nested_under_oui() {
-        let cfg = FuserConfig::OuiEnrichment {
-            data_path: String::new(),
+    fn fuser_supports_resume_false_for_identity_nested_under_mib() {
+        let cfg = FuserConfig::MibEnrichment {
+            data_path: None,
             inner: Box::new(identity_over(direct())),
         };
         assert!(
@@ -643,26 +643,26 @@ mod tests {
                 resumable: false,
             },
         ];
-        #[cfg(feature = "oui")]
+        #[cfg(feature = "mib_enrichment")]
         let extra_fusers: Vec<FuserCase> = vec![
             FuserCase {
-                label: "oui_over_direct",
-                cfg: Some(FuserConfig::OuiEnrichment {
-                    data_path: String::new(),
+                label: "mib_over_direct",
+                cfg: Some(FuserConfig::MibEnrichment {
+                    data_path: None,
                     inner: direct(),
                 }),
                 resumable: true,
             },
             FuserCase {
-                label: "identity_under_oui",
-                cfg: Some(FuserConfig::OuiEnrichment {
-                    data_path: String::new(),
+                label: "identity_under_mib",
+                cfg: Some(FuserConfig::MibEnrichment {
+                    data_path: None,
                     inner: Box::new(identity_over(direct())),
                 }),
                 resumable: false,
             },
         ];
-        #[cfg(not(feature = "oui"))]
+        #[cfg(not(feature = "mib_enrichment"))]
         let extra_fusers: Vec<FuserCase> = Vec::new();
         let fusers: Vec<FuserCase> = base_fusers.into_iter().chain(extra_fusers).collect();
 

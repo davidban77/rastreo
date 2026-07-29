@@ -116,7 +116,6 @@ How probe signals are merged into device records.
 One of:
 
 - { `confidence_baseline`: double \| null, `confidence_per_signal`: double \| null, `include_unreachable`: boolean \| null, `type`: `direct` }
-- { `data_path`: string, `inner`: [`FuserConfig`](#fuserconfig), `type`: `oui_enrichment` }
 - { `identity_hints`: [`IdentityHints`](#identityhints), `inner`: [`FuserConfig`](#fuserconfig), `type`: `identity` }
 
 ### `HttpScheme` {#httpscheme}

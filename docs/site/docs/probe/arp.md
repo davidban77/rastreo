@@ -1,12 +1,12 @@
 ---
-description: The ARP prober — sends a broadcast ARP Request on the local subnet and emits the target's MAC address as a Mac signal, enriching IPv4 targets with link-layer identity for vendor lookup.
+description: The ARP prober — sends a broadcast ARP Request on the local subnet and emits the target's MAC address as a Mac signal, giving IPv4 targets a link-layer identity.
 ---
 
 # ARP prober
 
-The ARP prober speaks Address Resolution Protocol (RFC 826) against IPv4 targets on the local subnet. It sends a broadcast ARP Request as a raw Ethernet frame, waits for the ARP Reply carrying the target's hardware address, and emits it as a `Mac(<address>)` signal. That MAC is the input to the OUI vendor lookup — the first two-and-a-half octets identify the manufacturer of the network interface — and is the strongest identity signal a discovery pipeline can gather without an application-layer handshake.
+The ARP prober speaks Address Resolution Protocol (RFC 826) against IPv4 targets on the local subnet. It sends a broadcast ARP Request as a raw Ethernet frame, waits for the ARP Reply carrying the target's hardware address, and emits it as a `Mac(<address>)` signal. That MAC is the strongest identity signal a discovery pipeline can gather without an application-layer handshake, and it is what the [identity fuser](../discover/identity.md) correlates a device's addresses on.
 
-**Use it when** you want the hardware (MAC) address of an IPv4 host on your local network. It is the strongest vendor clue there is.<br>
+**Use it when** you want the hardware (MAC) address of an IPv4 host on your local network. It is the strongest identity clue a probe can gather without an application-layer handshake.<br>
 **You get** a `Mac` signal for each host that answers on the local segment. It works only on the local network, not across routers.
 
 ARP is a link-layer protocol. Routers do not forward ARP frames. The prober only produces results for targets on the same broadcast domain as the interface used to send. A broadcast domain — also called an L2 or Layer 2 segment — is the group of devices that reach each other directly at the hardware level, without passing through a router. Cross-subnet targets, anything reachable only through a next-hop router, time out silently. This is a fundamental property of the protocol, not a limitation of the prober.
@@ -97,7 +97,7 @@ The prober does not send Gratuitous ARP, does not spoof source addresses, and do
 
 ## Example scenario
 
-Probe a `/29` subnet on the local lab network and gather MAC addresses for OUI vendor enrichment downstream. Interface is auto-selected per target.
+Probe a `/29` subnet on the local lab network and gather MAC addresses for identity correlation downstream. Interface is auto-selected per target.
 
 ```json
 {

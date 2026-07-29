@@ -35,17 +35,16 @@ impl MibEnrichmentFuser {
             }
         };
 
-        if let Some(model) = &entry.model {
-            record.model = Some(model.clone());
-        }
-        if let Some(product_family) = &entry.product_family {
-            record.product_family = Some(product_family.clone());
-        }
-        if record.manufacturer.is_none() {
-            if let Some(manufacturer) = &entry.manufacturer {
-                record.manufacturer = Some(manufacturer.clone());
-            }
-        }
+        fill_if_empty(&mut record.model, &entry.model);
+        fill_if_empty(&mut record.product_family, &entry.product_family);
+        fill_if_empty(&mut record.manufacturer, &entry.manufacturer);
+    }
+}
+
+// Write-if-empty is the stacking contract: the innermost enricher to reach a field keeps it.
+fn fill_if_empty(field: &mut Option<String>, value: &Option<String>) {
+    if field.is_none() {
+        field.clone_from(value);
     }
 }
 
@@ -91,8 +90,7 @@ impl MibTable {
     }
 
     pub fn from_path(path: &str) -> Result<Self, RastreoError> {
-        // Overlay MERGES onto the bundled seed (user keys win) — the bundled table is a stub, not
-        // a comprehensive database like OUI's manuf snapshot, so a user file extends rather than replaces.
+        // Overlay MERGES onto the bundled seed (user keys win): the seed is a stub, not a full database.
         let mut table = Self::from_bundled()?;
         let file = std::fs::File::open(path).map_err(|e| {
             RastreoError::Config(ConfigError::invalid(format!(
@@ -427,6 +425,38 @@ mod tests {
         fuser.enrich(&mut record);
         assert_eq!(record.manufacturer.as_deref(), Some("Acme Networks"));
         assert_eq!(record.model.as_deref(), Some("SR Linux"));
+    }
+
+    #[test]
+    fn stacked_enrichment_gives_the_innermost_fuser_first_claim_on_every_field() {
+        let inner = MibEnrichmentFuser::new(
+            Box::new(DirectFuser::new()),
+            parse_str("1.3.6.1\tINNER-VENDOR\tINNER-MODEL\tINNER-FAMILY\n"),
+        );
+        let mut outer = MibEnrichmentFuser::new(
+            Box::new(inner),
+            parse_str("1.3.6.1\tOUTER-VENDOR\tOUTER-MODEL\tOUTER-FAMILY\n"),
+        );
+        let records = outer.ingest(vec![outcome_with_oid("1.3.6.1")]).expect("ok");
+        assert_eq!(records[0].manufacturer.as_deref(), Some("INNER-VENDOR"));
+        assert_eq!(records[0].model.as_deref(), Some("INNER-MODEL"));
+        assert_eq!(records[0].product_family.as_deref(), Some("INNER-FAMILY"));
+    }
+
+    #[test]
+    fn stacked_enrichment_lets_the_outer_fuser_fill_fields_the_inner_left_empty() {
+        let inner = MibEnrichmentFuser::new(
+            Box::new(DirectFuser::new()),
+            parse_str("1.3.6.1\t\t\tINNER-FAMILY\n"),
+        );
+        let mut outer = MibEnrichmentFuser::new(
+            Box::new(inner),
+            parse_str("1.3.6.1\tOUTER-VENDOR\tOUTER-MODEL\tOUTER-FAMILY\n"),
+        );
+        let records = outer.ingest(vec![outcome_with_oid("1.3.6.1")]).expect("ok");
+        assert_eq!(records[0].manufacturer.as_deref(), Some("OUTER-VENDOR"));
+        assert_eq!(records[0].model.as_deref(), Some("OUTER-MODEL"));
+        assert_eq!(records[0].product_family.as_deref(), Some("INNER-FAMILY"));
     }
 
     #[test]

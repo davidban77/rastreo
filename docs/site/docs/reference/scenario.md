@@ -486,7 +486,7 @@ The `retry` field has the same three integer fields and defaults as the `kafka` 
 
 ## Fusers
 
-The `fuser` field is an internally-tagged object. Four fusers are available: `direct` (always), `oui_enrichment` (with the `oui` build feature), `mib_enrichment` (with the `mib_enrichment` build feature), and `identity` (always). `oui_enrichment`, `mib_enrichment`, and `identity` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
+The `fuser` field is an internally-tagged object. Three fusers are available: `direct` (always), `mib_enrichment` (with the `mib_enrichment` build feature), and `identity` (always). `mib_enrichment` and `identity` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
 
 ### direct
 
@@ -517,7 +517,7 @@ Set `include_unreachable: true` when you want one record per probed address, sil
 - **Address-space audits** — you need to know which addresses in a range are in use and which are free, so the free ones must appear too.
 - **Change detection** — a consumer compares consecutive scans. It needs to see an address turn silent, rather than watch it vanish from the stream.
 
-`oui_enrichment` and `identity` wrap an inner fuser. Set the flag on the `direct` fuser at the bottom of the chain.
+`mib_enrichment` and `identity` wrap an inner fuser. Set the flag on the `direct` fuser at the bottom of the chain.
 
 ```json
 {
@@ -529,35 +529,9 @@ Set `include_unreachable: true` when you want one record per probed address, sil
 }
 ```
 
-### oui_enrichment
-
-`oui_enrichment` wraps another fuser: it delegates fusion to `inner`, then looks up the returned record's MAC address in an OUI database and populates `DeviceRecord.manufacturer` with the vendor name. Records without a MAC are returned unchanged. Records whose MAC prefix is not in the database are also returned unchanged (`manufacturer` stays `null`).
-
-Requires the `oui` build feature. The bundled OUI database is a Wireshark manuf snapshot embedded at compile time (see the [OUI enrichment page](../discover/enrichment.md) for provenance and refresh cadence). Set `data_path` to load an alternative manuf-format file from disk instead.
-
-| Field | Type | Required | Default | Notes |
-|---|---|---|---|---|
-| `type` | string | yes | — | Must be `"oui_enrichment"`. |
-| `data_path` | string | no | `""` | Path to a manuf-format file. Empty string loads the compiled-in bundled snapshot. |
-| `inner` | object | yes | — | Nested fuser config (typically `direct`). Validated recursively. |
-
-```json
-{
-  "type": "oui_enrichment",
-  "data_path": "",
-  "inner": {
-    "type": "direct",
-    "confidence_baseline": 0.1,
-    "confidence_per_signal": 0.1
-  }
-}
-```
-
-Longest-prefix wins on lookup: a /36 MA-S allocation takes precedence over a /28 MA-M, which takes precedence over a /24 MA-L. Vendor names come from the manuf file's long-name column, falling back to the short-name column when the long name is empty.
-
 ### mib_enrichment
 
-`mib_enrichment` wraps another fuser: it delegates fusion to `inner`, then matches the returned record's SNMP `sysObjectID` against a table and populates `DeviceRecord.model` and `DeviceRecord.product_family`. It also sets `manufacturer` when the record does not already have one. Records without a `SnmpSysObjectId` signal, or whose OID is not in the table, are returned unchanged. `mib_enrichment` never sets `platform` — the classifier owns that field.
+`mib_enrichment` wraps another fuser: it delegates fusion to `inner`, then matches the returned record's SNMP `sysObjectID` against a table and populates `DeviceRecord.model`, `DeviceRecord.product_family`, and `DeviceRecord.manufacturer` — each only when the record does not already carry a value, so an inner enricher's answer survives. Records without a `SnmpSysObjectId` signal, or whose OID is not in the table, are returned unchanged. `mib_enrichment` never sets `platform` — the classifier owns that field.
 
 Requires the `mib_enrichment` build feature, which is not in the default binaries or the published Docker image — so `mib_enrichment` is absent from the published [scenario JSON schema](schema/scenario-config.md), and a default build rejects it. The bundled table is a small seed; set `data_path` to merge your fleet's OIDs on top of it (your entries win on collision). Lookup is an exact match on the full dotted OID — no prefix matching. See the [Enrichment page](../discover/enrichment.md#mib_enrichment) for the overlay file format and worked examples.
 
@@ -565,7 +539,7 @@ Requires the `mib_enrichment` build feature, which is not in the default binarie
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"mib_enrichment"`. |
 | `data_path` | string | no | bundled seed | Path to an overlay file that merges on top of the bundled seed. Omit or leave empty to use only the seed. |
-| `inner` | object | yes | — | Nested fuser config (typically `direct` or `oui_enrichment`). Validated recursively. |
+| `inner` | object | yes | — | Nested fuser config (typically `direct`). Validated recursively. |
 
 ```json
 {
@@ -585,7 +559,7 @@ Requires the `mib_enrichment` build feature, which is not in the default binarie
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"identity"`. |
 | `identity_hints` | object | no | `{}` | User-declared identity signals — see below. |
-| `inner` | object | yes | — | Nested fuser config (typically `direct` or `oui_enrichment`). Validated recursively. |
+| `inner` | object | yes | — | Nested fuser config (typically `direct`). Validated recursively. |
 
 The `identity_hints.vrrp_groups` array declares physical members of a shared virtual IP so their records stay separate even when their MACs would otherwise match. Each entry:
 
@@ -608,8 +582,7 @@ The `identity_hints.vrrp_groups` array declares physical members of a shared vir
     ]
   },
   "inner": {
-    "type": "oui_enrichment",
-    "inner": {"type": "direct"}
+    "type": "direct"
   }
 }
 ```

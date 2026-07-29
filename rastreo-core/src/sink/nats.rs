@@ -10,6 +10,7 @@ use chrono::Utc;
 
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
+use crate::redact::redacted_server_list;
 use crate::sink::{
     retry_with_backoff, RecordKind, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
     DEFAULT_LINKS_DESTINATION, DEFAULT_PROFILES_DESTINATION, SINK_ERROR_CLASS_COUNT,
@@ -135,7 +136,7 @@ impl std::fmt::Debug for NatsSink {
         f.debug_struct("NatsSink")
             .field("subject", &self.subject)
             .field("stream", &self.stream)
-            .field("servers", &self.servers)
+            .field("servers", &redacted_server_list(&self.servers))
             .field("buffered_records", &self.buffer.len())
             .field("buffered_bytes", &self.buffered_bytes)
             .field("buffer_threshold", &self.buffer_threshold)
@@ -149,7 +150,7 @@ impl std::fmt::Debug for NatsSink {
 }
 
 fn build_publish_error(subject: &str, servers: &[String], err: PublishError) -> RastreoError {
-    let servers_for_err = servers.join(",");
+    let servers_for_err = redacted_server_list(servers);
     RastreoError::Sink(SinkError::new(
         SinkErrorClass::PublishFailure,
         io::Error::other(format!(
@@ -159,12 +160,19 @@ fn build_publish_error(subject: &str, servers: &[String], err: PublishError) -> 
 }
 
 fn build_ack_error(subject: &str, servers: &[String], err: PublishError) -> RastreoError {
-    let servers_for_err = servers.join(",");
+    let servers_for_err = redacted_server_list(servers);
     RastreoError::Sink(SinkError::new(
         SinkErrorClass::AckRejection,
         io::Error::other(format!(
             "nats sink: publish to subject '{subject}' at server(s) '{servers_for_err}' was not acked: {err}"
         )),
+    ))
+}
+
+fn build_probe_error(subject: &str, servers: &[String], err: impl std::fmt::Display) -> io::Error {
+    io::Error::other(format!(
+        "nats sink probe failed for subject '{subject}' at server(s) '{}': {err}",
+        redacted_server_list(servers)
     ))
 }
 
@@ -189,7 +197,7 @@ impl NatsSink {
         stream: String,
         credentials: NatsCredentials,
     ) -> Result<Self, RastreoError> {
-        let servers_for_err = servers.join(",");
+        let servers_for_err = redacted_server_list(&servers);
         let client = connect_with_credentials(&servers, credentials)
             .await
             .map_err(|e| {
@@ -260,7 +268,7 @@ impl NatsSink {
     ) -> Result<Self, RastreoError> {
         config.validate()?;
 
-        let servers_for_err = self.servers.join(",");
+        let servers_for_err = redacted_server_list(&self.servers);
         let dlq_stream = config.stream.clone();
         self.ctx
             .get_stream(&dlq_stream)
@@ -623,13 +631,11 @@ impl Sink for NatsSink {
         // Client-level flush is a ping: it drains any pending client-side buffer and
         // requires the server round-trip to complete, so failure signals the same
         // connectivity break publish() would surface.
-        self.ctx.client().flush().await.map_err(|e| {
-            let servers_for_err = self.servers.join(",");
-            io::Error::other(format!(
-                "nats sink probe failed for subject '{}' at server(s) '{}': {e}",
-                self.subject, servers_for_err
-            ))
-        })
+        self.ctx
+            .client()
+            .flush()
+            .await
+            .map_err(|e| build_probe_error(&self.subject, &self.servers, e))
     }
 }
 
@@ -1012,6 +1018,38 @@ mod tests {
         <NatsSink as Sink>::probe(&sink).await.expect("probe");
     }
 
+    #[tokio::test]
+    async fn nats_sink_construction_error_names_the_server_without_its_inline_credentials() {
+        let err = NatsSink::new(
+            vec!["nats://admin:hunter2@127.0.0.1:1".into()],
+            "rastreo.discovery.records.v1".into(),
+            "rastreo".into(),
+            NatsCredentials::Anonymous,
+        )
+        .await
+        .expect_err("a closed port must fail the connect");
+        let msg = error_chain(&err);
+        assert!(!msg.contains("hunter2"), "password leaked: {msg}");
+        assert!(!msg.contains("admin"), "username leaked: {msg}");
+        assert!(msg.contains("nats://127.0.0.1:1"), "msg: {msg}");
+        assert!(msg.contains("failed to connect"), "msg: {msg}");
+    }
+
+    #[test]
+    fn every_error_built_from_a_server_list_redacts_inline_credentials() {
+        let servers = vec!["nats://admin:hunter2@n.example.com:4222".to_string()];
+        let rendered = [
+            sink_io_detail(&build_publish_error("s", &servers, publish_error())),
+            sink_io_detail(&build_ack_error("s", &servers, publish_error())),
+            build_probe_error("s", &servers, "connection refused").to_string(),
+        ];
+        for msg in rendered {
+            assert!(!msg.contains("hunter2"), "password leaked: {msg}");
+            assert!(!msg.contains("admin"), "username leaked: {msg}");
+            assert!(msg.contains("nats://n.example.com:4222"), "msg: {msg}");
+        }
+    }
+
     #[test]
     fn publish_and_ack_errors_carry_their_distinct_classes() {
         let servers = vec!["nats://n:4222".to_string()];
@@ -1030,6 +1068,13 @@ mod tests {
     fn dlq_wire_labels_stay_byte_identical() {
         assert_eq!(SinkErrorClass::PublishFailure.as_label(), "publish_failure");
         assert_eq!(SinkErrorClass::AckRejection.as_label(), "ack_rejection");
+    }
+
+    fn error_chain(err: &RastreoError) -> String {
+        std::iter::successors(Some(err as &dyn std::error::Error), |e| e.source())
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(": ")
     }
 
     fn publish_error() -> PublishError {

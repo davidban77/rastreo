@@ -5,7 +5,6 @@ use schemars::JsonSchema;
 
 use crate::classifier::ClassifierConfig;
 use crate::encoder::EncoderConfig;
-#[cfg(feature = "config")]
 use crate::error::{ConfigError, RastreoError};
 use crate::fuser::FuserConfig;
 use crate::model::Target;
@@ -22,6 +21,7 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
     let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
     let expanded = secrets::expand(raw)?;
+    ensure_no_retired_type_tags_yaml(&expanded)?;
     let file: ScenarioFile = serde_yaml_ng::from_value(expanded).map_err(|e| {
         ConfigError::InvalidValue(format!(
             "scenario shape validation failed after secret expansion: {e}"
@@ -38,6 +38,78 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
         }
     }
     Ok(file)
+}
+
+/// Parse the JSON body of a discovery scenario — the shape `POST /scans` accepts.
+pub fn parse_discover_scenario_json(
+    body: serde_json::Value,
+) -> Result<DiscoverScenarioConfig, RastreoError> {
+    ensure_no_retired_type_tags_json(&body)?;
+    let scenario = serde_json::from_value(body)
+        .map_err(|e| ConfigError::InvalidValue(format!("invalid scenario body: {e}")))?;
+    Ok(scenario)
+}
+
+/// Parse a standalone YAML sink config — the shape `RASTREO_SINK_CONFIG_PATH` points at.
+#[cfg(feature = "config")]
+pub fn parse_sink_config(input: &str) -> Result<SinkConfig, RastreoError> {
+    let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
+        .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
+    ensure_no_retired_type_tags_yaml(&raw)?;
+    let config = serde_yaml_ng::from_value(raw)
+        .map_err(|e| ConfigError::InvalidValue(format!("sink shape validation failed: {e}")))?;
+    Ok(config)
+}
+
+/// Removed `type:` discriminants, each paired with the message every config ingestion surface must reject it with. The match is position-blind: a tag retired in one position is rejected in every `type:` position.
+pub(crate) const RETIRED_TYPE_TAGS: &[(&str, &str)] = &[(
+    "oui_enrichment",
+    "the `oui_enrichment` fuser was removed: vendor identity now comes from the `mib_enrichment` fuser, which matches an SNMP `sysObjectID` exactly instead of guessing from a MAC address prefix",
+)];
+
+fn retired_type_tag_message(tag: &str) -> Option<&'static str> {
+    RETIRED_TYPE_TAGS
+        .iter()
+        .find_map(|(name, message)| (*name == tag).then_some(*message))
+}
+
+pub(crate) fn ensure_no_retired_type_tags_json(
+    value: &serde_json::Value,
+) -> Result<(), ConfigError> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(tag)) = map.get("type") {
+                if let Some(message) = retired_type_tag_message(tag) {
+                    return Err(ConfigError::invalid(message));
+                }
+            }
+            map.values().try_for_each(ensure_no_retired_type_tags_json)
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().try_for_each(ensure_no_retired_type_tags_json)
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(feature = "config")]
+pub(crate) fn ensure_no_retired_type_tags_yaml(
+    value: &serde_yaml_ng::Value,
+) -> Result<(), ConfigError> {
+    match value {
+        serde_yaml_ng::Value::Mapping(map) => {
+            if let Some(serde_yaml_ng::Value::String(tag)) = map.get("type") {
+                if let Some(message) = retired_type_tag_message(tag) {
+                    return Err(ConfigError::invalid(message));
+                }
+            }
+            map.values().try_for_each(ensure_no_retired_type_tags_yaml)
+        }
+        serde_yaml_ng::Value::Sequence(items) => {
+            items.iter().try_for_each(ensure_no_retired_type_tags_yaml)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The YAML scenario file rastreo accepts via `rastreo discover --file`. Declares the shared
@@ -233,6 +305,77 @@ mod tests {
     }
 
     #[cfg(feature = "config")]
+    fn scenario_with_fuser_yaml(fuser: &str) -> String {
+        format!("version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n    fuser:\n{fuser}")
+    }
+
+    // serde's own `unknown variant` message carries the tag name too, so asserting on the name alone would pass without the check under test.
+    #[cfg(feature = "config")]
+    fn retirement_message(yaml: &str) -> String {
+        let err = parse_scenario_file(yaml).expect_err("a retired type tag must error");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("unknown variant"),
+            "the retirement must be named, not left to serde: {msg}"
+        );
+        msg
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_the_retired_oui_enrichment_fuser() {
+        let yaml = scenario_with_fuser_yaml(
+            "      type: oui_enrichment\n      inner:\n        type: direct\n",
+        );
+        let msg = retirement_message(&yaml);
+        assert!(msg.contains("oui_enrichment"), "msg: {msg}");
+        assert!(msg.contains("mib_enrichment"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_the_retired_fuser_nested_under_identity() {
+        let yaml = scenario_with_fuser_yaml(
+            "      type: identity\n      inner:\n        type: oui_enrichment\n        inner:\n          type: direct\n",
+        );
+        assert!(retirement_message(&yaml).contains("oui_enrichment"));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_the_retired_fuser_in_defaults() {
+        let yaml = "version: 1\nkind: discovery\ndefaults:\n  fuser:\n    type: oui_enrichment\n    inner:\n      type: direct\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        assert!(retirement_message(yaml).contains("oui_enrichment"));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_accepts_a_direct_fuser() {
+        let yaml = scenario_with_fuser_yaml("      type: direct\n      confidence_baseline: 0.2\n");
+        let file = parse_scenario_file(&yaml).expect("a live fuser still parses");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        assert!(d.base.fuser.is_some());
+    }
+
+    #[cfg(all(feature = "config", feature = "mib_enrichment"))]
+    #[test]
+    fn parse_scenario_file_accepts_the_mib_enrichment_fuser() {
+        let yaml = scenario_with_fuser_yaml(
+            "      type: mib_enrichment\n      inner:\n        type: direct\n",
+        );
+        let file = parse_scenario_file(&yaml).expect("mib_enrichment still parses");
+        let ScenarioEntry::Discover(d) = &file.scenarios[0];
+        assert!(matches!(
+            d.base.fuser,
+            Some(FuserConfig::MibEnrichment { .. })
+        ));
+    }
+
+    #[cfg(feature = "config")]
     #[test]
     fn parse_scenario_file_accepts_max_concurrent_and_probe_rate() {
         let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    max_concurrent: 32\n    probe_rate: 100\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
@@ -419,5 +562,118 @@ mod tests {
         }"#;
         let result: Result<ScenarioFile, _> = serde_json::from_str(json);
         assert!(result.is_err(), "unknown kind must fail to deserialize");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn every_parse_entry_point_rejects_every_retired_type_tag_by_name() {
+        for (tag, message) in RETIRED_TYPE_TAGS {
+            let scenario_yaml = scenario_with_fuser_yaml(&format!(
+                "      type: {tag}\n      inner:\n        type: direct\n"
+            ));
+            let scenario_json = serde_json::json!({
+                "targets": [{"Ip": "10.0.0.1"}],
+                "probers": [{"type": "tcp_connect", "ports": [22]}],
+                "fuser": {"type": tag, "inner": {"type": "direct"}},
+            });
+            let sink_yaml = format!("type: {tag}\n");
+            for (surface, rejection) in [
+                (
+                    "scenario file",
+                    parse_scenario_file(&scenario_yaml).expect_err("rejected"),
+                ),
+                (
+                    "scenario body",
+                    parse_discover_scenario_json(scenario_json).expect_err("rejected"),
+                ),
+                (
+                    "sink config",
+                    parse_sink_config(&sink_yaml).expect_err("rejected"),
+                ),
+            ] {
+                let msg = format!("{rejection}");
+                assert!(
+                    msg.contains(message),
+                    "{surface} must name the retirement of `{tag}`: {msg}"
+                );
+                assert!(
+                    !msg.contains("unknown variant"),
+                    "{surface} left `{tag}` to serde: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_discover_scenario_json_accepts_a_minimal_body() {
+        let body = serde_json::json!({
+            "targets": [{"Ip": "10.0.0.1"}],
+            "probers": [{"type": "tcp_connect", "ports": [22]}],
+        });
+        let scenario = parse_discover_scenario_json(body).expect("minimal body");
+        assert_eq!(scenario.targets.len(), 1);
+        assert_eq!(scenario.probers.len(), 1);
+    }
+
+    #[test]
+    fn parse_discover_scenario_json_maps_a_shape_error_to_config_error() {
+        let body = serde_json::json!({"targets": "not-a-list"});
+        let err = parse_discover_scenario_json(body).expect_err("bad shape");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        assert!(format!("{err}").contains("invalid scenario body"));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_sink_config_accepts_a_live_sink() {
+        let config = parse_sink_config("type: stdout\n").expect("sink config");
+        assert!(matches!(config, SinkConfig::Stdout));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_sink_config_maps_malformed_yaml_to_config_error() {
+        let err = parse_sink_config("type: [stdout\n").expect_err("bad yaml");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        assert!(format!("{err}").contains("invalid YAML"));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_sink_config_maps_an_unknown_sink_to_config_error() {
+        let err = parse_sink_config("type: carrier_pigeon\n").expect_err("unknown sink");
+        assert!(format!("{err}").contains("sink shape validation failed"));
+    }
+
+    #[test]
+    fn json_walk_names_every_retired_tag_however_deeply_nested() {
+        for (tag, message) in RETIRED_TYPE_TAGS {
+            let value = serde_json::json!({
+                "scenarios": [{"fuser": {"type": "identity", "inner": {"type": tag}}}]
+            });
+            let err = ensure_no_retired_type_tags_json(&value)
+                .expect_err("a retired type tag must be rejected");
+            assert_eq!(format!("{err}"), *message);
+        }
+    }
+
+    #[test]
+    fn json_walk_accepts_a_live_type_tag() {
+        let value = serde_json::json!({"fuser": {"type": "direct"}});
+        assert!(ensure_no_retired_type_tags_json(&value).is_ok());
+    }
+
+    #[test]
+    fn json_walk_ignores_a_retired_name_that_is_not_a_type_tag() {
+        for (tag, _) in RETIRED_TYPE_TAGS {
+            let value = serde_json::json!({"name": tag, "type": "direct"});
+            assert!(ensure_no_retired_type_tags_json(&value).is_ok());
+        }
     }
 }

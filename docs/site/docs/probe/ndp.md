@@ -1,10 +1,10 @@
 ---
-description: The NDP prober — sends an ICMPv6 Neighbor Solicitation on the local IPv6 subnet and emits the target's MAC address as a Mac signal, enriching IPv6 targets with link-layer identity for vendor lookup.
+description: The NDP prober — sends an ICMPv6 Neighbor Solicitation on the local IPv6 subnet and emits the target's MAC address as a Mac signal, giving IPv6 targets a link-layer identity.
 ---
 
 # NDP prober
 
-The NDP prober speaks the Neighbor Discovery Protocol (RFC 4861) against IPv6 targets on the local subnet. It sends an ICMPv6 Neighbor Solicitation (type 135) to the target's Solicited-Node multicast address, waits for the Neighbor Advertisement (type 136) that carries the target's link-layer address in a Target Link-Layer Address option, and emits it as a `Mac(<address>)` signal. NDP is the IPv6 replacement for ARP — same purpose, different wire format — and produces the same signal shape for downstream OUI vendor enrichment.
+The NDP prober speaks the Neighbor Discovery Protocol (RFC 4861) against IPv6 targets on the local subnet. It sends an ICMPv6 Neighbor Solicitation (type 135) to the target's Solicited-Node multicast address, waits for the Neighbor Advertisement (type 136) that carries the target's link-layer address in a Target Link-Layer Address option, and emits it as a `Mac(<address>)` signal. NDP is the IPv6 replacement for ARP — same purpose, different wire format — and produces the same signal shape for downstream identity correlation.
 
 **Use it when** you want the hardware (MAC) address of an IPv6 host on your local network. NDP is the IPv6 version of ARP.<br>
 **You get** a `Mac` signal for each host that answers on the local segment. It works only on the local network, not across routers.

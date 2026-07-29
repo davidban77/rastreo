@@ -59,7 +59,7 @@ A kind your binary was not built with is a different error from a typo. Naming a
 
 ```console
 $ rastreo discover --target 10.0.0.1 --probe gnmi
-⚠ hint: 'gnmi' requires the 'gnmi' Cargo feature. Rebuild with --features gnmi or use the release Docker image which bundles kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls, gnmi, lldp.
+⚠ hint: 'gnmi' requires the 'gnmi' Cargo feature. Rebuild with --features gnmi or use the release Docker image which bundles kafka, http, snmp, arp, ndp, nats, ssh, icmp, tls, gnmi, lldp.
 Error: probe kind 'gnmi' requires the 'gnmi' Cargo feature, which this binary was not built with
 ```
 
@@ -616,13 +616,13 @@ A checkpoint is only offered for a scan that can be resumed correctly. rastreo c
 
 | Part | Eligible | Not eligible |
 |---|---|---|
-| [Fuser](enrichment.md) | `direct`, `oui_enrichment`, `mib_enrichment` | `identity` |
+| [Fuser](enrichment.md) | `direct`, `mib_enrichment` | `identity` |
 | [Probers](../probe/index.md) | every prober except the two on the right | `lldp`, `gnmi` |
 | [Sink](sinks.md) | `file`, `kafka`, `nats` | `stdout`, `memory` |
 
 Each rule guards against a resume that would produce a different result:
 
-- **Fuser** — the [`identity`](identity.md) fuser correlates records across the whole scan to merge one device seen on several addresses. A resume replays only the targets left, so it cannot rebuild that whole-scan state. The `direct`, `oui_enrichment`, and `mib_enrichment` fusers emit each record on its own and resume cleanly.
+- **Fuser** — the [`identity`](identity.md) fuser correlates records across the whole scan to merge one device seen on several addresses. A resume replays only the targets left, so it cannot rebuild that whole-scan state. The `direct` and `mib_enrichment` fusers emit each record on its own and resume cleanly.
 - **Probers** — the [`lldp`](../probe/lldp.md) and [`gnmi`](../probe/gnmi.md) probers build a second output stream — [topology links](topology.md) or [collection profiles](collection-profile.md) — from whole-scan state a checkpoint cannot replay.
 - **Sink** — a resume appends new records where the previous run stopped. The `file`, `kafka`, and `nats` sinks have a durable destination to append to. The `stdout` and `memory` sinks do not.
 
