@@ -353,26 +353,6 @@
         },
         {
           "properties": {
-            "data_path": {
-              "default": "",
-              "type": "string"
-            },
-            "inner": {
-              "$ref": "#/$defs/FuserConfig"
-            },
-            "type": {
-              "const": "oui_enrichment",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "inner"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
             "identity_hints": {
               "$ref": "#/$defs/IdentityHints",
               "default": {

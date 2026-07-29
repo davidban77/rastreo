@@ -1,5 +1,3 @@
-#[cfg(feature = "nats")]
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 use std::net::IpAddr;
@@ -213,35 +211,10 @@ fn render_sink(sink: Option<&SinkConfig>) -> String {
             stream,
             ..
         } => {
-            let servers = servers
-                .iter()
-                .map(|s| strip_userinfo(s))
-                .collect::<Vec<_>>()
-                .join(",");
+            let servers = crate::redact::redacted_server_list(servers);
             format!("{label}: servers={servers} subject={subject} stream={stream}")
         }
     }
-}
-
-// Strip inline `user:pass@` credentials so a `nats://user:pass@host` server URL never leaks into the rendered plan.
-#[cfg(feature = "nats")]
-fn strip_userinfo(server: &str) -> Cow<'_, str> {
-    let Some(scheme_end) = server.find("://") else {
-        return Cow::Borrowed(server);
-    };
-    let authority_start = scheme_end + 3;
-    let authority_end = server[authority_start..]
-        .find('/')
-        .map_or(server.len(), |i| authority_start + i);
-    let Some(at) = server[authority_start..authority_end].rfind('@') else {
-        return Cow::Borrowed(server);
-    };
-    let host_start = authority_start + at + 1;
-    Cow::Owned(format!(
-        "{}{}",
-        &server[..authority_start],
-        &server[host_start..]
-    ))
 }
 
 fn format_prober_line(probers: &[String]) -> String {
@@ -465,22 +438,6 @@ mod tests {
             !rendered.contains("u:p"),
             "userinfo must not leak: {rendered}"
         );
-    }
-
-    #[cfg(feature = "nats")]
-    #[test]
-    fn strip_userinfo_covers_authority_edge_cases() {
-        assert_eq!(
-            strip_userinfo("nats://user:pass@host:4222"),
-            "nats://host:4222"
-        );
-        assert_eq!(strip_userinfo("nats://host:4222"), "nats://host:4222");
-        assert_eq!(
-            strip_userinfo("nats://u:p@host:4222/js"),
-            "nats://host:4222/js"
-        );
-        assert_eq!(strip_userinfo("host:4222"), "host:4222");
-        assert_eq!(strip_userinfo("nats://a@b@host:4222"), "nats://host:4222");
     }
 
     #[test]

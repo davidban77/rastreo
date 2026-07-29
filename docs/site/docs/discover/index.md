@@ -63,7 +63,7 @@ flowchart LR
 
     ---
 
-    OUI vendor lookup from MAC addresses, SNMP `sysObjectID` model lookup, the bundled seed tables, and how to override each.
+    SNMP `sysObjectID` lookup of vendor, model, and product family, the bundled seed table, and how to override it.
 
     [:octicons-arrow-right-24: Enrichment](enrichment.md)
 

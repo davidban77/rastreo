@@ -45,15 +45,17 @@ pub async fn spawn_sink_probe(
             (state.with_sink(Some(sink), reachability), Some(handle))
         }
         Err(ConstructError { hint, err }) => {
+            // `{err:#}` keeps the cause chain: the outermost context alone names the file, not the reason.
+            let detail = format!("{err:#}");
             tracing::warn!(
-                error = %err,
+                error = %detail,
                 path = %path.display(),
                 sink_type = ?hint.map(SinkType::as_label),
                 "sink construction failed; /readyz will report sink_unreachable"
             );
             let reachability = Arc::new(SinkReachability::construction_failed(
                 hint,
-                format!("sink construction failed: {err}"),
+                format!("sink construction failed: {detail}"),
                 config.probe_interval,
                 config.probe_timeout,
             ));
@@ -69,13 +71,14 @@ async fn load_and_construct_sink(
     #[cfg(feature = "config")]
     {
         use anyhow::Context;
-        use rastreo_core::{sink::create_sink, SinkConfig};
+        use rastreo_core::config::parse_sink_config;
+        use rastreo_core::sink::create_sink;
 
         let raw = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("failed to read sink config at {}", path.display()))
             .map_err(|err| ConstructError { hint: None, err })?;
-        let config: SinkConfig = serde_yaml_ng::from_str(&raw)
+        let config = parse_sink_config(&raw)
             .with_context(|| format!("failed to parse sink config at {}", path.display()))
             .map_err(|err| ConstructError { hint: None, err })?;
         let hint = sink_type_hint(&config);

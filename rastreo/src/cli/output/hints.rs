@@ -12,12 +12,11 @@ const FEATURE_GATED_VARIANTS: &[(&str, &str)] = &[
     ("ssh", "ssh"),
     ("icmp", "icmp"),
     ("tls", "tls"),
-    ("oui_enrichment", "oui"),
     ("mib_enrichment", "mib_enrichment"),
 ];
 
 const RELEASE_BUNDLED_FEATURES: &str =
-    "kafka, http, snmp, arp, ndp, oui, nats, ssh, icmp, tls, gnmi, lldp";
+    "kafka, http, snmp, arp, ndp, nats, ssh, icmp, tls, gnmi, lldp";
 
 const DNS_RESOLUTION_HINT: &str =
     "DNS resolution failed for the target. Check the resolver configuration or the target's hostname.";
@@ -180,16 +179,6 @@ mod tests {
     fn enrich_feature_hint_names_the_bundled_release_features() {
         let hint = enrich_feature_hint("unknown variant `ssh`, expected one of ...").expect("hint");
         assert!(hint.contains(RELEASE_BUNDLED_FEATURES), "hint: {hint}");
-    }
-
-    #[cfg(feature = "config")]
-    #[test]
-    fn enrich_feature_hint_maps_oui_enrichment_variant_to_oui_feature() {
-        let hint =
-            enrich_feature_hint("unknown variant `oui_enrichment`, expected one of `direct`")
-                .expect("hint");
-        assert!(hint.contains("--features oui"), "hint: {hint}");
-        assert!(hint.contains("'oui_enrichment'"), "hint: {hint}");
     }
 
     #[cfg(feature = "config")]

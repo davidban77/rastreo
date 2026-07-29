@@ -131,7 +131,7 @@ pub struct DeviceRecord {
     pub mgmt_ip: Option<IpAddr>,
     /// First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex.
     pub mac: Option<String>,
-    /// Vendor name resolved from the MAC OUI prefix by the OUI enrichment fuser, or from the SNMP `sysObjectID` by the MIB enrichment fuser when the OUI is absent. `null` when neither source matched.
+    /// Vendor name resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.
     pub manufacturer: Option<String>,
     /// Hardware model resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]

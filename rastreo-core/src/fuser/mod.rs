@@ -18,14 +18,10 @@ pub mod identity;
 pub(crate) mod keys;
 #[cfg(feature = "mib_enrichment")]
 pub mod mib;
-#[cfg(feature = "oui")]
-pub mod oui;
 
 pub use identity::{IdentityFuser, IdentityHints, VrrpGroup};
 #[cfg(feature = "mib_enrichment")]
 pub use mib::{MibEnrichmentFuser, MibTable};
-#[cfg(feature = "oui")]
-pub use oui::{OuiEnrichmentFuser, OuiTable};
 
 /// Streaming fusion: `ingest` receives one target's outcomes at a time and returns any records
 /// ready to emit; `finish` flushes records held back for cross-target correlation. The pipeline
@@ -219,12 +215,6 @@ pub enum FuserConfig {
         #[serde(default)]
         confidence_per_signal: Option<f64>,
     },
-    #[cfg(feature = "oui")]
-    OuiEnrichment {
-        #[serde(default = "oui::default_data_path")]
-        data_path: String,
-        inner: Box<FuserConfig>,
-    },
     #[cfg(feature = "mib_enrichment")]
     MibEnrichment {
         #[serde(default)]
@@ -261,11 +251,6 @@ impl FuserConfig {
                     }
                 }
                 Ok(())
-            }
-            #[cfg(feature = "oui")]
-            FuserConfig::OuiEnrichment { inner, .. } => {
-                reject_nested_identity(inner)?;
-                inner.validate()
             }
             #[cfg(feature = "mib_enrichment")]
             FuserConfig::MibEnrichment { inner, .. } => {
@@ -304,8 +289,6 @@ fn reject_nested_identity(inner: &FuserConfig) -> Result<(), ConfigError> {
 pub(crate) fn subtree_contains_identity(config: &FuserConfig) -> bool {
     match config {
         FuserConfig::Direct { .. } => false,
-        #[cfg(feature = "oui")]
-        FuserConfig::OuiEnrichment { inner, .. } => subtree_contains_identity(inner),
         #[cfg(feature = "mib_enrichment")]
         FuserConfig::MibEnrichment { inner, .. } => subtree_contains_identity(inner),
         FuserConfig::Identity { .. } => true,
@@ -332,16 +315,6 @@ pub fn create_fuser(config: &FuserConfig) -> Result<Box<dyn Fuser>, RastreoError
                 f = f.with_confidence_per_signal(*v);
             }
             Ok(Box::new(f))
-        }
-        #[cfg(feature = "oui")]
-        FuserConfig::OuiEnrichment { data_path, inner } => {
-            let inner_fuser = create_fuser(inner)?;
-            let table = if data_path.is_empty() {
-                OuiTable::from_bundled()?
-            } else {
-                OuiTable::from_path(data_path)?
-            };
-            Ok(Box::new(OuiEnrichmentFuser::new(inner_fuser, table)))
         }
         #[cfg(feature = "mib_enrichment")]
         FuserConfig::MibEnrichment { data_path, inner } => {
@@ -844,105 +817,6 @@ mod tests {
         assert_send_sync::<Box<dyn Fuser>>();
     }
 
-    #[cfg(all(feature = "config", feature = "oui"))]
-    #[test]
-    fn fuser_config_deserializes_oui_enrichment_with_bundled_data() {
-        let yaml = "type: oui_enrichment\ndata_path: \"\"\ninner:\n  type: direct\n";
-        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        match cfg {
-            FuserConfig::OuiEnrichment { data_path, inner } => {
-                assert_eq!(data_path, "");
-                assert!(matches!(*inner, FuserConfig::Direct { .. }));
-            }
-            other => panic!("expected OuiEnrichment, got {other:?}"),
-        }
-    }
-
-    #[cfg(all(feature = "config", feature = "oui"))]
-    #[test]
-    fn fuser_config_deserializes_oui_enrichment_with_data_path() {
-        let yaml =
-            "type: oui_enrichment\ndata_path: /etc/rastreo/manuf.txt\ninner:\n  type: direct\n";
-        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        match cfg {
-            FuserConfig::OuiEnrichment { data_path, .. } => {
-                assert_eq!(data_path, "/etc/rastreo/manuf.txt");
-            }
-            other => panic!("expected OuiEnrichment, got {other:?}"),
-        }
-    }
-
-    #[cfg(all(feature = "config", feature = "oui"))]
-    #[test]
-    fn fuser_config_deserializes_oui_enrichment_defaults_data_path_to_empty() {
-        let yaml = "type: oui_enrichment\ninner:\n  type: direct\n";
-        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        match cfg {
-            FuserConfig::OuiEnrichment { data_path, .. } => {
-                assert_eq!(data_path, "");
-            }
-            other => panic!("expected OuiEnrichment, got {other:?}"),
-        }
-    }
-
-    #[cfg(all(feature = "config", feature = "oui"))]
-    #[test]
-    fn fuser_config_oui_enrichment_wraps_direct_fuser() {
-        let yaml = "type: oui_enrichment\ninner:\n  type: direct\n  confidence_baseline: 0.5\n";
-        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        let FuserConfig::OuiEnrichment { inner, .. } = cfg else {
-            panic!("expected OuiEnrichment");
-        };
-        match *inner {
-            FuserConfig::Direct {
-                confidence_baseline,
-                ..
-            } => assert_eq!(confidence_baseline, Some(0.5)),
-            other => panic!("expected inner Direct, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "oui")]
-    #[test]
-    fn create_fuser_oui_enrichment_with_bundled_data_returns_fuser() {
-        let cfg = FuserConfig::OuiEnrichment {
-            data_path: String::new(),
-            inner: Box::new(FuserConfig::Direct {
-                include_unreachable: None,
-                confidence_baseline: None,
-                confidence_per_signal: None,
-            }),
-        };
-        let mut f = create_fuser(&cfg).expect("create");
-        let outcomes = vec![outcome(
-            1,
-            true,
-            vec![
-                Signal::Mac("00:04:AC:11:22:33".into()),
-                Signal::OpenPort(22),
-            ],
-        )];
-        let records = drive_fuser(f.as_mut(), outcomes).expect("ok");
-        assert_eq!(records[0].manufacturer.as_deref(), Some("IBM Corp"));
-    }
-
-    #[cfg(feature = "oui")]
-    #[test]
-    fn create_fuser_oui_enrichment_propagates_inner_validation() {
-        let cfg = FuserConfig::OuiEnrichment {
-            data_path: String::new(),
-            inner: Box::new(FuserConfig::Direct {
-                include_unreachable: None,
-                confidence_baseline: Some(-1.0),
-                confidence_per_signal: None,
-            }),
-        };
-        match create_fuser(&cfg) {
-            Ok(_) => panic!("expected error"),
-            Err(e) => assert!(format!("{e}").contains("confidence_baseline")),
-        }
-    }
-
     #[cfg(feature = "config")]
     #[test]
     fn fuser_config_deserializes_identity_variant_with_defaults() {
@@ -998,27 +872,6 @@ inner:
             msg.contains("unknown variant") && msg.contains("correlation"),
             "unexpected error: {msg}"
         );
-    }
-
-    #[cfg(all(feature = "config", feature = "oui"))]
-    #[test]
-    fn fuser_config_identity_wraps_oui_enrichment_wrapping_direct() {
-        let yaml = "\
-type: identity
-inner:
-  type: oui_enrichment
-  data_path: ''
-  inner:
-    type: direct
-";
-        let cfg: FuserConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
-        let FuserConfig::Identity { inner, .. } = cfg else {
-            panic!("expected Identity");
-        };
-        let FuserConfig::OuiEnrichment { inner, .. } = *inner else {
-            panic!("expected inner OuiEnrichment");
-        };
-        assert!(matches!(*inner, FuserConfig::Direct { .. }));
     }
 
     #[test]
@@ -1176,20 +1029,20 @@ inner:
             ),
         ];
 
-        // Empty data_path is offline-decidable; a non-empty path does file IO that validate() skips.
-        #[cfg(feature = "oui")]
-        let oui: Vec<(&str, FuserConfig)> = vec![
+        // An absent data_path is offline-decidable; a set path does file IO that validate() skips.
+        #[cfg(feature = "mib_enrichment")]
+        let wrapped: Vec<(&str, FuserConfig)> = vec![
             (
-                "oui_over_direct_bundled",
-                FuserConfig::OuiEnrichment {
-                    data_path: String::new(),
+                "mib_over_direct_bundled",
+                FuserConfig::MibEnrichment {
+                    data_path: None,
                     inner: direct(),
                 },
             ),
             (
-                "oui_over_identity_nested",
-                FuserConfig::OuiEnrichment {
-                    data_path: String::new(),
+                "mib_over_identity_nested",
+                FuserConfig::MibEnrichment {
+                    data_path: None,
                     inner: Box::new(FuserConfig::Identity {
                         identity_hints: IdentityHints::default(),
                         inner: direct(),
@@ -1197,10 +1050,10 @@ inner:
                 },
             ),
         ];
-        #[cfg(not(feature = "oui"))]
-        let oui: Vec<(&str, FuserConfig)> = Vec::new();
+        #[cfg(not(feature = "mib_enrichment"))]
+        let wrapped: Vec<(&str, FuserConfig)> = Vec::new();
 
-        for (label, cfg) in base.iter().chain(oui.iter()) {
+        for (label, cfg) in base.iter().chain(wrapped.iter()) {
             assert_eq!(
                 cfg.validate().is_err(),
                 create_fuser(cfg).is_err(),
@@ -1209,84 +1062,9 @@ inner:
         }
     }
 
-    #[cfg(feature = "oui")]
-    #[test]
-    fn validate_rejects_identity_nested_in_oui() {
-        let cfg = FuserConfig::OuiEnrichment {
-            data_path: String::new(),
-            inner: Box::new(FuserConfig::Identity {
-                identity_hints: IdentityHints::default(),
-                inner: direct(),
-            }),
-        };
-        let err = cfg
-            .validate()
-            .expect_err("identity below oui must be rejected");
-        assert!(err.to_string().contains("outermost fuser"), "got: {err}");
-    }
-
-    #[cfg(feature = "oui")]
-    #[test]
-    fn validate_rejects_identity_buried_below_oui() {
-        let cfg = FuserConfig::Identity {
-            identity_hints: IdentityHints::default(),
-            inner: Box::new(FuserConfig::OuiEnrichment {
-                data_path: String::new(),
-                inner: Box::new(FuserConfig::Identity {
-                    identity_hints: IdentityHints::default(),
-                    inner: direct(),
-                }),
-            }),
-        };
-        let err = cfg
-            .validate()
-            .expect_err("deeply nested identity must be rejected");
-        assert!(err.to_string().contains("outermost fuser"), "got: {err}");
-    }
-
-    #[cfg(feature = "oui")]
-    #[test]
-    fn validate_accepts_identity_over_oui_over_direct() {
-        let cfg = FuserConfig::Identity {
-            identity_hints: IdentityHints::default(),
-            inner: Box::new(FuserConfig::OuiEnrichment {
-                data_path: String::new(),
-                inner: direct(),
-            }),
-        };
-        assert!(cfg.validate().is_ok());
-    }
-
-    #[cfg(feature = "oui")]
-    #[test]
-    fn validate_accepts_oui_over_direct() {
-        let cfg = FuserConfig::OuiEnrichment {
-            data_path: String::new(),
-            inner: direct(),
-        };
-        assert!(cfg.validate().is_ok());
-    }
-
     #[test]
     fn validate_accepts_direct_alone() {
         assert!(direct().validate().is_ok());
-    }
-
-    #[cfg(feature = "oui")]
-    #[test]
-    fn create_fuser_oui_enrichment_returns_error_for_nonexistent_data_path() {
-        let cfg = FuserConfig::OuiEnrichment {
-            data_path: "/does/not/exist/manuf.txt".into(),
-            inner: Box::new(FuserConfig::Direct {
-                include_unreachable: None,
-                confidence_baseline: None,
-                confidence_per_signal: None,
-            }),
-        };
-        match create_fuser(&cfg) {
-            Ok(_) => panic!("expected error"),
-            Err(e) => assert!(format!("{e}").contains("could not be opened")),
-        }
     }
 
     #[cfg(feature = "mib_enrichment")]

@@ -3629,9 +3629,9 @@ mod tests {
         async fn streaming_matches_batch_across_matrix() {
             #[allow(unused_mut)]
             let mut fusers = vec![direct_cfg(), identity_cfg()];
-            #[cfg(feature = "oui")]
-            fusers.push(FuserConfig::OuiEnrichment {
-                data_path: String::new(),
+            #[cfg(feature = "mib_enrichment")]
+            fusers.push(FuserConfig::MibEnrichment {
+                data_path: None,
                 inner: Box::new(direct_cfg()),
             });
 

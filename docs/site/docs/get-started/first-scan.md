@@ -119,7 +119,7 @@ Each JSON line is one `DeviceRecord`.
 | `identity_key` | Stable dedup key. For IP targets, this is `ip:<address>`. |
 | `mgmt_ip` | Management IP if known. For an IP target, this is the target address. |
 | `mac` | MAC address. `null` until an ARP-style [prober](../reference/glossary.md#prober) populates it, which needs a target on the local segment. |
-| `manufacturer` | OUI vendor name. `null` until a MAC address is known for the OUI lookup to work from. |
+| `manufacturer` | Vendor name from the SNMP `sysObjectID` lookup. `null` until the [`mib_enrichment`](../discover/enrichment.md) fuser matches one. |
 | `platform` | Platform fingerprint set by the [classifier](../discover/classification.md). `null` here because Cloudflare's banners match no platform rule — point the same command at a switch or a router and it fills in. |
 | `os_version` | OS version string set by the classifier alongside `platform`. `null` for the same reason. |
 | `role` | Device role from the [classifier](../discover/classification.md). `null` here: the default role rules need multi-port evidence such as SSH + BGP, or SSH + HTTPS + NETCONF. |

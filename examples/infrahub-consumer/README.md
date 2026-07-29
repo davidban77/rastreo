@@ -134,7 +134,7 @@ Kept out on purpose — production consumers should add these:
 
 ## Not currently mapped
 
-`manufacturer` is present on the `DeviceRecord` (populated from the OUI database) but is not written to Infrahub. The reference schema does not model a `Manufacturer` relationship, and modeling one would require a per-deployment decision about how the ops team already models manufacturers in Infrahub. An extension that resolves `record.manufacturer` to a `Manufacturer` node and attaches it as a relationship on `RastreoDevice` fits inside `InfrahubClientWrapper.upsert_device`.
+`manufacturer` is present on the `DeviceRecord` (populated from the SNMP `sysObjectID` lookup) but is not written to Infrahub. The reference schema does not model a `Manufacturer` relationship, and modeling one would require a per-deployment decision about how the ops team already models manufacturers in Infrahub. An extension that resolves `record.manufacturer` to a `Manufacturer` node and attaches it as a relationship on `RastreoDevice` fits inside `InfrahubClientWrapper.upsert_device`.
 
 ## Extending this reference
 

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use rastreo_core::config::DiscoverScenarioConfig;
+use rastreo_core::config::{parse_discover_scenario_json, DiscoverScenarioConfig};
 use rastreo_core::{
     hint_for_error_kind, resolve_scenario_targets, run_discovery, DeviceRecord, DiscoveryPlan,
     DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink, PlanKnobs, RunOptions, Sink,
@@ -99,13 +99,19 @@ fn scenario_label(scenario: &DiscoverScenarioConfig) -> String {
         .unwrap_or_else(|| "unnamed".to_string())
 }
 
+fn scenario_from_body(body: serde_json::Value) -> Result<DiscoverScenarioConfig, AppError> {
+    parse_discover_scenario_json(body).map_err(AppError::from)
+}
+
 /// Submit a discovery scenario. `?dry_run=true` resolves targets and returns the [`DiscoveryPlan`] without probing or writing a sink; otherwise the scenario runs synchronously and records are returned in the response body (the client-supplied `sink` field is ignored on the real-scan path).
 pub async fn create_scan(
     State(state): State<AppState>,
     Query(params): Query<ScanParams>,
-    Json(scenario): Json<DiscoverScenarioConfig>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Response, AppError> {
     let start = Instant::now();
+    // Uncounted by the scan-error metric the checks below feed: its scenario label does not exist until the body parses.
+    let scenario = scenario_from_body(body)?;
     let label = scenario_label(&scenario);
 
     if scenario.targets.is_empty() {
@@ -316,6 +322,10 @@ mod tests {
         DiscoverScenarioConfig::new(BaseProbeConfig::default(), targets, probers)
     }
 
+    fn json_body(scenario: &DiscoverScenarioConfig) -> Json<serde_json::Value> {
+        Json(serde_json::to_value(scenario).expect("scenario serializes"))
+    }
+
     async fn run_real(
         state: AppState,
         scenario: DiscoverScenarioConfig,
@@ -331,9 +341,13 @@ mod tests {
             Vec::new(),
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let err = create_scan(State(state), Query(ScanParams::default()), Json(scenario))
-            .await
-            .expect_err("empty targets must error");
+        let err = create_scan(
+            State(state),
+            Query(ScanParams::default()),
+            json_body(&scenario),
+        )
+        .await
+        .expect_err("empty targets must error");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("targets"));
     }
@@ -345,9 +359,13 @@ mod tests {
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
             Vec::new(),
         );
-        let err = create_scan(State(state), Query(ScanParams::default()), Json(scenario))
-            .await
-            .expect_err("empty probers must error");
+        let err = create_scan(
+            State(state),
+            Query(ScanParams::default()),
+            json_body(&scenario),
+        )
+        .await
+        .expect_err("empty probers must error");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("probers"));
     }
@@ -1047,9 +1065,13 @@ mod tests {
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
 
-        let response = create_scan(State(state), Query(ScanParams { dry_run: true }), Json(s))
-            .await
-            .expect("a dry-run consumes no inflight slot and is never 429'd");
+        let response = create_scan(
+            State(state),
+            Query(ScanParams { dry_run: true }),
+            json_body(&s),
+        )
+        .await
+        .expect("a dry-run consumes no inflight slot and is never 429'd");
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -1107,9 +1129,13 @@ mod tests {
         );
         s.base.timeout_ms = Some(500);
 
-        let response = create_scan(State(state), Query(ScanParams { dry_run: true }), Json(s))
-            .await
-            .expect("dry-run");
+        let response = create_scan(
+            State(state),
+            Query(ScanParams { dry_run: true }),
+            json_body(&s),
+        )
+        .await
+        .expect("dry-run");
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1146,11 +1172,57 @@ mod tests {
             Vec::new(),
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let err = create_scan(State(state), Query(ScanParams { dry_run: true }), Json(s))
-            .await
-            .expect_err("dry-run of an invalid scenario must 400");
+        let err = create_scan(
+            State(state),
+            Query(ScanParams { dry_run: true }),
+            json_body(&s),
+        )
+        .await
+        .expect_err("dry-run of an invalid scenario must 400");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("targets"));
+    }
+
+    #[test]
+    fn scenario_body_rejects_a_retired_type_tag_as_a_400_that_names_the_retirement() {
+        let body = serde_json::json!({
+            "targets": [{"Ip": "127.0.0.1"}],
+            "probers": [{"type": "tcp_connect", "ports": [22]}],
+            "fuser": {"type": "oui_enrichment", "inner": {"type": "direct"}},
+        });
+        let err = scenario_from_body(body).expect_err("a retired type tag must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("oui_enrichment"), "{}", err.message);
+        assert!(err.message.contains("mib_enrichment"), "{}", err.message);
+        assert!(
+            !err.message.contains("unknown variant"),
+            "the retirement must be named, not left to serde: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn scenario_body_with_an_unrecognized_type_tag_is_a_400() {
+        let body = serde_json::json!({
+            "targets": [{"Ip": "127.0.0.1"}],
+            "probers": [{"type": "carrier_pigeon"}],
+        });
+        let err = scenario_from_body(body).expect_err("an unknown prober must be rejected");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("carrier_pigeon"), "{}", err.message);
+    }
+
+    #[test]
+    fn scenario_body_round_trips_a_valid_scenario() {
+        let body = serde_json::json!({
+            "name": "lab",
+            "targets": [{"Ip": "127.0.0.1"}],
+            "probers": [{"type": "tcp_connect", "ports": [22]}],
+        });
+        let scenario = scenario_from_body(body).expect("a valid body parses");
+        assert_eq!(scenario.base.name.as_deref(), Some("lab"));
+        assert_eq!(scenario.targets.len(), 1);
+        assert_eq!(scenario.probers.len(), 1);
     }
 
     #[cfg(feature = "nats")]

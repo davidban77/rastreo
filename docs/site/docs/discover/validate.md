@@ -19,7 +19,7 @@ The main benefit: you can lint a production sink config with **no broker running
 `validate` runs the same file front-end as `discover --file`: it reads the file, checks `version: 1` and `kind: discovery`, expands `${VAR}` secret references, and rejects retired fields. Then, for every scenario, it checks:
 
 - **The sink config shape.** For a Kafka sink: a non-empty broker list, a non-empty topic, a well-formed TLS block, a well-formed SASL block, and a non-empty dead-letter topic when one is set. For a NATS sink: non-empty servers, subject, and stream. The `stdout` and `file` sinks are always valid — they need no network.
-- **The fuser configuration.** When a scenario sets a `fuser`, `validate` checks it too. The `direct` fuser has two confidence scores: `confidence_baseline` must be a number from `0.0` to `1.0`, and `confidence_per_signal` must be zero or greater. The `identity` fuser must be the outermost fuser. It cannot be nested inside `oui_enrichment` or another `identity`. Each `vrrp_groups` entry on an `identity` fuser needs a valid MAC address in `virtual_mac`.
+- **The fuser configuration.** When a scenario sets a `fuser`, `validate` checks it too. The `direct` fuser has two confidence scores: `confidence_baseline` must be a number from `0.0` to `1.0`, and `confidence_per_signal` must be zero or greater. The `identity` fuser must be the outermost fuser. It cannot be nested inside `mib_enrichment` or another `identity`. Each `vrrp_groups` entry on an `identity` fuser needs a valid MAC address in `virtual_mac`.
 - **A non-empty `probers` list.** A scenario with `probers: []` has nothing to run.
 - **A non-empty `targets` list.** A scenario with `targets: []` has nothing to probe.
 
@@ -161,11 +161,11 @@ scenario 'office' (1 of 1): confidence_baseline must be finite and in [0.0, 1.0]
 Error: 1 of 1 scenario(s) invalid
 ```
 
-Another is a mis-nested `identity` fuser. The `identity` fuser runs last, so it must wrap the other fusers. This file has the order backwards — `identity` nested inside `oui_enrichment` — and is rejected:
+Another is a mis-nested `identity` fuser. The `identity` fuser runs last, so it must wrap the other fusers. This file has the order backwards — `identity` nested inside `mib_enrichment` — and is rejected:
 
 ```yaml
     fuser:
-      type: oui_enrichment
+      type: mib_enrichment
       inner:
         type: identity
         inner:
@@ -177,7 +177,7 @@ scenario 'office' (1 of 1): identity fuser must be the outermost fuser; it canno
 Error: 1 of 1 scenario(s) invalid
 ```
 
-The correct order is `direct` innermost, then `oui_enrichment`, then `identity` outermost. See [Identity](identity.md#composition) for the recommended stack.
+The correct order is `direct` innermost, then `mib_enrichment`, then `identity` outermost. See [Identity](identity.md#composition) for the recommended stack.
 
 `validate` also checks the `identity` fuser's `vrrp_groups`. Each entry gives a virtual router's IP in `virtual_ip` and its shared MAC in `virtual_mac`. That MAC must be a real address, and this one is not:
 
@@ -199,8 +199,8 @@ Error: 1 of 1 scenario(s) invalid
 
 See [Identity · User-declared VRRP hints](identity.md#user-declared-vrrp-hints) for the full `vrrp_groups` entry shape.
 
-!!! note "`oui_enrichment` needs the `oui` build feature"
-    A `type: oui_enrichment` fuser is only recognized when the binary is built with the `oui` feature — see [Enrichment · Build feature](enrichment.md#build-feature). A default build does not recognize it and rejects the file while parsing.
+!!! note "`mib_enrichment` needs the `mib_enrichment` build feature"
+    A `type: mib_enrichment` fuser is only recognized when the binary is built with the `mib_enrichment` feature — see [Enrichment · Build feature](enrichment.md#mib-build-feature). A default build does not recognize it and rejects the file while parsing.
 
 ## Validating a secured sink offline
 

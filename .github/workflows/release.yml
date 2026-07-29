@@ -70,14 +70,14 @@ jobs:
       - name: Build binaries (native)
         if: matrix.target != 'aarch64-unknown-linux-musl'
         run: |
-          cargo build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp -p rastreo
-          cargo build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp -p rastreo-server
+          cargo build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp -p rastreo
+          cargo build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp -p rastreo-server
 
       - name: Build binaries (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
-          cross build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp -p rastreo
-          cross build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp -p rastreo-server
+          cross build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp -p rastreo
+          cross build --release --target ${{ matrix.target }} --features kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp -p rastreo-server
 
       - name: Create tarball
         run: |
@@ -143,7 +143,7 @@ jobs:
             tar xzf rastreo-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz
             ```
 
-            Platforms: `linux/amd64`, `linux/arm64`, `macos/amd64`, `macos/arm64`. Binaries are built with the `kafka`, `http`, `snmp`, `arp`, `ndp`, `oui`, `nats`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp` features enabled.
+            Platforms: `linux/amd64`, `linux/arm64`, `macos/amd64`, `macos/arm64`. Binaries are built with the `kafka`, `http`, `snmp`, `arp`, `ndp`, `nats`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp` features enabled.
 
             **Docker:**
             ```
@@ -151,7 +151,7 @@ jobs:
             docker pull ghcr.io/davidban77/rastreo:${{ github.ref_name }}-otlp     # OTLP-enabled variant
             ```
 
-            The image is multi-arch (`linux/amd64` + `linux/arm64`) and ships with both binaries: `rastreo-server` (the default entrypoint, port 8080) and `rastreo` at `/rastreo`. The `rastreo` CLI is built with the `kafka`, `http`, `snmp`, `arp`, `ndp`, `oui`, `nats`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp` features enabled — override the entrypoint to run a discovery scan with the Kafka or NATS sink. The `-otlp` variant additionally includes `--features otlp` for OpenTelemetry OTLP export of metrics and logs; see the [OTLP reference](https://rastreo.dev/reference/otlp/) for configuration. The ARP, NDP, and ICMP probers require `CAP_NET_RAW` at runtime (or a permissive `net.ipv4.ping_group_range` for ICMP); pass `--cap-add=NET_RAW` on `docker run` when using them:
+            The image is multi-arch (`linux/amd64` + `linux/arm64`) and ships with both binaries: `rastreo-server` (the default entrypoint, port 8080) and `rastreo` at `/rastreo`. The `rastreo` CLI is built with the `kafka`, `http`, `snmp`, `arp`, `ndp`, `nats`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp` features enabled — override the entrypoint to run a discovery scan with the Kafka or NATS sink. The `-otlp` variant additionally includes `--features otlp` for OpenTelemetry OTLP export of metrics and logs; see the [OTLP reference](https://rastreo.dev/reference/otlp/) for configuration. The ARP, NDP, and ICMP probers require `CAP_NET_RAW` at runtime (or a permissive `net.ipv4.ping_group_range` for ICMP); pass `--cap-add=NET_RAW` on `docker run` when using them:
 
             ```
             docker run --rm --entrypoint /rastreo ghcr.io/davidban77/rastreo:${{ github.ref_name }} \
@@ -174,10 +174,10 @@ jobs:
       matrix:
         variant:
           - name: default
-            features: kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp
+            features: kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp
             suffix: ""
           - name: otlp
-            features: kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp,otlp
+            features: kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp,otlp
             suffix: "-otlp"
 
     steps:

@@ -12,6 +12,8 @@ pub(crate) mod oid;
 pub mod pipeline;
 pub mod plan;
 pub mod prober;
+#[cfg(feature = "nats")]
+pub(crate) mod redact;
 pub mod resolver;
 pub mod scheduler;
 pub mod sink;

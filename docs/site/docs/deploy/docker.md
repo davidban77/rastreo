@@ -20,14 +20,14 @@ For a multi-arch build, use `docker buildx` and pass the platforms you want. The
 docker buildx build --platform linux/amd64,linux/arm64 -t rastreo .
 ```
 
-The image builds with the full feature set — `kafka`, `nats`, `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `gnmi`, `lldp`, and `oui`. Both binaries accept every sink and prober with no rebuild. `--sink kafka` and every `--probe` kind work in the published image with no extra steps. The NATS sink has no flag on any build. Reach it through a scenario file's `sink: {type: nats}` — see [Integrate · NATS](../integrate/nats.md).
+The image builds with the full feature set — `kafka`, `nats`, `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp`. Both binaries accept every sink and prober with no rebuild. `--sink kafka` and every `--probe` kind work in the published image with no extra steps. The NATS sink has no flag on any build. Reach it through a scenario file's `sink: {type: nats}` — see [Integrate · NATS](../integrate/nats.md).
 
 !!! tip "Changing the feature set"
     The Dockerfile takes a `FEATURES` build argument that defaults to the full set above. Override it to add or drop features, for example to build the OpenTelemetry variant:
 
     ```bash
     docker build \
-      --build-arg FEATURES=kafka,nats,http,snmp,arp,ndp,oui,ssh,icmp,tls,gnmi,lldp,otlp \
+      --build-arg FEATURES=kafka,nats,http,snmp,arp,ndp,ssh,icmp,tls,gnmi,lldp,otlp \
       -t rastreo .
     ```
 

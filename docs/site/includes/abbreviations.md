@@ -45,7 +45,6 @@
 *[NTP]: Network Time Protocol
 *[OID]: Object Identifier
 *[OTLP]: OpenTelemetry Protocol
-*[OUI]: Organisationally Unique Identifier
 *[PDU]: Protocol Data Unit
 *[PEM]: Privacy-Enhanced Mail
 *[PTR]: Pointer (reverse DNS) record

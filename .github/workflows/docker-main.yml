@@ -31,10 +31,10 @@ jobs:
       matrix:
         variant:
           - name: default
-            features: kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp
+            features: kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp
             suffix: ""
           - name: otlp
-            features: kafka,http,snmp,arp,ndp,oui,nats,ssh,icmp,tls,gnmi,lldp,otlp
+            features: kafka,http,snmp,arp,ndp,nats,ssh,icmp,tls,gnmi,lldp,otlp
             suffix: "-otlp"
 
     steps:
