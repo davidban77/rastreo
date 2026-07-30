@@ -1,4 +1,4 @@
-#![cfg(all(feature = "config", feature = "nats"))]
+#![cfg(feature = "config")]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -6,9 +6,6 @@ use std::sync::Arc;
 use rastreo_core::{HickoryResolver, Resolver};
 use rastreo_server::state::{AppState, SinkProbeConfig};
 use rastreo_server::{build_app, spawn_sink_probe};
-
-const USERNAME: &str = "admin";
-const PASSWORD: &str = "hunter2";
 
 fn resolver() -> Arc<dyn Resolver> {
     Arc::new(HickoryResolver::from_system().expect("system resolver"))
@@ -44,8 +41,12 @@ async fn readyz_body_for_sink_config(yaml: &str) -> serde_json::Value {
         .expect("readyz body json")
 }
 
+#[cfg(feature = "nats")]
 #[tokio::test]
 async fn readyz_reports_an_unreachable_nats_sink_without_its_inline_credentials() {
+    const USERNAME: &str = "admin";
+    const PASSWORD: &str = "hunter2";
+
     let yaml = format!(
         "type: nats\nservers: [\"nats://{USERNAME}:{PASSWORD}@127.0.0.1:1\"]\nsubject: rastreo.discovery.records.v1\nstream: RASTREO\n"
     );
@@ -59,4 +60,64 @@ async fn readyz_reports_an_unreachable_nats_sink_without_its_inline_credentials(
         .expect("readyz reports why the sink could not be built");
     assert!(reason.contains("nats://127.0.0.1:1"), "reason: {reason}");
     assert!(reason.contains("failed to connect"), "reason: {reason}");
+}
+
+/// Each expansion syntax as the YAML text resolving to `plaintext`, with the tempfile the `!file` arm must outlive.
+fn secret_references_to(
+    var: &str,
+    plaintext: &str,
+) -> Vec<(&'static str, String, Option<tempfile::NamedTempFile>)> {
+    use std::io::Write;
+
+    // SAFETY: env var mutation is process-global; the name is unique to this test binary.
+    unsafe { std::env::set_var(var, plaintext) };
+    let mut file = tempfile::NamedTempFile::new().expect("tempfile");
+    file.write_all(plaintext.as_bytes()).expect("write");
+    let path = file.path().to_str().expect("utf-8 path").to_string();
+    vec![
+        ("${VAR}", format!("\"${{{var}}}\""), None),
+        ("!file", format!("!file {path}"), Some(file)),
+    ]
+}
+
+#[tokio::test]
+async fn readyz_never_publishes_a_secret_expanded_into_a_malformed_sink_config() {
+    const SECRET: &str = "hunter2-plaintext-must-never-surface";
+    const VAR: &str = "RASTREO_TEST_SERVER_SINK_SHAPE_SECRET";
+
+    let mut positions: Vec<(&str, &str)> = Vec::new();
+    positions.push(("`type`", "type: REF\n"));
+    #[cfg(feature = "nats")]
+    positions.extend([
+        (
+            "`servers`",
+            "type: nats\nservers: REF\nsubject: rastreo.discovery.records.v1\nstream: RASTREO\n",
+        ),
+        (
+            "`flush_mode`",
+            "type: nats\nservers: [\"nats://127.0.0.1:1\"]\nsubject: rastreo.discovery.records.v1\nstream: RASTREO\nflush_mode: REF\n",
+        ),
+    ]);
+
+    for (position, template) in positions {
+        for (delivery, reference, _keep) in secret_references_to(VAR, SECRET) {
+            let body = readyz_body_for_sink_config(&template.replace("REF", &reference)).await;
+            let rendered = body.to_string();
+            assert!(
+                !rendered.contains(SECRET),
+                "{position} via {delivery} leaked the plaintext on /readyz: {rendered}"
+            );
+            let reason = body["last_probe_error"]
+                .as_str()
+                .expect("readyz reports why the sink could not be built");
+            assert!(
+                reason.contains("after secret expansion"),
+                "{position} via {delivery}: {reason}"
+            );
+            assert!(
+                reason.contains(reference.trim_matches('"')),
+                "{position} via {delivery} must still name the reference as written: {reason}"
+            );
+        }
+    }
 }

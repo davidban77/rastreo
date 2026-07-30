@@ -66,8 +66,16 @@ src/
 ├── pipeline.rs     ← run_discovery + DiscoverySummary + DiscoveryProgress (opt-in watch progress hook)
 ├── plan.rs         ← DiscoveryPlan + PlanKnobs (exhaustive dry-run plan render + Display)
 ├── redact.rs       ← crate-private server-URL userinfo stripping, shared by the plan render and the NATS sink's error text (feature: nats)
-└── config/mod.rs    ← ScenarioFile + ScenarioEntry + BaseProbeConfig + the parse entry points every config ingestion surface goes through
+└── config/
+    ├── mod.rs       ← ScenarioFile + ScenarioEntry + BaseProbeConfig + the parse entry points every config ingestion surface goes through
+    └── secrets.rs   ← `${VAR}` / `!file` expansion + the non-disclosing shape-error seam (feature: config)
 ```
+
+## Config Ingestion
+
+`parse_scenario_file` and `parse_sink_config` expand `${VAR}` references and `!file` tags before deserializing; `parse_discover_scenario_json` does not, because the body is client-supplied and expanding it would read the server's environment back to the caller. Both file-backed entry points go through `deserialize_expanded`, which runs the retired-`type:`-tag walk over the *expanded* tree (a tag delivered through a reference must still be rejected) but reports a shape error from `secrets::shape_failure_detail`. Formatting the serde error raised over the expanded tree would disclose the secret, because serde quotes the offending scalar verbatim and `rastreo-server` publishes `last_probe_error` on the unauthenticated `/readyz`. `shape_failure_detail` instead re-deserializes a *reference-form* tree — raw, with `!file` tags flattened to the literal text `!file <path>`, because a raw re-parse of an internally-tagged enum fails on the tag itself and names nothing. The reported text can therefore only ever contain a `${VAR}` reference or an `!file` path. Anything that formats an error out of expanded data breaks the invariant; `config::tests::no_expanding_parse_entry_point_quotes_an_expanded_secret_in_a_shape_error` and `rastreo-server`'s `readyz_never_publishes_a_secret_expanded_into_a_malformed_sink_config` pin both halves.
+
+The note `shape_failure_detail` appends states only what holds at every reference position, because the function has no schema knowledge and must not grow any: the references resolved (expansion errors on an unset variable long before shape validation), the text quotes them as written rather than the values they produced, and expansion substitutes a `Value::String`, so a reference can only fill a field that accepts a string. That last clause is the feature's ceiling, not a fixable mistake: a reference fills a string-valued position and nothing else — not `timeout_ms`, `max_concurrent`, `probe_rate`, or `retry.max_attempts`, not a boolean, not a sequence like `servers:`, and not an internally tagged enum like `flush_mode:`, whose wire form is a mapping (the `type:` string inside such a mapping does accept one). No referenced variable's contents change that. The note must not claim a value was withheld for secrecy: most reference positions hold no secret, and an operator who checks the field name against what it holds would rightly stop trusting the note where it *is* protecting a credential. `secrets::tests::the_note_claims_no_secrecy_for_a_reference_in_a_field_that_holds_none`, `secrets::tests::the_note_is_the_same_for_a_reference_in_a_numeric_field_and_in_a_stringly_typed_one`, and `config::tests::parse_scenario_file_rejects_a_reference_in_a_numeric_field_holding_a_valid_number` pin the wording and the ceiling.
 
 ## Second Streams
 
