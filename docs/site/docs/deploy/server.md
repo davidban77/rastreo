@@ -34,7 +34,7 @@ For every environment variable both binaries read at runtime, in one table, see 
 | —                       | `RASTREO_SHUTDOWN_TIMEOUT_SECS`        | `60`    | Hard cap in seconds on the graceful-drain window after a shutdown signal. When the drain runs longer, the server logs a warning and force-exits. Minimum 1. Keep it below the pod's `terminationGracePeriodSeconds`. See [Graceful shutdown](#graceful-shutdown). |
 | —                       | `RASTREO_API_TOKEN`                    | unset   | Shared secret for `POST /scans` bearer auth. When set, every request to `POST /scans` must send `Authorization: Bearer <token>`. A trailing newline is tolerated. See [Authentication](#authentication). |
 | —                       | `RASTREO_AUTH_DISABLED`                | unset   | Set to `true` to run `POST /scans` with no authentication. The server refuses to start unless this or `RASTREO_API_TOKEN` is set. See [Authentication](#authentication). |
-| —                       | `RASTREO_SINK_CONFIG_PATH`             | unset   | Path to a YAML file with a `SinkConfig`. When set, the server builds the sink at startup and probes it every `RASTREO_SINK_PROBE_INTERVAL_SECS`. Sink construction failure is non-fatal — the pod stays up, `/readyz` reports `sink_unreachable`. |
+| —                       | `RASTREO_SINK_CONFIG_PATH`             | unset   | Path to a YAML file with a `SinkConfig`. When set, the server builds the sink at startup and probes it every `RASTREO_SINK_PROBE_INTERVAL_SECS`. Sink construction failure is non-fatal — the pod stays up, `/readyz` reports `sink_unreachable`. The file may reference credentials with `${VAR}` or `!file` instead of embedding them — see [Secrets](../reference/secrets.md). |
 | —                       | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`    | Sink reachability probe cadence in seconds. Minimum 1. |
 | —                       | `RASTREO_SINK_PROBE_TIMEOUT_SECS`      | `5`     | Per-probe timeout in seconds. Probes exceeding this count as failures. Minimum 1. |
 | —                       | `RASTREO_TARGET_ALLOWLIST`             | unset   | Comma-separated CIDRs (bare IPs accepted, treated as `/32` or `/128`) the server may probe. Unset or empty allows any target. See [Restricting scan targets](#restricting-scan-targets). |
@@ -242,6 +242,27 @@ sink:
 ```
 
 The chart renders a ConfigMap with the sink YAML, mounts it at `/etc/rastreo/sink/sink.yaml`, and sets `RASTREO_SINK_CONFIG_PATH` on the container. Leave `sink.config` empty (default) to run the server without a probe.
+
+A ConfigMap is plaintext at rest and readable by anyone with access to the namespace. `helm get values` echoes it back as well. So do not inline a broker password into `sink.config`. The server expands `${VAR}` references when it reads the sink config, so `sink.config` can name a credential instead of holding one:
+
+```yaml
+sink:
+  config:
+    type: nats
+    servers: ["nats://probe:${NATS_PASS}@nats.observability.svc:4222"]
+    subject: rastreo.discovery.records.v1
+    stream: RASTREO
+```
+
+Helm copies the reference into the ConfigMap unchanged, so only the text `${NATS_PASS}` is stored and the password stays in a Secret.
+
+!!! warning "The bundled chart cannot supply the variable"
+    The chart has no `extraEnv`, `envFrom`, `extraVolumes`, or `extraVolumeMounts` value. It renders only the environment variables it already knows about, and its one volume is the sink ConfigMap. So `NATS_PASS` cannot reach the container through `helm install` alone. Supply it with a post-renderer, or with a Deployment you patch yourself. Either way, add an `env` entry with a `secretKeyRef`.
+
+!!! warning "Do not put an `!file` tag in `sink.config`"
+    Helm drops the YAML tag and keeps the path as plain text, so the ConfigMap ends up holding `password: /run/secrets/nats-password`. The server then reads that path *as the password* and fails authentication, with no error naming the credential. Use `!file` only in a sink config file you write yourself, outside the chart.
+
+An unset variable is not fatal. The pod starts and stays up. `/readyz` returns 503 with `reason: "sink_unreachable"`, and `last_probe_error` names the variable and the config path (`environment variable NATS_PASS referenced in sink config is not set`). `/readyz` needs no bearer token. That is why no expanded credential is allowed to reach `last_probe_error` on any failure path. A failed connect to `nats://probe:hunter2@nats:4222` reports `nats://nats:4222`. A malformed config is reported against the file as written, quoting `${NATS_PASS}` and never the value it resolved to. For the full syntax, the error shapes, and the Vault or Secrets Manager wrapper pattern, see [Secrets](../reference/secrets.md).
 
 `GET /health` is preserved as a backward-compat alias for `/healthz`. New deployments should point liveness at `/healthz` and readiness at `/readyz`.
 

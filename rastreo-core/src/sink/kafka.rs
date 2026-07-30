@@ -1559,7 +1559,7 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn kafka_sink_config_expands_file_ca_cert_and_env_password() {
-        use crate::config::secrets::expand;
+        use crate::config::secrets::{expand, SecretSource};
         use crate::sink::SinkConfig;
         use std::io::Write;
 
@@ -1575,7 +1575,7 @@ mod tests {
             "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\ntls:\n  verify: true\n  ca_cert: !file {ca_path}\nsasl:\n  mechanism: scram_sha_256\n  username: svc\n  password: ${{RASTREO_TEST_KAFKA_SASL_PW}}\n"
         );
         let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).expect("parse");
-        let expanded = expand(raw).expect("expand secrets");
+        let expanded = expand(raw, SecretSource::SinkConfig).expect("expand secrets");
         let config: SinkConfig = serde_yaml_ng::from_value(expanded).expect("deserialize");
 
         // SAFETY: see set_var above.

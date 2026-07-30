@@ -20,13 +20,7 @@ pub const MAX_RETRIES: u32 = 1024;
 pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
     let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
-    let expanded = secrets::expand(raw)?;
-    ensure_no_retired_type_tags_yaml(&expanded)?;
-    let file: ScenarioFile = serde_yaml_ng::from_value(expanded).map_err(|e| {
-        ConfigError::InvalidValue(format!(
-            "scenario shape validation failed after secret expansion: {e}"
-        ))
-    })?;
+    let file: ScenarioFile = deserialize_expanded(raw, secrets::SecretSource::Scenario)?;
     file.defaults.ensure_no_retired_fields()?;
     file.defaults.ensure_retries_within_bound()?;
     for entry in &file.scenarios {
@@ -40,7 +34,7 @@ pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
     Ok(file)
 }
 
-/// Parse the JSON body of a discovery scenario — the shape `POST /scans` accepts.
+/// Parse the JSON body of a discovery scenario — the shape `POST /scans` accepts. Unlike the file-backed parsers, `${VAR}` references stay literal: the body is client-supplied, so expanding it would read the server's environment back to the caller.
 pub fn parse_discover_scenario_json(
     body: serde_json::Value,
 ) -> Result<DiscoverScenarioConfig, RastreoError> {
@@ -50,15 +44,31 @@ pub fn parse_discover_scenario_json(
     Ok(scenario)
 }
 
-/// Parse a standalone YAML sink config — the shape `RASTREO_SINK_CONFIG_PATH` points at.
+/// Parse a standalone YAML sink config — the shape `RASTREO_SINK_CONFIG_PATH` points at. `${VAR}` env-var references and `!file <path>` tags are expanded before deserialization, so a broker credential can live in the environment or on a secret mount instead of in the file.
 #[cfg(feature = "config")]
 pub fn parse_sink_config(input: &str) -> Result<SinkConfig, RastreoError> {
     let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
-    ensure_no_retired_type_tags_yaml(&raw)?;
-    let config = serde_yaml_ng::from_value(raw)
-        .map_err(|e| ConfigError::InvalidValue(format!("sink shape validation failed: {e}")))?;
+    let config = deserialize_expanded(raw, secrets::SecretSource::SinkConfig)?;
     Ok(config)
+}
+
+#[cfg(feature = "config")]
+fn deserialize_expanded<T: serde::de::DeserializeOwned>(
+    raw: serde_yaml_ng::Value,
+    source: secrets::SecretSource,
+) -> Result<T, ConfigError> {
+    let expanded = secrets::expand(raw.clone(), source)?;
+    ensure_no_retired_type_tags_yaml(&expanded)?;
+    // The discarded error quotes the offending scalar verbatim, which for an expanded position is
+    // the secret itself; `shape_failure_detail` re-derives it from the tree as written.
+    serde_yaml_ng::from_value(expanded).map_err(|_| {
+        ConfigError::InvalidValue(format!(
+            "{} shape validation failed after secret expansion: {}",
+            source.shape_label(),
+            secrets::shape_failure_detail::<T>(&raw)
+        ))
+    })
 }
 
 /// Removed `type:` discriminants, each paired with the message every config ingestion surface must reject it with. The match is position-blind: a tag retired in one position is rejected in every `type:` position.
@@ -534,6 +544,26 @@ mod tests {
         unsafe { std::env::remove_var("RASTREO_TEST_PARSE_ENV_BAD_IP") };
     }
 
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_scenario_file_rejects_a_reference_in_a_numeric_field_holding_a_valid_number() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_PARSE_NUMERIC_REFERENCE", "500") };
+        let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: \"${RASTREO_TEST_PARSE_NUMERIC_REFERENCE}\"\nscenarios: []\n";
+        let err = parse_scenario_file(yaml).expect_err("expansion cannot fill a numeric field");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("${RASTREO_TEST_PARSE_NUMERIC_REFERENCE}"),
+            "msg: {msg}"
+        );
+        assert!(msg.contains("references resolved"), "msg: {msg}");
+        assert!(
+            msg.contains("can only fill a field that accepts one"),
+            "msg: {msg}"
+        );
+        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_NUMERIC_REFERENCE") };
+    }
+
     #[cfg(all(feature = "config", feature = "snmp"))]
     #[test]
     fn parse_scenario_file_expands_env_var_into_snmp_community() {
@@ -601,6 +631,123 @@ mod tests {
                     "{surface} left `{tag}` to serde: {msg}"
                 );
             }
+
+            // Delivered through expansion, the tag reaches the walk only if expansion ran first.
+            for (delivery, reference, _keep) in
+                secret_references_to("RASTREO_TEST_CONFIG_RETIRED_TAG_SOURCE", tag)
+            {
+                let scenario_yaml = scenario_with_fuser_yaml(&format!(
+                    "      type: {reference}\n      inner:\n        type: direct\n"
+                ));
+                let sink_yaml = format!("type: {reference}\n");
+                for (surface, rejection) in [
+                    (
+                        "scenario file",
+                        parse_scenario_file(&scenario_yaml).expect_err("rejected"),
+                    ),
+                    (
+                        "sink config",
+                        parse_sink_config(&sink_yaml).expect_err("rejected"),
+                    ),
+                ] {
+                    let msg = format!("{rejection}");
+                    assert!(
+                        msg.contains(message),
+                        "{surface} must name the retirement of `{tag}` delivered via {delivery}: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("unknown variant"),
+                        "{surface} left `{tag}` delivered via {delivery} to serde: {msg}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Each expansion syntax as the YAML text resolving to `plaintext`, with the tempfile the `!file` arm must outlive.
+    #[cfg(feature = "config")]
+    fn secret_references_to(
+        var: &str,
+        plaintext: &str,
+    ) -> Vec<(&'static str, String, Option<tempfile::NamedTempFile>)> {
+        use std::io::Write;
+
+        // SAFETY: env var mutation is process-global; each caller passes its own unique name.
+        unsafe { std::env::set_var(var, plaintext) };
+        let mut file = tempfile::NamedTempFile::new().expect("tempfile");
+        file.write_all(plaintext.as_bytes()).expect("write");
+        let path = file.path().to_str().expect("utf-8 path").to_string();
+        vec![
+            ("${VAR}", format!("\"${{{var}}}\""), None),
+            ("!file", format!("!file {path}"), Some(file)),
+        ]
+    }
+
+    #[cfg(feature = "config")]
+    #[derive(Clone, Copy)]
+    enum ExpandingSurface {
+        ScenarioFile,
+        SinkConfig,
+    }
+
+    #[cfg(feature = "config")]
+    impl ExpandingSurface {
+        fn parse(self, yaml: &str) -> Result<(), RastreoError> {
+            match self {
+                ExpandingSurface::ScenarioFile => parse_scenario_file(yaml).map(|_| ()),
+                ExpandingSurface::SinkConfig => parse_sink_config(yaml).map(|_| ()),
+            }
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn no_expanding_parse_entry_point_quotes_an_expanded_secret_in_a_shape_error() {
+        const SECRET: &str = "hunter2-plaintext-must-never-surface";
+
+        let mut positions: Vec<(&str, ExpandingSurface, &str)> = Vec::new();
+        positions.push((
+            "scenario `version`",
+            ExpandingSurface::ScenarioFile,
+            "version: REF\nkind: discovery\nscenarios: []\n",
+        ));
+        positions.push(("sink `type`", ExpandingSurface::SinkConfig, "type: REF\n"));
+        #[cfg(feature = "nats")]
+        positions.extend([
+            (
+                "sink `servers`",
+                ExpandingSurface::SinkConfig,
+                "type: nats\nservers: REF\nsubject: s\nstream: RASTREO\n",
+            ),
+            (
+                "sink `flush_mode`",
+                ExpandingSurface::SinkConfig,
+                "type: nats\nservers: [\"nats://n:4222\"]\nsubject: s\nstream: RASTREO\nflush_mode: REF\n",
+            ),
+        ]);
+
+        for (position, surface, template) in positions {
+            for (delivery, reference, _keep) in
+                secret_references_to("RASTREO_TEST_CONFIG_SHAPE_ERROR_SOURCE", SECRET)
+            {
+                let yaml = template.replace("REF", &reference);
+                let err = surface
+                    .parse(&yaml)
+                    .expect_err("a secret in a non-string position must fail shape validation");
+                let msg = format!("{err}");
+                assert!(
+                    !msg.contains(SECRET),
+                    "{position} via {delivery} leaked the plaintext: {msg}"
+                );
+                assert!(
+                    msg.contains("after secret expansion"),
+                    "{position} via {delivery}: {msg}"
+                );
+                assert!(
+                    msg.contains(reference.trim_matches('"')),
+                    "{position} via {delivery} must still name the reference as written: {msg}"
+                );
+            }
         }
     }
 
@@ -613,6 +760,74 @@ mod tests {
         let scenario = parse_discover_scenario_json(body).expect("minimal body");
         assert_eq!(scenario.targets.len(), 1);
         assert_eq!(scenario.probers.len(), 1);
+    }
+
+    #[test]
+    fn parse_discover_scenario_json_leaves_env_var_references_literal() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_SCANS_BODY_VAR", "internal.example.net") };
+        let body = serde_json::json!({
+            "targets": [{"DnsName": "${RASTREO_TEST_SCANS_BODY_VAR}"}],
+            "probers": [{"type": "tcp_connect", "ports": [22]}],
+        });
+        let scenario = parse_discover_scenario_json(body).expect("body parses");
+        match &scenario.targets[0] {
+            Target::DnsName(name) => assert_eq!(
+                name, "${RASTREO_TEST_SCANS_BODY_VAR}",
+                "a client body must never read the server's environment"
+            ),
+            other => panic!("expected DnsName target, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("RASTREO_TEST_SCANS_BODY_VAR") };
+    }
+
+    #[test]
+    fn parse_discover_scenario_json_leaves_a_nested_sink_reference_literal() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_SCANS_BODY_SINK_PATH", "captured") };
+        let body = serde_json::json!({
+            "targets": [{"Ip": "10.0.0.1"}],
+            "probers": [{"type": "tcp_connect", "ports": [22]}],
+            "sink": {"type": "file", "path": "/var/lib/rastreo/${RASTREO_TEST_SCANS_BODY_SINK_PATH}.ndjson"},
+        });
+        let scenario = parse_discover_scenario_json(body).expect("body parses");
+        match scenario.base.sink.as_ref().expect("sink present") {
+            SinkConfig::File { path } => assert_eq!(
+                path,
+                &std::path::PathBuf::from(
+                    "/var/lib/rastreo/${RASTREO_TEST_SCANS_BODY_SINK_PATH}.ndjson"
+                ),
+                "a sink nested in a client body must never read the server's environment"
+            ),
+            other => panic!("expected File sink, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("RASTREO_TEST_SCANS_BODY_SINK_PATH") };
+    }
+
+    #[cfg(feature = "nats")]
+    #[test]
+    fn parse_discover_scenario_json_leaves_a_nested_sink_credential_literal() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_SCANS_BODY_SINK_PASS", "hunter2") };
+        let body = serde_json::json!({
+            "targets": [{"Ip": "10.0.0.1"}],
+            "probers": [{"type": "tcp_connect", "ports": [22]}],
+            "sink": {
+                "type": "nats",
+                "servers": ["nats://probe:${RASTREO_TEST_SCANS_BODY_SINK_PASS}@nats:4222"],
+                "subject": "rastreo.discovery.records.v1",
+                "stream": "RASTREO",
+            },
+        });
+        let scenario = parse_discover_scenario_json(body).expect("body parses");
+        match scenario.base.sink.as_ref().expect("sink present") {
+            SinkConfig::Nats { servers, .. } => assert_eq!(
+                servers[0], "nats://probe:${RASTREO_TEST_SCANS_BODY_SINK_PASS}@nats:4222",
+                "a sink nested in a client body must never read the server's environment"
+            ),
+            other => panic!("expected Nats sink, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("RASTREO_TEST_SCANS_BODY_SINK_PASS") };
     }
 
     #[test]
@@ -649,6 +864,110 @@ mod tests {
     fn parse_sink_config_maps_an_unknown_sink_to_config_error() {
         let err = parse_sink_config("type: carrier_pigeon\n").expect_err("unknown sink");
         assert!(format!("{err}").contains("sink shape validation failed"));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_sink_config_expands_env_var_in_a_sink_field() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe {
+            std::env::set_var(
+                "RASTREO_TEST_SINK_ENV_PATH",
+                "/var/lib/rastreo/records.ndjson",
+            )
+        };
+        let config = parse_sink_config("type: file\npath: \"${RASTREO_TEST_SINK_ENV_PATH}\"\n")
+            .expect("sink config");
+        match config {
+            SinkConfig::File { path } => assert_eq!(
+                path,
+                std::path::PathBuf::from("/var/lib/rastreo/records.ndjson")
+            ),
+            other => panic!("expected File sink, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("RASTREO_TEST_SINK_ENV_PATH") };
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_sink_config_expands_file_tag_in_a_sink_field() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(b"/var/lib/rastreo/from-mount.ndjson\n")
+            .expect("write");
+        let secret_path = f.path().to_str().expect("utf-8 path");
+        let config = parse_sink_config(&format!("type: file\npath: !file {secret_path}\n"))
+            .expect("sink config");
+        match config {
+            SinkConfig::File { path } => assert_eq!(
+                path,
+                std::path::PathBuf::from("/var/lib/rastreo/from-mount.ndjson")
+            ),
+            other => panic!("expected File sink, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_sink_config_missing_env_var_names_the_sink_config() {
+        unsafe { std::env::remove_var("RASTREO_TEST_SINK_ENV_MISSING") };
+        let err = parse_sink_config("type: file\npath: \"${RASTREO_TEST_SINK_ENV_MISSING}\"\n")
+            .expect_err("must error");
+        assert!(matches!(
+            err,
+            RastreoError::Config(ConfigError::InvalidValue(_))
+        ));
+        let msg = format!("{err}");
+        assert!(msg.contains("RASTREO_TEST_SINK_ENV_MISSING"), "msg: {msg}");
+        assert!(msg.contains("not set"), "msg: {msg}");
+        assert!(msg.contains("sink config"), "msg: {msg}");
+        assert!(!msg.contains("scenario"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn parse_sink_config_empty_env_var_substitutes_as_empty_string() {
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_SINK_ENV_EMPTY", "") };
+        let config = parse_sink_config(
+            "type: file\npath: \"/var/lib/rastreo/records${RASTREO_TEST_SINK_ENV_EMPTY}.ndjson\"\n",
+        )
+        .expect("an empty value is not an error");
+        match config {
+            SinkConfig::File { path } => assert_eq!(
+                path,
+                std::path::PathBuf::from("/var/lib/rastreo/records.ndjson")
+            ),
+            other => panic!("expected File sink, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("RASTREO_TEST_SINK_ENV_EMPTY") };
+    }
+
+    #[cfg(all(feature = "config", feature = "nats"))]
+    #[test]
+    fn parse_sink_config_expands_env_var_into_the_nats_password() {
+        use crate::sink::NatsCredentials;
+
+        // SAFETY: env var mutation is process-global; use a unique per-test name.
+        unsafe { std::env::set_var("RASTREO_TEST_SINK_NATS_PASS", "broker-secret") };
+        let yaml = "type: nats\nservers: [\"nats://nats:4222\"]\nsubject: rastreo.discovery.records.v1\nstream: RASTREO\ncredentials:\n  type: user_pass\n  username: probe\n  password: \"${RASTREO_TEST_SINK_NATS_PASS}\"\n";
+        let config = parse_sink_config(yaml).expect("sink config");
+        let credentials = match config {
+            SinkConfig::Nats { credentials, .. } => credentials,
+            other => panic!("expected Nats sink, got {other:?}"),
+        };
+        let password = match &credentials {
+            NatsCredentials::UserPass { password, .. } => password,
+            other => panic!("expected user_pass credentials, got {other:?}"),
+        };
+        assert_eq!(password.expose(), "broker-secret");
+        let debug = format!("{password:?}");
+        assert!(debug.starts_with("<redacted:"), "debug: {debug}");
+        assert!(
+            !debug.contains("broker-secret"),
+            "plaintext leaked: {debug}"
+        );
+        unsafe { std::env::remove_var("RASTREO_TEST_SINK_NATS_PASS") };
     }
 
     #[test]
