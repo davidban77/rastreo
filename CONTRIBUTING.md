@@ -48,17 +48,32 @@ This project uses a conventional commit style:
 <type>(<scope>): <short description>
 ```
 
-Types:
+Types, and the changelog section each one lands in:
 
-- `feat` — new capability or behavior
-- `fix` — bug fix
-- `test` — adding or updating tests
-- `docs` — documentation only
-- `chore` — tooling, config, or housekeeping
+| Type | Section |
+|---|---|
+| `feat` — new capability or behavior | Features |
+| `fix` — bug fix | Bug Fixes |
+| `perf` — same behavior, measurably cheaper | Performance |
+| `docs` — documentation only | Documentation |
+| `refactor` — no behavior change | Refactoring |
+| `ci` — workflows and pipelines | CI/CD |
+| `chore` — tooling, config, housekeeping | Miscellaneous |
+| `test` — tests only | not in the changelog |
+| `build` — build system | not in the changelog |
+| `deps` — dependency bumps | not in the changelog |
 
 Scope examples: `core`, `cli`, `server`, `ci`.
 
 The first line must be 72 characters or fewer. Use the body for context when the change is non-obvious.
+
+## Breaking Changes
+
+Mark a breaking change with `!` after the scope — `feat(core)!: require every sink to declare its kind`. That is what puts the change under **⚠ BREAKING CHANGES** in the release notes.
+
+It does not force a major version. `bump-minor-pre-major` is set, so pre-1.0 a breaking change still takes a minor bump: `feat(core)!` in #227 produced 0.10.0, not 1.0.0.
+
+The `!` alone yields a one-line bullet. When the break needs explaining — what stops compiling, what silently changes, what to do instead — put a `BREAKING CHANGE:` paragraph in the **squash commit body** at merge time. release-please copies it into the release notes verbatim. Hand-editing the release PR's `CHANGELOG.md` afterwards does not survive: the next merge regenerates that section.
 
 ## Pull Request Process
 
@@ -81,13 +96,14 @@ All changes to `main` go through pull requests. The expected workflow:
    feat(core): add SNMP prober
    fix: resolve panic in deduplication path
    docs: update CLI reference for new flag
+   feat(core)!: require every sink to declare its kind
    ```
 
 4. **Wait for CI.** Build, test, clippy, and fmt jobs must pass.
 
 5. **Get a review.** At least one approving review is required.
 
-6. **Squash merge.** Use the "Squash and merge" option in GitHub. The PR title is used as the commit message.
+6. **Squash merge.** Use the "Squash and merge" option in GitHub. The PR title is used as the commit message. If the change is breaking and needs more than a bullet, add the `BREAKING CHANGE:` paragraph to the squash body here — this is the only point at which it reaches the release notes.
 
 ## Project Structure
 
