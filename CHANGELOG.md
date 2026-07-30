@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.11.0](https://github.com/davidban77/rastreo/compare/v0.10.0...v0.11.0) (2026-07-30)
 
 
+### ⚠ BREAKING CHANGES
+
+* **core:** `Encoder` and `Sink` gained required methods ([#230](https://github.com/davidban77/rastreo/issues/230))
+* **core:** service banners no longer set `platform` or `os_version` ([#233](https://github.com/davidban77/rastreo/issues/233))
+* **core:** the `oui_enrichment` fuser is removed ([#234](https://github.com/davidban77/rastreo/issues/234))
+
+`Encoder::encode_link` and `Encoder::encode_profile` are now required. They previously defaulted to NDJSON framing, so an encoder that did not override them emitted raw JSON objects into its own output stream, interleaved with whatever it actually produces; those bodies now live on `NdjsonEncoder`. `Sink::last_write_delivered` is required too and carries a contract: `true` only once the bytes of the most recent write have been accepted by the destination, `false` while they sit in a local buffer. A custom `Encoder` or `Sink` will not compile until it implements these. For a format with no link or collection-profile representation, implement the method and return `Ok(())` without writing — the emit path skips empty buffers.
+
+That contract also changes what the built-in sinks report, which no compile error will tell you. The file and stdout sinks both wrap a `BufWriter` and previously inherited the `true` default, claiming delivery for bytes still in memory; they now report `false` from each write until a successful `flush`. The memory sink reports `false` for a write its byte cap dropped, the tee sink recomputes its answer across children on flush and close, and the Kafka and NATS sinks track the claim on the link and collection-profile streams alongside the device stream.
+
+Service banners no longer guess a device's OS. An SSH or HTTP banner names the software listening on a port, not the machine underneath it — a Nokia SR Linux switch answers SSH from a Debian-packaged OpenSSH — so banner rules now populate only `ssh_version`, `http_server`, and `http_version`, and leave `platform` and `os_version` to SNMP `sysDescr`, the one signal where a device describes itself. Records that previously came back with `platform: linux` off a banner now come back with `platform: null` and the same software fields as before. If your estate is one where the banner does imply the OS, `baked_platform_rules_with_banner_heuristics()` restores the old behaviour, and the equivalent YAML is on the classification page. `http_version` is now bound to the `http_server` it versions, so a record can no longer report one server's version under another server's name.
+
+The `oui_enrichment` fuser is removed, along with the `oui` Cargo feature and the bundled Wireshark `manuf` snapshot — release binaries are about 900 KB smaller. Vendor identity now comes from `mib_enrichment`, which matches an SNMP `sysObjectID` exactly instead of guessing from a MAC address prefix. A config that still names `oui_enrichment` is rejected with that message on every surface that accepts configuration — scenario files, `POST /scans`, and the server's sink config — rather than falling through to an unknown-variant error. Point `mib_enrichment`'s `data_path` at an overlay mapping your fleet's `sysObjectID` values to vendor, model, and product family; records that previously got a `manufacturer` from the MAC prefix alone report `null` until that overlay covers them. Drop `oui` from any `--features` list or Docker build argument. `mib_enrichment` now fills `model` and `product_family` under the same write-if-empty rule it already used for `manufacturer`, so stacked enrichers keep the innermost answer for every field.
+
 ### Features
 
 * **core:** expand secret references in the server's sink config ([#238](https://github.com/davidban77/rastreo/issues/238)) ([58127ae](https://github.com/davidban77/rastreo/commit/58127ae15a99844614300aed7abd300ddfef7da2))
