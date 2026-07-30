@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.0](https://github.com/davidban77/rastreo/compare/v0.10.0...v0.11.0) (2026-07-30)
+
+
+### Features
+
+* **core:** expand secret references in the server's sink config ([#238](https://github.com/davidban77/rastreo/issues/238)) ([58127ae](https://github.com/davidban77/rastreo/commit/58127ae15a99844614300aed7abd300ddfef7da2))
+* **core:** give platform and role rules one evidence vocabulary ([#232](https://github.com/davidban77/rastreo/issues/232)) ([4fb0d85](https://github.com/davidban77/rastreo/commit/4fb0d858310f9691a9179526b8014c64899fd780))
+* **core:** remove OUI enrichment ([#234](https://github.com/davidban77/rastreo/issues/234)) ([b1d5b93](https://github.com/davidban77/rastreo/commit/b1d5b93b8c747a2d2b392d340f4972e33008e660))
+* **core:** require sinks and encoders to state what they did ([#230](https://github.com/davidban77/rastreo/issues/230)) ([2cbd884](https://github.com/davidban77/rastreo/commit/2cbd8848533ab60e8809e7797dec41dc0b12cb8c))
+* **core:** stop service banners guessing a device's OS ([#233](https://github.com/davidban77/rastreo/issues/233)) ([222e5e7](https://github.com/davidban77/rastreo/commit/222e5e75204d4c9a0b92c84ede90a48f7d5ba73d))
+
+
+### Bug Fixes
+
+* **ci:** keep Cargo.lock in step with the release version ([#237](https://github.com/davidban77/rastreo/issues/237)) ([5439e44](https://github.com/davidban77/rastreo/commit/5439e4488e4a98f6cf1a5cf77a6ea857ac10ece3))
+
+
+### Performance
+
+* **core:** render RFC 3339 timestamps without allocating ([#235](https://github.com/davidban77/rastreo/issues/235)) ([6d3b7e8](https://github.com/davidban77/rastreo/commit/6d3b7e827521718969099c45b4bc92ccd76adf83))
+
+
+### Miscellaneous
+
+* report perf commits in the changelog ([#236](https://github.com/davidban77/rastreo/issues/236)) ([5a9a919](https://github.com/davidban77/rastreo/commit/5a9a919c57280ed6c2a9b0425d6970be53568b29))
+
 ## [0.10.0](https://github.com/davidban77/rastreo/compare/v0.9.0...v0.10.0) (2026-07-28)
 
 
