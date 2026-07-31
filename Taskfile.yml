@@ -71,6 +71,15 @@ tasks:
       - cargo fmt --all
 
   # ---------------------------------------------------------------------------
+  # Helm chart
+  # ---------------------------------------------------------------------------
+  helm:test:
+    desc: Lint the Helm chart and assert on its rendered output
+    cmds:
+      - helm lint --strict helm/rastreo
+      - python3 scripts/helm_chart_test.py
+
+  # ---------------------------------------------------------------------------
   # Documentation site
   # ---------------------------------------------------------------------------
   site:setup:

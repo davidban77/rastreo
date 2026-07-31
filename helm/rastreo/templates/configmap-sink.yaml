@@ -1,4 +1,5 @@
-{{- if and .Values.sink .Values.sink.config (gt (len .Values.sink.config) 0) }}
+{{- $sinkConfig := include "rastreo.sinkConfig" . }}
+{{- if $sinkConfig }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,5 +8,5 @@ metadata:
     {{- include "rastreo.labels" . | nindent 4 }}
 data:
   sink.yaml: |
-    {{- toYaml .Values.sink.config | nindent 4 }}
+    {{- $sinkConfig | nindent 4 }}
 {{- end }}

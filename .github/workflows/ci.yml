@@ -220,6 +220,27 @@ jobs:
       - name: Run the live-infra UAT harness self-tests
         run: python3 scripts/live_infra_uat.py --self-test
 
+  helm-chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.15.2
+
+      - name: Lint chart
+        run: helm lint --strict helm/rastreo
+
+      # The release workflow only lints, which never renders a manifest. These
+      # tests render and assert, so a values combination the chart must refuse
+      # blocks here rather than on someone's cluster.
+      - name: Render the chart and assert on the output
+        run: python3 scripts/helm_chart_test.py
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

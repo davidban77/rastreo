@@ -74,6 +74,12 @@ The most useful `values.yaml` knobs are:
 | `readiness.maxInflightScans`     | unset (binary default `100`)  | `/readyz` gate: max concurrent `POST /scans` before the pod reports not-ready. Set to `0` to disable. Renders `RASTREO_MAX_INFLIGHT_SCANS`. See [Health endpoints · `/readyz`](../reference/health-endpoints.md#readyz-readiness). |
 | `readiness.sinkErrorQuarantineSeconds` | unset (binary default `30`) | `/readyz` gate: quarantine window after any sink error. Set to `0` to disable. Renders `RASTREO_SINK_ERROR_QUARANTINE_SECS`. See [Health endpoints · `/readyz`](../reference/health-endpoints.md#readyz-readiness). |
 | `readiness.scanErrorQuarantineSeconds` | unset (binary default `30`) | `/readyz` gate: quarantine window after any scan error. Set to `0` to disable. Renders `RASTREO_SCAN_ERROR_QUARANTINE_SECS`. See [Health endpoints · `/readyz`](../reference/health-endpoints.md#readyz-readiness). |
+| `sink.config`                    | `{}`                          | Sink config the chart renders into a `ConfigMap` and mounts at `/etc/rastreo/sink/sink.yaml`. Empty means the server runs with no sink and no reachability probe. See [Sink credentials](#sink-credentials). |
+| `sink.configYaml`                | `""`                          | The same document as a verbatim string, for a config carrying a `!file` tag. Mutually exclusive with `sink.config`. See [Sink credentials](#sink-credentials). |
+| `extraEnv`                       | `[]`                          | Extra `EnvVar` entries on the container, so a `${VAR}` reference in the sink config resolves from a `Secret`. See [Sink credentials](#sink-credentials). |
+| `extraEnvFrom`                   | `[]`                          | Extra `EnvFromSource` entries on the container. Each key of the referenced `Secret` or `ConfigMap` becomes a variable, as long as the key is a valid variable name. See [Sink credentials](#sink-credentials). |
+| `extraVolumes`                   | `[]`                          | Extra pod volumes, for mounting the `Secret` an `!file` reference reads. See [Sink credentials](#sink-credentials). |
+| `extraVolumeMounts`              | `[]`                          | Extra container volume mounts. A mount that overlaps `/etc/rastreo/sink`, or that names a volume `extraVolumes` does not define, fails the render. |
 | `grafana.dashboardsEnabled`      | `false`                       | Deploy the bundled Grafana dashboard as a labeled `ConfigMap` for sidecar auto-discovery. See [Observability · Grafana dashboard](../reference/observability.md#grafana-dashboard). |
 | `podSecurity.netRaw`             | `false`                       | Add `NET_RAW` to the container capabilities. Required for the ARP and NDP probers. See [`podSecurity.netRaw`](#podsecuritynetraw-arp-and-ndp-probers). |
 | `logFormat`                      | unset (binary default `text`) | Log line format on stderr. Set to `json` for Loki / ELK / Splunk ingestion; renders `RASTREO_LOG_FORMAT` on the pod. See [Logging](../reference/logging.md). |
@@ -177,6 +183,114 @@ You have two ways to supply the headers.
     ```
 
     The chart renders a `Secret` named `<release>-otlp` holding the value and mounts it into the pod as `RASTREO_OTLP_HEADERS`.
+
+## Sink credentials
+
+The sink config the chart renders is a `ConfigMap`: plaintext at rest, readable by anyone with access to the namespace, and echoed back by `helm get values`. A broker password does not belong in it. Put the credential in a `Secret` and leave a reference in the sink config — the server resolves the reference when it reads the file, so only the reference is ever stored. Two reference syntaxes exist and the chart reaches both; [Secrets](../reference/secrets.md) covers the syntax, the field types that accept one, and the error messages.
+
+=== "Environment variable (`${VAR}`)"
+
+    Write `${KAFKA_PASSWORD}` where the password goes and name the `Secret` key in `extraEnv`. The chart renders the entry as container environment, and the server substitutes the value when it loads the config.
+
+    ```bash
+    kubectl create secret generic rastreo-kafka \
+      --from-literal=password="$KAFKA_PASSWORD"
+    ```
+
+    ```yaml
+    sink:
+      config:
+        type: kafka
+        brokers: ["kafka.observability.svc:9092"]
+        topic: rastreo.discovery.records.v1
+        sasl:
+          mechanism: scram_sha_512
+          username: rastreo
+          password: "${KAFKA_PASSWORD}"
+
+    extraEnv:
+      - name: KAFKA_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: rastreo-kafka
+            key: password
+    ```
+
+    The rendered `ConfigMap` carries the reference, never the password:
+
+    ```yaml
+    data:
+      sink.yaml: |
+        brokers:
+        - kafka.observability.svc:9092
+        sasl:
+          mechanism: scram_sha_512
+          password: ${KAFKA_PASSWORD}
+          username: rastreo
+        topic: rastreo.discovery.records.v1
+        type: kafka
+    ```
+
+    `extraEnvFrom` does the same job for a whole object at once: each key in the referenced `Secret` or `ConfigMap` becomes a variable on the container, as long as the key is a valid variable name — letters, digits, and underscores, not starting with a digit. Kubernetes skips a key it cannot use as a name and reports it only in a pod event, so `--from-literal=kafka-password=…` yields no `KAFKA_PASSWORD` on the container: the reference never resolves and `/readyz` sits at 503 with `reason: "sink_unreachable"`. Name the key `KAFKA_PASSWORD` in the `Secret`, or bring a dashed key across with the `extraEnv` entry above, which renames it on the way in.
+
+=== "Mounted file (`!file`)"
+
+    Write `!file` and the path the `Secret` is mounted at, mount the `Secret` with `extraVolumes` and `extraVolumeMounts`, and the server reads the file when it loads the config.
+
+    Put the document in `sink.configYaml` rather than `sink.config`. Helm parses `sink.config` before any template runs, which drops the `!file` tag and leaves the path behind as an ordinary string — the server would then authenticate with the text `/run/secrets/kafka/password`. A document written into `sink.configYaml` reaches the `ConfigMap` character for character, so the tag survives.
+
+    ```bash
+    kubectl create secret generic rastreo-kafka \
+      --from-literal=password="$KAFKA_PASSWORD"
+    ```
+
+    ```yaml
+    sink:
+      configYaml: |
+        type: kafka
+        brokers: ["kafka.observability.svc:9092"]
+        topic: rastreo.discovery.records.v1
+        sasl:
+          mechanism: scram_sha_512
+          username: rastreo
+          password: !file /run/secrets/kafka/password
+
+    extraVolumes:
+      - name: kafka-credentials
+        secret:
+          secretName: rastreo-kafka
+
+    extraVolumeMounts:
+      - name: kafka-credentials
+        mountPath: /run/secrets/kafka
+        readOnly: true
+    ```
+
+    Each key of the `Secret` becomes a file under the mount path, so the `password` key lands at `/run/secrets/kafka/password` and the `ConfigMap` holds that line exactly as written. A read-only mount needs no capability and no writable root filesystem, so it works under the chart's hardened defaults as they ship.
+
+Setting `sink.config` and `sink.configYaml` together stops the render — the chart writes one `sink.yaml` and will not merge them:
+
+```text
+Error: execution error at (rastreo/templates/deployment.yaml:1:19): sink.config and sink.configYaml are both set: the chart writes one sink.yaml and will not merge them. Keep sink.config for a config Helm parses, or sink.configYaml for one it copies through verbatim (the only form that preserves a !file tag).
+```
+
+A reference that cannot resolve is not fatal. The pod starts and stays up, `/readyz` returns `503` with `reason: "sink_unreachable"`, and `last_probe_error` names the variable or the path it could not read — see [rastreo-server · Sink reachability probe](server.md#sink-reachability-probe).
+
+### Values the chart refuses to render
+
+Kubernetes keeps the last duplicate of an environment variable, rejects two volumes sharing a name, and rejects a mount that names no volume. A value that collides with what the chart renders would therefore shadow it with nothing in the manifest to show for it, or fail on apply — long after `helm template` looked clean. The chart stops at template time instead, naming the key and the entry in the error:
+
+- `extraEnv` naming a variable the chart sets — `RASTREO_API_TOKEN`, `RASTREO_SINK_CONFIG_PATH`, and the rest of the `RASTREO_*` set the values above render.
+- `extraEnv` naming the same variable twice.
+- `extraVolumes` using the name `sink-config`, which the chart gives its sink config volume. Reserved whether or not a sink config is set today, so adding one later cannot collide with a deploy that already works.
+- `extraVolumeMounts` naming a volume nothing defines — a one-word difference between `kafka-credentials` in `extraVolumes` and `kafka-creds` in the mount otherwise renders cleanly, and the credential silently never arrives.
+- `extraVolumeMounts` mounting `/etc/rastreo/sink`, or a path inside or above it — `/etc`, `/etc/rastreo/./sink`, and `/` included — which would hide the sink config the server reads.
+- Any `extra*` value that is not a list of mappings, or an entry missing a field Kubernetes requires: a `name` on `extraEnv` and `extraVolumes`, a `name` and a `mountPath` on `extraVolumeMounts`.
+
+`extraEnvFrom` is not checked for collisions: an explicit `env` entry wins over an `envFrom` key of the same name, so a key arriving that way cannot displace what the chart sets.
+
+!!! note "A rotated Secret needs a pod restart"
+    The server builds its sink once, at startup. Rotating the `Secret` behind a `${VAR}` or `!file` reference changes what the next pod reads, not what a running one holds — run `kubectl rollout restart deployment/<release>` to pick it up. Editing `sink.config` or `sink.configYaml` and running `helm upgrade` rolls the pods on its own: the chart stamps a checksum of the sink config onto the pod template.
 
 ## Restricting scan targets
 

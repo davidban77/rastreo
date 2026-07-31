@@ -43,7 +43,7 @@ scenarios:
             password: "${SNMP_PRIV_PASSWORD}"
 ```
 
-Multiple references may appear in the same scalar and the surrounding text is preserved verbatim. `"nats://${NATS_USER}:${NATS_PASS}@nats:4222"` interpolates both variables.
+Multiple references may appear in the same scalar and the surrounding text is preserved verbatim. `"nats://${NATS_HOST}:${NATS_PORT}"` interpolates both variables.
 
 A missing environment variable (`std::env::var` returns `NotPresent`) fails the load and names the file it was referenced from. A scenario file reports `environment variable NAME referenced in scenario is not set` under a `Caused by:` beneath `failed to parse scenario file '<path>'`; a sink config reports `environment variable NAME referenced in sink config is not set` beneath `failed to parse sink config at <path>`, which `rastreo-server` surfaces as `last_probe_error` on `/readyz`. A variable that is set to an empty string substitutes as an empty string with no error — this is a deliberate distinction so `unset` and `set-to-empty` remain distinguishable, and lets a deployment script export `AUTH_PASS=""` to select the SNMPv3 `noAuthNoPriv` code path without special-casing.
 
@@ -154,10 +154,16 @@ Every field that holds a credential accepts text, so this limit never blocks a s
 
 ```yaml
 type: nats
-servers: ["nats://probe:${NATS_PASS}@nats.observability.svc:4222"]
+servers: ["nats://nats.observability.svc:4222"]
 subject: rastreo.discovery.records.v1
 stream: RASTREO
+credentials:
+  type: user_pass
+  username: probe
+  password: "${NATS_PASS}"
 ```
+
+A NATS password belongs in `credentials`, not in the server URL: a `user:pass@` prefix on an entry in `servers` is not read as a credential and the connection is refused with `authorization violation`. See [NATS sink · Authentication](../integrate/nats.md#authentication).
 
 Or, with the credential on a secret mount instead of in the environment:
 
@@ -173,18 +179,18 @@ sasl:
 
 This matters most on Kubernetes, where the sink config is usually a ConfigMap: plaintext at rest, readable by anyone with namespace access, and echoed back by `helm get values`. Referencing the credential keeps it in a Secret and out of both. See [Server deployment · sink reachability probe](../deploy/server.md#sink-reachability-probe) for the mount path and the Helm values.
 
-!!! warning "Through the Helm chart, use `${VAR}` and not `!file`"
-    The chart renders the sink config into the ConfigMap with Helm's own YAML handling. That drops the `!file` tag and keeps the path as plain text. The server then reads the path *as the credential*. A `${VAR}` reference survives unchanged. Write `!file` only into a sink config file you manage yourself.
+!!! warning "Through the Helm chart, `!file` needs `sink.configYaml`"
+    Helm parses the chart's `sink.config` value before any template runs, and that drops the `!file` tag and keeps the path as plain text. The server then reads the path *as the credential*. Write the document into `sink.configYaml` instead — the chart copies that into the ConfigMap character for character, so the tag reaches the server intact, and `extraVolumes` mounts the Secret it points at. A `${VAR}` reference survives either value. See [Kubernetes · Sink credentials](../deploy/kubernetes.md#sink-credentials) for both worked through end to end.
 
 An unresolvable reference does not crash the pod. Sink construction fails, `/readyz` returns `503` with `reason: "sink_unreachable"`, and `last_probe_error` names the variable and the config path — `environment variable NATS_PASS referenced in sink config is not set`.
 
-`/readyz` is served without a bearer token. That is why no expanded credential is allowed to reach `last_probe_error` on any failure path. A connect failure strips the userinfo from the server URL: a failed connect to `nats://probe:hunter2@nats:4222` reports `nats://nats:4222`, and the dry-run plan render does the same. A config whose *shape* is wrong is reported against the file as written, so the message quotes the reference rather than the value it resolved to:
+`/readyz` is served without a bearer token. That is why no expanded credential is allowed to reach `last_probe_error` on any failure path. A connect failure names the server and the reason and nothing else — `failed to connect to server(s) 'nats://nats.observability.svc:4222': authorization violation` — and any `user:pass@` prefix written into a server URL is stripped out of it, as it is out of the dry-run plan render. A config whose *shape* is wrong is reported against the file as written, so the message quotes the reference rather than the value it resolved to:
 
 ```text
-sink shape validation failed after secret expansion: invalid type: string "nats://probe:${NATS_PASS}@nats.observability.svc:4222", expected a sequence (references resolved; quoted as written, never as the value produced; expansion substitutes a string, so a reference can only fill a field that accepts one)
+sink shape validation failed after secret expansion: invalid type: string "nats://nats.observability.svc:${NATS_PORT}", expected a sequence (references resolved; quoted as written, never as the value produced; expansion substitutes a string, so a reference can only fill a field that accepts one)
 ```
 
-Here `servers` is a string where a list is expected — the credential played no part in the failure and never appears. When the quoted text is a `!file` reference, it is the mount path, not the file's contents. Read the quoted scalar as the text in your file: it is never the substituted value. The closing note repeats the limit from [A reference only fills a string field](#a-reference-only-fills-a-string-field).
+Here `servers` is a string where a list is expected, and the message quotes that scalar as your file writes it — `${NATS_PORT}` and all, never the value the reference produced. When the quoted text is a `!file` reference, it is the mount path, not the file's contents. Read the quoted scalar as the text in your file: it is never the substituted value. The closing note repeats the limit from [A reference only fills a string field](#a-reference-only-fills-a-string-field).
 
 ## Vault, AWS Secrets Manager, other secret backends
 

@@ -100,6 +100,23 @@ sink:
   #       brokers: ["kafka.observability.svc:9092"]
   #       topic: rastreo.discovery.records.v1
   config: {}
+  # The same document as a verbatim string, for a config Helm must not parse.
+  # Helm strips a `!file` tag out of `config` above before any template runs and
+  # leaves the path behind as a plain string, which the server then reads as the
+  # credential itself. A document written here reaches the ConfigMap character
+  # for character, so the tag survives and the server reads the mounted file.
+  # Mutually exclusive with `config` — setting both fails the render.
+  # Example:
+  #   sink:
+  #     configYaml: |
+  #       type: kafka
+  #       brokers: ["kafka.observability.svc:9092"]
+  #       topic: rastreo.discovery.records.v1
+  #       sasl:
+  #         mechanism: scram_sha_512
+  #         username: rastreo
+  #         password: !file /run/secrets/kafka/password
+  configYaml: ""
   # Probe cadence in seconds. Clamped to a minimum of 1s.
   probeIntervalSeconds: 10
   # Per-probe timeout in seconds. Elapsed probes count as failure. Clamped to a
@@ -193,6 +210,50 @@ resources:
   limits:
     cpu: 500m
     memory: 256Mi
+
+# Extra environment variables on the container, as Kubernetes EnvVar entries.
+# The server expands `${VAR}` when it reads the sink config, so a broker
+# credential can stay in a Secret and be named here instead of written into the
+# sink config. Without an entry the reference has nothing to resolve against and
+# the pod never becomes ready. An entry that repeats a variable the chart
+# already sets fails the render: Kubernetes keeps the last duplicate, so the
+# override would be silent.
+extraEnv: []
+#  - name: KAFKA_PASSWORD
+#    valueFrom:
+#      secretKeyRef:
+#        name: rastreo-kafka
+#        key: password
+
+# Extra envFrom sources on the container, as Kubernetes EnvFromSource entries.
+# Each key in the referenced Secret or ConfigMap becomes an environment variable
+# as long as the key is a valid variable name ([A-Za-z_][A-Za-z0-9_]*):
+# Kubernetes skips a key like kafka-password and reports it only in a pod event,
+# leaving the reference in the sink config with nothing to resolve against. An
+# explicit env entry wins over an envFrom key of the same name, so these cannot
+# shadow what the chart sets and are not checked for collisions.
+extraEnvFrom: []
+#  - secretRef:
+#      name: rastreo-kafka
+
+# Extra volumes on the pod. Mount a Secret here to reach it with a `!file` tag
+# in `sink.configYaml`. The name `sink-config` is reserved for the chart's own
+# ConfigMap volume.
+extraVolumes: []
+#  - name: kafka-credentials
+#    secret:
+#      secretName: rastreo-kafka
+
+# Extra volume mounts on the container. Read-only mounts work as-is under the
+# hardened default securityContext — no capability and no writable root needed.
+# A mount that overlaps /etc/rastreo/sink fails the render: it would hide the
+# sink config the chart mounts there. A mount whose name matches no volume fails
+# the render too — Kubernetes would reject the pod on apply, after a clean
+# render, and the mounted Secret would never reach the container.
+extraVolumeMounts: []
+#  - name: kafka-credentials
+#    mountPath: /run/secrets/kafka
+#    readOnly: true
 
 # Pod-level security context. Defaults match the non-root image (UID 65532).
 podSecurityContext:
