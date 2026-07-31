@@ -762,12 +762,17 @@ impl Sink for KafkaSink {
         }
     }
 
+    /// Produces all three stream buffers whatever any one of them does, returning the first error.
     async fn flush(&mut self) -> Result<(), RastreoError> {
-        self.publish_buffer().await?;
-        self.publish_links_buffer().await?;
-        self.publish_profiles_buffer().await?;
-        self.last_write_delivered = true;
-        Ok(())
+        let device_err = self.publish_buffer().await.err();
+        let links_err = self.publish_links_buffer().await.err();
+        let profiles_err = self.publish_profiles_buffer().await.err();
+        let first_error = device_err.or(links_err).or(profiles_err);
+        self.last_write_delivered = first_error.is_none();
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     fn last_write_delivered(&self) -> bool {

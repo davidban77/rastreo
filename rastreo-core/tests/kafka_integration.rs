@@ -152,6 +152,136 @@ async fn kafka_second_stream_records_survive_a_failed_flush_and_arrive_on_the_ne
     assert_eq!(delivered_profiles.len(), profiles.len());
 }
 
+// Over the broker's ~1 MiB default message.max.bytes, so only the device produce is refused.
+// The uncreated-topic induction the other tests use cannot refuse the device stream: `create_sink`
+// connects the primary partition client eagerly, so an uncreated device topic fails the constructor.
+fn unproducible_record() -> Vec<u8> {
+    vec![b'x'; 2 * 1024 * 1024]
+}
+
+// A threshold no test payload reaches, so every stream publishes from one flush rather than from a write.
+fn buffer_everything_config(broker: &str, topic: &str, links: &str, profiles: &str) -> SinkConfig {
+    SinkConfig::Kafka {
+        brokers: vec![broker.to_string()],
+        topic: topic.to_string(),
+        links_topic: Some(links.to_string()),
+        profiles_topic: Some(profiles.to_string()),
+        flush_mode: KafkaFlushMode::Batched {
+            threshold_bytes: 256 * 1024 * 1024,
+        },
+        dead_letter: None,
+        tls: None,
+        sasl: None,
+        retry: SinkRetry::default(),
+    }
+}
+
+const LINK_RECORD: &[u8] = b"{\"link\":\"itest\"}\n";
+const PROFILE_RECORD: &[u8] = b"{\"profile\":\"itest\"}\n";
+
+#[tokio::test]
+#[ignore]
+async fn kafka_flush_produces_the_second_streams_though_the_device_produce_failed() {
+    let node = kafka::Kafka::default()
+        .start()
+        .await
+        .expect("start kafka container");
+    let port = node
+        .get_host_port_ipv4(kafka::KAFKA_PORT)
+        .await
+        .expect("mapped kafka port");
+    let broker = format!("127.0.0.1:{port}");
+    let topic = "rastreo.itest.starve";
+    let links_topic = "rastreo.itest.starve.links";
+    let profiles_topic = "rastreo.itest.starve.profiles";
+
+    create_topics(&broker, &[topic, links_topic, profiles_topic]).await;
+
+    let config = buffer_everything_config(&broker, topic, links_topic, profiles_topic);
+    let mut sink = create_sink(&config).await.expect("create kafka sink");
+
+    sink.write(&unproducible_record())
+        .await
+        .expect("an oversized record still buffers");
+    sink.write_kind(RecordKind::Link, LINK_RECORD)
+        .await
+        .expect("buffer a link");
+    sink.write_kind(RecordKind::CollectionProfile, PROFILE_RECORD)
+        .await
+        .expect("buffer a profile");
+
+    sink.flush()
+        .await
+        .expect_err("the device record is past the broker's message size limit");
+    assert!(
+        !sink.last_write_delivered(),
+        "a failed flush must not claim delivery"
+    );
+
+    assert_eq!(
+        consume(&broker, links_topic, 1).await,
+        vec![LINK_RECORD.to_vec()],
+        "a refused device topic must not strand the link buffer"
+    );
+    assert_eq!(
+        consume(&broker, profiles_topic, 1).await,
+        vec![PROFILE_RECORD.to_vec()],
+        "a refused device topic must not strand the profile buffer"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn kafka_flush_produces_the_profile_stream_though_the_link_produce_failed() {
+    let node = kafka::Kafka::default()
+        .with_env_var("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false")
+        .start()
+        .await
+        .expect("start kafka container");
+    let port = node
+        .get_host_port_ipv4(kafka::KAFKA_PORT)
+        .await
+        .expect("mapped kafka port");
+    let broker = format!("127.0.0.1:{port}");
+    let topic = "rastreo.itest.links-down";
+    let links_topic = "rastreo.itest.links-down.links";
+    let profiles_topic = "rastreo.itest.links-down.profiles";
+
+    // The links topic is never created, so only that stream's produce fails.
+    create_topics(&broker, &[topic, profiles_topic]).await;
+
+    let config = buffer_everything_config(&broker, topic, links_topic, profiles_topic);
+    let mut sink = create_sink(&config).await.expect("create kafka sink");
+
+    let device = b"{\"id\":\"itest-0\"}\n";
+    sink.write(device).await.expect("buffer a device record");
+    sink.write_kind(RecordKind::Link, LINK_RECORD)
+        .await
+        .expect("buffer a link");
+    sink.write_kind(RecordKind::CollectionProfile, PROFILE_RECORD)
+        .await
+        .expect("buffer a profile");
+
+    sink.flush()
+        .await
+        .expect_err("the links topic does not exist");
+    assert!(
+        !sink.last_write_delivered(),
+        "a failed flush must not claim delivery"
+    );
+
+    assert_eq!(
+        consume(&broker, topic, 1).await,
+        vec![device.to_vec()],
+        "the device stream publishes before the failing links stream"
+    );
+    assert_eq!(
+        consume(&broker, profiles_topic, 1).await,
+        vec![PROFILE_RECORD.to_vec()],
+        "a refused links topic must not strand the profile buffer"
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn kafka_create_sink_batched_close_delivers_one_message_per_record() {

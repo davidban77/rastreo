@@ -217,6 +217,120 @@ async fn nats_second_stream_records_survive_a_rejected_flush_and_arrive_on_the_n
 
 #[tokio::test]
 #[ignore]
+async fn nats_flush_publishes_the_second_streams_though_the_device_publish_was_rejected() {
+    let (_node, server, js) = start_jetstream().await;
+    // The sink verifies the stream by name, so a device subject outside its filter still constructs.
+    create_stream(
+        &js,
+        "RASTREO",
+        &["rastreo.retention.links", "rastreo.retention.profiles"],
+    )
+    .await;
+
+    let config = batched_sink_config(&server, "rastreo.retention.records");
+    let mut sink = create_sink(&config).await.expect("create nats sink");
+
+    let devices: Vec<String> = (0..3)
+        .map(|i| format!("{{\"id\":\"itest-{i}\"}}\n"))
+        .collect();
+    let links: Vec<String> = (0..2)
+        .map(|i| format!("{{\"link\":\"itest-{i}\"}}\n"))
+        .collect();
+    let profiles: Vec<String> = (0..2)
+        .map(|i| format!("{{\"profile\":\"itest-{i}\"}}\n"))
+        .collect();
+    for line in &devices {
+        sink.write(line.as_bytes()).await.expect("buffer a device");
+    }
+    for line in &links {
+        sink.write_kind(RecordKind::Link, line.as_bytes())
+            .await
+            .expect("buffer a link");
+    }
+    for line in &profiles {
+        sink.write_kind(RecordKind::CollectionProfile, line.as_bytes())
+            .await
+            .expect("buffer a profile");
+    }
+
+    within_budget(sink.flush())
+        .await
+        .expect_err("no stream is bound to the device subject");
+    assert!(
+        !sink.last_write_delivered(),
+        "a rejected flush must not claim delivery"
+    );
+
+    let expected: Vec<(String, Vec<u8>)> = messages_on("rastreo.retention.links", &links)
+        .into_iter()
+        .chain(messages_on("rastreo.retention.profiles", &profiles))
+        .collect();
+    assert_eq!(
+        stored_messages(&js, "RASTREO").await,
+        expected,
+        "a rejected device subject must not strand the healthy second streams"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn nats_flush_publishes_the_profile_stream_though_the_link_publish_was_rejected() {
+    let (_node, server, js) = start_jetstream().await;
+    // No stream covers the links subject, so only that stream's publish is rejected.
+    create_stream(
+        &js,
+        "RASTREO",
+        &["rastreo.retention.records", "rastreo.retention.profiles"],
+    )
+    .await;
+
+    let config = batched_sink_config(&server, "rastreo.retention.records");
+    let mut sink = create_sink(&config).await.expect("create nats sink");
+
+    let devices: Vec<String> = (0..2)
+        .map(|i| format!("{{\"id\":\"itest-{i}\"}}\n"))
+        .collect();
+    let links: Vec<String> = (0..2)
+        .map(|i| format!("{{\"link\":\"itest-{i}\"}}\n"))
+        .collect();
+    let profiles: Vec<String> = (0..2)
+        .map(|i| format!("{{\"profile\":\"itest-{i}\"}}\n"))
+        .collect();
+    for line in &devices {
+        sink.write(line.as_bytes()).await.expect("buffer a device");
+    }
+    for line in &links {
+        sink.write_kind(RecordKind::Link, line.as_bytes())
+            .await
+            .expect("buffer a link");
+    }
+    for line in &profiles {
+        sink.write_kind(RecordKind::CollectionProfile, line.as_bytes())
+            .await
+            .expect("buffer a profile");
+    }
+
+    within_budget(sink.flush())
+        .await
+        .expect_err("no stream is bound to the links subject");
+    assert!(
+        !sink.last_write_delivered(),
+        "a rejected flush must not claim delivery"
+    );
+
+    let expected: Vec<(String, Vec<u8>)> = device_messages(&devices)
+        .into_iter()
+        .chain(messages_on("rastreo.retention.profiles", &profiles))
+        .collect();
+    assert_eq!(
+        stored_messages(&js, "RASTREO").await,
+        expected,
+        "a rejected links subject must not strand the profile buffer"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn nats_device_records_whose_ack_was_rejected_are_retained_for_the_next_flush() {
     let (_node, server, js) = start_jetstream().await;
     // The sink verifies the stream by name, so a subject outside its filter still constructs.

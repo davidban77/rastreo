@@ -212,7 +212,7 @@ When a scan runs the [LLDP prober](../probe/lldp.md), rastreo discovers links be
 
     The fix is to widen the stream's subject filter to the wildcard `rastreo.discovery.>` — edit the existing stream, or delete and recreate it with the [Stream setup](#stream-setup) command above.
 
-    A refused link publish is not discarded. The sink keeps the record buffered and publishes it again on the next flush. Widen the filter mid-scan and those links still reach the stream. If the filter is still too narrow when the scan ends, the run fails with a sink error. Those links never reached the stream. The [dead-letter queue](../discover/sinks.md#dead-letter-queue_1) covers the device stream only, so a link record never goes there.
+    A refused link publish is not discarded. The sink keeps the record buffered and publishes it again on the next flush. Widen the filter mid-scan and those links still reach the stream. If the filter is still too narrow when the scan ends, the run fails with a sink error. Those links never reached the stream. The device and collection-profile streams are unaffected: the same flush publishes them whether or not the link publish is refused. The [dead-letter queue](../discover/sinks.md#dead-letter-queue_1) covers the device stream only, so a link record never goes there.
 
 A consumer that reconciles topology subscribes to both subjects: the device subject to create or update devices, the links subject to create or update cables. A `LinkRecord` carries the same one-message-per-record framing as a `DeviceRecord`. See [Topology](../discover/topology.md) for the record shape and the mapping to NetBox cables and Nautobot interface connections.
 
