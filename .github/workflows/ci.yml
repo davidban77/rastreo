@@ -207,6 +207,19 @@ jobs:
         working-directory: examples/${{ matrix.consumer }}
         run: uv run pytest
 
+  live-uat-self-test:
+    name: Live UAT harness self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Stdlib-only and Docker-free: the structural guards (readiness coverage,
+      # gate/endpoint reconciliation, budget vs. job timeout) block here rather
+      # than only when someone runs the flag by hand.
+      - name: Run the live-infra UAT harness self-tests
+        run: python3 scripts/live_infra_uat.py --self-test
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

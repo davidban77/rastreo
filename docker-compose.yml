@@ -12,6 +12,8 @@ services:
     container_name: rastreo-kafka
     ports:
       - "9092:9092"
+    expose:
+      - "29092"
     networks:
       rastreo-net:
         ipv4_address: 10.50.0.2
