@@ -22,6 +22,7 @@ use rustls::{
 
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
+use crate::sink::pending::{clamp_threshold, PendingBuffer};
 use crate::sink::{
     retry_with_backoff, RecordKind, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
     DEFAULT_LINKS_DESTINATION, DEFAULT_PROFILES_DESTINATION, SINK_ERROR_CLASS_COUNT,
@@ -284,25 +285,12 @@ const HEADER_SOURCE_TOPIC: &str = "x-rastreo-source-topic";
 const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
 const HEADER_DLQ_TIMESTAMP: &str = "x-rastreo-dlq-timestamp";
 
-fn clamp_threshold(bytes: usize) -> usize {
-    bytes.max(1)
-}
-
-fn should_flush_after_append(buffer_len: usize, threshold: usize) -> bool {
-    buffer_len >= threshold
-}
-
-fn buffer_record(buffer: &mut Vec<Vec<u8>>, buffered_bytes: &mut usize, data: &[u8]) {
-    buffer.push(data.to_vec());
-    *buffered_bytes += data.len();
-}
-
 fn build_records(
-    entries: &[Vec<u8>],
+    buffer: &PendingBuffer<Vec<u8>>,
     headers: &BTreeMap<String, Vec<u8>>,
     timestamp: chrono::DateTime<Utc>,
 ) -> Vec<Record> {
-    entries
+    buffer
         .iter()
         .map(|value| Record {
             key: None,
@@ -315,7 +303,7 @@ fn build_records(
 
 async fn produce_buffer(
     client: &PartitionClient,
-    buffer: &[Vec<u8>],
+    buffer: &PendingBuffer<Vec<u8>>,
     headers: &BTreeMap<String, Vec<u8>>,
     topic: &str,
     brokers: &[String],
@@ -372,8 +360,7 @@ pub struct KafkaSink {
     topic: String,
     brokers: Vec<String>,
     client: PartitionClient,
-    buffer: Vec<Vec<u8>>,
-    buffered_bytes: usize,
+    buffer: PendingBuffer<Vec<u8>>,
     buffer_threshold: usize,
     last_write_delivered: bool,
     dlq_client: Option<PartitionClient>,
@@ -386,13 +373,11 @@ pub struct KafkaSink {
     links_topic: String,
     // Lazily connected on the first link publish: a scan with no LLDP data never opens it.
     links_client: Option<PartitionClient>,
-    links_buffer: Vec<Vec<u8>>,
-    links_buffered_bytes: usize,
+    links_buffer: PendingBuffer<Vec<u8>>,
     profiles_topic: String,
     // Lazily connected on the first profile publish: a scan with no gNMI capability data never opens it.
     profiles_client: Option<PartitionClient>,
-    profiles_buffer: Vec<Vec<u8>>,
-    profiles_buffered_bytes: usize,
+    profiles_buffer: PendingBuffer<Vec<u8>>,
 }
 
 impl std::fmt::Debug for KafkaSink {
@@ -401,7 +386,7 @@ impl std::fmt::Debug for KafkaSink {
             .field("topic", &self.topic)
             .field("brokers", &self.brokers)
             .field("buffered_records", &self.buffer.len())
-            .field("buffered_bytes", &self.buffered_bytes)
+            .field("buffered_bytes", &self.buffer.bytes())
             .field("buffer_threshold", &self.buffer_threshold)
             .field("last_write_delivered", &self.last_write_delivered)
             .field("dlq_topic", &self.dlq_topic)
@@ -493,8 +478,7 @@ impl KafkaSink {
             topic,
             brokers,
             client,
-            buffer: Vec::new(),
-            buffered_bytes: 0,
+            buffer: PendingBuffer::new(),
             buffer_threshold: Self::DEFAULT_BUFFER_THRESHOLD,
             last_write_delivered: false,
             dlq_client: None,
@@ -506,12 +490,10 @@ impl KafkaSink {
             retry: SinkRetry::default(),
             links_topic: DEFAULT_LINKS_DESTINATION.to_string(),
             links_client: None,
-            links_buffer: Vec::new(),
-            links_buffered_bytes: 0,
+            links_buffer: PendingBuffer::new(),
             profiles_topic: DEFAULT_PROFILES_DESTINATION.to_string(),
             profiles_client: None,
-            profiles_buffer: Vec::new(),
-            profiles_buffered_bytes: 0,
+            profiles_buffer: PendingBuffer::new(),
         })
     }
 
@@ -568,11 +550,6 @@ impl KafkaSink {
         Ok(self)
     }
 
-    fn clear_buffer(&mut self) {
-        self.buffer.clear();
-        self.buffered_bytes = 0;
-    }
-
     async fn publish_buffer(&mut self) -> Result<(), RastreoError> {
         if self.buffer.is_empty() {
             return Ok(());
@@ -591,11 +568,8 @@ impl KafkaSink {
         )
         .await;
 
-        let primary_err = match primary_result {
-            Ok(()) => {
-                self.clear_buffer();
-                return Ok(());
-            }
+        let primary_err = match self.buffer.settle_all(primary_result) {
+            Ok(()) => return Ok(()),
             Err(e) => e,
         };
 
@@ -620,13 +594,12 @@ impl KafkaSink {
         };
         let dlq_records = build_records(&self.buffer, &dlq_headers, Utc::now());
 
-        match dlq_client
+        let dlq_result = dlq_client
             .produce(dlq_records, Compression::NoCompression)
-            .await
-        {
+            .await;
+        match self.buffer.settle_all(dlq_result) {
             Ok(_) => {
                 // DLQ absorbed every buffered record; primary failure is quarantined, not propagated.
-                self.clear_buffer();
                 self.dlq_delivered
                     .fetch_add(record_count, Ordering::Relaxed);
                 Ok(())
@@ -645,8 +618,8 @@ impl KafkaSink {
 
     async fn write_link(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        buffer_record(&mut self.links_buffer, &mut self.links_buffered_bytes, data);
-        if should_flush_after_append(self.links_buffered_bytes, self.buffer_threshold) {
+        self.links_buffer.push_record(data);
+        if self.links_buffer.reached_threshold(self.buffer_threshold) {
             self.publish_links_buffer().await?;
             self.last_write_delivered = true;
         }
@@ -668,10 +641,7 @@ impl KafkaSink {
         )
         .await;
         self.links_client = Some(client);
-        result?;
-        self.links_buffer.clear();
-        self.links_buffered_bytes = 0;
-        Ok(())
+        self.links_buffer.settle_all(result)
     }
 
     async fn take_links_client(&mut self) -> Result<PartitionClient, RastreoError> {
@@ -692,12 +662,11 @@ impl KafkaSink {
 
     async fn write_profile(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        buffer_record(
-            &mut self.profiles_buffer,
-            &mut self.profiles_buffered_bytes,
-            data,
-        );
-        if should_flush_after_append(self.profiles_buffered_bytes, self.buffer_threshold) {
+        self.profiles_buffer.push_record(data);
+        if self
+            .profiles_buffer
+            .reached_threshold(self.buffer_threshold)
+        {
             self.publish_profiles_buffer().await?;
             self.last_write_delivered = true;
         }
@@ -719,10 +688,7 @@ impl KafkaSink {
         )
         .await;
         self.profiles_client = Some(client);
-        result?;
-        self.profiles_buffer.clear();
-        self.profiles_buffered_bytes = 0;
-        Ok(())
+        self.profiles_buffer.settle_all(result)
     }
 
     async fn take_profiles_client(&mut self) -> Result<PartitionClient, RastreoError> {
@@ -746,8 +712,8 @@ impl KafkaSink {
 impl Sink for KafkaSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        buffer_record(&mut self.buffer, &mut self.buffered_bytes, data);
-        if should_flush_after_append(self.buffered_bytes, self.buffer_threshold) {
+        self.buffer.push_record(data);
+        if self.buffer.reached_threshold(self.buffer_threshold) {
             self.publish_buffer().await?;
             self.last_write_delivered = true;
         }
@@ -926,48 +892,21 @@ mod tests {
         assert!(cfg.validate().is_ok());
     }
 
-    #[test]
-    fn clamp_threshold_coerces_zero_to_one() {
-        assert_eq!(clamp_threshold(0), 1);
-    }
-
-    #[test]
-    fn clamp_threshold_passes_through_non_zero_values() {
-        assert_eq!(clamp_threshold(1), 1);
-        assert_eq!(clamp_threshold(1024), 1024);
-        assert_eq!(clamp_threshold(usize::MAX), usize::MAX);
-    }
-
-    #[test]
-    fn should_flush_after_append_is_false_below_threshold() {
-        assert!(!should_flush_after_append(0, 1024));
-        assert!(!should_flush_after_append(1023, 1024));
-    }
-
-    #[test]
-    fn should_flush_after_append_is_true_at_or_above_threshold() {
-        assert!(should_flush_after_append(1024, 1024));
-        assert!(should_flush_after_append(2048, 1024));
-    }
-
-    #[test]
-    fn buffer_record_appends_one_entry_per_call_and_sums_bytes() {
-        let mut buffer: Vec<Vec<u8>> = Vec::new();
-        let mut bytes = 0usize;
-        buffer_record(&mut buffer, &mut bytes, b"one\n");
-        buffer_record(&mut buffer, &mut bytes, b"two\n");
-        buffer_record(&mut buffer, &mut bytes, b"three\n");
-        assert_eq!(buffer.len(), 3, "each write must stay a distinct entry");
-        assert_eq!(buffer[0], b"one\n");
-        assert_eq!(buffer[1], b"two\n");
-        assert_eq!(buffer[2], b"three\n");
-        assert_eq!(bytes, 4 + 4 + 6);
+    fn buffered(records: &[&[u8]]) -> PendingBuffer<Vec<u8>> {
+        let mut buffer = PendingBuffer::new();
+        for record in records {
+            buffer.push_record(record);
+        }
+        buffer
     }
 
     #[test]
     fn build_records_produces_one_record_per_entry() {
-        let entries = vec![b"a\n".to_vec(), b"b\n".to_vec(), b"c\n".to_vec()];
-        let records = build_records(&entries, &BTreeMap::new(), Utc::now());
+        let records = build_records(
+            &buffered(&[b"a\n", b"b\n", b"c\n"]),
+            &BTreeMap::new(),
+            Utc::now(),
+        );
         assert_eq!(
             records.len(),
             3,
@@ -980,9 +919,8 @@ mod tests {
 
     #[test]
     fn build_records_attaches_dlq_headers_to_every_record() {
-        let entries = vec![b"a\n".to_vec(), b"b\n".to_vec()];
         let headers = build_dlq_headers("rastreo.devices", SinkErrorClass::ProduceFailure);
-        let records = build_records(&entries, &headers, Utc::now());
+        let records = build_records(&buffered(&[b"a\n", b"b\n"]), &headers, Utc::now());
         assert_eq!(records.len(), 2, "all buffered records ship to the DLQ");
         for record in &records {
             assert!(record.headers.contains_key(HEADER_SOURCE_TOPIC));
@@ -992,7 +930,7 @@ mod tests {
 
     #[test]
     fn build_records_on_empty_buffer_produces_no_records() {
-        let records = build_records(&[], &BTreeMap::new(), Utc::now());
+        let records = build_records(&buffered(&[]), &BTreeMap::new(), Utc::now());
         assert!(records.is_empty());
     }
 
@@ -1105,10 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_mode_batched_with_threshold_one_flushes_after_every_byte() {
+    fn flush_mode_per_record_flushes_on_the_first_record() {
         let threshold = KafkaFlushMode::PerRecord.to_threshold();
-        assert!(should_flush_after_append(1, threshold));
-        assert!(should_flush_after_append(2, threshold));
+        assert!(!buffered(&[]).reached_threshold(threshold));
+        assert!(buffered(&[b"a"]).reached_threshold(threshold));
     }
 
     #[test]
@@ -1117,10 +1055,12 @@ mod tests {
             threshold_bytes: 1024,
         }
         .to_threshold();
-        assert!(!should_flush_after_append(0, threshold));
-        assert!(!should_flush_after_append(1023, threshold));
-        assert!(should_flush_after_append(1024, threshold));
-        assert!(should_flush_after_append(2048, threshold));
+        let short = vec![b'x'; 1023];
+        let exact = vec![b'x'; 1024];
+        assert!(!buffered(&[]).reached_threshold(threshold));
+        assert!(!buffered(&[&short]).reached_threshold(threshold));
+        assert!(buffered(&[&exact]).reached_threshold(threshold));
+        assert!(buffered(&[&exact, &exact]).reached_threshold(threshold));
     }
 
     #[cfg(feature = "config")]
