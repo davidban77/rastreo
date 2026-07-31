@@ -99,6 +99,8 @@ Only the primary produce is retried. The DLQ produce is never retried. The total
 
 The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). When the primary produce fails and a DLQ is configured, the sink publishes the same payload to the DLQ topic, logs a `WARN`, and returns success — the buffer is drained and the pipeline moves on. When no DLQ is configured, the primary failure surfaces as an error. The buffered records are kept, so the next flush retries them.
 
+The DLQ covers the device topic. The [links](topology.md#where-links-are-emitted) and [collection profiles](collection-profile.md#where-profiles-are-emitted) topics have no DLQ path. A failed publish there is kept for the next flush.
+
 ```yaml
 sink:
   type: kafka
@@ -189,14 +191,16 @@ sink:
     subject: rastreo.discovery.dlq
 ```
 
-Retry covers the synchronous publish only. A JetStream ack rejection is not retried, because the message may already be stored and re-publishing it could duplicate the record. An ack rejection goes straight to the DLQ with error class `ack_rejection`. The DLQ publish is never retried either.
+Retry covers the synchronous publish only. rastreo waits for each ack once and does not re-send the message inside the same attempt. An ack rejection goes straight to the DLQ with error class `ack_rejection`. With no DLQ configured, the sink keeps the record and the next flush publishes it again. A consumer can therefore see that record twice, which [`identity_key`](../integrate/nats.md#idempotency) makes harmless. The DLQ publish is never retried either.
 
 !!! tip "Disabling retry"
     Set `max_attempts: 1` when you want a failure visible in the DLQ immediately. The record is quarantined on the first primary publish failure, with no retry in between.
 
 ### Dead-letter queue
 
-The NATS sink can quarantine records the primary subject refused instead of dropping them silently. Configure a second JetStream stream + subject under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). Unlike Kafka, NATS has two failure surfaces the DLQ absorbs: the synchronous `publish()` call (broker unreachable, subject invalid) and the JetStream ack (broker accepted the publish for routing but refused durable storage — stream retention limits, wrong stream binding, quota exceeded). When either surface fails and a DLQ is configured, the sink publishes the same payload to the DLQ subject, logs a `WARN`, and returns success. When no DLQ is configured, the failure surfaces as an error and the buffer / pending queue is retained.
+The NATS sink can quarantine records the primary subject refused instead of dropping them silently. Configure a second JetStream stream + subject under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). Unlike Kafka, NATS has two failure surfaces the DLQ absorbs: the synchronous `publish()` call (broker unreachable, subject invalid) and the JetStream ack (broker accepted the publish for routing but refused durable storage — stream retention limits, wrong stream binding, quota exceeded). When either surface fails and a DLQ is configured, the sink publishes the same payload to the DLQ subject, logs a `WARN`, and returns success. When no DLQ is configured, the failure surfaces as an error and the sink keeps the record for the next flush.
+
+The DLQ covers the device subject. The [links](topology.md#where-links-are-emitted) and [collection profiles](collection-profile.md#where-profiles-are-emitted) subjects have no DLQ path. A failed publish there is kept for the next flush.
 
 ```yaml
 sink:
@@ -229,7 +233,7 @@ The two error classes are diagnostically distinct so an ops team can triage DLQ 
 
 Set `include_error_metadata: false` to send the payload with no headers — the DLQ message body is byte-identical to what would have gone to the primary subject.
 
-**Failure model.** Primary publish OK, ack OK → the payload lands on the primary subject. Primary publish fails, DLQ publish + ack succeed → the payload lands on the DLQ subject, a `WARN` log is emitted, and the pipeline continues. Primary publish OK but ack fails, DLQ publish + ack succeed → same outcome, `WARN` log, pipeline continues. Any DLQ publish or ack failure → an `ERROR` log records the DLQ failure, the sink returns the original error, and the buffer / pending queue is retained for the caller to retry via `flush()`.
+**Failure model.** Primary publish OK, ack OK → the payload lands on the primary subject. Primary publish fails, DLQ publish + ack succeed → the payload lands on the DLQ subject, a `WARN` log is emitted, and the pipeline continues. Primary publish OK but ack fails, DLQ publish + ack succeed → same outcome, `WARN` log, pipeline continues. Any DLQ publish or ack failure → an `ERROR` log records the DLQ failure, the sink returns the original error, and the record is kept for the next `flush()`, which publishes it again.
 
 **Consumer guidance.** A DLQ consumer typically re-publishes the payload to the primary subject once the underlying issue (broker outage, stream misconfiguration, quota) is resolved. Filter on `x-rastreo-source-subject` when the same DLQ is shared across multiple discovery pipelines; filter on `x-rastreo-error-class` to split triage between broker-connectivity issues (`publish_failure`) and stream-durability issues (`ack_rejection`); use `x-rastreo-dlq-timestamp` to skip records older than a retention window.
 

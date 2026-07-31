@@ -149,7 +149,9 @@ sink:
     backoff_max_ms: 2000
 ```
 
-Retry covers the synchronous publish only. A JetStream ack rejection is not retried, because the message may already be stored and re-publishing it could duplicate the record. See [Sinks · Retrying before the dead-letter queue](../discover/sinks.md#retrying-before-the-dead-letter-queue_1) for how retry composes with the dead-letter queue.
+Retry covers the synchronous publish only. rastreo waits for each ack once and does not re-send the message inside the same attempt. A rejected ack keeps the record in the buffer instead, and the next `flush()` publishes it again. Delivery is therefore at-least-once: a message JetStream already stored can reach the stream a second time. See [Idempotency](#idempotency) for why a repeated record is harmless.
+
+With a dead-letter queue configured, an ack-rejected record goes there instead of staying in the buffer. See [Sinks · Retrying before the dead-letter queue](../discover/sinks.md#retrying-before-the-dead-letter-queue_1) for how retry composes with the dead-letter queue.
 
 ## Stream setup
 
@@ -208,13 +210,13 @@ When a scan runs the [LLDP prober](../probe/lldp.md), rastreo discovers links be
 
     The fix is to widen the stream's subject filter to the wildcard `rastreo.discovery.>` — edit the existing stream, or delete and recreate it with the [Stream setup](#stream-setup) command above.
 
-    A refused link publish goes to the dead-letter queue with error class `ack_rejection` when one is configured — see [Dead-letter queue](../discover/sinks.md#dead-letter-queue_1).
+    A refused link publish is not discarded. The sink keeps the record buffered and publishes it again on the next flush. Widen the filter mid-scan and those links still reach the stream. If the filter is still too narrow when the scan ends, the run fails with a sink error. Those links never reached the stream. The [dead-letter queue](../discover/sinks.md#dead-letter-queue_1) covers the device stream only, so a link record never goes there.
 
 A consumer that reconciles topology subscribes to both subjects: the device subject to create or update devices, the links subject to create or update cables. A `LinkRecord` carries the same one-message-per-record framing as a `DeviceRecord`. See [Topology](../discover/topology.md) for the record shape and the mapping to NetBox cables and Nautobot interface connections.
 
 ## Idempotency
 
-`identity_key` is the stable dedup key, identical to the Kafka sink. Consumers must upsert by `identity_key` — replace fields the new record carries, bump `last_seen`, and tolerate seeing the same key arrive any number of times. The NATS sink does not deduplicate. JetStream's built-in message deduplication window (`--dupe-window` on the stream) dedupes only on the JetStream message ID, not on the payload, so use it as a safety net against duplicate publishes, not as a record dedup mechanism.
+`identity_key` is the stable dedup key, identical to the Kafka sink. Consumers must upsert by `identity_key` — replace fields the new record carries, bump `last_seen`, and tolerate seeing the same key arrive any number of times. The NATS sink does not deduplicate. JetStream's own duplicate window (`--dupe-window` on the stream) matches on a message ID. rastreo sets none, so the window never collapses a record the sink published twice. Upserting by `identity_key` is what makes a repeat harmless.
 
 ## Build feature
 
