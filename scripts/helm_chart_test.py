@@ -42,6 +42,7 @@ GOLDEN_DIR = REPO_ROOT / "scripts" / "testdata" / "helm"
 RELEASE = "rastreo"
 NAMESPACE = "rastreo"
 VERSION_TOKEN = "{{VERSION}}"
+CHECKSUM_RE = re.compile(r"^(\s*checksum/sink-config:\s*)[0-9a-f]{64}$", re.MULTILINE)
 HELM_TIMEOUT_S = 120.0
 
 # Overridden by --chart so a mutated copy can be rendered instead.
@@ -211,10 +212,15 @@ def normalized(text: str) -> str:
     Chart version and appVersion collapse into one token on purpose: they move
     together on a release bump, and a golden that told them apart would go red
     on the bump commit for a change nobody made.
+
+    The sink-config checksum is a digest of a ConfigMap that carries the chart
+    version in its labels, so it moves on that same bump and no version
+    substitution can reach inside it. It collapses to the same token; that the
+    annotation tracks the sink config is pinned by the tests that edit one.
     """
     for version in chart_versions():
         text = text.replace(version, VERSION_TOKEN)
-    return text
+    return CHECKSUM_RE.sub(rf"\g<1>{VERSION_TOKEN}", text)
 
 
 # --- Reading the rendered output ---------------------------------------------

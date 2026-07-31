@@ -241,6 +241,12 @@ jobs:
       - name: Lint chart
         run: helm lint --strict helm/rastreo
 
+      # `helm lint` never renders, so it cannot see a guard that stopped firing or a
+      # default render that drifted. This is the chart users actually pull, so it is
+      # gated on the same assertions CI runs, not on lint alone.
+      - name: Render chart and assert
+        run: python3 scripts/helm_chart_test.py
+
       - name: Package chart
         run: helm package helm/rastreo --destination .
 
