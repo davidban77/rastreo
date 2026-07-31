@@ -240,8 +240,21 @@ jobs:
       - name: Lockfile in sync with manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
 
+      - name: Format check
+        run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+
+      # `cargo clippy --workspace` sees whatever xtask pulls in — 12 of rastreo-core's 14
+      # features, all at once. `mib_enrichment` and `otlp` are never linted, and an
+      # everything-on build is the one shape where a lint on a feature-gated type can go
+      # quiet: two large enum variants hide each other. This lints every feature at least
+      # once on its own. It does not lint pairs.
+      - name: Clippy every crate with each feature in isolation
+        run: cargo hack --each-feature --workspace clippy --all-targets -- -D warnings
