@@ -111,7 +111,7 @@ sink:
 
 Password and token values are redacted in logs and in `source_config_hash`. Rotating a credential still changes the hash, so consumers can detect config changes — but the plaintext is never logged or serialized. The `creds_file` value is a filesystem path, not a secret, and is written verbatim.
 
-Inline userinfo in a server URL (`nats://user:pass@nats.prod:4222`) is also supported, and the `user:pass@` portion is stripped everywhere the server list is rendered back to you: connect and publish errors, `rastreo discover --dry-run` plans, and the `last_probe_error` field of the server's `/readyz` response. The host, port, and failure reason stay intact, so an unreachable broker is still diagnosable from the error text alone.
+Inline userinfo in a server URL (`nats://user:pass@nats.prod:4222`) does not authenticate. The sink connects with the `credentials` block and nothing else, so against a broker that requires a user and password the connection is refused with `authorization violation` however the URL is written. The `user:pass@` portion is stripped everywhere the server list is rendered back to you — connect and publish errors, `rastreo discover --dry-run` plans, and the `last_probe_error` field of the server's `/readyz` response — so a password that landed in a URL does not leak, while the host, port, and failure reason stay intact for diagnosis.
 
 ## Delivery modes
 

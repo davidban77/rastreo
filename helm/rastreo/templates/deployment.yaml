@@ -1,3 +1,18 @@
+{{- $sinkConfig := include "rastreo.sinkConfig" . -}}
+{{- $_ := include "rastreo.requireEntries" (dict "key" "extraEnv" "entries" .Values.extraEnv "required" (list "name")) -}}
+{{- $_ := include "rastreo.requireEntries" (dict "key" "extraEnvFrom" "entries" .Values.extraEnvFrom "required" (list)) -}}
+{{- $_ := include "rastreo.requireEntries" (dict "key" "extraVolumes" "entries" .Values.extraVolumes "required" (list "name")) -}}
+{{- $_ := include "rastreo.requireEntries" (dict "key" "extraVolumeMounts" "entries" .Values.extraVolumeMounts "required" (list "name" "mountPath")) -}}
+{{- $volumeNames := list -}}
+{{- if $sinkConfig -}}
+{{- $volumeNames = append $volumeNames "sink-config" -}}
+{{- end -}}
+{{- range $volume := .Values.extraVolumes -}}
+{{- if eq $volume.name "sink-config" -}}
+{{- fail "extraVolumes defines a volume named sink-config. The chart reserves that name for the ConfigMap it mounts at /etc/rastreo/sink and refuses it whether or not a sink config is set today, so adding one later cannot collide with this deploy. Rename it." -}}
+{{- end -}}
+{{- $volumeNames = append $volumeNames $volume.name -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,7 +30,7 @@ spec:
     metadata:
       labels:
         {{- include "rastreo.selectorLabels" . | nindent 8 }}
-      {{- if and .Values.sink .Values.sink.config }}
+      {{- if $sinkConfig }}
       annotations:
         checksum/sink-config: {{ include (print $.Template.BasePath "/configmap-sink.yaml") . | sha256sum }}
       {{- end }}
@@ -91,7 +106,7 @@ spec:
           {{- $envs = append $envs (dict "name" "RASTREO_MAX_BODY_BYTES" "value" (printf "%d" (int64 .Values.targetGuard.maxBodyBytes))) }}
           {{- end }}
           {{- end }}
-          {{- if and .Values.sink (and .Values.sink.config (gt (len .Values.sink.config) 0)) }}
+          {{- if $sinkConfig }}
           {{- $envs = append $envs (dict "name" "RASTREO_SINK_CONFIG_PATH" "value" "/etc/rastreo/sink/sink.yaml") }}
           {{- if hasKey .Values.sink "probeIntervalSeconds" }}
           {{- $envs = append $envs (dict "name" "RASTREO_SINK_PROBE_INTERVAL_SECS" "value" (printf "%d" (int64 .Values.sink.probeIntervalSeconds))) }}
@@ -143,9 +158,29 @@ spec:
           {{- else }}
           {{- $envs = append $envs (dict "name" "RASTREO_AUTH_DISABLED" "value" "true") }}
           {{- end }}
+          {{- $chartEnvNames := list }}
+          {{- range $entry := $envs }}
+          {{- $chartEnvNames = append $chartEnvNames $entry.name }}
+          {{- end }}
+          {{- $extraEnvNames := list }}
+          {{- range $entry := .Values.extraEnv }}
+          {{- $name := $entry.name }}
+          {{- if has $name $chartEnvNames }}
+          {{- fail (printf "extraEnv sets %s, which the chart already renders on this container. Kubernetes keeps the last duplicate of an env name, so the chart's value would be replaced with nothing in the rendered manifest to show it. Rename the variable, or unset the chart value that renders it." $name) }}
+          {{- end }}
+          {{- if has $name $extraEnvNames }}
+          {{- fail (printf "extraEnv sets %s twice. Kubernetes keeps the last duplicate; keep one entry." $name) }}
+          {{- end }}
+          {{- $extraEnvNames = append $extraEnvNames $name }}
+          {{- $envs = append $envs $entry }}
+          {{- end }}
           {{- if $envs }}
           env:
             {{- toYaml $envs | nindent 12 }}
+          {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           livenessProbe:
             httpGet:
@@ -165,18 +200,37 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- $hasSinkConfig := and .Values.sink (and .Values.sink.config (gt (len .Values.sink.config) 0)) }}
-          {{- if $hasSinkConfig }}
+          {{- range $mount := .Values.extraVolumeMounts }}
+          {{- if not (has $mount.name $volumeNames) }}
+          {{- fail (printf "extraVolumeMounts mounts a volume named %s, and this pod has none by that name — it has %s. Kubernetes refuses a pod whose mount names no volume, so the render looks clean and the Secret never reaches the container. Match the name to an extraVolumes entry." $mount.name (join ", " $volumeNames | default "no volumes")) }}
+          {{- end }}
+          {{- $path := clean $mount.mountPath }}
+          {{- $dir := ternary $path (printf "%s/" $path) (hasSuffix "/" $path) }}
+          {{- if or (hasPrefix "/etc/rastreo/sink/" $dir) (hasPrefix $dir "/etc/rastreo/sink/") }}
+          {{- fail (printf "extraVolumeMounts mounts %s, which overlaps the chart's sink config mount at /etc/rastreo/sink. One mount would hide the other and the server would read the wrong file. Mount elsewhere — /run/secrets is the usual place for a secret the chart does not own." $mount.mountPath) }}
+          {{- end }}
+          {{- end }}
+          {{- if or $sinkConfig .Values.extraVolumeMounts }}
           volumeMounts:
+            {{- if $sinkConfig }}
             - name: sink-config
               mountPath: /etc/rastreo/sink
               readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
-      {{- if $hasSinkConfig }}
+      {{- if or $sinkConfig .Values.extraVolumes }}
       volumes:
+        {{- if $sinkConfig }}
         - name: sink-config
           configMap:
             name: {{ include "rastreo.fullname" . }}-sink
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

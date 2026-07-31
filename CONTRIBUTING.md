@@ -12,6 +12,14 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+## Helm chart
+
+```bash
+task helm:test
+```
+
+Lints the chart and renders it with `helm template`, asserting on the output: the two ways a secret reaches a server-side sink config, every values combination the chart must refuse, and a golden render that goes red if the default output changes. Needs Helm 3 on `PATH` and nothing else — the harness at `scripts/helm_chart_test.py` is stdlib-only Python. Regenerate a golden with `python3 scripts/helm_chart_test.py --update-goldens` once you have confirmed the change to the rendered manifests is intended.
+
 ## Benchmarks
 
 ```bash

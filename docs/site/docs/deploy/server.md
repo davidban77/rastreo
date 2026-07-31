@@ -249,20 +249,21 @@ A ConfigMap is plaintext at rest and readable by anyone with access to the names
 sink:
   config:
     type: nats
-    servers: ["nats://probe:${NATS_PASS}@nats.observability.svc:4222"]
+    servers: ["nats://nats.observability.svc:4222"]
     subject: rastreo.discovery.records.v1
     stream: RASTREO
+    credentials:
+      type: user_pass
+      username: probe
+      password: "${NATS_PASS}"
 ```
 
-Helm copies the reference into the ConfigMap unchanged, so only the text `${NATS_PASS}` is stored and the password stays in a Secret.
+Helm copies the reference into the ConfigMap unchanged, so only the text `${NATS_PASS}` is stored and the password stays in a Secret. Supply the variable itself with `extraEnv`, which the chart renders as container environment from a Secret key — see [Kubernetes · Sink credentials](kubernetes.md#sink-credentials) for the Secret, the values, and the resulting config. A NATS password goes in `credentials`; a `user:pass@` prefix on a server URL is not read as a credential and the broker refuses the connection.
 
-!!! warning "The bundled chart cannot supply the variable"
-    The chart has no `extraEnv`, `envFrom`, `extraVolumes`, or `extraVolumeMounts` value. It renders only the environment variables it already knows about, and its one volume is the sink ConfigMap. So `NATS_PASS` cannot reach the container through `helm install` alone. Supply it with a post-renderer, or with a Deployment you patch yourself. Either way, add an `env` entry with a `secretKeyRef`.
+!!! warning "An `!file` tag needs `sink.configYaml`, not `sink.config`"
+    Helm parses `sink.config` and drops the YAML tag, so the ConfigMap ends up holding `password: /run/secrets/nats-password`. The server then reads that path *as the password* and fails authentication, with no error naming the credential. Write the document into `sink.configYaml`, which the chart copies through untouched, and mount the Secret with `extraVolumes` and `extraVolumeMounts`.
 
-!!! warning "Do not put an `!file` tag in `sink.config`"
-    Helm drops the YAML tag and keeps the path as plain text, so the ConfigMap ends up holding `password: /run/secrets/nats-password`. The server then reads that path *as the password* and fails authentication, with no error naming the credential. Use `!file` only in a sink config file you write yourself, outside the chart.
-
-An unset variable is not fatal. The pod starts and stays up. `/readyz` returns 503 with `reason: "sink_unreachable"`, and `last_probe_error` names the variable and the config path (`environment variable NATS_PASS referenced in sink config is not set`). `/readyz` needs no bearer token. That is why no expanded credential is allowed to reach `last_probe_error` on any failure path. A failed connect to `nats://probe:hunter2@nats:4222` reports `nats://nats:4222`. A malformed config is reported against the file as written, quoting `${NATS_PASS}` and never the value it resolved to. For the full syntax, the error shapes, and the Vault or Secrets Manager wrapper pattern, see [Secrets](../reference/secrets.md).
+An unset variable is not fatal. The pod starts and stays up. `/readyz` returns 503 with `reason: "sink_unreachable"`, and `last_probe_error` names the variable and the config path (`environment variable NATS_PASS referenced in sink config is not set`). `/readyz` needs no bearer token. That is why no expanded credential is allowed to reach `last_probe_error` on any failure path. A failed connect names the server and the reason only (`failed to connect to server(s) 'nats://nats.observability.svc:4222': authorization violation`), and any `user:pass@` prefix in a server URL is stripped out of it. A malformed config is reported against the file as written, quoting `${NATS_PASS}` and never the value it resolved to. For the full syntax, the error shapes, and the Vault or Secrets Manager wrapper pattern, see [Secrets](../reference/secrets.md).
 
 `GET /health` is preserved as a backward-compat alias for `/healthz`. New deployments should point liveness at `/healthz` and readiness at `/readyz`.
 
@@ -539,7 +540,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 ```
 
 !!! tip "Safe to log or share"
-    The plan strips inline credentials from a sink URL. A NATS server URL written as `nats://user:pass@host` renders as `nats://host` in the plan.
+    The plan strips inline userinfo from a sink URL. A NATS server URL written as `nats://user:pass@host` renders as `nats://host` in the plan.
 
 A real scan rejects an out-of-allow-list target with a hard `403` and probes nothing. A dry-run is more informative. It resolves what it can and reports the blocked target in the plan. The blocked target carries an `error` in its `resolution`, and it does not add to `total_probes`.
 
