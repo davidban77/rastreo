@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use async_nats::jetstream;
 use rastreo_core::sink::{
-    create_sink, NatsCredentials, NatsFlushMode, RecordKind, SinkConfig, SinkErrorClass, SinkRetry,
+    create_sink, NatsCredentials, NatsDeadLetterConfig, NatsFlushMode, RecordKind, SinkConfig,
+    SinkErrorClass, SinkRetry,
 };
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::nats::{Nats, NatsServerCmd};
@@ -89,21 +90,59 @@ fn batched_sink_config(server: &str, subject: &str) -> SinkConfig {
     )
 }
 
+// A threshold no scan of a few thousand records reaches, so the whole batch publishes from one flush.
+fn buffer_everything_sink_config(server: &str, subject: &str) -> SinkConfig {
+    retention_sink_config(
+        server,
+        subject,
+        NatsFlushMode::Batched {
+            threshold_bytes: 256 * 1024 * 1024,
+        },
+    )
+}
+
+// NatsDeadLetterConfig is #[non_exhaustive], so build it the way a scenario file does.
+fn dead_letter_config(subject: &str) -> NatsDeadLetterConfig {
+    serde_json::from_str(&format!(
+        r#"{{"stream":"RASTREO_DLQ","subject":"{subject}","include_error_metadata":true}}"#
+    ))
+    .expect("dead-letter config")
+}
+
+fn with_dead_letter(mut config: SinkConfig, subject: &str) -> SinkConfig {
+    if let SinkConfig::Nats { dead_letter, .. } = &mut config {
+        *dead_letter = Some(dead_letter_config(subject));
+    }
+    config
+}
+
+// Many times the sink's deferred-ack cap, so one flush drains repeatedly instead of once at the end.
+const RECORDS_PAST_THE_ACK_CAP: usize = 6_000;
+
+const BROKER_TEST_BUDGET: Duration = Duration::from_secs(60);
+
+// A stall waiting on an ack permit is unbounded, so cap the publishing phase: a regression fails instead of hanging CI.
+async fn within_budget<F: std::future::Future>(publishing: F) -> F::Output {
+    match tokio::time::timeout(BROKER_TEST_BUDGET, publishing).await {
+        Ok(value) => value,
+        Err(_) => panic!("publishing did not finish within {BROKER_TEST_BUDGET:?}"),
+    }
+}
+
 // Over the server's 1 MiB default max_payload, which async-nats enforces client-side: every publish attempt fails, at every point in the buffer's life.
 fn unpublishable_record() -> Vec<u8> {
     vec![b'x'; 2 * 1024 * 1024]
 }
 
-fn device_messages(records: &[String]) -> Vec<(String, Vec<u8>)> {
+fn messages_on(subject: &str, records: &[String]) -> Vec<(String, Vec<u8>)> {
     records
         .iter()
-        .map(|line| {
-            (
-                "rastreo.retention.records".to_string(),
-                line.as_bytes().to_vec(),
-            )
-        })
+        .map(|line| (subject.to_string(), line.as_bytes().to_vec()))
         .collect()
+}
+
+fn device_messages(records: &[String]) -> Vec<(String, Vec<u8>)> {
+    messages_on("rastreo.retention.records", records)
 }
 
 // A publish to a subject no stream is bound to is accepted by the core connection and rejected
@@ -260,6 +299,131 @@ async fn nats_records_published_before_a_mid_buffer_publish_failure_survive_the_
         stored,
         device_messages(&records),
         "records published ahead of the failing entry must be back in the buffer, not left in acks no flush ever awaits"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn nats_batched_mode_delivers_a_scan_longer_than_the_ack_permit_capacity() {
+    let (_node, server, js) = start_jetstream().await;
+    create_stream(&js, "RASTREO", &["rastreo.retention.records"]).await;
+
+    let config = batched_sink_config(&server, "rastreo.retention.records");
+    let mut sink = create_sink(&config).await.expect("create nats sink");
+
+    let records: Vec<String> = (0..RECORDS_PAST_THE_ACK_CAP)
+        .map(|i| format!("{{\"id\":\"inflight-{i}\",\"ts\":0}}\n"))
+        .collect();
+
+    within_budget(async {
+        for line in &records {
+            sink.write(line.as_bytes())
+                .await
+                .expect("a batched write must never wait on a permit only a drain releases");
+        }
+        sink.close().await.expect("close");
+    })
+    .await;
+
+    assert!(sink.last_write_delivered());
+    assert_eq!(
+        stored_messages(&js, "RASTREO").await,
+        device_messages(&records),
+        "every record of a scan longer than the ack-permit capacity must reach the stream, in order"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn nats_a_rejected_batch_longer_than_the_ack_permit_capacity_retains_every_record() {
+    let (_node, server, js) = start_jetstream().await;
+    create_stream(&js, "RASTREO", &["rastreo.retention.other"]).await;
+
+    let config = buffer_everything_sink_config(&server, "rastreo.retention.records");
+    let mut sink = create_sink(&config).await.expect("create nats sink");
+
+    let records: Vec<String> = (0..RECORDS_PAST_THE_ACK_CAP)
+        .map(|i| format!("{{\"id\":\"retained-{i}\",\"ts\":0}}\n"))
+        .collect();
+    for line in &records {
+        sink.write(line.as_bytes())
+            .await
+            .expect("a device record buffers under the batched threshold");
+    }
+
+    within_budget(async {
+        let err = sink
+            .flush()
+            .await
+            .expect_err("no stream is bound to the device subject");
+        assert_eq!(
+            err.sink_error_class(),
+            Some(SinkErrorClass::AckRejection),
+            "the rejection that stopped the batch is the reported error"
+        );
+    })
+    .await;
+    assert!(!sink.last_write_delivered());
+
+    create_stream(&js, "RASTREO_DEVICES", &["rastreo.retention.records"]).await;
+
+    within_budget(async {
+        sink.flush()
+            .await
+            .expect("the retained device buffer publishes once a stream covers its subject");
+    })
+    .await;
+    assert!(sink.last_write_delivered());
+
+    assert_eq!(
+        stored_messages(&js, "RASTREO_DEVICES").await,
+        device_messages(&records),
+        "a rejected drain mid-batch must retain the records it had published along with every record behind them"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn nats_a_dead_letter_queue_absorbs_every_rejected_ack_of_a_batch_past_the_ack_cap() {
+    let (_node, server, js) = start_jetstream().await;
+    create_stream(&js, "RASTREO", &["rastreo.retention.other"]).await;
+    create_stream(&js, "RASTREO_DLQ", &["rastreo.retention.dlq"]).await;
+
+    let config = with_dead_letter(
+        buffer_everything_sink_config(&server, "rastreo.retention.records"),
+        "rastreo.retention.dlq",
+    );
+    let mut sink = create_sink(&config).await.expect("create nats sink");
+
+    let records: Vec<String> = (0..RECORDS_PAST_THE_ACK_CAP)
+        .map(|i| format!("{{\"id\":\"quarantined-{i}\",\"ts\":0}}\n"))
+        .collect();
+    for line in &records {
+        sink.write(line.as_bytes())
+            .await
+            .expect("a device record buffers under the batched threshold");
+    }
+
+    within_budget(async {
+        sink.flush().await.expect(
+            "a drain that quarantines every rejected ack retains nothing, so the flush succeeds",
+        );
+    })
+    .await;
+
+    assert_eq!(
+        sink.dlq_records_delivered(),
+        RECORDS_PAST_THE_ACK_CAP as u64,
+        "every rejected ack of every drain must be credited to the DLQ, not just the last drain's"
+    );
+    assert_eq!(
+        stored_messages(&js, "RASTREO_DLQ").await,
+        messages_on("rastreo.retention.dlq", &records),
+        "quarantining from a drain that runs mid-walk must ship every record, in order"
+    );
+    assert!(
+        stored_messages(&js, "RASTREO").await.is_empty(),
+        "no record reached the primary stream, so none may be reported as delivered there"
     );
 }
 

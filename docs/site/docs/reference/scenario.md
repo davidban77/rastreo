@@ -466,7 +466,7 @@ The `credentials` field is an internally-tagged object with four variants distin
 {"type": "creds", "creds_file": "/etc/rastreo/nats.creds"}
 ```
 
-The `flush_mode` field is an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each NATS message. `per_record` publishes each record and waits for its JetStream ack — the simplest at-least-once model. `batched` publishes each record as its own message too, but pipelines the acks: it buffers until `threshold_bytes` (default 65536), fires the publishes, and drains the pending acks on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch.
+The `flush_mode` field is an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each NATS message. `per_record` publishes each record and waits for its JetStream ack — the simplest at-least-once model. `batched` publishes each record as its own message too, but pipelines the acks: it buffers until `threshold_bytes` (default 65536), fires the publishes, and drains the pending acks once enough are outstanding and again on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch; a rejected ack can surface from a record write, not only from `flush()`. See [NATS · Delivery modes](../integrate/nats.md#delivery-modes).
 
 ```json
 {"type": "per_record"}
