@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,9 +29,29 @@ fn should_flush_after_append(buffer_len: usize, threshold: usize) -> bool {
     buffer_len >= threshold
 }
 
-fn buffer_record(buffer: &mut Vec<Vec<u8>>, buffered_bytes: &mut usize, data: &[u8]) {
-    buffer.push(data.to_vec());
+fn buffer_record(buffer: &mut VecDeque<Bytes>, buffered_bytes: &mut usize, data: &[u8]) {
+    buffer.push_back(Bytes::from(data.to_vec()));
     *buffered_bytes += data.len();
+}
+
+fn pop_accepted(buffer: &mut VecDeque<Bytes>, buffered_bytes: &mut usize) {
+    if let Some(entry) = buffer.pop_front() {
+        *buffered_bytes = buffered_bytes.saturating_sub(entry.len());
+    }
+}
+
+/// Puts payloads whose ack was rejected back at the head of `buffer`, ahead of anything written since.
+fn retain_unacked(
+    buffer: &mut VecDeque<Bytes>,
+    buffered_bytes: &mut usize,
+    mut unacked: VecDeque<Bytes>,
+) {
+    if unacked.is_empty() {
+        return;
+    }
+    *buffered_bytes += unacked.iter().map(Bytes::len).sum::<usize>();
+    unacked.append(buffer);
+    *buffer = unacked;
 }
 
 pub fn default_batch_threshold() -> usize {
@@ -113,7 +134,7 @@ pub struct NatsSink {
     stream: String,
     servers: Vec<String>,
     ctx: Context,
-    buffer: Vec<Vec<u8>>,
+    buffer: VecDeque<Bytes>,
     buffered_bytes: usize,
     buffer_threshold: usize,
     pending_acks: Vec<PendingPublish>,
@@ -124,10 +145,10 @@ pub struct NatsSink {
     dlq_delivered: [AtomicU64; SINK_ERROR_CLASS_COUNT],
     retry: SinkRetry,
     links_subject: String,
-    links_buffer: Vec<Vec<u8>>,
+    links_buffer: VecDeque<Bytes>,
     links_buffered_bytes: usize,
     profiles_subject: String,
-    profiles_buffer: Vec<Vec<u8>>,
+    profiles_buffer: VecDeque<Bytes>,
     profiles_buffered_bytes: usize,
 }
 
@@ -223,7 +244,7 @@ impl NatsSink {
             stream,
             servers,
             ctx,
-            buffer: Vec::new(),
+            buffer: VecDeque::new(),
             buffered_bytes: 0,
             buffer_threshold: 1,
             pending_acks: Vec::new(),
@@ -234,10 +255,10 @@ impl NatsSink {
             dlq_delivered: std::array::from_fn(|_| AtomicU64::new(0)),
             retry: SinkRetry::default(),
             links_subject: DEFAULT_LINKS_DESTINATION.to_string(),
-            links_buffer: Vec::new(),
+            links_buffer: VecDeque::new(),
             links_buffered_bytes: 0,
             profiles_subject: DEFAULT_PROFILES_DESTINATION.to_string(),
-            profiles_buffer: Vec::new(),
+            profiles_buffer: VecDeque::new(),
             profiles_buffered_bytes: 0,
         })
     }
@@ -286,35 +307,63 @@ impl NatsSink {
         Ok(self)
     }
 
-    async fn publish_to_dlq(
+    /// `true` once the DLQ accepted *and* acked the payload; `false` when no DLQ is configured or
+    /// it refused, in which case the caller still holds the record and must retain it.
+    async fn quarantine(
         &self,
         payload: Bytes,
         error_class: SinkErrorClass,
-    ) -> Result<PublishAckFuture, PublishError> {
-        let dlq_subject = self
-            .dlq_subject
-            .as_ref()
-            .expect("publish_to_dlq called without DLQ configured");
-        if self.include_error_metadata {
+        cause: &RastreoError,
+    ) -> bool {
+        let Some(dlq_subject) = self.dlq_subject.clone() else {
+            return false;
+        };
+
+        tracing::warn!(
+            subject = self.subject.as_str(),
+            dlq_subject = dlq_subject.as_str(),
+            error = %cause,
+            "nats sink: primary delivery failed; shipping record to DLQ",
+        );
+
+        let published = if self.include_error_metadata {
             let headers = build_dlq_headers(&self.subject, error_class);
             self.ctx
                 .publish_with_headers(dlq_subject.clone(), headers, payload)
                 .await
         } else {
             self.ctx.publish(dlq_subject.clone(), payload).await
+        };
+
+        let ack = match published {
+            Ok(ack) => ack,
+            Err(dlq_err) => {
+                tracing::error!(
+                    subject = self.subject.as_str(),
+                    dlq_subject = dlq_subject.as_str(),
+                    dlq_error = %dlq_err,
+                    "nats sink: DLQ publish also failed; retaining record",
+                );
+                return false;
+            }
+        };
+
+        if let Err(dlq_ack_err) = ack.await {
+            tracing::error!(
+                subject = self.subject.as_str(),
+                dlq_subject = dlq_subject.as_str(),
+                dlq_error = %dlq_ack_err,
+                "nats sink: DLQ publish accepted but ack rejected; retaining record",
+            );
+            return false;
         }
+
+        self.credit_dlq(error_class);
+        true
     }
 
     fn credit_dlq(&self, class: SinkErrorClass) {
         self.dlq_delivered[class.index()].fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn requeue(&mut self, failed: Bytes, rest: std::vec::IntoIter<Vec<u8>>) {
-        let mut buffer = Vec::with_capacity(rest.len() + 1);
-        buffer.push(failed.to_vec());
-        buffer.extend(rest);
-        self.buffered_bytes = buffer.iter().map(|entry| entry.len()).sum();
-        self.buffer = buffer;
     }
 
     async fn publish_buffer(&mut self) -> Result<(), RastreoError> {
@@ -322,13 +371,9 @@ impl NatsSink {
             return Ok(());
         }
         let subject = self.subject.clone();
-        // One publish per entry, pipelined; a non-recoverable failure retains the tail for retry.
-        let mut remaining = std::mem::take(&mut self.buffer).into_iter();
-        self.buffered_bytes = 0;
-
-        while let Some(entry) = remaining.next() {
-            let payload = Bytes::from(entry);
-
+        // One publish per entry, pipelined. An entry leaves the buffer only once it is
+        // accepted, so any failure retains it along with every entry behind it.
+        while let Some(payload) = self.buffer.front().cloned() {
             // Retry only the primary publish: a transient connection blip self-heals within the
             // attempt budget. The returned ack stays deferred for pipelined draining.
             let publish_result = {
@@ -346,53 +391,20 @@ impl NatsSink {
 
             let primary_err = match publish_result {
                 Ok(ack) => {
+                    pop_accepted(&mut self.buffer, &mut self.buffered_bytes);
                     self.pending_acks.push(PendingPublish { payload, ack });
                     continue;
                 }
                 Err(e) => e,
             };
 
-            if self.dlq_stream.is_none() || self.dlq_subject.is_none() {
-                self.requeue(payload, remaining);
-                return Err(primary_err);
-            }
-
-            tracing::warn!(
-                subject = subject.as_str(),
-                error = %primary_err,
-                "nats sink: primary publish exhausted retries; shipping record to DLQ",
-            );
-
-            // DLQ replay is awaited synchronously: quarantined records can't be batched with
-            // primary-path acks, and reporting DLQ failure post-hoc via drain_pending_acks
-            // would lose the causal link to the primary failure.
-            let dlq_ack_fut = match self
-                .publish_to_dlq(payload.clone(), SinkErrorClass::PublishFailure)
+            if !self
+                .quarantine(payload, SinkErrorClass::PublishFailure, &primary_err)
                 .await
             {
-                Ok(fut) => fut,
-                Err(dlq_err) => {
-                    tracing::error!(
-                        subject = subject.as_str(),
-                        dlq_error = %dlq_err,
-                        "nats sink: DLQ publish also failed; retaining buffer",
-                    );
-                    self.requeue(payload, remaining);
-                    return Err(primary_err);
-                }
-            };
-
-            if let Err(dlq_ack_err) = dlq_ack_fut.await {
-                tracing::error!(
-                    subject = subject.as_str(),
-                    dlq_error = %dlq_ack_err,
-                    "nats sink: DLQ publish accepted but ack rejected; retaining buffer",
-                );
-                self.requeue(payload, remaining);
-                return Err(build_ack_error(&subject, &self.servers, dlq_ack_err));
+                return Err(primary_err);
             }
-
-            self.credit_dlq(SinkErrorClass::PublishFailure);
+            pop_accepted(&mut self.buffer, &mut self.buffered_bytes);
         }
         Ok(())
     }
@@ -406,63 +418,40 @@ impl NatsSink {
         // Collect only the first non-recovered ack error; every ack is still awaited so
         // JetStream drains and the DLQ receives every quarantinable payload.
         let mut first_error: Option<RastreoError> = None;
+        let mut unacked: VecDeque<Bytes> = VecDeque::new();
 
         for PendingPublish { payload, ack } in pending {
-            let ack_err = match ack.await {
-                Ok(_) => continue,
-                Err(e) => e,
-            };
-
-            let Some(dlq_subject) = self.dlq_subject.as_ref() else {
-                if first_error.is_none() {
-                    first_error = Some(build_ack_error(&subject, &self.servers, ack_err));
-                }
+            let Err(ack_err) = ack.await else {
                 continue;
             };
+            let ack_error = build_ack_error(&subject, &self.servers, ack_err);
 
-            tracing::warn!(
-                subject = subject.as_str(),
-                dlq_subject = dlq_subject.as_str(),
-                error = %ack_err,
-                "nats sink: ack rejected; shipping payload to DLQ",
-            );
-
-            match self
-                .publish_to_dlq(payload, SinkErrorClass::AckRejection)
+            if self
+                .quarantine(payload.clone(), SinkErrorClass::AckRejection, &ack_error)
                 .await
             {
-                Ok(dlq_ack_fut) => match dlq_ack_fut.await {
-                    Ok(_) => {
-                        self.credit_dlq(SinkErrorClass::AckRejection);
-                        continue;
-                    }
-                    Err(dlq_ack_err) => {
-                        tracing::error!(
-                            subject = subject.as_str(),
-                            dlq_subject = dlq_subject.as_str(),
-                            dlq_error = %dlq_ack_err,
-                            "nats sink: DLQ ack rejected on replay; propagating original ack error",
-                        );
-                        if first_error.is_none() {
-                            first_error = Some(build_ack_error(&subject, &self.servers, ack_err));
-                        }
-                    }
-                },
-                Err(dlq_publish_err) => {
-                    tracing::error!(
-                        subject = subject.as_str(),
-                        dlq_subject = dlq_subject.as_str(),
-                        dlq_error = %dlq_publish_err,
-                        "nats sink: DLQ publish failed on replay; propagating original ack error",
-                    );
-                    if first_error.is_none() {
-                        first_error = Some(build_ack_error(&subject, &self.servers, ack_err));
-                    }
-                }
+                continue;
+            }
+
+            unacked.push_back(payload);
+            if first_error.is_none() {
+                first_error = Some(ack_error);
             }
         }
 
+        retain_unacked(&mut self.buffer, &mut self.buffered_bytes, unacked);
+
         match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Drains unconditionally: a mid-buffer publish failure leaves earlier entries in `pending_acks`, and skipping the drain would strand them in neither buffer nor DLQ.
+    async fn publish_and_drain(&mut self) -> Result<(), RastreoError> {
+        let publish_err = self.publish_buffer().await.err();
+        let drain_err = self.drain_pending_acks().await.err();
+        match publish_err.or(drain_err) {
             Some(err) => Err(err),
             None => Ok(()),
         }
@@ -480,30 +469,15 @@ impl NatsSink {
     }
 
     async fn publish_links_buffer(&mut self) -> Result<(), RastreoError> {
-        if self.links_buffer.is_empty() {
-            return Ok(());
-        }
-        let subject = self.links_subject.clone();
-        let entries = std::mem::take(&mut self.links_buffer);
-        self.links_buffered_bytes = 0;
-        for entry in entries {
-            let payload = Bytes::from(entry);
-            let ack = {
-                let ctx = &self.ctx;
-                let servers = &self.servers;
-                let subject = &subject;
-                let payload = &payload;
-                retry_with_backoff(&self.retry, || async move {
-                    ctx.publish(subject.clone(), payload.clone())
-                        .await
-                        .map_err(|e| build_publish_error(subject, servers, e))
-                })
-                .await
-            }?;
-            ack.await
-                .map_err(|e| build_ack_error(&subject, &self.servers, e))?;
-        }
-        Ok(())
+        publish_stream_buffer(
+            &self.ctx,
+            &self.retry,
+            &self.servers,
+            &self.links_subject,
+            &mut self.links_buffer,
+            &mut self.links_buffered_bytes,
+        )
+        .await
     }
 
     async fn write_profile(&mut self, data: &[u8]) -> Result<(), RastreoError> {
@@ -521,31 +495,43 @@ impl NatsSink {
     }
 
     async fn publish_profiles_buffer(&mut self) -> Result<(), RastreoError> {
-        if self.profiles_buffer.is_empty() {
-            return Ok(());
-        }
-        let subject = self.profiles_subject.clone();
-        let entries = std::mem::take(&mut self.profiles_buffer);
-        self.profiles_buffered_bytes = 0;
-        for entry in entries {
-            let payload = Bytes::from(entry);
-            let ack = {
-                let ctx = &self.ctx;
-                let servers = &self.servers;
-                let subject = &subject;
-                let payload = &payload;
-                retry_with_backoff(&self.retry, || async move {
-                    ctx.publish(subject.clone(), payload.clone())
-                        .await
-                        .map_err(|e| build_publish_error(subject, servers, e))
-                })
-                .await
-            }?;
-            ack.await
-                .map_err(|e| build_ack_error(&subject, &self.servers, e))?;
-        }
-        Ok(())
+        publish_stream_buffer(
+            &self.ctx,
+            &self.retry,
+            &self.servers,
+            &self.profiles_subject,
+            &mut self.profiles_buffer,
+            &mut self.profiles_buffered_bytes,
+        )
+        .await
     }
+}
+
+/// Publishes a second-stream buffer entry by entry, awaiting each ack inline. An entry leaves
+/// the buffer only once it is acked, so any failure retains it along with every entry behind it.
+async fn publish_stream_buffer(
+    ctx: &Context,
+    retry: &SinkRetry,
+    servers: &[String],
+    subject: &str,
+    buffer: &mut VecDeque<Bytes>,
+    buffered_bytes: &mut usize,
+) -> Result<(), RastreoError> {
+    while let Some(payload) = buffer.front().cloned() {
+        let ack = {
+            let payload = &payload;
+            retry_with_backoff(retry, || async move {
+                ctx.publish(subject.to_string(), payload.clone())
+                    .await
+                    .map_err(|e| build_publish_error(subject, servers, e))
+            })
+            .await
+        }?;
+        ack.await
+            .map_err(|e| build_ack_error(subject, servers, e))?;
+        pop_accepted(buffer, buffered_bytes);
+    }
+    Ok(())
 }
 
 async fn connect_with_credentials(
@@ -583,10 +569,12 @@ impl Sink for NatsSink {
         self.last_write_delivered = false;
         buffer_record(&mut self.buffer, &mut self.buffered_bytes, data);
         if should_flush_after_append(self.buffered_bytes, self.buffer_threshold) {
-            self.publish_buffer().await?;
             if self.buffer_threshold == 1 {
-                self.drain_pending_acks().await?;
+                self.publish_and_drain().await?;
                 self.last_write_delivered = true;
+            } else {
+                // Batched mode pipelines the acks deliberately; flush drains them.
+                self.publish_buffer().await?;
             }
         }
         Ok(())
@@ -601,8 +589,7 @@ impl Sink for NatsSink {
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
-        self.publish_buffer().await?;
-        self.drain_pending_acks().await?;
+        self.publish_and_drain().await?;
         self.publish_links_buffer().await?;
         self.publish_profiles_buffer().await?;
         self.last_write_delivered = true;
@@ -673,22 +660,99 @@ mod tests {
         assert!(should_flush_after_append(2048, 1024));
     }
 
+    fn buffered(records: &[&[u8]]) -> (VecDeque<Bytes>, usize) {
+        let mut buffer = VecDeque::new();
+        let mut bytes = 0usize;
+        for record in records {
+            buffer_record(&mut buffer, &mut bytes, record);
+        }
+        (buffer, bytes)
+    }
+
     #[test]
     fn buffer_record_keeps_each_record_a_distinct_entry() {
-        let mut buffer: Vec<Vec<u8>> = Vec::new();
-        let mut bytes = 0usize;
-        buffer_record(&mut buffer, &mut bytes, b"one\n");
-        buffer_record(&mut buffer, &mut bytes, b"two\n");
-        buffer_record(&mut buffer, &mut bytes, b"three\n");
+        let (buffer, bytes) = buffered(&[b"one\n", b"two\n", b"three\n"]);
         assert_eq!(
             buffer.len(),
             3,
             "a batched flush of 3 records must issue 3 publishes, not one concatenated payload"
         );
-        assert_eq!(buffer[0], b"one\n");
-        assert_eq!(buffer[1], b"two\n");
-        assert_eq!(buffer[2], b"three\n");
+        assert_eq!(buffer[0], b"one\n".as_slice());
+        assert_eq!(buffer[1], b"two\n".as_slice());
+        assert_eq!(buffer[2], b"three\n".as_slice());
         assert_eq!(bytes, 4 + 4 + 6);
+    }
+
+    #[test]
+    fn pop_accepted_removes_the_head_and_debits_only_its_bytes() {
+        let (mut buffer, mut bytes) = buffered(&[b"one\n", b"two\n", b"three\n"]);
+        pop_accepted(&mut buffer, &mut bytes);
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer[0], b"two\n".as_slice());
+        assert_eq!(bytes, 4 + 6);
+    }
+
+    #[test]
+    fn popping_every_accepted_entry_leaves_an_empty_buffer_and_no_bytes() {
+        let (mut buffer, mut bytes) = buffered(&[b"one\n", b"two\n", b"three\n"]);
+        for _ in 0..3 {
+            pop_accepted(&mut buffer, &mut bytes);
+        }
+        assert!(buffer.is_empty());
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn pop_accepted_on_an_empty_buffer_is_a_no_op() {
+        let mut buffer: VecDeque<Bytes> = VecDeque::new();
+        let mut bytes = 0usize;
+        pop_accepted(&mut buffer, &mut bytes);
+        assert!(buffer.is_empty());
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn retain_unacked_puts_the_payloads_back_ahead_of_later_writes_in_order() {
+        let (mut buffer, mut bytes) = buffered(&[b"later\n"]);
+        let (unacked, unacked_bytes) = buffered(&[b"first\n", b"second\n"]);
+
+        retain_unacked(&mut buffer, &mut bytes, unacked);
+
+        assert_eq!(buffer.len(), 3);
+        assert_eq!(buffer[0], b"first\n".as_slice());
+        assert_eq!(buffer[1], b"second\n".as_slice());
+        assert_eq!(buffer[2], b"later\n".as_slice());
+        assert_eq!(bytes, unacked_bytes + 6);
+    }
+
+    #[test]
+    fn retain_unacked_on_an_empty_buffer_restores_the_whole_batch() {
+        let mut buffer: VecDeque<Bytes> = VecDeque::new();
+        let mut bytes = 0usize;
+        let (unacked, unacked_bytes) = buffered(&[b"one\n", b"two\n"]);
+
+        retain_unacked(&mut buffer, &mut bytes, unacked);
+
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(bytes, unacked_bytes);
+    }
+
+    #[test]
+    fn retain_unacked_with_nothing_to_retain_leaves_the_buffer_untouched() {
+        let (mut buffer, mut bytes) = buffered(&[b"one\n"]);
+        retain_unacked(&mut buffer, &mut bytes, VecDeque::new());
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(bytes, 4);
+    }
+
+    #[test]
+    fn a_retained_batch_still_triggers_the_flush_threshold_it_reached() {
+        let (mut buffer, mut bytes) = buffered(&[]);
+        let (unacked, _) = buffered(&[b"0123456789\n"]);
+
+        retain_unacked(&mut buffer, &mut bytes, unacked);
+
+        assert!(should_flush_after_append(bytes, 11));
     }
 
     #[test]

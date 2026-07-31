@@ -226,6 +226,29 @@ fn configure_client_builder(
     builder
 }
 
+/// Bounds the connect: rskafka retries an unknown topic and a black-hole broker without a deadline.
+async fn connect_partition_client_bounded(
+    brokers: &[String],
+    topic: &str,
+    tls_config: Option<&Arc<ClientConfig>>,
+    sasl: Option<&KafkaSasl>,
+    connect_timeout: Duration,
+) -> Result<PartitionClient, RastreoError> {
+    let connect = connect_partition_client(brokers, topic, tls_config, sasl);
+    tokio::time::timeout(connect_timeout, connect)
+        .await
+        .map_err(|_elapsed| {
+            SinkError::other(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "kafka sink: connecting to broker(s) '{}' for topic '{topic}' timed out after {}s",
+                    brokers.join(","),
+                    connect_timeout.as_secs()
+                ),
+            ))
+        })?
+}
+
 async fn connect_partition_client(
     brokers: &[String],
     topic: &str,
@@ -290,6 +313,29 @@ fn build_records(
         .collect()
 }
 
+async fn produce_buffer(
+    client: &PartitionClient,
+    buffer: &[Vec<u8>],
+    headers: &BTreeMap<String, Vec<u8>>,
+    topic: &str,
+    brokers: &[String],
+    retry: &SinkRetry,
+) -> Result<(), RastreoError> {
+    let timestamp = Utc::now();
+    // One Record per entry: N entries produce N individually-consumable messages in one round-trip.
+    retry_with_backoff(retry, || async move {
+        client
+            .produce(
+                build_records(buffer, headers, timestamp),
+                Compression::NoCompression,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| build_produce_error(topic, brokers, e))
+    })
+    .await
+}
+
 fn default_batch_threshold() -> usize {
     KafkaSink::DEFAULT_BUFFER_THRESHOLD
 }
@@ -338,12 +384,12 @@ pub struct KafkaSink {
     sasl: Option<KafkaSasl>,
     retry: SinkRetry,
     links_topic: String,
-    // Lazily connected on the first link write: a scan with no LLDP data never opens it.
+    // Lazily connected on the first link publish: a scan with no LLDP data never opens it.
     links_client: Option<PartitionClient>,
     links_buffer: Vec<Vec<u8>>,
     links_buffered_bytes: usize,
     profiles_topic: String,
-    // Lazily connected on the first profile write: a scan with no gNMI capability data never opens it.
+    // Lazily connected on the first profile publish: a scan with no gNMI capability data never opens it.
     profiles_client: Option<PartitionClient>,
     profiles_buffer: Vec<Vec<u8>>,
     profiles_buffered_bytes: usize,
@@ -532,26 +578,18 @@ impl KafkaSink {
             return Ok(());
         }
         let record_count = self.buffer.len() as u64;
-        let timestamp = Utc::now();
 
         // Retry the primary produce before the DLQ: a transient blip that clears within
         // the attempt budget is delivered to the primary and never quarantined.
-        let primary_result = {
-            let client = &self.client;
-            let buffer = &self.buffer;
-            let topic = &self.topic;
-            let brokers = &self.brokers;
-            retry_with_backoff(&self.retry, || async move {
-                // One Record per entry: N entries produce N individually-consumable messages in one round-trip.
-                let records = build_records(buffer, &BTreeMap::new(), timestamp);
-                client
-                    .produce(records, Compression::NoCompression)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| build_produce_error(topic, brokers, e))
-            })
-            .await
-        };
+        let primary_result = produce_buffer(
+            &self.client,
+            &self.buffer,
+            &BTreeMap::new(),
+            &self.topic,
+            &self.brokers,
+            &self.retry,
+        )
+        .await;
 
         let primary_err = match primary_result {
             Ok(()) => {
@@ -607,16 +645,6 @@ impl KafkaSink {
 
     async fn write_link(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        if self.links_client.is_none() {
-            let client = connect_partition_client(
-                &self.brokers,
-                &self.links_topic,
-                self.tls_config.as_ref(),
-                self.sasl.as_ref(),
-            )
-            .await?;
-            self.links_client = Some(client);
-        }
         buffer_record(&mut self.links_buffer, &mut self.links_buffered_bytes, data);
         if should_flush_after_append(self.links_buffered_bytes, self.buffer_threshold) {
             self.publish_links_buffer().await?;
@@ -629,44 +657,41 @@ impl KafkaSink {
         if self.links_buffer.is_empty() {
             return Ok(());
         }
-        // A buffered record with no client would leave flush claiming delivery it never made.
-        debug_assert!(self.links_client.is_some());
-        let Some(client) = self.links_client.as_ref() else {
-            return Ok(());
-        };
-        let timestamp = Utc::now();
-        let result = {
-            let buffer = &self.links_buffer;
-            let topic = &self.links_topic;
-            let brokers = &self.brokers;
-            retry_with_backoff(&self.retry, || async move {
-                let records = build_records(buffer, &BTreeMap::new(), timestamp);
-                client
-                    .produce(records, Compression::NoCompression)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| build_produce_error(topic, brokers, e))
-            })
-            .await
-        };
+        let client = self.take_links_client().await?;
+        let result = produce_buffer(
+            &client,
+            &self.links_buffer,
+            &BTreeMap::new(),
+            &self.links_topic,
+            &self.brokers,
+            &self.retry,
+        )
+        .await;
+        self.links_client = Some(client);
         result?;
         self.links_buffer.clear();
         self.links_buffered_bytes = 0;
         Ok(())
     }
 
+    async fn take_links_client(&mut self) -> Result<PartitionClient, RastreoError> {
+        match self.links_client.take() {
+            Some(client) => Ok(client),
+            None => {
+                connect_partition_client_bounded(
+                    &self.brokers,
+                    &self.links_topic,
+                    self.tls_config.as_ref(),
+                    self.sasl.as_ref(),
+                    Self::CONNECT_TIMEOUT,
+                )
+                .await
+            }
+        }
+    }
+
     async fn write_profile(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        if self.profiles_client.is_none() {
-            let client = connect_partition_client(
-                &self.brokers,
-                &self.profiles_topic,
-                self.tls_config.as_ref(),
-                self.sasl.as_ref(),
-            )
-            .await?;
-            self.profiles_client = Some(client);
-        }
         buffer_record(
             &mut self.profiles_buffer,
             &mut self.profiles_buffered_bytes,
@@ -683,30 +708,37 @@ impl KafkaSink {
         if self.profiles_buffer.is_empty() {
             return Ok(());
         }
-        // A buffered record with no client would leave flush claiming delivery it never made.
-        debug_assert!(self.profiles_client.is_some());
-        let Some(client) = self.profiles_client.as_ref() else {
-            return Ok(());
-        };
-        let timestamp = Utc::now();
-        let result = {
-            let buffer = &self.profiles_buffer;
-            let topic = &self.profiles_topic;
-            let brokers = &self.brokers;
-            retry_with_backoff(&self.retry, || async move {
-                let records = build_records(buffer, &BTreeMap::new(), timestamp);
-                client
-                    .produce(records, Compression::NoCompression)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| build_produce_error(topic, brokers, e))
-            })
-            .await
-        };
+        let client = self.take_profiles_client().await?;
+        let result = produce_buffer(
+            &client,
+            &self.profiles_buffer,
+            &BTreeMap::new(),
+            &self.profiles_topic,
+            &self.brokers,
+            &self.retry,
+        )
+        .await;
+        self.profiles_client = Some(client);
         result?;
         self.profiles_buffer.clear();
         self.profiles_buffered_bytes = 0;
         Ok(())
+    }
+
+    async fn take_profiles_client(&mut self) -> Result<PartitionClient, RastreoError> {
+        match self.profiles_client.take() {
+            Some(client) => Ok(client),
+            None => {
+                connect_partition_client_bounded(
+                    &self.brokers,
+                    &self.profiles_topic,
+                    self.tls_config.as_ref(),
+                    self.sasl.as_ref(),
+                    Self::CONNECT_TIMEOUT,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -801,23 +833,26 @@ mod tests {
         assert_eq!(KafkaSink::DEFAULT_BUFFER_THRESHOLD, 64 * 1024);
     }
 
-    #[tokio::test]
-    async fn new_with_connect_timeout_bounds_a_black_hole_broker() {
-        use std::time::Instant;
+    // Accepts the TCP connection but never speaks Kafka, so the handshake read hangs forever.
+    async fn black_hole_broker() -> String {
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
-
-        // Accept the TCP connection but never speak Kafka: the handshake read hangs forever.
         tokio::spawn(async move {
             let mut held = Vec::new();
             while let Ok((sock, _)) = listener.accept().await {
                 held.push(sock);
             }
         });
+        addr
+    }
 
-        let start = Instant::now();
+    #[tokio::test]
+    async fn new_with_connect_timeout_bounds_a_black_hole_broker() {
+        let addr = black_hole_broker().await;
+
+        let start = std::time::Instant::now();
         let result = KafkaSink::new_with_connect_timeout(
             vec![addr],
             "t".into(),
@@ -832,6 +867,33 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "connect must be bounded; took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_partition_client_bounded_bounds_a_black_hole_broker() {
+        let addr = black_hole_broker().await;
+
+        let start = std::time::Instant::now();
+        let result = connect_partition_client_bounded(
+            &[addr],
+            "rastreo.discovery.links.v1",
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        let err = result.expect_err("black-hole broker must fail, not hang");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the second-stream connect must be bounded; took {elapsed:?}"
+        );
+        let detail = sink_io_detail(&err);
+        assert!(
+            detail.contains("rastreo.discovery.links.v1") && detail.contains("timed out"),
+            "the timeout must name the second-stream topic it was reaching for: {detail}"
         );
     }
 
