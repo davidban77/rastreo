@@ -203,6 +203,7 @@ The `Fuser` trait is streaming-native: `ingest(Vec<ProbeOutcome>) -> Result<Vec<
 - Use `insta` for golden-file snapshots of structured outputs.
 - Seed every randomized component for deterministic tests.
 - `tests/kafka_integration.rs` and `tests/nats_integration.rs` stand up a real broker with `testcontainers`, so they need a running Docker daemon and are `#[ignore]`d to stay out of the default suite. Run them with `cargo test -p rastreo-core --features kafka,nats --test kafka_integration --test nats_integration -- --ignored`.
+- The `#[ignore]`d tests in `sink/nats.rs`'s own test module stand up their own container too, for the cases that need a private field the integration crate cannot reach. `--test <name>` does not select the lib target, so they run under `cargo test -p rastreo-core --features nats --lib -- --ignored`; CI runs both selectors. The `#[ignore]`d tests in `sink/kafka.rs` still require a hand-run broker and are excluded by leaving the `kafka` feature off that selector.
 - `KafkaSink::new` bounds the whole broker connect (`build` + `partition_client`) with `CONNECT_TIMEOUT` (10s) so a black-hole broker fails fast instead of hanging; the in-module black-hole test exercises the seam with a 1s timeout. `NatsSink` relies on `async-nats`' own bounded initial connect (default 5s `connection_timeout`, no retry-on-initial-connect).
 
 ## Extension Points

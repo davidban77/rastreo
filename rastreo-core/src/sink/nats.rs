@@ -21,8 +21,17 @@ const HEADER_SOURCE_SUBJECT: &str = "x-rastreo-source-subject";
 const HEADER_ERROR_CLASS: &str = "x-rastreo-error-class";
 const HEADER_DLQ_TIMESTAMP: &str = "x-rastreo-dlq-timestamp";
 
+/// Cap on acks left un-awaited between publishes; a deferred ack holds a client permit that only its drain releases.
+const MAX_PENDING_ACKS: usize = 512;
+/// One permit per deferred ack, plus slack: a cancelled drain leaves its permits with the client's acker task until each ack resolves or times out.
+const ACK_PERMIT_CAPACITY: usize = MAX_PENDING_ACKS + 64;
+
 fn clamp_threshold(bytes: usize) -> usize {
     bytes.max(1)
+}
+
+fn should_drain_pending_acks(pending: usize) -> bool {
+    pending >= MAX_PENDING_ACKS
 }
 
 fn should_flush_after_append(buffer_len: usize, threshold: usize) -> bool {
@@ -228,7 +237,9 @@ impl NatsSink {
             })
             .map_err(SinkError::other)?;
 
-        let ctx = jetstream::new(client);
+        let ctx = jetstream::ContextBuilder::new()
+            .max_ack_inflight(ACK_PERMIT_CAPACITY)
+            .build(client);
 
         ctx.get_stream(&stream)
             .await
@@ -393,6 +404,10 @@ impl NatsSink {
                 Ok(ack) => {
                     pop_accepted(&mut self.buffer, &mut self.buffered_bytes);
                     self.pending_acks.push(PendingPublish { payload, ack });
+                    if should_drain_pending_acks(self.pending_acks.len()) {
+                        // A drain that put records back returns Err, so `?` leaves before this walk re-reads the buffer it mutated.
+                        self.drain_pending_acks().await?;
+                    }
                     continue;
                 }
                 Err(e) => e,
@@ -413,14 +428,15 @@ impl NatsSink {
         if self.pending_acks.is_empty() {
             return Ok(());
         }
-        let pending = std::mem::take(&mut self.pending_acks);
+        let mut pending = std::mem::take(&mut self.pending_acks);
         let subject = self.subject.clone();
         // Collect only the first non-recovered ack error; every ack is still awaited so
-        // JetStream drains and the DLQ receives every quarantinable payload.
+        // JetStream drains and the DLQ receives every quarantinable payload. Every retained
+        // payload also sets that error, so a non-empty `unacked` and an `Err` return are the same event.
         let mut first_error: Option<RastreoError> = None;
         let mut unacked: VecDeque<Bytes> = VecDeque::new();
 
-        for PendingPublish { payload, ack } in pending {
+        for PendingPublish { payload, ack } in pending.drain(..) {
             let Err(ack_err) = ack.await else {
                 continue;
             };
@@ -439,6 +455,8 @@ impl NatsSink {
             }
         }
 
+        // Drained empty but with its capacity intact, so a scan grows this once rather than once per drain.
+        self.pending_acks = pending;
         retain_unacked(&mut self.buffer, &mut self.buffered_bytes, unacked);
 
         match first_error {
@@ -628,8 +646,72 @@ impl Sink for NatsSink {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+    use testcontainers_modules::nats::{Nats, NatsServerCmd};
+
     use super::*;
     use crate::sink::sink_io_detail;
+
+    struct JetStream {
+        _node: ContainerAsync<Nats>,
+        server: String,
+        admin: Context,
+    }
+
+    impl JetStream {
+        async fn start() -> Self {
+            let cmd = NatsServerCmd::default().with_jetstream();
+            let node = Nats::default()
+                .with_cmd(&cmd)
+                .start()
+                .await
+                .expect("start nats container");
+            let port = node
+                .get_host_port_ipv4(4222)
+                .await
+                .expect("mapped nats port");
+            let server = format!("nats://127.0.0.1:{port}");
+
+            // The container reports ready from its log, which can win the race against the server accepting connections.
+            let mut client = None;
+            for _ in 0..40 {
+                if let Ok(connected) = async_nats::connect(&server).await {
+                    client = Some(connected);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let admin = jetstream::new(client.expect("nats server never accepted a connection"));
+            Self {
+                _node: node,
+                server,
+                admin,
+            }
+        }
+
+        async fn create_stream(&self, name: &str, subjects: &[&str]) {
+            self.admin
+                .create_stream(jetstream::stream::Config {
+                    name: name.to_string(),
+                    subjects: subjects.iter().map(|s| s.to_string()).collect(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_else(|e| panic!("create stream {name}: {e}"));
+        }
+
+        async fn sink(&self, subject: &str, stream: &str) -> Result<NatsSink, RastreoError> {
+            NatsSink::new(
+                vec![self.server.clone()],
+                subject.to_string(),
+                stream.to_string(),
+                NatsCredentials::Anonymous,
+            )
+            .await
+        }
+    }
 
     #[test]
     fn default_buffer_threshold_is_64_kib() {
@@ -658,6 +740,19 @@ mod tests {
     fn should_flush_after_append_is_true_at_or_above_threshold() {
         assert!(should_flush_after_append(1024, 1024));
         assert!(should_flush_after_append(2048, 1024));
+    }
+
+    #[test]
+    fn should_drain_pending_acks_is_false_below_the_cap() {
+        assert!(!should_drain_pending_acks(0));
+        assert!(!should_drain_pending_acks(1));
+        assert!(!should_drain_pending_acks(MAX_PENDING_ACKS - 1));
+    }
+
+    #[test]
+    fn should_drain_pending_acks_is_true_at_or_above_the_cap() {
+        assert!(should_drain_pending_acks(MAX_PENDING_ACKS));
+        assert!(should_drain_pending_acks(MAX_PENDING_ACKS + 1));
     }
 
     fn buffered(records: &[&[u8]]) -> (VecDeque<Bytes>, usize) {
@@ -924,27 +1019,20 @@ mod tests {
         }
     }
 
-    #[ignore = "requires a live NATS JetStream server; exercised in Live Infra UAT"]
+    #[ignore = "requires a docker daemon; run with --ignored"]
     #[tokio::test]
     async fn nats_sink_construction_verifies_stream_exists() {
-        let err = NatsSink::new(
-            vec!["nats://localhost:4222".into()],
-            "rastreo.discovery.records.v1".into(),
-            "does-not-exist".into(),
-            NatsCredentials::Anonymous,
-        )
-        .await
-        .expect_err("missing stream must error");
-        match err {
-            RastreoError::Sink(io) => {
-                let msg = format!("{io}");
-                assert!(
-                    msg.contains("does-not-exist") || msg.contains("stream"),
-                    "msg was: {msg}"
-                );
-            }
-            other => panic!("expected Sink error, got {other:?}"),
-        }
+        let js = JetStream::start().await;
+        let err = js
+            .sink("rastreo.discovery.records.v1", "does-not-exist")
+            .await
+            .expect_err("missing stream must error");
+        assert!(
+            matches!(err, RastreoError::Sink(_)),
+            "expected Sink error, got {err:?}"
+        );
+        let msg = sink_io_detail(&err);
+        assert!(msg.contains("does-not-exist"), "msg was: {msg}");
     }
 
     #[cfg(feature = "config")]
@@ -1068,18 +1156,55 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339(value.as_str()).expect("valid rfc3339 timestamp");
     }
 
-    #[ignore = "requires a live NATS JetStream server; exercised in Live Infra UAT"]
+    #[ignore = "requires a docker daemon; run with --ignored"]
     #[tokio::test]
     async fn probe_reports_reachable_against_live_server() {
-        let sink = NatsSink::new(
-            vec!["nats://localhost:4222".into()],
-            "rastreo.discovery.records.v1".into(),
-            "rastreo".into(),
-            NatsCredentials::Anonymous,
-        )
-        .await
-        .expect("connect to live server");
+        let js = JetStream::start().await;
+        js.create_stream("RASTREO", &["rastreo.discovery.>"]).await;
+        let sink = js
+            .sink("rastreo.discovery.records.v1", "RASTREO")
+            .await
+            .expect("connect to live server");
         <NatsSink as Sink>::probe(&sink).await.expect("probe");
+    }
+
+    async fn publish_without_awaiting(sink: &NatsSink) -> PublishAckFuture {
+        sink.ctx
+            .publish(sink.subject.clone(), Bytes::from_static(b"{}\n"))
+            .await
+            .expect("publish")
+    }
+
+    #[ignore = "requires a docker daemon; run with --ignored"]
+    #[tokio::test]
+    async fn a_publish_waits_once_every_permit_the_sink_asked_the_client_for_is_parked() {
+        const PERMIT_WAIT: Duration = Duration::from_millis(750);
+
+        let js = JetStream::start().await;
+        js.create_stream("PERMITS", &["rastreo.permits.>"]).await;
+        let sink = js
+            .sink("rastreo.permits.records", "PERMITS")
+            .await
+            .expect("create sink");
+
+        // The permit rides on the future: dropping one hands it to the client's acker task, which releases it.
+        let mut parked = Vec::with_capacity(ACK_PERMIT_CAPACITY);
+        for _ in 0..ACK_PERMIT_CAPACITY - 1 {
+            parked.push(publish_without_awaiting(&sink).await);
+        }
+        parked.push(
+            tokio::time::timeout(PERMIT_WAIT, publish_without_awaiting(&sink))
+                .await
+                .expect("the last free permit must be handed out without waiting"),
+        );
+
+        assert!(
+            tokio::time::timeout(PERMIT_WAIT, publish_without_awaiting(&sink))
+                .await
+                .is_err(),
+            "with {ACK_PERMIT_CAPACITY} acks parked the next publish must wait for a permit; a \
+             client left on its own default capacity lets it straight through"
+        );
     }
 
     #[tokio::test]

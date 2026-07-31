@@ -20,7 +20,7 @@ A JetStream message payload is one JSON-encoded `DeviceRecord` followed by a sin
 
 In `per_record` mode (the default), the sink publishes one message per `DeviceRecord` and waits for its ack before returning from the write. This is the simplest correctness model — every record is durable on the stream by the time the sink signals success.
 
-In `batched` mode, the sink still publishes one message per record, but it does not wait for each ack inline. It buffers records until the buffered bytes reach `threshold_bytes` (default 65536), fires the publishes back to back, and holds the acks pending. `flush()` drains all pending acks and returns an error if any publish was not acknowledged. Batched mode raises throughput by overlapping the ack round-trips, at the cost of a wider failure window if the process is killed before `flush()`.
+In `batched` mode, the sink still publishes one message per record, but it does not wait for each ack inline. It buffers records until the buffered bytes reach `threshold_bytes` (default 65536), fires the publishes back to back, and holds the acks pending. Pending acks are capped: once enough have piled up the sink drains them mid-scan, so `threshold_bytes` sizes the publish batch and not the ack window. `flush()` drains whatever is still pending and returns an error if any publish was not acknowledged. Batched mode raises throughput by overlapping the ack round-trips, at the cost of a failure window covering the records whose acks are still outstanding if the process is killed.
 
 ## Basic scenario
 
@@ -117,7 +117,9 @@ Inline userinfo in a server URL (`nats://user:pass@nats.prod:4222`) does not aut
 
 `per_record` is the default and the right choice for most workloads. Every record is confirmed on the stream before the sink acknowledges the write, so a graceful shutdown never loses a record.
 
-`batched` is the right choice for very high record rates where the extra ack round-trips dominate. It publishes each record as its own message and pipelines the acks, draining them at `flush()`. The pipeline calls `flush()` during graceful shutdown, which surfaces any ack error.
+`batched` is the right choice for very high record rates where the extra ack round-trips dominate. It publishes each record as its own message and pipelines the acks, draining them whenever enough are outstanding and again at `flush()`. The pipeline calls `flush()` during graceful shutdown, which surfaces any ack error still open at that point.
+
+Because those drains happen during the scan, a rejected ack can fail a record write mid-scan instead of waiting for `flush()`. Handle a sink error from either call the same way: the records the broker refused are still buffered, or in the [dead-letter queue](../discover/sinks.md#dead-letter-queue_1) if one is configured.
 
 Set `flush_mode.type` to `batched`. The optional `threshold_bytes` field is the buffered-byte count that triggers the pipelined publishes (default 65536):
 
@@ -149,7 +151,7 @@ sink:
     backoff_max_ms: 2000
 ```
 
-Retry covers the synchronous publish only. rastreo waits for each ack once and does not re-send the message inside the same attempt. A rejected ack keeps the record in the buffer instead, and the next `flush()` publishes it again. Delivery is therefore at-least-once: a message JetStream already stored can reach the stream a second time. See [Idempotency](#idempotency) for why a repeated record is harmless.
+Retry covers the synchronous publish only. rastreo waits for each ack once and does not re-send the message inside the same attempt. A rejected ack keeps the record in the buffer instead, and the next publish of that buffer sends it again. Delivery is therefore at-least-once: a message JetStream already stored can reach the stream a second time. See [Idempotency](#idempotency) for why a repeated record is harmless.
 
 With a dead-letter queue configured, an ack-rejected record goes there instead of staying in the buffer. See [Sinks · Retrying before the dead-letter queue](../discover/sinks.md#retrying-before-the-dead-letter-queue_1) for how retry composes with the dead-letter queue.
 

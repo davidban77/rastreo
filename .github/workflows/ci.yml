@@ -111,6 +111,9 @@ jobs:
       - name: Run Kafka + NATS integration tests
         run: cargo test -p rastreo-core --features kafka,nats --test kafka_integration --test nats_integration -- --ignored
 
+      - name: Run NATS sink tests that stand up a broker
+        run: cargo test -p rastreo-core --features nats --lib -- --ignored
+
   schema-drift:
     name: Schema drift check
     runs-on: ubuntu-latest
