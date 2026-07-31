@@ -79,7 +79,7 @@ spec:
         app.kubernetes.io/name: rastreo
         app.kubernetes.io/instance: rastreo
       annotations:
-        checksum/sink-config: a164b719fe0aad3d4b722cd413251a3752bfc9a74a6c454ba2c774eae9b7a223
+        checksum/sink-config: {{VERSION}}
     spec:
       serviceAccountName: rastreo
       terminationGracePeriodSeconds: 75
