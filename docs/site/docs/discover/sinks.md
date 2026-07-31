@@ -99,7 +99,9 @@ Only the primary produce is retried. The DLQ produce is never retried. The total
 
 The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). When the primary produce fails and a DLQ is configured, the sink publishes the same payload to the DLQ topic, logs a `WARN`, and returns success — the buffer is drained and the pipeline moves on. When no DLQ is configured, the primary failure surfaces as an error. The buffered records are kept, so the next flush retries them.
 
-The DLQ covers the device topic. The [links](topology.md#where-links-are-emitted) and [collection profiles](collection-profile.md#where-profiles-are-emitted) topics have no DLQ path. A failed publish there is kept for the next flush.
+The DLQ covers the device topic. The [links](topology.md#where-links-are-emitted) and [collection profiles](collection-profile.md#where-profiles-are-emitted) topics have no DLQ path. A failed produce there is kept for the next flush.
+
+Every flush produces all three topics whatever any one of them does, so a topic the broker refuses never holds back the topics it accepts. Records bound for a healthy topic land; records bound for the refused topic stay buffered. The flush returns the first failure in device-then-links-then-profiles order, so an outage that takes all three down reports the device error.
 
 ```yaml
 sink:
@@ -201,6 +203,8 @@ Retry covers the synchronous publish only. rastreo waits for each ack once and d
 The NATS sink can quarantine records the primary subject refused instead of dropping them silently. Configure a second JetStream stream + subject under `dead_letter` in a YAML scenario (there is no CLI flag for the DLQ; it is a scenario-level concern). Unlike Kafka, NATS has two failure surfaces the DLQ absorbs: the synchronous `publish()` call (broker unreachable, subject invalid) and the JetStream ack (broker accepted the publish for routing but refused durable storage — stream retention limits, wrong stream binding, quota exceeded). When either surface fails and a DLQ is configured, the sink publishes the same payload to the DLQ subject, logs a `WARN`, and returns success. When no DLQ is configured, the failure surfaces as an error and the sink keeps the record for the next flush.
 
 The DLQ covers the device subject. The [links](topology.md#where-links-are-emitted) and [collection profiles](collection-profile.md#where-profiles-are-emitted) subjects have no DLQ path. A failed publish there is kept for the next flush.
+
+Every flush publishes all three subjects whatever any one of them does, so a subject JetStream refuses never holds back the subjects it accepts. Records bound for a healthy subject land; records bound for the refused subject stay buffered. The flush returns the first failure in device-then-links-then-profiles order, so an outage that takes all three down reports the device error.
 
 ```yaml
 sink:

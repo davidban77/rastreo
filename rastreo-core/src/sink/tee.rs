@@ -15,11 +15,13 @@ pub enum TeeChild {
 
 type ClassDeltas = [u64; SINK_ERROR_CLASS_COUNT];
 
-/// Fans every `write` / `flush` / `probe` call out to a fixed set of child sinks.
+/// Fans every `write` / `write_kind` / `flush` / `close` / `probe` call out to a fixed set of child
+/// sinks.
 ///
-/// The first child to error aborts the fan-out and surfaces the error; remaining children
-/// are not called for that record. `last_write_delivered` and `probe` follow the same
-/// fail-close model — success requires every child to succeed.
+/// `write` and `write_kind` stop at the first child error. `flush` and `close` attempt every child
+/// and return the first error, so a failing destination never strands what a healthy one already
+/// holds. Whatever the call, a child is credited for the DLQ records it landed before failing.
+/// `last_write_delivered` and `probe` are fail-close — success requires every child to succeed.
 pub struct TeeSink {
     children: Vec<TeeChild>,
     last_delivered: bool,
@@ -34,6 +36,29 @@ impl TeeSink {
             children,
             last_delivered: false,
             attribution: StdMutex::new(Vec::new()),
+        }
+    }
+
+    async fn fan_out(&mut self, call: Fanout<'_>) -> Result<(), RastreoError> {
+        self.last_delivered = false;
+        let mut all_delivered = true;
+        let mut first_error: Option<RastreoError> = None;
+        for child in &mut self.children {
+            let (attribution, error) = fanout_child(child, call).await;
+            credit_attribution(&self.attribution, attribution.kind, &attribution.deltas);
+            all_delivered &= attribution.delivered;
+            let abort = error.is_some() && call.aborts_on_child_error();
+            first_error = first_error.or(error);
+            if abort {
+                break;
+            }
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => {
+                self.last_delivered = all_delivered;
+                Ok(())
+            }
         }
     }
 }
@@ -67,110 +92,52 @@ struct ChildAttribution {
     delivered: bool,
 }
 
-async fn write_child(child: &mut TeeChild, data: &[u8]) -> Result<ChildAttribution, RastreoError> {
-    match child {
-        TeeChild::Owned(sink) => {
-            let before = sink.dlq_records_by_class();
-            sink.write(data).await?;
-            let after = sink.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: sink.kind(),
-                deltas: class_deltas(before, after),
-                delivered: sink.last_write_delivered(),
-            })
-        }
-        TeeChild::Shared(sink) => {
-            let mut guard = sink.lock().await;
-            let before = guard.dlq_records_by_class();
-            guard.write(data).await?;
-            let after = guard.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: guard.kind(),
-                deltas: class_deltas(before, after),
-                delivered: guard.last_write_delivered(),
-            })
+#[derive(Clone, Copy)]
+enum Fanout<'a> {
+    Write(&'a [u8]),
+    WriteKind(RecordKind, &'a [u8]),
+    Flush,
+    Close,
+}
+
+impl Fanout<'_> {
+    fn aborts_on_child_error(self) -> bool {
+        match self {
+            Fanout::Write(_) | Fanout::WriteKind(_, _) => true,
+            Fanout::Flush | Fanout::Close => false,
         }
     }
 }
 
-async fn write_kind_child(
+async fn fanout_sink(
+    sink: &mut dyn Sink,
+    call: Fanout<'_>,
+) -> (ChildAttribution, Option<RastreoError>) {
+    let before = sink.dlq_records_by_class();
+    let error = match call {
+        Fanout::Write(data) => sink.write(data).await.err(),
+        Fanout::WriteKind(kind, data) => sink.write_kind(kind, data).await.err(),
+        Fanout::Flush => sink.flush().await.err(),
+        Fanout::Close => sink.close().await.err(),
+    };
+    let after = sink.dlq_records_by_class();
+    let attribution = ChildAttribution {
+        kind: sink.kind(),
+        deltas: class_deltas(before, after),
+        delivered: sink.last_write_delivered(),
+    };
+    (attribution, error)
+}
+
+async fn fanout_child(
     child: &mut TeeChild,
-    kind: RecordKind,
-    data: &[u8],
-) -> Result<ChildAttribution, RastreoError> {
+    call: Fanout<'_>,
+) -> (ChildAttribution, Option<RastreoError>) {
     match child {
-        TeeChild::Owned(sink) => {
-            let before = sink.dlq_records_by_class();
-            sink.write_kind(kind, data).await?;
-            let after = sink.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: sink.kind(),
-                deltas: class_deltas(before, after),
-                delivered: sink.last_write_delivered(),
-            })
-        }
+        TeeChild::Owned(sink) => fanout_sink(sink.as_mut(), call).await,
         TeeChild::Shared(sink) => {
             let mut guard = sink.lock().await;
-            let before = guard.dlq_records_by_class();
-            guard.write_kind(kind, data).await?;
-            let after = guard.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: guard.kind(),
-                deltas: class_deltas(before, after),
-                delivered: guard.last_write_delivered(),
-            })
-        }
-    }
-}
-
-async fn flush_child(child: &mut TeeChild) -> Result<ChildAttribution, RastreoError> {
-    match child {
-        TeeChild::Owned(sink) => {
-            let before = sink.dlq_records_by_class();
-            sink.flush().await?;
-            let after = sink.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: sink.kind(),
-                deltas: class_deltas(before, after),
-                delivered: sink.last_write_delivered(),
-            })
-        }
-        TeeChild::Shared(sink) => {
-            let mut guard = sink.lock().await;
-            let before = guard.dlq_records_by_class();
-            guard.flush().await?;
-            let after = guard.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: guard.kind(),
-                deltas: class_deltas(before, after),
-                delivered: guard.last_write_delivered(),
-            })
-        }
-    }
-}
-
-async fn close_child(child: &mut TeeChild) -> Result<ChildAttribution, RastreoError> {
-    match child {
-        TeeChild::Owned(sink) => {
-            let before = sink.dlq_records_by_class();
-            sink.close().await?;
-            let after = sink.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: sink.kind(),
-                deltas: class_deltas(before, after),
-                delivered: sink.last_write_delivered(),
-            })
-        }
-        TeeChild::Shared(sink) => {
-            let mut guard = sink.lock().await;
-            let before = guard.dlq_records_by_class();
-            guard.close().await?;
-            let after = guard.dlq_records_by_class();
-            Ok(ChildAttribution {
-                kind: guard.kind(),
-                deltas: class_deltas(before, after),
-                delivered: guard.last_write_delivered(),
-            })
+            fanout_sink(guard.as_mut(), call).await
         }
     }
 }
@@ -192,63 +159,19 @@ async fn child_requires_structured_records(child: &TeeChild) -> bool {
 #[async_trait]
 impl Sink for TeeSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
-        let mut all_delivered = true;
-        for child in &mut self.children {
-            let ChildAttribution {
-                kind,
-                deltas,
-                delivered,
-            } = write_child(child, data).await?;
-            credit_attribution(&self.attribution, kind, &deltas);
-            all_delivered &= delivered;
-        }
-        self.last_delivered = all_delivered;
-        Ok(())
+        self.fan_out(Fanout::Write(data)).await
     }
 
     async fn write_kind(&mut self, kind: RecordKind, data: &[u8]) -> Result<(), RastreoError> {
-        let mut all_delivered = true;
-        for child in &mut self.children {
-            let ChildAttribution {
-                kind: sink_kind,
-                deltas,
-                delivered,
-            } = write_kind_child(child, kind, data).await?;
-            credit_attribution(&self.attribution, sink_kind, &deltas);
-            all_delivered &= delivered;
-        }
-        self.last_delivered = all_delivered;
-        Ok(())
+        self.fan_out(Fanout::WriteKind(kind, data)).await
     }
 
     async fn flush(&mut self) -> Result<(), RastreoError> {
-        let mut all_delivered = true;
-        for child in &mut self.children {
-            let ChildAttribution {
-                kind,
-                deltas,
-                delivered,
-            } = flush_child(child).await?;
-            credit_attribution(&self.attribution, kind, &deltas);
-            all_delivered &= delivered;
-        }
-        self.last_delivered = all_delivered;
-        Ok(())
+        self.fan_out(Fanout::Flush).await
     }
 
     async fn close(&mut self) -> Result<(), RastreoError> {
-        let mut all_delivered = true;
-        for child in &mut self.children {
-            let ChildAttribution {
-                kind,
-                deltas,
-                delivered,
-            } = close_child(child).await?;
-            credit_attribution(&self.attribution, kind, &deltas);
-            all_delivered &= delivered;
-        }
-        self.last_delivered = all_delivered;
-        Ok(())
+        self.fan_out(Fanout::Close).await
     }
 
     fn last_write_delivered(&self) -> bool {
@@ -317,6 +240,9 @@ mod tests {
         dlq_on_close: u64,
         dlq_class: SinkErrorClass,
         kind: SinkType,
+        fail_write: bool,
+        fail_flush: bool,
+        fail_close: bool,
     }
 
     impl RecordingSink {
@@ -333,6 +259,9 @@ mod tests {
                 dlq_on_close: 0,
                 dlq_class: SinkErrorClass::ProduceFailure,
                 kind: SinkType::Memory,
+                fail_write: false,
+                fail_flush: false,
+                fail_close: false,
             }
         }
     }
@@ -342,16 +271,25 @@ mod tests {
         async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             self.dlq = self.dlq.saturating_add(self.dlq_per_write);
+            if self.fail_write {
+                return Err(sink_err(SinkErrorClass::WriteFailure, "recording write"));
+            }
             Ok(())
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
             self.dlq = self.dlq.saturating_add(self.dlq_on_flush);
+            if self.fail_flush {
+                return Err(sink_err(SinkErrorClass::FlushFailure, "recording flush"));
+            }
             Ok(())
         }
         async fn close(&mut self) -> Result<(), RastreoError> {
             self.closes.fetch_add(1, Ordering::SeqCst);
             self.dlq = self.dlq.saturating_add(self.dlq_on_close);
+            if self.fail_close {
+                return Err(sink_err(SinkErrorClass::FlushFailure, "recording close"));
+            }
             Ok(())
         }
         fn last_write_delivered(&self) -> bool {
@@ -396,7 +334,7 @@ mod tests {
         }
     }
 
-    struct FailingFlush;
+    struct FailingFlush(&'static str);
 
     #[async_trait]
     impl Sink for FailingFlush {
@@ -404,7 +342,7 @@ mod tests {
             Ok(())
         }
         async fn flush(&mut self) -> Result<(), RastreoError> {
-            Err(sink_err(SinkErrorClass::FlushFailure, "flush failed"))
+            Err(sink_err(SinkErrorClass::FlushFailure, self.0))
         }
         fn last_write_delivered(&self) -> bool {
             true
@@ -414,7 +352,7 @@ mod tests {
         }
     }
 
-    struct FailingClose;
+    struct FailingClose(&'static str);
 
     #[async_trait]
     impl Sink for FailingClose {
@@ -425,7 +363,7 @@ mod tests {
             Ok(())
         }
         async fn close(&mut self) -> Result<(), RastreoError> {
-            Err(sink_err(SinkErrorClass::FlushFailure, "close failed"))
+            Err(sink_err(SinkErrorClass::FlushFailure, self.0))
         }
         fn last_write_delivered(&self) -> bool {
             true
@@ -505,6 +443,94 @@ mod tests {
         assert_eq!(after_writes.load(Ordering::SeqCst), 0);
     }
 
+    struct FailsAfterFirstWrite {
+        writes: usize,
+    }
+
+    #[async_trait]
+    impl Sink for FailsAfterFirstWrite {
+        async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+            self.writes += 1;
+            if self.writes > 1 {
+                return Err(sink_err(SinkErrorClass::WriteFailure, "boom"));
+            }
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), RastreoError> {
+            Ok(())
+        }
+        fn last_write_delivered(&self) -> bool {
+            true
+        }
+        fn kind(&self) -> SinkType {
+            SinkType::Memory
+        }
+    }
+
+    #[tokio::test]
+    async fn tee_write_failure_revokes_the_delivery_claim_an_earlier_write_earned() {
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(RecordingSink::new())),
+            TeeChild::Owned(Box::new(FailsAfterFirstWrite { writes: 0 })),
+        ]);
+        tee.write(b"first").await.expect("write");
+        assert!(tee.last_write_delivered());
+
+        tee.write(b"second").await.expect_err("must error");
+        assert!(!tee.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn tee_write_kind_failure_revokes_the_delivery_claim_an_earlier_write_earned() {
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(RecordingSink::new())),
+            TeeChild::Owned(Box::new(FailsAfterFirstWrite { writes: 0 })),
+        ]);
+        tee.write_kind(RecordKind::Link, b"first")
+            .await
+            .expect("write");
+        assert!(tee.last_write_delivered());
+
+        tee.write_kind(RecordKind::Link, b"second")
+            .await
+            .expect_err("must error");
+        assert!(!tee.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn tee_write_credits_dlq_a_child_landed_before_its_write_failed() {
+        let mut failing = RecordingSink::new();
+        failing.fail_write = true;
+        failing.dlq_per_write = 3;
+        failing.kind = SinkType::Nats;
+        failing.dlq_class = SinkErrorClass::PublishFailure;
+        let mut tee = TeeSink::new(vec![TeeChild::Owned(Box::new(failing))]);
+
+        tee.write(b"x").await.expect_err("must error");
+        assert_eq!(
+            tee.dlq_records_by_type_and_class(),
+            vec![(SinkType::Nats, SinkErrorClass::PublishFailure, 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tee_write_kind_credits_dlq_a_child_landed_before_its_write_failed() {
+        let mut failing = RecordingSink::new();
+        failing.fail_write = true;
+        failing.dlq_per_write = 2;
+        failing.kind = SinkType::Kafka;
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(failing)));
+        let mut tee = TeeSink::new(vec![TeeChild::Shared(shared)]);
+
+        tee.write_kind(RecordKind::CollectionProfile, b"x")
+            .await
+            .expect_err("must error");
+        assert_eq!(
+            tee.dlq_records_by_type_and_class(),
+            vec![(SinkType::Kafka, SinkErrorClass::ProduceFailure, 2)]
+        );
+    }
+
     #[tokio::test]
     async fn tee_sink_flush_calls_flush_on_every_child() {
         let a = RecordingSink::new();
@@ -521,16 +547,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tee_sink_flush_returns_first_error_and_stops() {
+    async fn tee_sink_flush_returns_an_error_after_flushing_every_later_child() {
         let after = RecordingSink::new();
         let after_flushes = Arc::clone(&after.flushes);
         let mut tee = TeeSink::new(vec![
-            TeeChild::Owned(Box::new(FailingFlush)),
+            TeeChild::Owned(Box::new(FailingFlush("boom"))),
             TeeChild::Owned(Box::new(after)),
         ]);
         let err = tee.flush().await.expect_err("must error");
         assert!(matches!(err, RastreoError::Sink(_)));
-        assert_eq!(after_flushes.load(Ordering::SeqCst), 0);
+        assert_eq!(after_flushes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_flush_returns_the_error_of_the_first_child_that_failed() {
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingFlush("first child"))),
+            TeeChild::Owned(Box::new(FailingFlush("second child"))),
+        ]);
+        let err = tee.flush().await.expect_err("must error");
+        assert_eq!(crate::sink::sink_io_detail(&err), "first child");
+    }
+
+    #[tokio::test]
+    async fn tee_flush_puts_a_healthy_childs_bytes_on_disk_though_an_earlier_child_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("healthy-flush.ndjson");
+        let file = crate::sink::FileSink::new(&path).await.expect("file child");
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingFlush("boom"))),
+            TeeChild::Owned(Box::new(file)),
+        ]);
+
+        tee.write(b"kept\n").await.expect("write");
+        tee.flush().await.expect_err("the first child fails");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"kept\n");
+    }
+
+    #[tokio::test]
+    async fn tee_flush_failure_revokes_the_delivery_claim_even_when_children_claim_delivery() {
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingFlush("boom"))),
+            TeeChild::Owned(Box::new(RecordingSink::new())),
+        ]);
+        tee.write(b"x").await.expect("write");
+        assert!(tee.last_write_delivered());
+
+        tee.flush().await.expect_err("must error");
+        assert!(!tee.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn tee_flush_credits_dlq_a_child_landed_before_its_flush_failed() {
+        let mut failing = RecordingSink::new();
+        failing.fail_flush = true;
+        failing.dlq_on_flush = 3;
+        failing.kind = SinkType::Kafka;
+        let mut tee = TeeSink::new(vec![TeeChild::Owned(Box::new(failing))]);
+
+        tee.flush().await.expect_err("must error");
+        assert_eq!(tee.dlq_records_delivered(), 3);
+    }
+
+    #[tokio::test]
+    async fn tee_flush_credits_dlq_a_later_child_landed_after_an_earlier_one_failed() {
+        let mut healthy = RecordingSink::new();
+        healthy.dlq_on_flush = 2;
+        healthy.kind = SinkType::Nats;
+        healthy.dlq_class = SinkErrorClass::PublishFailure;
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingFlush("boom"))),
+            TeeChild::Owned(Box::new(healthy)),
+        ]);
+
+        tee.flush().await.expect_err("must error");
+        assert_eq!(
+            tee.dlq_records_by_type_and_class(),
+            vec![(SinkType::Nats, SinkErrorClass::PublishFailure, 2)]
+        );
     }
 
     #[tokio::test]
@@ -565,16 +660,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tee_sink_close_returns_first_error_and_stops() {
+    async fn tee_sink_close_returns_an_error_after_closing_every_later_child() {
         let after = RecordingSink::new();
         let after_closes = Arc::clone(&after.closes);
         let mut tee = TeeSink::new(vec![
-            TeeChild::Owned(Box::new(FailingClose)),
+            TeeChild::Owned(Box::new(FailingClose("boom"))),
             TeeChild::Owned(Box::new(after)),
         ]);
         let err = tee.close().await.expect_err("must error");
         assert!(matches!(err, RastreoError::Sink(_)));
-        assert_eq!(after_closes.load(Ordering::SeqCst), 0);
+        assert_eq!(after_closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tee_sink_close_returns_the_error_of_the_first_child_that_failed() {
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingClose("first child"))),
+            TeeChild::Owned(Box::new(FailingClose("second child"))),
+        ]);
+        let err = tee.close().await.expect_err("must error");
+        assert_eq!(crate::sink::sink_io_detail(&err), "first child");
+    }
+
+    #[tokio::test]
+    async fn tee_close_puts_a_healthy_childs_bytes_on_disk_though_an_earlier_child_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("healthy-close.ndjson");
+        let file = crate::sink::FileSink::new(&path).await.expect("file child");
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingClose("boom"))),
+            TeeChild::Owned(Box::new(file)),
+        ]);
+
+        tee.write(b"kept\n").await.expect("write");
+        tee.close().await.expect_err("the first child fails");
+
+        assert_eq!(std::fs::read(&path).expect("read"), b"kept\n");
+    }
+
+    #[tokio::test]
+    async fn tee_close_failure_revokes_the_delivery_claim_even_when_children_claim_delivery() {
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingClose("boom"))),
+            TeeChild::Owned(Box::new(RecordingSink::new())),
+        ]);
+        tee.write(b"x").await.expect("write");
+        assert!(tee.last_write_delivered());
+
+        tee.close().await.expect_err("must error");
+        assert!(!tee.last_write_delivered());
+    }
+
+    #[tokio::test]
+    async fn tee_close_credits_dlq_a_child_landed_before_its_close_failed() {
+        let mut failing = RecordingSink::new();
+        failing.fail_close = true;
+        failing.dlq_on_close = 4;
+        failing.kind = SinkType::Kafka;
+        let mut tee = TeeSink::new(vec![TeeChild::Owned(Box::new(failing))]);
+
+        tee.close().await.expect_err("must error");
+        assert_eq!(tee.dlq_records_delivered(), 4);
+    }
+
+    #[tokio::test]
+    async fn tee_close_credits_dlq_a_later_child_landed_after_an_earlier_one_failed() {
+        let mut healthy = RecordingSink::new();
+        healthy.dlq_on_close = 5;
+        healthy.kind = SinkType::Kafka;
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingClose("boom"))),
+            TeeChild::Owned(Box::new(healthy)),
+        ]);
+
+        tee.close().await.expect_err("must error");
+        assert_eq!(
+            tee.dlq_records_by_type_and_class(),
+            vec![(SinkType::Kafka, SinkErrorClass::ProduceFailure, 5)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tee_flush_reaches_a_shared_child_behind_a_failing_owned_one() {
+        let recording = RecordingSink::new();
+        let flushes = Arc::clone(&recording.flushes);
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(recording)));
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingFlush("boom"))),
+            TeeChild::Shared(shared),
+        ]);
+
+        tee.flush().await.expect_err("must error");
+        assert_eq!(flushes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tee_close_reaches_a_shared_child_behind_a_failing_owned_one() {
+        let recording = RecordingSink::new();
+        let closes = Arc::clone(&recording.closes);
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(recording)));
+        let mut tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(FailingClose("boom"))),
+            TeeChild::Shared(shared),
+        ]);
+
+        tee.close().await.expect_err("must error");
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
