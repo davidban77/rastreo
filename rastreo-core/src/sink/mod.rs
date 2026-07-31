@@ -250,6 +250,10 @@ pub trait Sink: Send + Sync {
 }
 
 /// Where discovered records are sent (stdout, file, Kafka, NATS).
+// One value per scenario, cloned at most once per run and passed by reference everywhere else,
+// so the broker variants' size never lands on a per-target or per-record path. Revisit if a
+// SinkConfig is ever held per target. Not `expect`: the lint is silent when both brokers are on.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]

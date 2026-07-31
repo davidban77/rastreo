@@ -36,8 +36,9 @@ tasks:
   lint:
     desc: Run clippy and format check
     cmds:
-      - cargo clippy --workspace --all-targets -- -D warnings
       - cargo fmt --all -- --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo hack --each-feature --workspace clippy --all-targets -- -D warnings
 
   check:
     desc: Run full quality gate (build + test + lint)

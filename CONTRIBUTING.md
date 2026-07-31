@@ -27,12 +27,15 @@ Criterion depends on `alloca`, whose build script compiles a small C source file
 
 ## Linting and Formatting
 
-Both must pass before committing:
+All three must pass before committing:
 
 ```bash
-cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo hack --each-feature --workspace clippy --all-targets -- -D warnings
 ```
+
+The third one needs `cargo install cargo-hack`. A workspace build enables most optional features at once, and a lint on a feature-gated type can go quiet in that shape — linting each feature on its own is what catches it. `task lint` runs all three.
 
 To apply formatting automatically:
 
