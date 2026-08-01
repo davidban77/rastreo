@@ -40,6 +40,7 @@ $ rastreo discover --target 192.0.2.1 --probe udp --udp-protocol ntp --dry-run
     probers: udp (ports 123, protocol Ntp)
     fuser: direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)
     classifier: rules (merge_mode extend, platform_rules 0, role_rules 0)
+    encoder: table
     sink: stdout
     concurrency: 64
     rate: unlimited

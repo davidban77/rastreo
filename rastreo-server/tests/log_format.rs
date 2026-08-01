@@ -1,17 +1,13 @@
+mod common;
+
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[test]
 fn json_log_format_emits_listening_line_as_json() {
-    let bin = env!("CARGO_BIN_EXE_rastreo-server");
-    let mut child = Command::new(bin)
+    let mut child = common::rastreo_server()
         .args(["--log-format", "json", "--port", "0"])
-        .env_remove("RUST_LOG")
-        .env_remove("RASTREO_LOG_FORMAT")
-        .env_remove("RASTREO_SERVER_PORT")
-        .env_remove("RASTREO_SERVER_BIND")
-        .env_remove("RASTREO_SERVER_REQUEST_TIMEOUT_MS")
         .env("RASTREO_AUTH_DISABLED", "true")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -76,14 +72,8 @@ fn json_log_format_emits_listening_line_as_json() {
 
 #[test]
 fn text_log_format_default_does_not_emit_json() {
-    let bin = env!("CARGO_BIN_EXE_rastreo-server");
-    let mut child = Command::new(bin)
+    let mut child = common::rastreo_server()
         .args(["--port", "0"])
-        .env_remove("RUST_LOG")
-        .env_remove("RASTREO_LOG_FORMAT")
-        .env_remove("RASTREO_SERVER_PORT")
-        .env_remove("RASTREO_SERVER_BIND")
-        .env_remove("RASTREO_SERVER_REQUEST_TIMEOUT_MS")
         .env("RASTREO_AUTH_DISABLED", "true")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -125,11 +115,8 @@ fn text_log_format_default_does_not_emit_json() {
 
 #[test]
 fn help_lists_log_format_flag() {
-    let bin = env!("CARGO_BIN_EXE_rastreo-server");
-    let output = Command::new(bin)
+    let output = common::rastreo_server()
         .args(["--help"])
-        .env_remove("RUST_LOG")
-        .env_remove("RASTREO_LOG_FORMAT")
         .output()
         .expect("spawn rastreo-server");
 

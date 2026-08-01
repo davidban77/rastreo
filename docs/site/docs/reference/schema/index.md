@@ -18,7 +18,7 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 - [CollectionProfileRecord](collection-profile-record.md) — how to collect telemetry from a discovered endpoint (transport, encoding, advertised models), emitted per gNMI endpoint that returned capability data. Generated.
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
 - [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo discover --file`. Generated. Point an IDE YAML plugin at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json` for autocomplete and validation; see [Editor setup](#editor-setup) below for the concrete snippets. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
-- [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, fuser, classifier, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated.
+- [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, fuser, classifier, encoder, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated.
 - [Streaming API](streaming-api.md) — Kafka topic / NATS subject conventions, correlation IDs, the AsyncAPI spec.
 - [DlqEnvelope](dlq-envelope.md) — the `x-rastreo-*` header and payload contract on every dead-letter message.
 

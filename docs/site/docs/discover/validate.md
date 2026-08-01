@@ -470,13 +470,15 @@ Two cases come up in a normal pipeline:
 
 They differ in two ways.
 
-**A scenario with `probers: []`.** `validate` calls it invalid, because a scenario that runs nothing is a mistake in the file. A real run skips that scenario with a notice and carries on with the rest of the file. `--dry-run` predicts exactly that. It prints the notice, leaves the scenario out of the plan, and exits `0`.
+**A scenario with `probers: []` beside one that would run.** `validate` calls the file invalid, because a scenario that runs nothing is a mistake in the file. A real run skips that scenario with a notice and carries on with the rest, and `--dry-run` predicts exactly that: it prints the notice, leaves the scenario out of the plan, and exits `0`.
 
 Here is the notice from a two-scenario file whose second scenario, `placeholder`, has no probers:
 
 ```text
 • 'placeholder' (2 of 2): no probers configured, skipping
 ```
+
+The two surfaces converge once *every* scenario in the file is prober-less. Then the run probes nothing, and both `validate` and `discover` — with or without `--dry-run` — exit `1`.
 
 **Targets.** `validate` never resolves targets. A name that does not resolve passes, and so does a CIDR that expands past the host limit. `--dry-run` resolves for real and exits `1` when any target fails. See [What validate does not check](#what-validate-does-not-check).
 

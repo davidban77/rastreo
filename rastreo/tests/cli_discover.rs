@@ -814,7 +814,7 @@ async fn zero_reachable_hosts_scenario_exits_zero() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
-async fn empty_probers_scenario_is_skipped_with_warning() {
+async fn a_run_whose_only_scenario_was_skipped_probed_nothing_and_says_so() {
     let dir = tempfile::tempdir().expect("tempdir");
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: empty\n    timeout_ms: 500\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n";
     let path = write_yaml(&dir, "empty.yml", yaml);
@@ -829,13 +829,18 @@ async fn empty_probers_scenario_is_skipped_with_warning() {
     .await
     .expect("join");
 
-    assert!(
-        output.status.success(),
-        "expected exit 0 when the only scenario is skipped; stderr: {}",
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a run that probed nothing must not report success; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("every scenario in") && stderr.contains("nothing to probe"),
+        "stderr must say why the run failed: {stderr}"
+    );
     assert!(
         stderr.contains("no probers configured, skipping"),
         "stderr missing skip warning: {stderr}"
@@ -958,6 +963,49 @@ async fn dry_run_flag_driven_prints_plan_and_exits_zero_without_probing() {
         stdout.contains("127.0.0.1 → 127.0.0.1"),
         "stdout missing target line: {stdout}"
     );
+}
+
+#[tokio::test]
+async fn the_plan_names_the_record_format_the_destination_chose() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let records = dir.path().join("records.ndjson");
+    let to_a_file = vec![
+        "--sink".to_string(),
+        "file".to_string(),
+        "--output".to_string(),
+        records.display().to_string(),
+    ];
+    for (extra, expected) in [
+        (Vec::new(), "    encoder: table\n"),
+        (
+            vec!["--format".to_string(), "table".to_string()],
+            "    encoder: table\n",
+        ),
+        (to_a_file, "    encoder: ndjson\n"),
+    ] {
+        let output = tokio::task::spawn_blocking(move || {
+            common::rastreo()
+                .args([
+                    "discover",
+                    "--target",
+                    "127.0.0.1",
+                    "--port",
+                    "22",
+                    "--dry-run",
+                ])
+                .args(&extra)
+                .output()
+                .expect("spawn rastreo")
+        })
+        .await
+        .expect("join");
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+        assert!(
+            stdout.contains(expected),
+            "the plan must confirm what lands in the sink, expected {expected:?}: {stdout}"
+        );
+    }
+    assert!(!records.exists(), "a dry-run opens no sink");
 }
 
 #[cfg(feature = "kafka")]
@@ -1288,6 +1336,7 @@ async fn dry_run_json_emits_parseable_plan_array() {
     assert_eq!(arr[0]["scenario"], "discovery");
     assert_eq!(arr[0]["total_probes"], 1);
     assert_eq!(arr[0]["sink"], "stdout");
+    assert_eq!(arr[0]["encoder"], "ndjson");
     assert!(arr[0]["targets"].is_array(), "{stdout}");
     assert!(arr[0]["probers"].is_array(), "{stdout}");
     assert!(
@@ -1529,6 +1578,36 @@ async fn sink_flag_overrides_yaml_sink() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
+async fn checkpointing_a_multi_scenario_file_is_refused_before_the_scan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let records = dir.path().join("records.ndjson");
+    let yaml = format!("version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 200\n  sink:\n    type: file\n    path: \"{}\"\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n  - signal_type: discover\n    name: second\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22223]\n", records.display());
+    let path = write_yaml(&dir, "multi-checkpoint.yml", &yaml);
+    let checkpoint = dir.path().join("scan.checkpoint");
+
+    let args = vec![
+        "discover".to_string(),
+        "--file".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+    ];
+    assert_both_refuse(
+        &dry_run_then_scan(args).await,
+        "--checkpoint supports a single-scenario run",
+    );
+    assert!(
+        !checkpoint.exists(),
+        "a checkpoint no --resume could ever read must not be written"
+    );
+    assert!(
+        !records.exists(),
+        "a refused checkpoint request must not open the sink"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
 async fn resume_refuses_a_multi_scenario_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: file\n    path: \"/tmp/rastreo-resume-refuse.ndjson\"\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n  - signal_type: discover\n    name: second\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [80]\n";
@@ -1554,7 +1633,7 @@ async fn resume_refuses_a_multi_scenario_file() {
     );
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("--resume supports a single-scenario run")
+        stderr.contains("--checkpoint supports a single-scenario run")
             && stderr.contains("2 scenarios"),
         "stderr must explain the single-scenario limitation: {stderr}"
     );
@@ -1782,14 +1861,14 @@ async fn the_run_and_the_dry_run_skip_the_same_prober_less_scenario() {
     );
     assert_eq!(
         outcomes[0],
-        (Some(0), true),
-        "a prober-less scenario is skipped with a notice and exits 0"
+        (Some(1), true),
+        "the only scenario was skipped, so nothing was probed and the notice explains why"
     );
 }
 
 #[cfg(feature = "config")]
 #[tokio::test]
-async fn dry_run_skips_a_prober_less_scenario_the_run_would_skip() {
+async fn dry_run_of_a_file_of_nothing_but_prober_less_scenarios_refuses() {
     let dir = tempfile::tempdir().expect("tempdir");
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: no-probers\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n";
     let path = write_yaml(&dir, "no-probers.yml", yaml);
@@ -1805,21 +1884,62 @@ async fn dry_run_skips_a_prober_less_scenario_the_run_would_skip() {
     .await
     .expect("join");
 
-    assert!(
-        output.status.success(),
-        "a scenario the run skips must not fail the dry-run; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a plan that would probe nothing is not a runnable plan"
     );
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
         stderr.contains("no probers configured, skipping"),
         "stderr must name the skipped scenario: {stderr}"
     );
+    assert!(
+        stderr.contains("every scenario in") && stderr.contains("nothing to probe"),
+        "stderr must say why the rehearsal failed: {stderr}"
+    );
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
     assert!(
         stdout.contains("would run 0 scenarios"),
         "a skipped scenario must not be counted as runnable: {stdout}"
     );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn one_probed_scenario_is_enough_for_a_file_that_also_skips_one() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = format!("version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: stdout\nscenarios:\n  - signal_type: discover\n    name: placeholder\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n  - signal_type: discover\n    name: real\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n");
+    let path = write_yaml(&dir, "one-of-each.yml", &yaml);
+
+    for extra in [Vec::new(), vec!["--dry-run".to_string()]] {
+        let path = path.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            common::rastreo()
+                .args(["discover", "--file"])
+                .arg(&path)
+                .args(&extra)
+                .output()
+                .expect("spawn rastreo")
+        })
+        .await
+        .expect("join");
+        let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "a file that probed one of its two scenarios ran; stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("'placeholder' (1 of 2): no probers configured, skipping"),
+            "the skipped scenario is still explained: {stderr}"
+        );
+    }
+    drop(listener);
 }
 
 async fn dry_run_then_scan(args: Vec<String>) -> Vec<(Option<i32>, String)> {
@@ -1979,7 +2099,7 @@ async fn the_dry_run_and_the_scan_agree_a_resume_needs_a_single_scenario() {
     ];
     assert_both_refuse(
         &dry_run_then_scan(args).await,
-        "--resume supports a single-scenario run",
+        "--checkpoint supports a single-scenario run",
     );
 }
 

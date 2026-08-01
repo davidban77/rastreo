@@ -145,6 +145,49 @@ fn a_file_sink_keeps_the_progress_line_on_the_terminal() {
     assert_no_row_carries_both(&captured);
 }
 
+// A terminal ends every line `\r\n`; the plan itself carries no carriage return.
+fn without_carriage_returns(captured: &str) -> String {
+    captured.replace('\r', "")
+}
+
+fn dry_run_plan(cols: Option<u16>) -> String {
+    let mut cmd = common::rastreo();
+    cmd.args([
+        "discover",
+        "--target",
+        "127.0.0.1",
+        "--probe",
+        "tcp_connect",
+        "--port",
+        "22",
+        "--dry-run",
+    ]);
+    match cols {
+        Some(cols) => run_on_a_terminal(cmd, cols),
+        None => {
+            let out = cmd.output().expect("spawn rastreo");
+            assert!(out.status.success(), "rastreo exited with {:?}", out.status);
+            String::from_utf8(out.stdout).expect("utf-8 stdout")
+        }
+    }
+}
+
+#[test]
+fn the_plan_reads_the_same_on_a_terminal_as_it_does_piped() {
+    let piped = dry_run_plan(None);
+    assert!(
+        piped.contains("encoder:"),
+        "the row a measured width would leak into must be in the comparison: {piped:?}"
+    );
+    for cols in [40, 200] {
+        assert_eq!(
+            without_carriage_returns(&dry_run_plan(Some(cols))),
+            piped,
+            "a plan that varies with the terminal cannot be diffed between runs ({cols} columns)"
+        );
+    }
+}
+
 #[test]
 fn a_verbose_json_run_keeps_its_banners_off_the_record_rows() {
     let captured = scan_one_open_port(&["--format", "json", "-v"], 120);

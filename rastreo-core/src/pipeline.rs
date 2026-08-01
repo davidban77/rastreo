@@ -11,7 +11,7 @@ use crate::checkpoint::{resume_fingerprint, Checkpoint, CheckpointConfig, Checkp
 use crate::classifier::{create_classifier, Classifier};
 use crate::collection_profile::CollectionProfileAssembler;
 use crate::config::DiscoverScenarioConfig;
-use crate::encoder::{create_encoder, ensure_encoder_output_fits_sink, Encoder, EncoderConfig};
+use crate::encoder::{create_encoder, ensure_encoder_output_fits_sink, Encoder};
 use crate::error::{ProbeErrorKind, RastreoError};
 use crate::fuser::{create_fuser, Fuser};
 use crate::model::{
@@ -26,14 +26,6 @@ use crate::topology::TopologyAssembler;
 
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CONCURRENCY: u32 = 64;
-
-fn effective_encoder_config(scenario: &DiscoverScenarioConfig) -> EncoderConfig {
-    scenario
-        .base
-        .encoder
-        .clone()
-        .unwrap_or(EncoderConfig::Ndjson)
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
@@ -174,7 +166,7 @@ pub async fn run_discovery(opts: RunOptions<'_>) -> Result<DiscoverySummary, Ras
             let sink_config = scenario.base.sink.clone().unwrap_or(SinkConfig::Stdout);
             // Offline first: a broker sink is rejected before the connect, not after it.
             ensure_encoder_output_fits_sink(
-                &effective_encoder_config(scenario),
+                &scenario.effective_encoder_config(),
                 sink_config.requires_structured_records(),
             )?;
             create_sink(&sink_config).await?
@@ -282,7 +274,7 @@ async fn run_discovery_core(
     )
     .with_port_budget(Some(port_budget));
 
-    let encoder_config = effective_encoder_config(scenario);
+    let encoder_config = scenario.effective_encoder_config();
     // Catches a sink handed in through `RunOptions::sink`, which never passed the config check.
     ensure_encoder_output_fits_sink(&encoder_config, sink.requires_structured_records().await)?;
     let encoder = create_encoder(&encoder_config)?;
@@ -992,6 +984,7 @@ mod tests {
 
     use crate::classifier::{ClassifierConfig, MergeMode};
     use crate::config::BaseProbeConfig;
+    use crate::encoder::EncoderConfig;
     use crate::error::ConfigError;
     use crate::fuser::FuserConfig;
     use crate::model::Target;

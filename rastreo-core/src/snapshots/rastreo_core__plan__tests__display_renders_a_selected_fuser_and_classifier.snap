@@ -8,6 +8,7 @@ expression: plan.to_string()
     probers: tcp_connect (ports 22, 80)
     fuser: identity over direct (include_unreachable true, confidence_baseline 0.25, confidence_per_signal 0.1)
     classifier: noop
+    encoder: ndjson
     sink: stdout
     concurrency: 64
     rate: unlimited

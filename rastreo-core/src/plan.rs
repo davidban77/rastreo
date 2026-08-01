@@ -5,7 +5,8 @@ use std::net::IpAddr;
 use schemars::JsonSchema;
 
 use crate::classifier::ClassifierConfig;
-use crate::config::DiscoverScenarioConfig;
+use crate::config::{BaseProbeConfig, DiscoverScenarioConfig};
+use crate::encoder::EncoderConfig;
 use crate::error::RastreoError;
 use crate::fuser::{DirectFuser, FuserConfig};
 use crate::model::Target;
@@ -29,6 +30,8 @@ pub struct DiscoveryPlan {
     pub fuser: String,
     /// Human-readable summary of the resolved classifier.
     pub classifier: String,
+    /// Wire format records leave in: `ndjson` or `table`.
+    pub encoder: String,
     /// Human-readable summary of the configured sink.
     pub sink: String,
     /// Effective in-flight probe cap for this run.
@@ -78,6 +81,24 @@ impl DiscoveryPlan {
         knobs: PlanKnobs,
     ) -> Result<Self, RastreoError> {
         config.validate()?;
+        // Exhaustive, so a field added to the config cannot reach a run until the plan states whether it renders.
+        let DiscoverScenarioConfig {
+            base:
+                BaseProbeConfig {
+                    fuser,
+                    classifier,
+                    sink,
+                    name: _,
+                    encoder: _,
+                    max_concurrent: _,
+                    probe_rate: _,
+                    retries: _,
+                    timeout_ms: _,
+                    rate_limit: _,
+                },
+            targets: _,
+            probers: prober_configs,
+        } = config;
         let mut unique_ips: HashSet<IpAddr> = HashSet::new();
         let mut targets = Vec::with_capacity(resolutions.len());
         for entry in resolutions {
@@ -91,15 +112,16 @@ impl DiscoveryPlan {
             };
             targets.push(PlannedTarget { target, resolution });
         }
-        let probers: Vec<String> = config.probers.iter().map(render_prober).collect();
-        let total_probes = unique_ips.len().saturating_mul(config.probers.len());
+        let probers: Vec<String> = prober_configs.iter().map(render_prober).collect();
+        let total_probes = unique_ips.len().saturating_mul(prober_configs.len());
         Ok(Self {
             scenario,
             targets,
             probers,
-            fuser: render_fuser(config.base.fuser.as_ref()),
-            classifier: render_classifier(config.base.classifier.as_ref()),
-            sink: render_sink(config.base.sink.as_ref()),
+            fuser: render_fuser(fuser.as_ref()),
+            classifier: render_classifier(classifier.as_ref()),
+            encoder: render_encoder(&config.effective_encoder_config()),
+            sink: render_sink(sink.as_ref()),
             max_concurrent: knobs.max_concurrent,
             probe_rate: knobs.probe_rate,
             retries: knobs.retries,
@@ -126,6 +148,7 @@ impl fmt::Display for DiscoveryPlan {
         writeln!(f, "    probers: {}", format_prober_line(&self.probers))?;
         writeln!(f, "    fuser: {}", self.fuser)?;
         writeln!(f, "    classifier: {}", self.classifier)?;
+        writeln!(f, "    encoder: {}", self.encoder)?;
         writeln!(f, "    sink: {}", self.sink)?;
         writeln!(f, "    concurrency: {}", self.max_concurrent)?;
         match self.probe_rate {
@@ -286,6 +309,14 @@ fn render_classifier_config(config: &ClassifierConfig) -> String {
             platform_rules.len(),
             role_rules.len()
         ),
+    }
+}
+
+// Width is deliberately absent: the CLI measures it off the terminal, so rendering it would make one scenario plan two different texts.
+fn render_encoder(encoder: &EncoderConfig) -> String {
+    match encoder {
+        EncoderConfig::Ndjson => "ndjson".to_string(),
+        EncoderConfig::Table { .. } => "table".to_string(),
     }
 }
 
@@ -685,6 +716,26 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_names_the_encoder_the_run_would_build() {
+        for (encoder, expected) in [
+            (None, "ndjson"),
+            (Some(EncoderConfig::Ndjson), "ndjson"),
+            (Some(EncoderConfig::Table { width: 100 }), "table"),
+        ] {
+            let mut config = tcp_scenario();
+            config.base.encoder = encoder;
+            assert_eq!(plan_of(&config, &[], default_knobs()).encoder, expected);
+        }
+    }
+
+    #[test]
+    fn the_encoder_reads_the_same_whatever_width_the_terminal_measured() {
+        let narrow = render_encoder(&EncoderConfig::Table { width: 55 });
+        assert_eq!(narrow, render_encoder(&EncoderConfig::Table { width: 153 }));
+        assert_eq!(narrow, "table");
+    }
+
+    #[test]
     fn render_classifier_none_prints_the_pipeline_default() {
         assert_eq!(
             render_classifier(None),
@@ -842,6 +893,15 @@ mod tests {
     }
 
     #[test]
+    fn display_names_the_encoder_records_would_leave_in() {
+        let mut config = tcp_scenario();
+        config.base.encoder = Some(EncoderConfig::Table { width: 120 });
+        assert!(plan_of(&config, &[], default_knobs())
+            .to_string()
+            .contains("    encoder: table\n"));
+    }
+
+    #[test]
     fn display_shows_rate_per_second_when_set() {
         let config = tcp_scenario();
         let resolutions = vec![ResolvedScenarioTarget::new(
@@ -992,6 +1052,7 @@ mod tests {
         assert_eq!(json["targets"][0]["resolution"]["resolved"][0], "127.0.0.1");
         assert_eq!(json["fuser"], render_fuser(None));
         assert_eq!(json["classifier"], render_classifier(None));
+        assert_eq!(json["encoder"], "ndjson");
     }
 
     #[test]

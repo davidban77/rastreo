@@ -564,6 +564,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 - `probers` — a readable summary of each prober the scan would run.
 - `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
 - `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the request added.
+- `encoder` — always reads `ndjson` on `POST /scans`. See the warning below.
 - `sink` — always reads `stdout (default)` on `POST /scans`. See the warning below.
 - `max_concurrent` — the most probes the scan would run at once.
 - `probe_rate` — the probes-per-second pace, or `null` for unlimited.
@@ -580,6 +581,7 @@ The response is a `DiscoveryPlan`. Its fields are:
   "probers": ["tcp_connect (ports 22, 443)"],
   "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
   "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
+  "encoder": "ndjson",
   "sink": "stdout (default)",
   "max_concurrent": 64,
   "probe_rate": null,
@@ -591,8 +593,8 @@ The response is a `DiscoveryPlan`. Its fields are:
 
 A request that names no `fuser` and no `classifier` gets the pipeline defaults shown above: `direct` fusion, and the `rules` classifier over the tables built into rastreo. The `platform_rules` and `role_rules` counts cover only the rules the request added, so `0` means those built-in tables run on their own. See [Classification](../discover/classification.md).
 
-!!! warning "The plan's `sink` line does not name the server's destination"
-    The plan's `sink` always reads `stdout (default)`, because the server has already dropped the field. A real scan returns its records in the response body. It also writes them to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set.
+!!! warning "The plan's `sink` and `encoder` lines do not name the server's destination"
+    The plan's `sink` always reads `stdout (default)` and its `encoder` always reads `ndjson`, because the server has already dropped the one and pinned the other. A real scan returns its records in the response body. It also writes them to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set.
 
 A real scan rejects an out-of-allow-list target with a hard `403` and probes nothing. A dry-run is more informative. It resolves what it can and reports the blocked target in the plan. The blocked target carries an `error` in its `resolution`, and it does not add to `total_probes`.
 
@@ -605,6 +607,7 @@ A real scan rejects an out-of-allow-list target with a hard `403` and probes not
   "probers": ["tcp_connect (ports 22, 443)"],
   "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
   "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
+  "encoder": "ndjson",
   "sink": "stdout (default)",
   "max_concurrent": 64,
   "probe_rate": null,
