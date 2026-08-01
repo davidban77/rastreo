@@ -4,8 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use rastreo_core::config::{DiscoverScenarioConfig, ScenarioEntry, ScenarioKind};
-use rastreo_core::{ensure_encoder_output_fits_sink, SinkConfig};
+use rastreo_core::config::{ScenarioEntry, ScenarioKind};
 
 use super::discover::{
     load_scenario_file, merge_defaults, resolve_scenario_source, scenario_label,
@@ -52,11 +51,11 @@ pub fn run(args: ValidateArgs, mode: OutputMode) -> Result<()> {
         };
         merge_defaults(&mut cfg.base, &defaults);
         let label = scenario_label(&cfg.base, idx, total);
-        match validate_scenario(&cfg) {
+        match cfg.validate() {
             Ok(()) => println!("{label}: ok"),
-            Err(reason) => {
+            Err(err) => {
                 invalid += 1;
-                print_scenario_invalid(&label, &reason);
+                print_scenario_invalid(&label, &err.to_string());
             }
         }
     }
@@ -69,199 +68,16 @@ pub fn run(args: ValidateArgs, mode: OutputMode) -> Result<()> {
     }
 }
 
-fn validate_scenario(cfg: &DiscoverScenarioConfig) -> Result<(), String> {
-    if cfg.targets.is_empty() {
-        return Err("no targets configured".to_string());
-    }
-    if cfg.probers.is_empty() {
-        return Err("no probers configured".to_string());
-    }
-    if let Some(sink) = &cfg.base.sink {
-        sink.validate().map_err(|e| e.to_string())?;
-    }
-    if let Some(encoder) = &cfg.base.encoder {
-        let sink = cfg.base.sink.clone().unwrap_or(SinkConfig::Stdout);
-        ensure_encoder_output_fits_sink(encoder, sink.requires_structured_records())
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(fuser) = &cfg.base.fuser {
-        fuser.validate().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::output::Verbosity;
     use super::*;
-    use rastreo_core::config::BaseProbeConfig;
-    use rastreo_core::{FuserConfig, IdentityHints, ProberConfig, SinkConfig, Target};
     use std::io::Write;
-
-    fn scenario(
-        targets: Vec<Target>,
-        probers: Vec<ProberConfig>,
-        sink: Option<SinkConfig>,
-    ) -> DiscoverScenarioConfig {
-        let mut base = BaseProbeConfig::new();
-        base.sink = sink;
-        DiscoverScenarioConfig::new(base, targets, probers)
-    }
-
-    fn scenario_with_fuser(fuser: FuserConfig) -> DiscoverScenarioConfig {
-        let mut cfg = scenario(one_ip(), vec![tcp_prober()], None);
-        cfg.base.fuser = Some(fuser);
-        cfg
-    }
-
-    fn direct(baseline: Option<f64>, per_signal: Option<f64>) -> FuserConfig {
-        FuserConfig::Direct {
-            include_unreachable: None,
-            confidence_baseline: baseline,
-            confidence_per_signal: per_signal,
-        }
-    }
-
-    fn tcp_prober() -> ProberConfig {
-        ProberConfig::TcpConnect { ports: vec![22] }
-    }
-
-    fn one_ip() -> Vec<Target> {
-        vec![Target::Ip("10.0.0.1".parse().expect("ip"))]
-    }
 
     fn write_scenario(contents: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");
         f.write_all(contents.as_bytes()).expect("write");
         f
-    }
-
-    #[test]
-    fn validate_scenario_accepts_targets_probers_and_valid_sink() {
-        let cfg = scenario(one_ip(), vec![tcp_prober()], Some(SinkConfig::Stdout));
-        assert!(validate_scenario(&cfg).is_ok());
-    }
-
-    #[test]
-    fn validate_scenario_accepts_missing_sink_as_the_default() {
-        let cfg = scenario(one_ip(), vec![tcp_prober()], None);
-        assert!(validate_scenario(&cfg).is_ok());
-    }
-
-    #[test]
-    fn validate_scenario_rejects_empty_targets() {
-        let cfg = scenario(Vec::new(), vec![tcp_prober()], None);
-        let err = validate_scenario(&cfg).expect_err("empty targets must be invalid");
-        assert!(err.contains("targets"), "err was: {err}");
-    }
-
-    #[test]
-    fn validate_scenario_rejects_empty_probers() {
-        let cfg = scenario(one_ip(), Vec::new(), None);
-        let err = validate_scenario(&cfg).expect_err("empty probers must be invalid");
-        assert!(err.contains("probers"), "err was: {err}");
-    }
-
-    #[cfg(feature = "kafka")]
-    #[test]
-    fn validate_scenario_rejects_invalid_sink_config() {
-        let sink = SinkConfig::Kafka {
-            brokers: Vec::new(),
-            topic: "t".into(),
-            links_topic: None,
-            profiles_topic: None,
-            flush_mode: rastreo_core::KafkaFlushMode::default(),
-            dead_letter: None,
-            tls: None,
-            sasl: None,
-            retry: rastreo_core::SinkRetry::default(),
-        };
-        let cfg = scenario(one_ip(), vec![tcp_prober()], Some(sink));
-        let err = validate_scenario(&cfg).expect_err("invalid sink must be invalid");
-        assert!(err.contains("brokers"), "err was: {err}");
-    }
-
-    #[cfg(feature = "kafka")]
-    #[test]
-    fn validate_scenario_rejects_the_table_encoder_against_a_kafka_sink() {
-        let sink = SinkConfig::Kafka {
-            brokers: vec!["kafka:9092".into()],
-            topic: "rastreo.devices".into(),
-            links_topic: None,
-            profiles_topic: None,
-            flush_mode: rastreo_core::KafkaFlushMode::default(),
-            dead_letter: None,
-            tls: None,
-            sasl: None,
-            retry: rastreo_core::SinkRetry::default(),
-        };
-        let mut cfg = scenario(one_ip(), vec![tcp_prober()], Some(sink));
-        cfg.base.encoder = Some(rastreo_core::EncoderConfig::Table { width: 100 });
-        let err = validate_scenario(&cfg).expect_err("table into kafka must be invalid");
-        assert!(err.contains("table encoder"), "err was: {err}");
-    }
-
-    #[test]
-    fn validate_scenario_accepts_the_table_encoder_against_stdout() {
-        let mut cfg = scenario(one_ip(), vec![tcp_prober()], Some(SinkConfig::Stdout));
-        cfg.base.encoder = Some(rastreo_core::EncoderConfig::Table { width: 100 });
-        assert!(validate_scenario(&cfg).is_ok());
-    }
-
-    #[test]
-    fn validate_scenario_accepts_the_table_encoder_when_the_sink_is_left_default() {
-        let mut cfg = scenario(one_ip(), vec![tcp_prober()], None);
-        cfg.base.encoder = Some(rastreo_core::EncoderConfig::Table { width: 100 });
-        assert!(validate_scenario(&cfg).is_ok());
-    }
-
-    #[test]
-    fn validate_scenario_rejects_confidence_baseline_out_of_range() {
-        let cfg = scenario_with_fuser(direct(Some(5.0), None));
-        let err = validate_scenario(&cfg).expect_err("out-of-range confidence must be invalid");
-        assert!(err.contains("confidence_baseline"), "err was: {err}");
-    }
-
-    #[test]
-    fn validate_scenario_rejects_nested_identity_fuser() {
-        let cfg = scenario_with_fuser(FuserConfig::Identity {
-            identity_hints: IdentityHints::default(),
-            inner: Box::new(FuserConfig::Identity {
-                identity_hints: IdentityHints::default(),
-                inner: Box::new(direct(None, None)),
-            }),
-        });
-        let err = validate_scenario(&cfg).expect_err("nested identity must be invalid");
-        assert!(err.contains("outermost"), "err was: {err}");
-    }
-
-    #[cfg(feature = "mib_enrichment")]
-    #[test]
-    fn validate_scenario_rejects_identity_nested_in_mib_enrichment() {
-        let cfg = scenario_with_fuser(FuserConfig::MibEnrichment {
-            data_path: None,
-            inner: Box::new(FuserConfig::Identity {
-                identity_hints: IdentityHints::default(),
-                inner: Box::new(direct(None, None)),
-            }),
-        });
-        let err = validate_scenario(&cfg).expect_err("identity nested in mib must be invalid");
-        assert!(err.contains("outermost"), "err was: {err}");
-    }
-
-    #[test]
-    fn validate_scenario_accepts_identity_over_direct() {
-        let cfg = scenario_with_fuser(FuserConfig::Identity {
-            identity_hints: IdentityHints::default(),
-            inner: Box::new(direct(Some(0.5), Some(0.1))),
-        });
-        assert!(validate_scenario(&cfg).is_ok());
-    }
-
-    #[test]
-    fn validate_scenario_accepts_direct_with_in_range_confidence() {
-        let cfg = scenario_with_fuser(direct(Some(0.2), Some(0.05)));
-        assert!(validate_scenario(&cfg).is_ok());
     }
 
     #[test]

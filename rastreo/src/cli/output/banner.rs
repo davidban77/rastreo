@@ -321,6 +321,7 @@ mod tests {
                 timeout_ms: 1000,
             },
         )
+        .expect("plan")
     }
 
     fn summary() -> DiscoverySummary {
@@ -395,7 +396,8 @@ mod tests {
                 retries: 0,
                 timeout_ms: 500,
             },
-        );
+        )
+        .expect("plan");
         let line = strip_ansi(&start_line(&plan, 1));
         assert!(line.contains("targets: 1"), "{line}");
     }
@@ -639,13 +641,14 @@ mod tests {
             Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
             Ok(vec!["10.0.0.1".parse().expect("ip")]),
         );
-        let unresolved = DiscoveryPlan::new("discover".into(), &config, &[], knobs);
+        let unresolved = DiscoveryPlan::new("discover".into(), &config, &[], knobs).expect("plan");
         let resolved = DiscoveryPlan::new(
             "discover".into(),
             &config,
             std::slice::from_ref(&resolution),
             knobs,
-        );
+        )
+        .expect("plan");
         assert!(resolved.total_probes > unresolved.total_probes);
         assert_eq!(
             strip_ansi(&start_line(&unresolved, 1)),

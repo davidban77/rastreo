@@ -107,7 +107,7 @@ fn scenario_from_body(
     parse_discover_scenario_json(body).map_err(|err| AppError::from_rastreo(err, disclosure))
 }
 
-/// Submit a discovery scenario. `?dry_run=true` resolves targets and returns the [`DiscoveryPlan`] without probing or writing a sink; otherwise the scenario runs synchronously and records are returned in the response body (the client-supplied `sink` field is ignored on the real-scan path).
+/// Submit a discovery scenario. `?dry_run=true` resolves targets and returns the [`DiscoveryPlan`] without probing or writing a sink; otherwise the scenario runs synchronously and records are returned in the response body. The server owns the destination, so the client-supplied `sink` and `encoder` fields are dropped before anything else reads the scenario.
 pub async fn create_scan(
     State(state): State<AppState>,
     Query(params): Query<ScanParams>,
@@ -116,26 +116,23 @@ pub async fn create_scan(
 ) -> Result<Response, AppError> {
     let start = Instant::now();
     // Uncounted by the scan-error metric the checks below feed: its scenario label does not exist until the body parses.
-    let scenario = scenario_from_body(body, disclosure)?;
+    let mut scenario = scenario_from_body(body, disclosure)?;
     let label = scenario_label(&scenario);
 
-    if scenario.targets.is_empty() {
+    // Before validation and before the branch: validating a field the server discards refuses a body over something the caller cannot fix.
+    pin_server_destination(&mut scenario);
+
+    // Ahead of the dry-run branch and of any resolution: a scenario a scan would refuse has no plan either.
+    if let Err(err) = scenario.validate() {
         state
             .metrics
             .record_scan_error(start.elapsed(), None, &label);
         state.readiness.record_scan_error(false);
-        return Err(AppError::bad_request("scenario.targets must not be empty"));
-    }
-    if scenario.probers.is_empty() {
-        state
-            .metrics
-            .record_scan_error(start.elapsed(), None, &label);
-        state.readiness.record_scan_error(false);
-        return Err(AppError::bad_request("scenario.probers must not be empty"));
+        return Err(AppError::from_rastreo(err, disclosure));
     }
 
     if params.dry_run {
-        return Ok(Json(dry_run_plan(&state, &scenario, label).await).into_response());
+        return Ok(Json(dry_run_plan(&state, &scenario, label, disclosure).await?).into_response());
     }
 
     Ok(run_scan(state, scenario, start, label, disclosure)
@@ -143,11 +140,30 @@ pub async fn create_scan(
         .into_response())
 }
 
+fn pin_server_destination(scenario: &mut DiscoverScenarioConfig) {
+    if scenario.base.sink.is_some() {
+        tracing::warn!(
+            sink = ?scenario.base.sink,
+            "client-supplied sink ignored; server returns records via response body"
+        );
+        scenario.base.sink = None;
+    }
+    if matches!(scenario.base.encoder, Some(ref e) if !matches!(e, EncoderConfig::Ndjson)) {
+        tracing::warn!(
+            encoder = ?scenario.base.encoder,
+            "client-supplied encoder ignored; server forces NDJSON encoding"
+        );
+    }
+    // Pin the encoder server-side so the MemorySink read-back parses line-by-line as JSON.
+    scenario.base.encoder = Some(EncoderConfig::Ndjson);
+}
+
 async fn dry_run_plan(
     state: &AppState,
     scenario: &DiscoverScenarioConfig,
     label: String,
-) -> DiscoveryPlan {
+    disclosure: ErrorDisclosure,
+) -> Result<DiscoveryPlan, AppError> {
     let resolutions = resolve_scenario_targets(scenario, state.resolver.as_ref()).await;
     let knobs = PlanKnobs {
         max_concurrent: scenario
@@ -160,6 +176,7 @@ async fn dry_run_plan(
         timeout_ms: scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
     };
     DiscoveryPlan::new(label, scenario, &resolutions, knobs)
+        .map_err(|err| AppError::from_rastreo(err, disclosure))
 }
 
 async fn run_scan(
@@ -177,23 +194,6 @@ async fn run_scan(
             "inflight scan limit reached; retry once running scans complete",
         ));
     };
-
-    let mut scenario = scenario;
-    if scenario.base.sink.is_some() {
-        tracing::warn!(
-            sink = ?scenario.base.sink,
-            "client-supplied sink ignored; server returns records via response body"
-        );
-        scenario.base.sink = None;
-    }
-    if matches!(scenario.base.encoder, Some(ref e) if !matches!(e, EncoderConfig::Ndjson)) {
-        tracing::warn!(
-            encoder = ?scenario.base.encoder,
-            "client-supplied encoder ignored; server forces NDJSON encoding"
-        );
-    }
-    // Pin the encoder server-side so the MemorySink read-back parses line-by-line as JSON.
-    scenario.base.encoder = Some(EncoderConfig::Ndjson);
 
     let memory_sink = MemorySink::with_max_bytes(state.max_result_bytes);
     let handle = memory_sink.handle();
@@ -336,7 +336,9 @@ mod tests {
         state: AppState,
         scenario: DiscoverScenarioConfig,
     ) -> Result<Json<ScanResponse>, AppError> {
+        let mut scenario = scenario;
         let label = scenario_label(&scenario);
+        pin_server_destination(&mut scenario);
         run_scan(
             state,
             scenario,
@@ -383,6 +385,56 @@ mod tests {
         .expect_err("empty probers must error");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("probers"));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_scenario_is_refused_before_a_target_is_resolved() {
+        use rastreo_core::{FuserConfig, RastreoError, ResolvedTarget};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingResolver {
+            inner: HickoryResolver,
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Resolver for CountingResolver {
+            async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.resolve(target).await
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver: Arc<dyn Resolver> = Arc::new(CountingResolver {
+            inner: HickoryResolver::from_system().expect("system resolver"),
+            calls: Arc::clone(&calls),
+        });
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        s.base.fuser = Some(FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: Some(2.0),
+            confidence_per_signal: None,
+        });
+
+        let err = create_scan(
+            State(AppState::new(resolver)),
+            Query(ScanParams { dry_run: true }),
+            ErrorDisclosure::default(),
+            json_body(&s),
+        )
+        .await
+        .expect_err("an invalid fuser knob must be refused");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("confidence_baseline"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a scenario the scan refuses must not reach the resolver"
+        );
     }
 
     #[tokio::test]
@@ -1108,7 +1160,14 @@ mod tests {
                 ports: vec![22, 80],
             }],
         );
-        let plan = dry_run_plan(&state, &s, "unit-plan".to_string()).await;
+        let plan = dry_run_plan(
+            &state,
+            &s,
+            "unit-plan".to_string(),
+            ErrorDisclosure::default(),
+        )
+        .await
+        .expect("a valid scenario plans");
 
         assert_eq!(plan.scenario, "unit-plan");
         assert_eq!(plan.max_concurrent, DEFAULT_CONCURRENCY);
@@ -1252,9 +1311,43 @@ mod tests {
         assert_eq!(scenario.probers.len(), 1);
     }
 
+    async fn dry_run_body(state: AppState, scenario: &DiscoverScenarioConfig) -> serde_json::Value {
+        let response = create_scan(
+            State(state),
+            Query(ScanParams { dry_run: true }),
+            ErrorDisclosure::default(),
+            json_body(scenario),
+        )
+        .await
+        .expect("a valid scenario plans");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        serde_json::from_slice(&bytes).expect("plan json")
+    }
+
+    #[tokio::test]
+    async fn create_scan_dry_run_plan_names_no_client_supplied_sink() {
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        s.base.sink = Some(SinkConfig::File {
+            path: "/tmp/client-supplied.ndjson".into(),
+        });
+
+        let plan = dry_run_body(state, &s).await;
+        assert_eq!(
+            plan["sink"], "stdout (default)",
+            "the plan must not render a destination the server discards: {plan}"
+        );
+    }
+
     #[cfg(feature = "nats")]
     #[tokio::test]
-    async fn create_scan_dry_run_nats_sink_strips_credentials_from_plan() {
+    async fn create_scan_dry_run_plan_leaks_no_client_sink_credentials() {
         let state = state_with_system_resolver();
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -1272,15 +1365,83 @@ mod tests {
             retry: rastreo_core::SinkRetry::default(),
         });
 
-        let plan = dry_run_plan(&state, &s, "nats-plan".to_string()).await;
-        assert_eq!(
-            plan.sink,
-            "nats: servers=nats://broker:4222 subject=rastreo.devices stream=RASTREO"
-        );
+        let plan = dry_run_body(state, &s).await;
         assert!(
-            !plan.sink.contains("u:p"),
-            "dry-run plan must not leak credentials: {}",
-            plan.sink
+            !plan.to_string().contains("u:p"),
+            "dry-run plan must not carry credentials from the discarded client sink: {plan}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_scan_pins_ndjson_over_a_client_supplied_encoder() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+        s.base.encoder = Some(EncoderConfig::Table { width: 100 });
+
+        let payload = scan_body(state, &s).await;
+        assert_eq!(payload["summary"]["records_emitted"], 1);
+        assert_eq!(
+            payload["records"].as_array().map(Vec::len),
+            Some(1),
+            "the response capture is read back as NDJSON, so the client's encoder cannot reach it: {payload}"
+        );
+    }
+
+    #[cfg(feature = "nats")]
+    #[tokio::test]
+    async fn create_scan_runs_a_scenario_whose_client_sink_it_would_have_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+        s.base.sink = Some(SinkConfig::Nats {
+            servers: Vec::new(),
+            subject: "rastreo.devices".into(),
+            stream: "RASTREO".into(),
+            links_subject: None,
+            profiles_subject: None,
+            credentials: rastreo_core::NatsCredentials::default(),
+            flush_mode: rastreo_core::NatsFlushMode::default(),
+            dead_letter: None,
+            retry: rastreo_core::SinkRetry::default(),
+        });
+
+        let payload = scan_body(state, &s).await;
+        assert_eq!(
+            payload["summary"]["records_emitted"], 1,
+            "a destination the server discards must not decide whether the scan runs: {payload}"
+        );
+    }
+
+    async fn scan_body(state: AppState, scenario: &DiscoverScenarioConfig) -> serde_json::Value {
+        let response = create_scan(
+            State(state),
+            Query(ScanParams::default()),
+            ErrorDisclosure::default(),
+            json_body(scenario),
+        )
+        .await
+        .expect("the scan runs");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        serde_json::from_slice(&bytes).expect("scan json")
     }
 }

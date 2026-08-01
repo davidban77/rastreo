@@ -303,7 +303,11 @@ All counters are monotonic across the server process's lifetime and reset only o
 
 ## POST /scans
 
-`POST /scans` submits a discovery scenario, runs it synchronously, and returns the summary and records in the response body. The request body is a `DiscoverScenarioConfig` JSON object. The required fields are `targets` (a non-empty list of targets) and `probers` (a non-empty list of prober configurations). Optional fields on the embedded `base` include `max_concurrent`, `probe_rate`, `timeout_ms`, `fuser`, and `name`. The `encoder` and `sink` fields are accepted but ignored — the server forces NDJSON encoding and captures records in memory so it can return them in the response.
+`POST /scans` submits a discovery scenario, runs it synchronously, and returns the summary and records in the response body. The request body is a `DiscoverScenarioConfig` JSON object. The required fields are `targets` (a non-empty list of targets) and `probers` (a non-empty list of prober configurations).
+
+Every optional field sits at the same top level, next to `targets` and `probers`: `name`, `max_concurrent`, `probe_rate`, `retries`, `timeout_ms`, `fuser`, `classifier`, `encoder`, and `sink`. There is no nested `base` object in the JSON. A body that nests them under a `base` key is still accepted. The nested values are dropped, and the scan runs on the defaults.
+
+The server owns the destination, so it drops any `sink` and `encoder` you send. It does that before it reads anything else from the body. Neither field is checked, so neither one can make a request fail. Records are encoded as NDJSON and captured in memory, so the server can return them in the response. This holds on a real scan and on a [dry-run](#preview-a-scenario-with-a-dry-run).
 
 To preview what a scan would do without probing anything, add the `?dry_run=true` query parameter. The server resolves the targets and returns a discovery plan instead of running the scan. See [Preview a scenario with a dry-run](#preview-a-scenario-with-a-dry-run).
 
@@ -487,7 +491,7 @@ Error surfaces:
 | `403`  | The target allow-list is set and a resolved target falls outside every allowed network. The whole request is rejected and nothing is probed. See [Restricting scan targets](#restricting-scan-targets). |
 | `413`  | The request body exceeded `RASTREO_MAX_BODY_BYTES`. Rejected before the JSON body is parsed. See [Restricting scan targets](#restricting-scan-targets). |
 | `429`  | `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running. The body is `{"error":"inflight scan limit reached; retry once running scans complete"}`. A dry-run never counts against the cap and is never rejected. Setting the cap to `0` disables it. See [POST /scans](#post-scans). |
-| `400`  | `scenario.targets` empty, `scenario.probers` empty, malformed JSON body, the request exceeded `RASTREO_MAX_TOTAL_HOSTS`, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). |
+| `400`  | The scenario failed validation — empty `targets`, empty `probers`, a backwards or mixed-family target range, a prober rastreo cannot build, a malformed `fuser` block, a `classifier` rule rastreo cannot compile (an unbalanced regex in `platform_rules`, a `sys_object_id_prefix` that is not dotted-decimal), a retired field, or a `retries` value above 1024. Also a malformed JSON body, a request over `RASTREO_MAX_TOTAL_HOSTS`, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). A `sink` or an `encoder` never causes a `400`, because the server drops both before it validates anything. A dry-run is refused on the same terms as a real scan. |
 | `500`  | Internal probe / encoder / sink / runtime error. What the body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). |
 | `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`), or the request exceeded `--request-timeout-ms`. What a DNS-failure body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
 
@@ -526,11 +530,17 @@ Redaction is the default for every other error the API builds. The scan endpoint
 
 Before a scan probes anything, you can preview exactly what it would do. Add `?dry_run=true` to the request. The server resolves every target and returns a discovery plan with HTTP 200. A dry-run runs no probers and writes to no sink.
 
+A scenario the scan would refuse has no plan either. The server applies the same check on both paths. An invalid scenario returns `400` with the reason instead of a plan:
+
+```json
+{"error":"scenario.probers must not be empty"}
+```
+
 Use a dry-run to validate a scenario before it probes the network:
 
 - Confirm each target resolves to the addresses you expect.
 - See how many probes the scan would start.
-- Check the sink the scan would write to, with any inline credentials removed.
+- Check the fuser and classifier the scan would run.
 
 !!! note "A dry-run does not probe or write to a sink"
     A dry-run only resolves targets and builds the plan. It still requires a bearer token when authentication is enabled, and it still routes through the target allow-list.
@@ -552,7 +562,9 @@ The response is a `DiscoveryPlan`. Its fields are:
 - `targets` — one entry per target you sent, each with the original `target` spec and a `resolution`.
 - `resolution` — `resolved` with the list of IP addresses when the target resolves, or `error` with the reason when it fails to resolve or is blocked.
 - `probers` — a readable summary of each prober the scan would run.
-- `sink` — the destination the scan would write to.
+- `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
+- `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the request added.
+- `sink` — always reads `stdout (default)` on `POST /scans`. See the warning below.
 - `max_concurrent` — the most probes the scan would run at once.
 - `probe_rate` — the probes-per-second pace, or `null` for unlimited.
 - `retries` — the retransmit count for connectionless probers.
@@ -566,6 +578,8 @@ The response is a `DiscoveryPlan`. Its fields are:
     { "target": "10.50.0.10", "resolution": { "resolved": ["10.50.0.10"] } }
   ],
   "probers": ["tcp_connect (ports 22, 443)"],
+  "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
+  "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
   "sink": "stdout (default)",
   "max_concurrent": 64,
   "probe_rate": null,
@@ -575,8 +589,10 @@ The response is a `DiscoveryPlan`. Its fields are:
 }
 ```
 
-!!! tip "Safe to log or share"
-    The plan strips inline userinfo from a sink URL. A NATS server URL written as `nats://user:pass@host` renders as `nats://host` in the plan.
+A request that names no `fuser` and no `classifier` gets the pipeline defaults shown above: `direct` fusion, and the `rules` classifier over the tables built into rastreo. The `platform_rules` and `role_rules` counts cover only the rules the request added, so `0` means those built-in tables run on their own. See [Classification](../discover/classification.md).
+
+!!! warning "The plan's `sink` line does not name the server's destination"
+    The plan's `sink` always reads `stdout (default)`, because the server has already dropped the field. A real scan returns its records in the response body. It also writes them to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set.
 
 A real scan rejects an out-of-allow-list target with a hard `403` and probes nothing. A dry-run is more informative. It resolves what it can and reports the blocked target in the plan. The blocked target carries an `error` in its `resolution`, and it does not add to `total_probes`.
 
@@ -587,6 +603,8 @@ A real scan rejects an out-of-allow-list target with a hard `403` and probes not
     { "target": "192.168.1.1", "resolution": { "error": "target 192.168.1.1 is outside the configured allow-list" } }
   ],
   "probers": ["tcp_connect (ports 22, 443)"],
+  "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
+  "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
   "sink": "stdout (default)",
   "max_concurrent": 64,
   "probe_rate": null,

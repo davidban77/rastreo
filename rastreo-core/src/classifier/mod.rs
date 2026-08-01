@@ -1,5 +1,11 @@
 pub mod platform_rules;
 pub mod role_rules;
+pub mod selection;
+
+pub use selection::{
+    default_classifier_config, expand_classifier_selection, parse_classifier_selection,
+    ClassifierKind, ClassifierSelectionOptions, CLASSIFIER_KIND_COUNT, DEFAULT_CLASSIFIER_KIND,
+};
 
 use regex::Regex;
 use schemars::JsonSchema;
@@ -84,6 +90,16 @@ pub enum MergeMode {
     Extend,
     /// Only user rules run; baked-in rules are ignored.
     Replace,
+}
+
+impl MergeMode {
+    /// snake_case label matching the serde wire form.
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            MergeMode::Extend => "extend",
+            MergeMode::Replace => "replace",
+        }
+    }
 }
 
 /// A single regex-based platform-detection rule.
@@ -1563,6 +1579,14 @@ role: router
             serde_json::to_string(&MergeMode::Replace).expect("serialize"),
             "\"replace\""
         );
+    }
+
+    #[test]
+    fn merge_mode_as_label_matches_the_serde_wire_form() {
+        for mode in [MergeMode::Extend, MergeMode::Replace] {
+            let json = serde_json::to_string(&mode).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", mode.as_label()));
+        }
     }
 
     #[test]

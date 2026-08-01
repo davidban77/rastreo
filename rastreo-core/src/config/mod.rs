@@ -216,6 +216,53 @@ impl DiscoverScenarioConfig {
             probers,
         }
     }
+
+    pub(crate) fn effective_fuser_config(&self) -> FuserConfig {
+        self.base
+            .fuser
+            .clone()
+            .unwrap_or_else(crate::fuser::default_fuser_config)
+    }
+
+    pub(crate) fn effective_classifier_config(&self) -> ClassifierConfig {
+        self.base
+            .classifier
+            .clone()
+            .unwrap_or_else(crate::classifier::default_classifier_config)
+    }
+
+    /// Everything a run refuses this scenario for without touching the network.
+    pub fn validate(&self) -> Result<(), RastreoError> {
+        self.base.ensure_no_retired_fields()?;
+        self.base.ensure_retries_within_bound()?;
+        if self.targets.is_empty() {
+            return Err(ConfigError::invalid("scenario.targets must not be empty").into());
+        }
+        if self.probers.is_empty() {
+            return Err(ConfigError::invalid("scenario.probers must not be empty").into());
+        }
+        for target in &self.targets {
+            crate::resolver::ensure_target_shape(target)?;
+        }
+        if let Some(sink) = &self.base.sink {
+            sink.validate()?;
+        }
+        if let Some(encoder) = &self.base.encoder {
+            let structured = self
+                .base
+                .sink
+                .as_ref()
+                .is_some_and(SinkConfig::requires_structured_records);
+            crate::encoder::ensure_encoder_output_fits_sink(encoder, structured)?;
+        }
+        // Constructing is the pipeline's own check; a second implementation of it would be a second opinion.
+        for prober in &self.probers {
+            crate::prober::create_prober(prober)?;
+        }
+        crate::fuser::create_fuser(&self.effective_fuser_config())?;
+        crate::classifier::create_classifier(&self.effective_classifier_config())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -994,5 +1041,378 @@ mod tests {
             let value = serde_json::json!({"name": tag, "type": "direct"});
             assert!(ensure_no_retired_type_tags_json(&value).is_ok());
         }
+    }
+
+    fn one_ip() -> Vec<Target> {
+        vec![Target::Ip("10.0.0.1".parse().expect("ip"))]
+    }
+
+    fn tcp_prober() -> Vec<ProberConfig> {
+        vec![ProberConfig::TcpConnect { ports: vec![22] }]
+    }
+
+    fn scenario(base: BaseProbeConfig) -> DiscoverScenarioConfig {
+        DiscoverScenarioConfig::new(base, one_ip(), tcp_prober())
+    }
+
+    fn direct_fuser(baseline: Option<f64>) -> FuserConfig {
+        FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: baseline,
+            confidence_per_signal: None,
+        }
+    }
+
+    fn invalid_value(err: RastreoError) -> String {
+        match err {
+            RastreoError::Config(ConfigError::InvalidValue(msg)) => msg,
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_targets_probers_and_an_explicit_sink() {
+        let base = BaseProbeConfig {
+            sink: Some(SinkConfig::Stdout),
+            ..Default::default()
+        };
+        assert!(scenario(base).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_a_missing_sink_as_the_default() {
+        assert!(scenario(BaseProbeConfig::new()).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_targets() {
+        let config = DiscoverScenarioConfig::new(BaseProbeConfig::new(), Vec::new(), tcp_prober());
+        let msg = invalid_value(
+            config
+                .validate()
+                .expect_err("empty targets must be invalid"),
+        );
+        assert_eq!(msg, "scenario.targets must not be empty");
+    }
+
+    #[test]
+    fn validate_rejects_empty_probers() {
+        let config = DiscoverScenarioConfig::new(BaseProbeConfig::new(), one_ip(), Vec::new());
+        let msg = invalid_value(
+            config
+                .validate()
+                .expect_err("empty probers must be invalid"),
+        );
+        assert_eq!(msg, "scenario.probers must not be empty");
+    }
+
+    #[test]
+    fn validate_rejects_a_retired_rate_limit_field() {
+        let base = BaseProbeConfig {
+            rate_limit: Some(50),
+            ..Default::default()
+        };
+        let msg = invalid_value(
+            scenario(base)
+                .validate()
+                .expect_err("a retired field must be invalid"),
+        );
+        assert!(msg.contains("rate_limit"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_retries_above_the_bound() {
+        let base = BaseProbeConfig {
+            retries: Some(MAX_RETRIES + 1),
+            ..Default::default()
+        };
+        let msg = invalid_value(
+            scenario(base)
+                .validate()
+                .expect_err("retries over the bound must be invalid"),
+        );
+        assert!(msg.contains("retries"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_an_out_of_range_confidence_baseline() {
+        let base = BaseProbeConfig {
+            fuser: Some(direct_fuser(Some(2.0))),
+            ..Default::default()
+        };
+        let msg = invalid_value(
+            scenario(base)
+                .validate()
+                .expect_err("a confidence_baseline above 1.0 must be invalid"),
+        );
+        assert!(msg.contains("confidence_baseline"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_a_nested_identity_fuser() {
+        let base = BaseProbeConfig {
+            fuser: Some(FuserConfig::Identity {
+                identity_hints: crate::fuser::IdentityHints::default(),
+                inner: Box::new(FuserConfig::Identity {
+                    identity_hints: crate::fuser::IdentityHints::default(),
+                    inner: Box::new(direct_fuser(None)),
+                }),
+            }),
+            ..Default::default()
+        };
+        let msg = invalid_value(
+            scenario(base)
+                .validate()
+                .expect_err("a nested identity fuser must be invalid"),
+        );
+        assert!(msg.contains("outermost"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_accepts_the_table_encoder_when_the_sink_is_left_default() {
+        let base = BaseProbeConfig {
+            encoder: Some(EncoderConfig::Table { width: 100 }),
+            ..Default::default()
+        };
+        assert!(scenario(base).validate().is_ok());
+    }
+
+    #[cfg(feature = "kafka")]
+    fn kafka_sink(brokers: Vec<&str>) -> SinkConfig {
+        SinkConfig::Kafka {
+            brokers: brokers.into_iter().map(String::from).collect(),
+            topic: "rastreo.devices".into(),
+            links_topic: None,
+            profiles_topic: None,
+            flush_mode: crate::sink::KafkaFlushMode::default(),
+            dead_letter: None,
+            tls: None,
+            sasl: None,
+            retry: crate::sink::SinkRetry::default(),
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_rejects_a_sink_config_the_factory_would_refuse() {
+        let base = BaseProbeConfig {
+            sink: Some(kafka_sink(Vec::new())),
+            ..Default::default()
+        };
+        let msg = invalid_value(
+            scenario(base)
+                .validate()
+                .expect_err("a broker-less kafka sink must be invalid"),
+        );
+        assert!(msg.contains("brokers"), "msg: {msg}");
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn validate_rejects_the_table_encoder_against_a_sink_that_carries_structured_records() {
+        let base = BaseProbeConfig {
+            sink: Some(kafka_sink(vec!["kafka:9092"])),
+            encoder: Some(EncoderConfig::Table { width: 100 }),
+            ..Default::default()
+        };
+        let msg = invalid_value(
+            scenario(base)
+                .validate()
+                .expect_err("the table encoder must not reach a broker sink"),
+        );
+        assert!(msg.contains("table encoder"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_a_prober_the_factory_would_refuse() {
+        let config = DiscoverScenarioConfig::new(
+            BaseProbeConfig::new(),
+            one_ip(),
+            vec![ProberConfig::TcpConnect { ports: Vec::new() }],
+        );
+        let msg = invalid_value(
+            config
+                .validate()
+                .expect_err("a port-less tcp_connect prober must be invalid"),
+        );
+        assert!(msg.contains("at least one port"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_a_second_prober_family_the_factory_would_refuse() {
+        let config = DiscoverScenarioConfig::new(
+            BaseProbeConfig::new(),
+            one_ip(),
+            vec![ProberConfig::Dns {
+                ports: vec![53],
+                query_names: Vec::new(),
+                query_type: crate::prober::DnsQueryType::A,
+                transport: crate::prober::DnsTransport::Udp,
+                recursion_desired: true,
+            }],
+        );
+        let msg = invalid_value(
+            config
+                .validate()
+                .expect_err("a dns prober with no query_names must be invalid"),
+        );
+        assert!(msg.contains("query_name"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_a_prober_the_factory_would_refuse_behind_a_buildable_one() {
+        let config = DiscoverScenarioConfig::new(
+            BaseProbeConfig::new(),
+            one_ip(),
+            vec![
+                ProberConfig::TcpConnect { ports: vec![22] },
+                ProberConfig::Udp {
+                    ports: Vec::new(),
+                    protocol: crate::prober::UdpProtocol::Ntp,
+                },
+            ],
+        );
+        let msg = invalid_value(
+            config
+                .validate()
+                .expect_err("every prober is built, not just the first"),
+        );
+        assert!(msg.contains("at least one port"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_a_classifier_the_factory_would_refuse() {
+        let base = BaseProbeConfig {
+            classifier: Some(ClassifierConfig::Rules {
+                merge_mode: crate::classifier::MergeMode::Extend,
+                platform_rules: vec![crate::classifier::PlatformRule {
+                    signal: crate::classifier::SignalKind::SshBanner,
+                    pattern: "([unclosed".to_string(),
+                    platform: Some("broken".to_string()),
+                    os_version_capture: None,
+                    ssh_version_capture: None,
+                    http_server_capture: None,
+                    http_version_capture: None,
+                }],
+                role_rules: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let err = scenario(base)
+            .validate()
+            .expect_err("an uncompilable platform-rule pattern must be invalid");
+        assert!(
+            matches!(
+                err,
+                RastreoError::Classifier(crate::error::ClassifierError::InvalidRegex { .. })
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_role_rule_the_factory_would_refuse() {
+        let base = BaseProbeConfig {
+            classifier: Some(ClassifierConfig::Rules {
+                merge_mode: crate::classifier::MergeMode::Extend,
+                platform_rules: Vec::new(),
+                role_rules: vec![crate::classifier::RoleRule::SysObjectIdPrefix {
+                    prefix: "not.an.oid".to_string(),
+                    role: "router".to_string(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let err = scenario(base)
+            .validate()
+            .expect_err("a malformed sysObjectID prefix must be invalid");
+        assert!(
+            matches!(
+                err,
+                RastreoError::Classifier(crate::error::ClassifierError::InvalidRoleRule(_))
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_backwards_range_target() {
+        let config = DiscoverScenarioConfig::new(
+            BaseProbeConfig::new(),
+            vec![Target::Range {
+                start: "10.0.0.5".parse().expect("ip"),
+                end: "10.0.0.1".parse().expect("ip"),
+            }],
+            tcp_prober(),
+        );
+        let err = config
+            .validate()
+            .expect_err("a range whose start exceeds its end must be invalid");
+        assert!(
+            matches!(
+                err,
+                RastreoError::Resolver(crate::error::ResolverError::InvalidRange { .. })
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_mixed_family_range_target() {
+        let config = DiscoverScenarioConfig::new(
+            BaseProbeConfig::new(),
+            vec![Target::Range {
+                start: "10.0.0.1".parse().expect("ip"),
+                end: "2001:db8::1".parse().expect("ip"),
+            }],
+            tcp_prober(),
+        );
+        let err = config
+            .validate()
+            .expect_err("a range spanning two address families must be invalid");
+        assert!(
+            matches!(
+                err,
+                RastreoError::Resolver(crate::error::ResolverError::MixedFamilyRange { .. })
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_bad_target_behind_a_good_one() {
+        let config = DiscoverScenarioConfig::new(
+            BaseProbeConfig::new(),
+            vec![
+                Target::Ip("10.0.0.1".parse().expect("ip")),
+                Target::Range {
+                    start: "10.0.0.5".parse().expect("ip"),
+                    end: "10.0.0.1".parse().expect("ip"),
+                },
+            ],
+            tcp_prober(),
+        );
+        assert!(
+            config.validate().is_err(),
+            "every target is checked, not just the first"
+        );
+    }
+
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn validate_rejects_a_mib_enrichment_table_the_factory_cannot_read() {
+        let base = BaseProbeConfig {
+            fuser: Some(FuserConfig::MibEnrichment {
+                data_path: Some("/nonexistent/rastreo-mib-identity.tsv".to_string()),
+                inner: Box::new(direct_fuser(None)),
+            }),
+            ..Default::default()
+        };
+        let msg = invalid_value(
+            scenario(base)
+                .validate()
+                .expect_err("an unreadable enrichment table must be invalid"),
+        );
+        assert!(msg.contains("rastreo-mib-identity.tsv"), "msg: {msg}");
     }
 }

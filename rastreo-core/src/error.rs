@@ -69,6 +69,20 @@ pub enum ConfigError {
 
     #[error("no probe kinds selected")]
     EmptyProbeSelection,
+
+    #[error("unknown fuser '{name}'; available in this build: {available}")]
+    UnknownFuserKind { name: String, available: String },
+
+    #[error(
+        "fuser '{kind}' requires the '{feature}' Cargo feature, which this binary was not built with"
+    )]
+    FuserKindNotCompiled {
+        kind: &'static str,
+        feature: &'static str,
+    },
+
+    #[error("unknown classifier '{name}'; available: {available}")]
+    UnknownClassifierKind { name: String, available: String },
 }
 
 impl ConfigError {
@@ -350,6 +364,18 @@ mod tests {
                 param: "a udp protocol",
             },
             ConfigError::EmptyProbeSelection => ConfigError::EmptyProbeSelection,
+            ConfigError::UnknownFuserKind { .. } => ConfigError::UnknownFuserKind {
+                name: "identiy".into(),
+                available: "direct, identity".into(),
+            },
+            ConfigError::FuserKindNotCompiled { .. } => ConfigError::FuserKindNotCompiled {
+                kind: "mib_enrichment",
+                feature: "mib_enrichment",
+            },
+            ConfigError::UnknownClassifierKind { .. } => ConfigError::UnknownClassifierKind {
+                name: "rule".into(),
+                available: "noop, rules".into(),
+            },
         )
     }
 

@@ -20,13 +20,14 @@ pub mod sink;
 pub mod topology;
 
 pub use checkpoint::{
-    checkpoint_preflight, fuser_supports_resume, probers_support_resume, resume_eligibility,
-    resume_fingerprint, resume_preflight, Checkpoint, CheckpointConfig, CheckpointWriter,
+    fuser_supports_resume, preflight_checkpoint_request, probers_support_resume,
+    resume_eligibility, resume_fingerprint, Checkpoint, CheckpointConfig, CheckpointWriter,
     CHECKPOINT_VERSION,
 };
 pub use classifier::{
-    create_classifier, Classifier, ClassifierConfig, MergeMode, NoopClassifier, PlatformRule,
-    RoleRule, RulesClassifier, SignalKind, SIGNAL_KIND_COUNT,
+    create_classifier, Classifier, ClassifierConfig, ClassifierKind, ClassifierSelectionOptions,
+    MergeMode, NoopClassifier, PlatformRule, RoleRule, RulesClassifier, SignalKind,
+    CLASSIFIER_KIND_COUNT, SIGNAL_KIND_COUNT,
 };
 pub use collection_profile::CollectionProfileAssembler;
 pub use encoder::{
@@ -36,7 +37,10 @@ pub use error::{
     ClassifierError, ConfigError, DnsFailure, EncoderError, ProbeError, ProbeErrorKind,
     RastreoError, ResolverError, ResumeError, RuntimeError,
 };
-pub use fuser::{DirectFuser, Fuser, FuserConfig, IdentityFuser, IdentityHints, VrrpGroup};
+pub use fuser::{
+    DirectFuser, Fuser, FuserConfig, FuserKind, FuserSelectionOptions, IdentityFuser,
+    IdentityHints, VrrpGroup, FUSER_KIND_COUNT,
+};
 pub use hints::hint_for_error_kind;
 pub use model::{
     AltIp, AltIpRole, Collection, CollectionProfileRecord, Confidence, DeviceRecord, GnmiEndpoint,

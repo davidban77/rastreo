@@ -234,7 +234,7 @@ Each scenario prints its own status line to stderr, and the CLI runs every scena
 | `--rate <N>` | unset — no pacing (flag-driven) / YAML `probe_rate` (YAML-driven) | Maximum number of probes started per second. Minimum value is 1. When unset, probes start as fast as concurrency allows. In YAML-driven mode, setting `--rate` overrides the scenario's `probe_rate`. |
 | `--retries <N>` | `0` (flag-driven) / YAML `retries` (YAML-driven) | Retransmit attempts for the connectionless probers (UDP, SNMP, DNS, reverse DNS). Range 0–1024; `0` is single-shot. In YAML-driven mode, setting `--retries` overrides the scenario's `retries`. See [Retries on lossy links](#retries-on-lossy-links). |
 | `--timeout-ms <MS>` | `1000` (flag-driven) / YAML `timeout_ms` (YAML-driven) | Per-probe timeout in milliseconds. Minimum value is 1. In YAML-driven mode, setting `--timeout-ms` overrides the scenario's `timeout_ms`. |
-| `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
+| `--dry-run` | off | Validate the scenario, resolve targets, print the expansion to stdout, and exit without probing or opening a sink. A scenario rastreo cannot build gets no plan. Useful before running against production. See [Dry-run mode](#dry-run-mode) below. |
 | `--checkpoint <PATH>` | — | Write a resume checkpoint to this file during the scan, so a scan that dies can be resumed later. The scenario must be resume-safe or the scan is refused before probing. See [Checkpoints](#checkpoints). |
 | `--checkpoint-interval <N>` | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. See [Checkpoints](#checkpoints). |
 | `--resume` | off | Continue an interrupted scan from the checkpoint at `--checkpoint <PATH>`: skip the targets already written and probe the rest. Requires `--checkpoint`. Works for a single scenario only. See [Resuming](#resuming). |
@@ -418,9 +418,20 @@ rastreo discover \
 
 `--dry-run` validates the scenario, resolves targets (DNS lookups run for real), prints the expanded plan to stdout, and exits without probing anything or opening a sink. It works in both flag-driven and YAML-driven mode. CLI overrides (`--sink`, `--concurrency`, `--retries`, `--timeout-ms`) are applied to the plan, and the `probers:` line lists every selected prober with the port list it resolved to — what you see is what would run. This is the fastest way to confirm a `--probe` / `--port` / `--probe-ports` combination before sending traffic.
 
-The output shows one block per scenario listing each target's DNS / CIDR / range expansion, the configured probers with their parameters, the sink kind and destination, and the effective concurrency, probe rate, and per-probe timeout. The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count: unique IPs × probers, counting an address once even when several targets cover it. This matches the real scan for targets that do not overlap. When targets overlap, the real scan probes each shared address once per target, so it runs more probes than this count shows. See [Overlapping targets](targets.md#overlapping-targets).
+The output shows one block per scenario. Each block lists:
 
-CIDRs and ranges that expand to more than six addresses are truncated with an ellipsis and a count. DNS resolution failures are printed inline (`example.com → <error: DNS lookup failed: ...>`) and the run continues with the remaining targets. The exit code is `0` when at least one target resolves and `1` only when every target fails to resolve — in that case there is nothing left to probe.
+- each target's DNS / CIDR / range expansion
+- the configured probers with their parameters
+- the [fuser](../reference/glossary.md#fuser) chain that would merge probe results into device records, outermost layer first
+- the [classifier](classification.md) that would derive the canonical `platform`, `role`, and version fields
+- the sink kind and destination
+- the effective concurrency, probe rate, and per-probe timeout
+
+The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count: unique IPs × probers, counting an address once even when several targets cover it. This matches the real scan for targets that do not overlap. When targets overlap, the real scan probes each shared address once per target, so it runs more probes than this count shows. See [Overlapping targets](targets.md#overlapping-targets).
+
+CIDRs and ranges that expand to more than six addresses are truncated with an ellipsis and a count. A target that does not resolve is listed with its reason in place of the addresses. The plan covers every target you configured, resolved or not.
+
+The exit code is `1` when any target fails to resolve, and `0` when they all resolve. A real scan stops at the first target it cannot resolve. A plan with a failing target therefore describes a scan that would not start. The dry-run lists every failing target; a real scan reports only the first.
 
 Kafka, NATS, and file sinks are described from the configured values only. `--dry-run` never opens a network connection to the sink or writes to the output file, so a bogus broker address in `--brokers` completes in milliseconds instead of hanging.
 
@@ -434,6 +445,8 @@ rastreo discover --target 10.0.0.0/24 --probe tcp_connect --port 22,80 --dry-run
     targets:
       10.0.0.0/24 → 10.0.0.1, 10.0.0.2, 10.0.0.3, ... (254 addresses)
     probers: tcp_connect (ports 22, 80)
+    fuser: direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)
+    classifier: rules (merge_mode extend, platform_rules 0, role_rules 0)
     sink: stdout
     concurrency: 64
     rate: unlimited
@@ -441,6 +454,85 @@ rastreo discover --target 10.0.0.0/24 --probe tcp_connect --port 22,80 --dry-run
     timeout_ms: 1000
 total probes: 254
 ```
+
+The `fuser` and `classifier` lines show the stages that would run after probing, with the settings they would use. A scenario that names neither gets the pipeline defaults you see above: `direct` fusion, and the `rules` classifier over the tables built into rastreo. The `platform_rules` and `role_rules` counts cover only the rules the scenario added, so `0` means those built-in tables run on their own.
+
+!!! tip "Safe to log or share"
+    The plan strips inline credentials from a sink URL. A NATS server written as `nats://user:pass@host` renders as `nats://host`.
+
+A plan with failing targets still prints in full, then exits `1`:
+
+```bash
+rastreo discover --target nx.invalid --target 10.0.0.0/8 --probe tcp_connect --port 22 --dry-run
+```
+
+```text
+[dry-run] would run 1 scenario
+  scenario: discovery
+    targets:
+      nx.invalid → <error: DNS lookup failed for nx.invalid>
+      10.0.0.0/8 → <error: CIDR 10.0.0.0/8 expands to 16777214 hosts; exceeds the configured limit of 65536>
+    probers: tcp_connect (ports 22)
+    fuser: direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)
+    classifier: rules (merge_mode extend, platform_rules 0, role_rules 0)
+    sink: stdout
+    concurrency: 64
+    rate: unlimited
+    retries: 0
+    timeout_ms: 1000
+total probes: 0
+⚠ hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.
+Error: DNS lookup failed for nx.invalid: no records found for Query { name: Name("nx.invalid."), query_type: AAAA, query_class: IN }
+```
+
+### A scenario rastreo cannot build gets no plan
+
+A dry-run applies the same validity checks `rastreo discover` applies before it probes, in both flag-driven and YAML-driven mode. A scenario that fails one of them is not rendered as a plan at all. The command names the scenario and the reason, then exits `1`. Below, the scenario named `office` sets a fuser confidence score outside the allowed range:
+
+```text
+■ 'office' (1 of 1)  failed → confidence_baseline must be finite and in [0.0, 1.0], got 5
+[dry-run] would run 0 scenarios
+total probes: 0
+Error: 1 of 1 scenario(s) failed; see individual errors above
+```
+
+The same refusal covers a prober rastreo cannot build, a classifier rule that will not compile, and a malformed target range. [`rastreo validate`](validate.md#what-it-checks) lists every check and shows the message each one produces.
+
+!!! note "A target that fails to resolve is a different case"
+    An unresolvable target leaves the scenario itself valid. rastreo still renders the plan, marks the target that failed, and exits `1`. See [Dry-run mode](#dry-run-mode).
+
+A scenario with an empty `probers:` list is not refused, because a real run does not refuse it either. The run skips that scenario and carries on with the rest of the file. The dry-run predicts that: the scenario is left out of the plan, a notice says why, and the exit code stays `0`. Here the second scenario in a two-scenario file, `placeholder`, has no probers:
+
+```text
+• 'placeholder' (2 of 2): no probers configured, skipping
+```
+
+[`rastreo validate`](validate.md) judges the same file more strictly. It calls a scenario with no probers invalid, because a scenario that runs nothing is a mistake in the file. See [How it differs from a dry-run](validate.md#how-it-differs-from-a-dry-run).
+
+### Checkpoint and resume checks
+
+A run refuses more than a bad scenario. It also refuses a *request* it cannot accept — a `--checkpoint` or `--resume` that does not fit the scenario. A dry-run applies those refusals too, so it never reports a plan the run would then reject. Three checks apply when you pass `--checkpoint` or `--resume` with `--dry-run`:
+
+- **The scenario must be resume-safe.** See [Which scans can checkpoint](#which-scans-can-checkpoint) for the fuser, prober, and sink rules.
+- **The `--checkpoint` path must be free.** A path that already holds a checkpoint is refused, not overwritten.
+- **`--resume` needs a single scenario.** A `--file` holding several scenarios is refused, because one checkpoint path cannot record several scenarios' progress.
+
+The second check is why a dry-run reads the disk. Here a checkpoint from an earlier run is still at that path:
+
+```bash
+rastreo discover --file scan.yml --checkpoint scan.checkpoint --dry-run
+```
+
+```text
+■ 'office' (1 of 1)  failed → a checkpoint already exists at scan.checkpoint; remove it to start a fresh scan
+[dry-run] would run 0 scenarios
+total probes: 0
+Error: 1 of 1 scenario(s) failed; see individual errors above
+```
+
+Without `--dry-run`, the run refuses the same request, with the same message and the same exit code `1`.
+
+A dry-run reads the checkpoint path but never writes to it. An existing checkpoint keeps its contents. No new checkpoint file appears, and no sink is opened.
 
 ### Machine-readable output
 
@@ -458,12 +550,16 @@ The output is a JSON array with one object per scenario. Each object carries the
 - `scenario` — the scenario name. This is the plain name, the same value the HTTP server reports for a dry-run scan.
 - `targets` — one entry per configured target. Each has the original `target` string and a `resolution` that is either `{"resolved": [ip, ...]}` or `{"error": "..."}`.
 - `probers` — the probers that would run, with their ports.
-- `sink` — the destination.
+- `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
+- `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the scenario added.
+- `sink` — the destination, rendered from what the scenario configured. A scenario that names no `sink:` at all reads `stdout (default)` instead.
 - `max_concurrent` — probes allowed in flight at once.
 - `probe_rate` — probes started per second, or `null` when no pacing is set.
 - `retries` — retransmit attempts for the connectionless probers.
 - `timeout_ms` — per-probe timeout in milliseconds.
 - `total_probes` — unique IPs × probers, deduplicated across overlapping targets.
+
+The `lab` scenario behind the plan below declares `sink: {type: stdout}`, one `/30` target, and one TCP-connect prober on port 22:
 
 ```json
 [
@@ -473,11 +569,18 @@ The output is a JSON array with one object per scenario. Each object carries the
       {
         "target": "10.0.0.0/30",
         "resolution": {
-          "resolved": ["10.0.0.1", "10.0.0.2"]
+          "resolved": [
+            "10.0.0.1",
+            "10.0.0.2"
+          ]
         }
       }
     ],
-    "probers": ["tcp_connect (ports 22)"],
+    "probers": [
+      "tcp_connect (ports 22)"
+    ],
+    "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
+    "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
     "sink": "stdout",
     "max_concurrent": 64,
     "probe_rate": null,
@@ -488,7 +591,7 @@ The output is a JSON array with one object per scenario. Each object carries the
 ]
 ```
 
-A `--file` with several scenarios produces one array element per scenario, in file order. When a target fails to resolve, its `resolution` holds the error string and the plan still lists the remaining targets. The exit code follows the same rule as the text plan: `0` when at least one target resolves, `1` only when every target fails.
+A `--file` with several scenarios produces one array element per scenario, in file order. When a target fails to resolve, its `resolution` holds an `error` string instead of the address list. Every other target still appears. The exit code follows the text plan's rule: `1` when any target fails to resolve, `0` when they all resolve. The plan goes to stdout and the error message to stderr, so `jq` still reads a plan that exits `1`.
 
 ## Override precedence in YAML-driven mode
 
@@ -566,6 +669,9 @@ rastreo discover \
 ```
 
 rastreo writes the checkpoint every 5000 targets by default. `--checkpoint-interval <N>` sets how many targets pass between writes. A smaller number checkpoints more often and loses less work on a crash. A larger number writes less often. The minimum is 1.
+
+!!! tip "Check the request before you start the scan"
+    Add `--dry-run` to any `--checkpoint` or `--resume` command to find out whether it would be accepted. A dry-run applies the same three refusals a run applies, and writes nothing. See [Checkpoint and resume checks](#checkpoint-and-resume-checks).
 
 ### Resuming
 
@@ -650,6 +756,8 @@ Error: a checkpoint already exists at /var/log/scan.checkpoint; remove it to sta
 ```
 
 A file at the path that is not a valid checkpoint is refused the same way, with a `corrupt` message. rastreo never overwrites it.
+
+A dry-run refuses the same path, so you can check before the scan starts. See [Checkpoint and resume checks](#checkpoint-and-resume-checks).
 
 ### Lifecycle
 

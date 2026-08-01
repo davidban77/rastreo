@@ -1,0 +1,15 @@
+---
+source: rastreo-core/src/plan.rs
+expression: plan.to_string()
+---
+  scenario: discovery
+    targets:
+      127.0.0.1 → 127.0.0.1
+    probers: tcp_connect (ports 22, 80)
+    fuser: identity over direct (include_unreachable true, confidence_baseline 0.25, confidence_per_signal 0.1)
+    classifier: noop
+    sink: stdout
+    concurrency: 64
+    rate: unlimited
+    retries: 0
+    timeout_ms: 1000

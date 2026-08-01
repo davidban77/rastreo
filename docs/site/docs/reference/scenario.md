@@ -25,9 +25,9 @@ Any string scalar in the scenario may use `${VAR}` to interpolate an environment
 | `encoder` | object \| null | `null` (the destination decides) | Output encoding. Unset, the CLI renders the table for a stdout sink and NDJSON everywhere else; the HTTP server always pins NDJSON. See [Encoders](#encoders). |
 | `fuser` | object \| null | `null` (Direct, baseline 0.1 / per-signal 0.1) | Signal-fusion strategy. See [Fusers](#fusers). |
 | `classifier` | object \| null | `null` (Rules, baked-in tables, merge_mode extend) | Platform / os_version / role classifier applied after fusion. See [Classifier](#classifier). |
-| `sink` | object \| null | `null` | Output destination. See [Sinks](#sinks). On `POST /scans` the server strips this and writes records to an internal buffer that is returned in the response body. |
-| `targets` | array | — (required) | List of targets to probe. Must not be empty for `POST /scans`. See [Targets](#targets). |
-| `probers` | array | `[]` | List of probers to run against each target. Must not be empty for `POST /scans`. See [Probers](#probers). |
+| `sink` | object \| null | `null` | Output destination. See [Sinks](#sinks). `POST /scans` drops it before validating anything, so it is never checked and never used. Records come back in the response body instead, and a dry-run plan reads `stdout (default)`. |
+| `targets` | array | — (required) | List of targets to probe. An empty list is rejected on every surface. See [Targets](#targets). |
+| `probers` | array | `[]` | List of probers to run against each target. An empty list is rejected by `POST /scans` and by `rastreo validate`. `rastreo discover` skips the scenario instead. See [Probers](#probers). |
 
 ## Targets
 
