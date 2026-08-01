@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ipnet::IpNet;
@@ -15,8 +15,6 @@ use rastreo_core::{
 pub use rastreo_core::observability::otlp::OtlpConfig;
 #[cfg(feature = "otlp")]
 pub use rastreo_core::observability::otlp_config::OtlpProtocol;
-#[cfg(feature = "otlp")]
-use std::sync::OnceLock;
 
 pub(crate) struct HistogramShard {
     pub buckets: [AtomicU64; 11],
@@ -574,7 +572,8 @@ pub struct SinkReachability {
     pub reachable: AtomicBool,
     pub last_probe_epoch_ms: AtomicU64,
     pub last_error: Mutex<Option<String>>,
-    pub sink_type: Option<SinkType>,
+    // Writable: a sink that builds on a retry relabels itself from the construction hint.
+    sink_type: Mutex<Option<SinkType>>,
     pub configured: bool,
     pub probe_interval: Duration,
     pub probe_timeout: Duration,
@@ -587,7 +586,7 @@ impl SinkReachability {
             reachable: AtomicBool::new(false),
             last_probe_epoch_ms: AtomicU64::new(0),
             last_error: Mutex::new(None),
-            sink_type: None,
+            sink_type: Mutex::new(None),
             configured: false,
             probe_interval: Duration::from_secs(10),
             probe_timeout: Duration::from_secs(5),
@@ -604,14 +603,14 @@ impl SinkReachability {
             reachable: AtomicBool::new(false),
             last_probe_epoch_ms: AtomicU64::new(0),
             last_error: Mutex::new(None),
-            sink_type: Some(sink_type),
+            sink_type: Mutex::new(Some(sink_type)),
             configured: true,
             probe_interval,
             probe_timeout,
         }
     }
 
-    /// State for a sink that failed to construct at startup; surfaces the failure via `/readyz`.
+    /// State for a sink that has not built yet; surfaces the failure via `/readyz` while construction is retried.
     pub fn construction_failed(
         sink_type: Option<SinkType>,
         error: String,
@@ -622,11 +621,20 @@ impl SinkReachability {
             reachable: AtomicBool::new(false),
             last_probe_epoch_ms: AtomicU64::new(current_epoch_ms()),
             last_error: Mutex::new(Some(error)),
-            sink_type,
+            sink_type: Mutex::new(sink_type),
             configured: true,
             probe_interval,
             probe_timeout,
         }
+    }
+
+    pub fn sink_type(&self) -> Option<SinkType> {
+        *self.sink_type.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set_sink_type(&self, sink_type: SinkType) {
+        let mut guard = self.sink_type.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(sink_type);
     }
 
     pub fn record_success(&self) {
@@ -653,7 +661,7 @@ impl SinkReachability {
     }
 
     pub fn sink_type_label(&self) -> Option<&'static str> {
-        match self.sink_type {
+        match self.sink_type() {
             Some(t) => Some(t.as_label()),
             None if self.configured => Some("unknown"),
             None => None,
@@ -665,7 +673,7 @@ impl std::fmt::Debug for SinkReachability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SinkReachability")
             .field("configured", &self.configured)
-            .field("sink_type", &self.sink_type)
+            .field("sink_type", &self.sink_type())
             .field("reachable", &self.reachable.load(Ordering::Relaxed))
             .field(
                 "last_probe_epoch_ms",
@@ -723,6 +731,27 @@ impl SinkProbeConfig {
 /// handlers and the probe task can serialise access without blocking the runtime.
 pub type SharedSink = Arc<tokio::sync::Mutex<Box<dyn Sink>>>;
 
+/// Empty until the sink builds, then attached for the process lifetime; shared by every clone of
+/// [`AppState`], so a sink that builds late is visible to requests already holding a state clone.
+#[derive(Clone, Default)]
+pub(crate) struct SinkSlot(Arc<OnceLock<SharedSink>>);
+
+impl SinkSlot {
+    pub(crate) fn attached(sink: SharedSink) -> Self {
+        let slot = Self::default();
+        slot.attach(sink);
+        slot
+    }
+
+    pub(crate) fn get(&self) -> Option<SharedSink> {
+        self.0.get().cloned()
+    }
+
+    pub(crate) fn attach(&self, sink: SharedSink) {
+        let _ = self.0.set(sink);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub enum AuthConfig {
     #[default]
@@ -766,7 +795,7 @@ pub struct AppState {
     pub resolver: Arc<dyn Resolver>,
     pub metrics: Arc<Metrics>,
     pub readiness: Arc<ReadinessState>,
-    pub sink: Option<SharedSink>,
+    pub(crate) sink: SinkSlot,
     pub sink_reachability: Arc<SinkReachability>,
     pub auth: AuthConfig,
     pub max_body_bytes: usize,
@@ -791,7 +820,7 @@ impl AppState {
             resolver,
             metrics: Arc::new(Metrics::with_config(metrics)),
             readiness: Arc::new(ReadinessState::new(readiness)),
-            sink: None,
+            sink: SinkSlot::default(),
             sink_reachability: Arc::new(SinkReachability::not_configured()),
             auth: AuthConfig::default(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
@@ -799,9 +828,22 @@ impl AppState {
         }
     }
 
-    pub fn with_sink(
+    /// The server-configured sink, or `None` while it has not built yet.
+    pub fn sink(&self) -> Option<SharedSink> {
+        self.sink.get()
+    }
+
+    pub fn with_sink(self, sink: Option<SharedSink>, reachability: Arc<SinkReachability>) -> Self {
+        let slot = match sink {
+            Some(sink) => SinkSlot::attached(sink),
+            None => SinkSlot::default(),
+        };
+        self.with_sink_slot(slot, reachability)
+    }
+
+    pub(crate) fn with_sink_slot(
         mut self,
-        sink: Option<SharedSink>,
+        sink: SinkSlot,
         reachability: Arc<SinkReachability>,
     ) -> Self {
         self.sink = sink;
@@ -1612,9 +1654,9 @@ mod tests {
     #[test]
     fn app_state_default_sink_reachability_reports_not_configured() {
         let state = build_state();
-        assert!(state.sink.is_none());
+        assert!(state.sink().is_none());
         assert!(!state.sink_reachability.configured);
-        assert!(state.sink_reachability.sink_type.is_none());
+        assert!(state.sink_reachability.sink_type().is_none());
     }
 
     #[test]
@@ -1625,7 +1667,7 @@ mod tests {
             Duration::from_secs(5),
         );
         assert!(r.configured);
-        assert_eq!(r.sink_type, Some(SinkType::Kafka));
+        assert_eq!(r.sink_type(), Some(SinkType::Kafka));
         assert!(!r.reachable.load(Ordering::Relaxed));
         assert_eq!(r.last_probe_epoch_ms.load(Ordering::Relaxed), 0);
         assert!(r.last_error_snapshot().is_none());
@@ -1722,8 +1764,65 @@ mod tests {
             Duration::from_secs(5),
         ));
         let state = base.with_sink(Some(Arc::clone(&sink)), Arc::clone(&reach));
-        assert!(state.sink.is_some());
+        let stored = state.sink().expect("sink stored");
+        assert!(Arc::ptr_eq(&stored, &sink));
         assert!(Arc::ptr_eq(&state.sink_reachability, &reach));
+    }
+
+    #[test]
+    fn app_state_without_a_sink_reports_none() {
+        let reach = Arc::new(SinkReachability::construction_failed(
+            None,
+            "sink config file not found".into(),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        let state = build_state().with_sink(None, reach);
+        assert!(state.sink().is_none());
+    }
+
+    #[test]
+    fn sink_slot_attach_is_visible_to_clones_taken_before_the_attach() {
+        use rastreo_core::MemorySink;
+        let slot = SinkSlot::default();
+        let observer = slot.clone();
+        assert!(observer.get().is_none());
+
+        let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(
+            Box::new(MemorySink::new()) as Box<dyn Sink>
+        ));
+        slot.attach(Arc::clone(&sink));
+
+        let seen = observer.get().expect("clone sees the late attach");
+        assert!(Arc::ptr_eq(&seen, &sink));
+    }
+
+    #[test]
+    fn sink_slot_attach_keeps_the_first_sink() {
+        use rastreo_core::MemorySink;
+        let first: SharedSink = Arc::new(tokio::sync::Mutex::new(
+            Box::new(MemorySink::new()) as Box<dyn Sink>
+        ));
+        let second: SharedSink = Arc::new(tokio::sync::Mutex::new(
+            Box::new(MemorySink::new()) as Box<dyn Sink>
+        ));
+        let slot = SinkSlot::attached(Arc::clone(&first));
+        slot.attach(Arc::clone(&second));
+        assert!(Arc::ptr_eq(&slot.get().expect("attached"), &first));
+    }
+
+    #[test]
+    fn sink_reachability_set_sink_type_relabels_an_unknown_sink() {
+        let r = SinkReachability::construction_failed(
+            None,
+            "sink config file not found".into(),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        assert_eq!(r.sink_type_label(), Some("unknown"));
+        r.set_sink_type(SinkType::Kafka);
+        assert_eq!(r.sink_type(), Some(SinkType::Kafka));
+        assert_eq!(r.sink_type_label(), Some("kafka"));
     }
 
     #[test]

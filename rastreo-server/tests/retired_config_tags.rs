@@ -59,10 +59,9 @@ async fn sink_config_rejection(tag: &str) -> String {
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (state, probe_task) =
         spawn_sink_probe(AppState::new(resolver()), &config, shutdown_rx).await;
-    assert!(
-        probe_task.is_none(),
-        "a rejected sink config must not start a probe task"
-    );
+    probe_task
+        .expect("a rejected sink config is retried until it parses")
+        .abort();
 
     let addr = serve(build_app(state)).await;
     let payload: serde_json::Value = reqwest::get(format!("http://{addr}/readyz"))

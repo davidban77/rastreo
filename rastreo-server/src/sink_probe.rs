@@ -1,19 +1,23 @@
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use rastreo_core::{Sink, SinkType};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
-use crate::state::{AppState, Metrics, SharedSink, SinkProbeConfig, SinkReachability};
+use crate::state::{AppState, Metrics, SharedSink, SinkProbeConfig, SinkReachability, SinkSlot};
 
 struct ConstructError {
     hint: Option<SinkType>,
     err: anyhow::Error,
 }
 
-/// Build the sink referenced by `RASTREO_SINK_CONFIG_PATH` and spawn a background probe task that exits when `shutdown` fires; failures surface via `/readyz` rather than crashing the server.
+/// Build the sink referenced by `RASTREO_SINK_CONFIG_PATH` and spawn a background task that, every `probe_interval` until `shutdown` fires, rebuilds the sink while it has not built yet and probes it once it has; failures surface via `/readyz` rather than crashing the server.
 pub async fn spawn_sink_probe(
     state: AppState,
     config: &SinkProbeConfig,
@@ -23,8 +27,9 @@ pub async fn spawn_sink_probe(
         return (state, None);
     };
 
-    let sink_result = load_and_construct_sink(path, config.probe_timeout).await;
-    match sink_result {
+    let slot = SinkSlot::default();
+    let mut failures = ConstructionFailures::default();
+    let reachability = match load_and_construct_sink(path, config.probe_timeout).await {
         Ok(sink) => {
             let sink_type = sink.kind();
             let reachability = Arc::new(SinkReachability::configured(
@@ -33,33 +38,91 @@ pub async fn spawn_sink_probe(
                 config.probe_timeout,
             ));
             let sink: SharedSink = Arc::new(Mutex::new(sink));
+            slot.attach(Arc::clone(&sink));
+            log_sink_attached(path, sink_type, failures.attempts);
             run_probe(&sink, &reachability, &state.metrics, config.probe_timeout).await;
-            let handle = spawn_probe_task(
-                Arc::clone(&sink),
-                Arc::clone(&reachability),
-                Arc::clone(&state.metrics),
-                config.probe_interval,
-                config.probe_timeout,
-                shutdown,
-            );
-            (state.with_sink(Some(sink), reachability), Some(handle))
+            reachability
         }
         Err(ConstructError { hint, err }) => {
             // `{err:#}` keeps the cause chain: the outermost context alone names the file, not the reason.
             let detail = format!("{err:#}");
-            tracing::warn!(
+            failures.log(path, hint, &detail);
+            state.metrics.record_sink_probe_failure();
+            Arc::new(SinkReachability::construction_failed(
+                hint,
+                construction_error(&detail),
+                config.probe_interval,
+                config.probe_timeout,
+            ))
+        }
+    };
+
+    let handle = spawn_probe_task(
+        slot.clone(),
+        Arc::clone(&reachability),
+        Arc::clone(&state.metrics),
+        config.clone(),
+        failures,
+        shutdown,
+    );
+    (state.with_sink_slot(slot, reachability), Some(handle))
+}
+
+fn construction_error(detail: &str) -> String {
+    format!("sink construction failed: {detail}")
+}
+
+fn log_sink_attached(path: &Path, sink_type: SinkType, failed_attempts: u32) {
+    tracing::info!(
+        path = %path.display(),
+        sink_type = %sink_type.as_label(),
+        failed_attempts,
+        "sink attached; it is held for the lifetime of this process and never rebuilt"
+    );
+}
+
+#[derive(Default)]
+struct ConstructionFailures {
+    attempts: u32,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureVolume {
+    Warn,
+    Debug,
+}
+
+impl ConstructionFailures {
+    // Loud on a new failure mode and on attempts 1, 2, 4, 8, ...: a day-long outage stays visible without one WARN per tick.
+    fn observe(&mut self, detail: &str) -> FailureVolume {
+        self.attempts = self.attempts.saturating_add(1);
+        let changed = self.last_error.as_deref() != Some(detail);
+        self.last_error = Some(detail.to_string());
+        if changed || self.attempts.is_power_of_two() {
+            FailureVolume::Warn
+        } else {
+            FailureVolume::Debug
+        }
+    }
+
+    fn log(&mut self, path: &Path, hint: Option<SinkType>, detail: &str) {
+        let volume = self.observe(detail);
+        let attempt = self.attempts;
+        match volume {
+            FailureVolume::Warn => tracing::warn!(
                 error = %detail,
                 path = %path.display(),
                 sink_type = ?hint.map(SinkType::as_label),
-                "sink construction failed; /readyz will report sink_unreachable"
-            );
-            let reachability = Arc::new(SinkReachability::construction_failed(
-                hint,
-                format!("sink construction failed: {detail}"),
-                config.probe_interval,
-                config.probe_timeout,
-            ));
-            (state.with_sink(None, reachability), None)
+                attempt,
+                "sink construction failed; retrying every probe interval, /readyz reports sink_unreachable"
+            ),
+            FailureVolume::Debug => tracing::debug!(
+                error = %detail,
+                path = %path.display(),
+                attempt,
+                "sink construction still failing"
+            ),
         }
     }
 }
@@ -81,7 +144,8 @@ async fn load_and_construct_sink(
         let config = parse_sink_config(&raw)
             .with_context(|| format!("failed to parse sink config at {}", path.display()))
             .map_err(|err| ConstructError { hint: None, err })?;
-        let hint = sink_type_hint(&config);
+        // A parsed config names its kind even when it cannot be built: `unknown` means unreadable.
+        let hint = Some(config.sink_type());
         match timeout(construction_timeout, create_sink(&config)).await {
             Ok(Ok(sink)) => Ok(sink),
             Ok(Err(err)) => Err(ConstructError {
@@ -113,42 +177,100 @@ async fn load_and_construct_sink(
     }
 }
 
-#[cfg(feature = "config")]
-fn sink_type_hint(config: &rastreo_core::SinkConfig) -> Option<SinkType> {
-    use rastreo_core::SinkConfig;
-    match config {
-        SinkConfig::Stdout => Some(SinkType::Stdout),
-        SinkConfig::File { .. } => Some(SinkType::File),
-        SinkConfig::Memory => Some(SinkType::Memory),
-        #[cfg(feature = "kafka")]
-        SinkConfig::Kafka { .. } => Some(SinkType::Kafka),
-        #[cfg(feature = "nats")]
-        SinkConfig::Nats { .. } => Some(SinkType::Nats),
-        _ => None,
-    }
-}
-
 fn spawn_probe_task(
-    sink: SharedSink,
+    slot: SinkSlot,
     reachability: Arc<SinkReachability>,
     metrics: Arc<Metrics>,
-    interval_dur: Duration,
-    timeout_dur: Duration,
+    config: SinkProbeConfig,
+    mut failures: ConstructionFailures,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = interval(interval_dur);
+        let mut ticker = interval(config.probe_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        ticker.tick().await; // the first tick is immediate; startup already ran this cycle
         loop {
             tokio::select! {
                 biased;
                 _ = shutdown.changed() => break,
                 _ = ticker.tick() => {
-                    run_probe(&sink, &reachability, &metrics, timeout_dur).await;
+                    guard_panics(probe_tick(
+                        &slot,
+                        &config,
+                        &reachability,
+                        &metrics,
+                        &mut failures,
+                    ))
+                    .await;
                 }
             }
         }
     })
+}
+
+async fn probe_tick(
+    slot: &SinkSlot,
+    config: &SinkProbeConfig,
+    reachability: &Arc<SinkReachability>,
+    metrics: &Arc<Metrics>,
+    failures: &mut ConstructionFailures,
+) {
+    let sink = match slot.get() {
+        Some(sink) => sink,
+        None => match retry_construction(config, reachability, metrics, failures).await {
+            Some(sink) => {
+                slot.attach(Arc::clone(&sink));
+                sink
+            }
+            None => return,
+        },
+    };
+    run_probe(&sink, reachability, metrics, config.probe_timeout).await;
+}
+
+// A panic in the tick would otherwise kill the task and freeze /readyz on its last cached value.
+async fn guard_panics(tick: impl Future<Output = ()>) {
+    if let Err(payload) = AssertUnwindSafe(tick).catch_unwind().await {
+        tracing::error!(
+            panic = panic_detail(payload.as_ref()),
+            "sink probe tick panicked; the task continues on the next interval"
+        );
+    }
+}
+
+fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("panic payload was not a string")
+}
+
+async fn retry_construction(
+    config: &SinkProbeConfig,
+    reachability: &Arc<SinkReachability>,
+    metrics: &Arc<Metrics>,
+    failures: &mut ConstructionFailures,
+) -> Option<SharedSink> {
+    let path = config.config_path.as_ref()?;
+    match load_and_construct_sink(path, config.probe_timeout).await {
+        Ok(sink) => {
+            let sink_type = sink.kind();
+            reachability.set_sink_type(sink_type);
+            log_sink_attached(path, sink_type, failures.attempts);
+            Some(Arc::new(Mutex::new(sink)))
+        }
+        Err(ConstructError { hint, err }) => {
+            let detail = format!("{err:#}");
+            failures.log(path, hint, &detail);
+            if let Some(hint) = hint {
+                reachability.set_sink_type(hint);
+            }
+            reachability.record_failure(construction_error(&detail));
+            metrics.record_sink_probe_failure();
+            None
+        }
+    }
 }
 
 async fn run_probe(
@@ -426,7 +548,7 @@ mod tests {
         let cfg = SinkProbeConfig::default();
         let (_tx, rx) = make_shutdown();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
-        assert!(after.sink.is_none());
+        assert!(after.sink().is_none());
         assert!(!after.sink_reachability.configured);
         assert!(handle.is_none(), "no task spawned when no sink configured");
     }
@@ -453,9 +575,9 @@ mod tests {
         };
         let (_tx, rx) = make_shutdown();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
-        assert!(after.sink.is_some());
+        assert!(after.sink().is_some());
         assert!(after.sink_reachability.configured);
-        assert_eq!(after.sink_reachability.sink_type, Some(SinkType::Stdout));
+        assert_eq!(after.sink_reachability.sink_type(), Some(SinkType::Stdout));
         assert!(handle.is_some(), "handle returned for configured sink");
         if let Some(h) = handle {
             h.abort();
@@ -505,7 +627,7 @@ mod tests {
 
     #[cfg(feature = "config")]
     #[tokio::test]
-    async fn spawn_sink_probe_with_missing_file_marks_state_not_configured_with_error() {
+    async fn spawn_sink_probe_with_missing_file_records_error_and_keeps_retrying() {
         use std::sync::Arc as StdArc;
 
         use rastreo_core::{HickoryResolver, Resolver};
@@ -522,15 +644,21 @@ mod tests {
         };
         let (_tx, rx) = make_shutdown();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
-        assert!(after.sink.is_none());
+        assert!(after.sink().is_none());
         assert!(after.sink_reachability.configured);
         assert!(after.sink_reachability.last_error_snapshot().is_some());
-        assert!(handle.is_none(), "no task spawned on construction failure");
+        assert_eq!(
+            after.metrics.sink_probe_failure.load(Ordering::Relaxed),
+            1,
+            "a failed construction is a failed reachability check",
+        );
+        let handle = handle.expect("retry task spawned on construction failure");
+        handle.abort();
     }
 
     #[cfg(feature = "config")]
     #[tokio::test]
-    async fn spawn_sink_probe_with_malformed_yaml_marks_state_not_configured_with_error() {
+    async fn spawn_sink_probe_with_malformed_yaml_records_error_and_keeps_retrying() {
         use std::sync::Arc as StdArc;
 
         use rastreo_core::{HickoryResolver, Resolver};
@@ -550,10 +678,43 @@ mod tests {
         };
         let (_tx, rx) = make_shutdown();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
-        assert!(after.sink.is_none());
+        assert!(after.sink().is_none());
         assert!(after.sink_reachability.configured);
         assert!(after.sink_reachability.last_error_snapshot().is_some());
-        assert!(handle.is_none(), "no task spawned on parse failure");
+        let handle = handle.expect("retry task spawned on parse failure");
+        handle.abort();
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn a_config_that_parses_but_cannot_build_still_reports_its_sink_type() {
+        use std::sync::Arc as StdArc;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sink.yaml");
+        let records = dir.path().join("records");
+        tokio::fs::create_dir(&records).await.expect("create dir");
+        tokio::fs::write(&path, format!("type: file\npath: {}\n", records.display()))
+            .await
+            .expect("write yaml");
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let cfg = SinkProbeConfig {
+            config_path: Some(path),
+            probe_interval: Duration::from_secs(60),
+            probe_timeout: Duration::from_secs(5),
+        };
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+
+        assert!(after.sink().is_none());
+        assert_eq!(after.sink_reachability.sink_type(), Some(SinkType::File));
+        assert_eq!(after.sink_reachability.sink_type_label(), Some("file"));
+        assert!(after.sink_reachability.last_error_snapshot().is_some());
+        handle.expect("retry task spawned on build failure").abort();
     }
 
     #[cfg(all(feature = "config", feature = "kafka"))]
@@ -590,9 +751,9 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "spawn_sink_probe hung past construction timeout: {elapsed:?}",
         );
-        assert!(after.sink.is_none());
+        assert!(after.sink().is_none());
         assert!(after.sink_reachability.configured);
-        assert_eq!(after.sink_reachability.sink_type, Some(SinkType::Kafka));
+        assert_eq!(after.sink_reachability.sink_type(), Some(SinkType::Kafka));
         let err = after
             .sink_reachability
             .last_error_snapshot()
@@ -606,7 +767,8 @@ mod tests {
             0,
             "eager probe must not run when construction fails",
         );
-        assert!(handle.is_none(), "no task spawned on construction timeout");
+        let handle = handle.expect("retry task spawned on construction timeout");
+        handle.abort();
     }
 
     #[cfg(feature = "config")]
@@ -640,5 +802,236 @@ mod tests {
             "probe task must exit within 500ms of shutdown signal",
         );
         joined.unwrap().expect("task joined cleanly");
+    }
+
+    #[cfg(all(feature = "config", unix))]
+    #[tokio::test]
+    async fn shutdown_during_an_in_flight_construction_finishes_it_and_then_exits() {
+        use std::sync::Arc as StdArc;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sink.yaml");
+        // A FIFO read blocks until a writer closes, so the test decides when the read completes.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let startup_path = path.clone();
+        tokio::spawn(async move {
+            let _ = tokio::fs::write(&startup_path, "type: not-a-real-sink\n").await;
+        });
+
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let cfg = SinkProbeConfig {
+            config_path: Some(path.clone()),
+            probe_interval: Duration::from_millis(50),
+            probe_timeout: Duration::from_secs(5),
+        };
+        let (tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let handle = handle.expect("retry task spawned on parse failure");
+        assert!(after.sink().is_none());
+
+        // Feeds on a dropped sender too, so a failing assertion cannot leave the read blocked.
+        let (feed, feed_signal) = std::sync::mpsc::channel::<()>();
+        let feed_path = path.clone();
+        let feeder = std::thread::spawn(move || {
+            let _ = feed_signal.recv();
+            let _ = std::fs::write(&feed_path, "type: stdout\n");
+        });
+
+        // Long enough for the first retry tick to fire and block on the unfed FIFO.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx.send(true).expect("send shutdown");
+        feed.send(()).expect("release the feeder");
+
+        let joined = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        feeder.join().expect("feeder thread");
+        assert!(
+            joined.is_ok(),
+            "probe task must exit once the in-flight construction completes",
+        );
+        joined.unwrap().expect("task joined cleanly");
+        assert!(
+            after.sink().is_some(),
+            "shutdown must not cancel a construction the tick already started",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_tick_is_caught_and_the_task_keeps_going() {
+        let next_tick_ran = Arc::new(AtomicBool::new(false));
+        guard_panics(async { panic!("third-party client panicked") }).await;
+
+        let marker = Arc::clone(&next_tick_ran);
+        guard_panics(async move {
+            marker.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(next_tick_ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn panic_detail_reads_both_string_payload_shapes() {
+        assert_eq!(panic_detail(&"boom"), "boom");
+        assert_eq!(panic_detail(&String::from("boom")), "boom");
+        assert_eq!(panic_detail(&7_u32), "panic payload was not a string");
+    }
+
+    #[cfg(feature = "config")]
+    async fn wait_until(label: &str, mut condition: impl FnMut() -> bool) {
+        let waited = tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "timed out waiting for {label}");
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn sink_that_failed_to_build_attaches_once_its_config_appears() {
+        use std::sync::Arc as StdArc;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sink.yaml");
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let cfg = SinkProbeConfig {
+            config_path: Some(path.clone()),
+            probe_interval: Duration::from_millis(50),
+            probe_timeout: Duration::from_secs(5),
+        };
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let handle = handle.expect("retry task spawned");
+        assert!(after.sink().is_none());
+        assert_eq!(after.sink_reachability.sink_type_label(), Some("unknown"));
+
+        tokio::fs::write(&path, "type: stdout\n")
+            .await
+            .expect("write yaml");
+
+        let reach = StdArc::clone(&after.sink_reachability);
+        let attached = after.clone();
+        wait_until("the sink to attach", move || attached.sink().is_some()).await;
+        wait_until("the probe to report reachable", move || {
+            reach.reachable.load(Ordering::Relaxed)
+        })
+        .await;
+
+        assert_eq!(
+            after.sink_reachability.sink_type(),
+            Some(SinkType::Stdout),
+            "the attached sink's real kind must replace the construction hint",
+        );
+        assert_eq!(after.sink_reachability.sink_type_label(), Some("stdout"));
+        assert!(after.sink_reachability.last_error_snapshot().is_none());
+        assert!(
+            after.metrics.sink_probe_success.load(Ordering::Relaxed) >= 1,
+            "the attached sink must be probed, not just stored",
+        );
+        handle.abort();
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn sink_construction_that_keeps_failing_retries_on_the_interval_without_spinning() {
+        use std::sync::Arc as StdArc;
+        use std::time::Instant;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("never-written.yaml");
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let interval_dur = Duration::from_millis(100);
+        let cfg = SinkProbeConfig {
+            config_path: Some(path),
+            probe_interval: interval_dur,
+            probe_timeout: Duration::from_secs(5),
+        };
+        let (_tx, rx) = make_shutdown();
+        let start = Instant::now();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let handle = handle.expect("retry task spawned");
+        let first_stamp = after
+            .sink_reachability
+            .last_probe_epoch_ms
+            .load(Ordering::Relaxed);
+
+        let metrics = StdArc::clone(&after.metrics);
+        wait_until("two retries to fail", move || {
+            metrics.sink_probe_failure.load(Ordering::Relaxed) >= 3
+        })
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= interval_dur * 2,
+            "retries must be paced by the probe interval, not spun: {elapsed:?}",
+        );
+        assert!(after.sink().is_none());
+        assert!(!after.sink_reachability.reachable.load(Ordering::Relaxed));
+        assert!(after.sink_reachability.last_error_snapshot().is_some());
+        assert!(
+            after
+                .sink_reachability
+                .last_probe_epoch_ms
+                .load(Ordering::Relaxed)
+                > first_stamp,
+            "each retry must refresh seconds_since_last_probe on /readyz",
+        );
+        handle.abort();
+    }
+
+    #[test]
+    fn identical_construction_failures_warn_on_a_doubling_backoff() {
+        let mut failures = ConstructionFailures::default();
+        let volumes: Vec<FailureVolume> = (0..8)
+            .map(|_| failures.observe("broker unreachable"))
+            .collect();
+        assert_eq!(
+            volumes,
+            vec![
+                FailureVolume::Warn,
+                FailureVolume::Warn,
+                FailureVolume::Debug,
+                FailureVolume::Warn,
+                FailureVolume::Debug,
+                FailureVolume::Debug,
+                FailureVolume::Debug,
+                FailureVolume::Warn,
+            ],
+        );
+        assert_eq!(failures.attempts, 8);
+    }
+
+    #[test]
+    fn a_new_construction_failure_warns_between_backoff_points() {
+        let mut failures = ConstructionFailures::default();
+        for _ in 0..5 {
+            failures.observe("broker unreachable");
+        }
+        assert_eq!(
+            failures.observe("authorization violation"),
+            FailureVolume::Warn
+        );
+        assert_eq!(
+            failures.observe("authorization violation"),
+            FailureVolume::Debug
+        );
     }
 }

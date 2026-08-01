@@ -51,6 +51,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 async-trait = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 subtle = "2"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

@@ -200,8 +200,8 @@ async fn run_scan(
 
     // Memory child first so the response body captures every record even if the shared sink aborts mid-scan.
     let mut children: Vec<TeeChild> = vec![TeeChild::Owned(Box::new(memory_sink))];
-    if let Some(server_sink) = state.sink.as_ref() {
-        children.push(TeeChild::Shared(Arc::clone(server_sink)));
+    if let Some(server_sink) = state.sink() {
+        children.push(TeeChild::Shared(server_sink));
     }
     let pipeline_sink: Box<dyn Sink> = Box::new(TeeSink::new(children));
 
@@ -618,7 +618,7 @@ mod tests {
         let port = listener.local_addr().expect("local_addr").port();
 
         let state = state_with_system_resolver();
-        assert!(state.sink.is_none());
+        assert!(state.sink().is_none());
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
             vec![ProberConfig::TcpConnect { ports: vec![port] }],
