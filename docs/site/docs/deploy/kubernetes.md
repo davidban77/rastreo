@@ -138,6 +138,8 @@ You have three ways to supply the token.
       --set auth.enabled=false
     ```
 
+    A `POST /scans` that fails on this deployment returns `{"error":"internal server error"}` with no detail, because the caller never proved who they were. Read the pod logs for the reason, or turn authentication back on — see [What a 5xx body tells you](server.md#what-a-5xx-body-tells-you).
+
 !!! note "Read the token back for a client request"
     Fetch the stored token to build an authenticated call:
 

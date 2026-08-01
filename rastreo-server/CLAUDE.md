@@ -23,7 +23,7 @@ src/
 ├── error.rs       ← AppError + IntoResponse + RastreoError -> HTTP mapping
 └── routes/
     ├── mod.rs     ← route module re-exports
-    ├── auth.rs    ← require_bearer middleware (route_layer on /scans only)
+    ├── auth.rs    ← require_bearer middleware (route_layer on /scans only) + ErrorDisclosure
     ├── health.rs  ← GET /health (alias), GET /healthz, GET /readyz
     ├── metrics.rs ← GET /metrics (Prometheus text format)
     └── scans.rs   ← POST /scans handler + ScanResponse + InflightGuard
@@ -81,7 +81,7 @@ Errors:
 - 413 — the request body exceeded `RASTREO_MAX_BODY_BYTES`; rejected before JSON parsing.
 - 429 — the inflight-scan cap (`RASTREO_MAX_INFLIGHT_SCANS`, when non-zero) is reached; a real scan submitted while the server is at capacity is rejected rather than queued. The gauge is rolled back atomically so a rejected request never inflates it. Dry-runs consume no slot and are never 429'd.
 - 400 — bad scenario config (empty `targets` or `probers`, malformed JSON body) or unresolvable client input (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`, `AggregateHostCapExceeded`).
-- 500 — probe / encode / sink / runtime errors. A server-configured sink that returns an error mid-scan aborts the pipeline and surfaces as 500; the response body's `records` list is not returned even if the in-memory capture succeeded.
+- 500 — probe / encode / sink / runtime errors. A server-configured sink that returns an error mid-scan aborts the pipeline and surfaces as 500; the response body's `records` list is not returned even if the in-memory capture succeeded. The body carries the whole cause chain when auth was enforced on the request, and the fixed `internal server error` string when it was not.
 - 503 — request exceeded the server-side timeout (`--request-timeout-ms`), or the server-side DNS infrastructure failed (`ResolverError::DnsLookupFailed`). A scan dropped by the request-timeout aborts its in-flight probes and records `rastreo_server_scans_total{outcome="cancelled"}` plus its duration in the scan-duration histogram; it does not trip the `/readyz` scan-error quarantine (a client timeout is not a server fault).
 
 A request holds the HTTP connection open for the duration of the scan. The pipeline's own `BoundedScheduler` enforces per-scan concurrency via the scenario's `max_concurrent` and paces probe starts via `probe_rate`.
@@ -91,6 +91,7 @@ A request holds the HTTP connection open for the duration of the scan. The pipel
 - Use `anyhow` at the binary boundary.
 - `AppError` maps `RastreoError` to HTTP status codes via `IntoResponse`: `Config` errors map to 400; `Resolver` errors map to 400 for structural / client-input variants (including `AggregateHostCapExceeded`), to 403 for `TargetNotAllowed`, and to 503 for `DnsLookupFailed` (server-side DNS infrastructure failure); `Probe`, `Encoder`, `Sink`, and `Runtime` errors map to 500.
 - Error response body is `{"error": "<message>"}`.
+- **A 5xx body carries the error detail exactly when the caller had to authenticate to reach it.** `impl From<RastreoError> for AppError` redacts every 5xx to `internal server error` and is what a bare `?` gives you — that is the default and it stays. `AppError::from_rastreo(err, disclosure)` discloses instead, but only for an `ErrorDisclosure` whose private `caller_authenticated` field is set, and the only code that can set it is `require_bearer` in `routes/auth.rs`, after a token compared equal. `ErrorDisclosure` extracts from request extensions and defaults to withholding, so a route the middleware does not cover cannot obtain a disclosing one — `AuthConfig::Enabled` in `AppState` is NOT proof, since it says nothing about this request. Disclosed bodies render the whole cause chain (`RastreoError::Sink` is `#[error(transparent)]` over `SinkError`, whose Display is the useless `output sink failed`); 4xx bodies stay at the top-level Display, unchanged. Every 5xx is logged either way, with a `disclosed` field.
 - Do not panic. Recover from poisoned locks; return 500 with a JSON error body.
 
 ## Known Limitations
