@@ -70,7 +70,7 @@ The most useful `values.yaml` knobs are:
 | `podDisruptionBudget.enabled`    | `false`                       | Create a PDB with `minAvailable: 1`.                      |
 | `ingress.enabled`                | `false`                       | Create an `Ingress` for the service.                      |
 | `serviceMonitor.enabled`         | `false`                       | Create a Prometheus Operator `ServiceMonitor` that scrapes `/metrics`. |
-| `alerts.enabled`                 | `false`                       | Create a Prometheus Operator `PrometheusRule` with four packaged alerts. See [Observability · Alerts](../reference/observability.md#alerts). |
+| `alerts.enabled`                 | `false`                       | Create a Prometheus Operator `PrometheusRule` with the packaged alerts. See [Observability · Alerts](../reference/observability.md#alerts). |
 | `readiness.maxInflightScans`     | unset (binary default `100`)  | `/readyz` gate: max concurrent `POST /scans` before the pod reports not-ready. Set to `0` to disable. Renders `RASTREO_MAX_INFLIGHT_SCANS`. See [Health endpoints · `/readyz`](../reference/health-endpoints.md#readyz-readiness). |
 | `readiness.sinkErrorQuarantineSeconds` | unset (binary default `30`) | `/readyz` gate: quarantine window after any sink error. Set to `0` to disable. Renders `RASTREO_SINK_ERROR_QUARANTINE_SECS`. See [Health endpoints · `/readyz`](../reference/health-endpoints.md#readyz-readiness). |
 | `readiness.scanErrorQuarantineSeconds` | unset (binary default `30`) | `/readyz` gate: quarantine window after any scan error. Set to `0` to disable. Renders `RASTREO_SCAN_ERROR_QUARANTINE_SECS`. See [Health endpoints · `/readyz`](../reference/health-endpoints.md#readyz-readiness). |

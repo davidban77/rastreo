@@ -95,8 +95,13 @@ Every metric enumerated on the [Observability page](observability.md#metrics) is
 | `rastreo_server_sink_errors_total` | observable counter (u64) | `error_class` (bounded set — see [error_class taxonomy](observability.md#error_class-taxonomy)) |
 | `rastreo_server_dlq_records_total` | observable counter (u64) | `sink_type` (`kafka\|nats`), `error_class` |
 | `rastreo_server_scan_duration_seconds` | histogram (f64, unit `s`) | `scenario` (see [scenario label](observability.md#scenario-label)) |
+| `rastreo_server_sink_reachability_probe_total` | observable counter (u64) | `outcome=success\|failure`, `sink_type` |
+| `rastreo_server_sink_probe_ticks_total` | observable counter (u64) | `sink_type` |
+| `rastreo_server_sink_reachable` | observable gauge (u64) | `sink_type` |
 | `rastreo_server_uptime_seconds` | observable gauge (f64) | — |
 | `rastreo_server_build_info` | observable gauge (u64, value always `1`) | `version` |
+
+The three sink-probe instruments are registered only when `RASTREO_SINK_CONFIG_PATH` is set. Whether a sink is configured is fixed for the life of the process, so a server started without one exports nothing on those names rather than exporting zeros.
 
 The instrument names use underscore separators, not the OpenTelemetry semantic-convention dot separators, so they line up with the Prometheus-format names on `/metrics`. When a collector like Grafana Alloy fans OTLP metrics into a downstream Prometheus datasource, the OTLP and scrape paths surface the same metric names.
 

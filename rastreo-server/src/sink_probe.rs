@@ -57,6 +57,8 @@ pub async fn spawn_sink_probe(
         }
     };
 
+    reachability.record_tick();
+
     let handle = spawn_probe_task(
         slot.clone(),
         Arc::clone(&reachability),
@@ -215,6 +217,8 @@ async fn probe_tick(
     metrics: &Arc<Metrics>,
     failures: &mut ConstructionFailures,
 ) {
+    // Stamped before the awaits: a cycle that never returns still proves the task reached it.
+    reachability.record_tick();
     let sink = match slot.get() {
         Some(sink) => sink,
         None => match retry_construction(config, reachability, metrics, failures).await {
@@ -279,13 +283,15 @@ async fn run_probe(
     metrics: &Arc<Metrics>,
     timeout_dur: Duration,
 ) {
-    // Lock unavailable within timeout means a scan holds it — busy, not unhealthy. Skip
-    // this cycle so reachability keeps its last state instead of flipping to unreachable.
+    // The lock is held for one sink operation at a time, so losing it for a whole timeout means a
+    // single write/flush/close is outlasting the probe. Skip rather than report a verdict we did
+    // not measure; the skip is visible as the gap between the tick counter and the probe counters.
     let guard = match timeout(timeout_dur, sink.lock()).await {
         Ok(guard) => guard,
         Err(_) => {
             tracing::debug!(
-                "sink probe skipped: shared sink lock unavailable (concurrent scan in progress)"
+                timeout_ms = timeout_dur.as_millis(),
+                "sink probe skipped: a sink operation held the shared lock past the probe timeout"
             );
             return;
         }
@@ -512,6 +518,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn probe_tick_stamps_the_liveness_tick_when_the_sink_lock_is_held() {
+        let sink = shared(Box::new(AlwaysOk));
+        let slot = SinkSlot::attached(Arc::clone(&sink));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Stdout,
+            Duration::from_millis(50),
+            Duration::from_millis(20),
+        ));
+        let metrics = Arc::new(Metrics::new());
+        let config = SinkProbeConfig {
+            config_path: None,
+            probe_interval: Duration::from_millis(50),
+            probe_timeout: Duration::from_millis(20),
+        };
+
+        let holder_sink = Arc::clone(&sink);
+        let hold_ready = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let hold_ready_clone = Arc::clone(&hold_ready);
+        let release_clone = Arc::clone(&release);
+        let hold_handle = tokio::spawn(async move {
+            let _guard = holder_sink.lock().await;
+            hold_ready_clone.notify_one();
+            release_clone.notified().await;
+        });
+        hold_ready.notified().await;
+
+        let mut failures = ConstructionFailures::default();
+        probe_tick(&slot, &config, &reach, &metrics, &mut failures).await;
+
+        assert!(
+            reach.last_tick_epoch_ms.load(Ordering::Relaxed) > 0,
+            "a tick that skips the probe still proves the task is alive",
+        );
+        assert_eq!(
+            reach.last_probe_epoch_ms.load(Ordering::Relaxed),
+            0,
+            "a skipped probe produces no result to stamp",
+        );
+        assert_eq!(reach.ticks.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.sink_probe_success.load(Ordering::Relaxed)
+                + metrics.sink_probe_failure.load(Ordering::Relaxed),
+            0,
+            "the gap between the tick counter and the probe counters is the skipped-probe count",
+        );
+
+        release.notify_one();
+        hold_handle.await.expect("holder task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_that_pays_the_lock_wait_and_the_probe_in_full_fits_the_modelled_cycle() {
+        use crate::routes::health::longest_legitimate_cycle_secs;
+
+        let probe_interval = Duration::from_secs(1);
+        let probe_timeout = Duration::from_secs(4);
+        let hold = Duration::from_secs(3);
+
+        let started = Arc::new(AtomicBool::new(false));
+        let sink = shared(Box::new(HangingProbe {
+            started: Arc::clone(&started),
+        }));
+        let slot = SinkSlot::attached(Arc::clone(&sink));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Nats,
+            probe_interval,
+            probe_timeout,
+        ));
+        let metrics = Arc::new(Metrics::new());
+        let config = SinkProbeConfig {
+            config_path: None,
+            probe_interval,
+            probe_timeout,
+        };
+
+        let holder_sink = Arc::clone(&sink);
+        let hold_ready = Arc::new(tokio::sync::Notify::new());
+        let hold_ready_clone = Arc::clone(&hold_ready);
+        // Released just short of the lock timeout, so the tick pays the lock wait and then the probe.
+        let hold_handle = tokio::spawn(async move {
+            let _guard = holder_sink.lock().await;
+            hold_ready_clone.notify_one();
+            tokio::time::sleep(hold).await;
+        });
+        hold_ready.notified().await;
+
+        let mut failures = ConstructionFailures::default();
+        let start = tokio::time::Instant::now();
+        probe_tick(&slot, &config, &reach, &metrics, &mut failures).await;
+        let elapsed = start.elapsed();
+        hold_handle.await.expect("holder task");
+
+        assert!(
+            started.load(Ordering::SeqCst),
+            "the lock must be granted before it times out, so the probe runs too",
+        );
+        assert_eq!(
+            elapsed,
+            hold + probe_timeout,
+            "the tick must pay both bounded awaits in full",
+        );
+        assert!(
+            elapsed.as_secs_f64() <= longest_legitimate_cycle_secs(probe_interval, probe_timeout),
+            "a {elapsed:?} tick does not fit the {}s cycle the staleness window is built from",
+            longest_legitimate_cycle_secs(probe_interval, probe_timeout),
+        );
+    }
+
+    #[tokio::test]
     async fn success_after_failure_clears_last_error() {
         let counter = Arc::new(AtomicUsize::new(0));
         let sink = shared(Box::new(CountedFail(Arc::clone(&counter))));
@@ -550,6 +666,14 @@ mod tests {
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(after.sink().is_none());
         assert!(!after.sink_reachability.configured);
+        assert_eq!(
+            after
+                .sink_reachability
+                .last_tick_epoch_ms
+                .load(Ordering::Relaxed),
+            0,
+            "an unconfigured sink has no probe task, so it must never look stalled",
+        );
         assert!(handle.is_none(), "no task spawned when no sink configured");
     }
 
@@ -623,6 +747,128 @@ mod tests {
         if let Some(h) = handle {
             h.abort();
         }
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn spawn_sink_probe_stamps_the_liveness_tick_on_the_startup_cycle() {
+        use std::sync::Arc as StdArc;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sink.yaml");
+        tokio::fs::write(&path, "type: stdout\n")
+            .await
+            .expect("write yaml");
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let cfg = SinkProbeConfig {
+            config_path: Some(path),
+            probe_interval: Duration::from_secs(3600),
+            probe_timeout: Duration::from_secs(5),
+        };
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        assert!(
+            after
+                .sink_reachability
+                .last_tick_epoch_ms
+                .load(Ordering::Relaxed)
+                > 0,
+            "the startup cycle counts as a tick, so /readyz is never gated on it",
+        );
+        if let Some(h) = handle {
+            h.abort();
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn spawn_sink_probe_stamps_the_liveness_tick_when_construction_fails() {
+        use std::sync::Arc as StdArc;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let cfg = SinkProbeConfig {
+            config_path: Some(std::path::PathBuf::from(
+                "/tmp/rastreo-sink-does-not-exist-5512087.yaml",
+            )),
+            probe_interval: Duration::from_secs(3600),
+            probe_timeout: Duration::from_secs(5),
+        };
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        assert!(
+            after
+                .sink_reachability
+                .last_tick_epoch_ms
+                .load(Ordering::Relaxed)
+                > 0,
+        );
+        handle.expect("retry task spawned").abort();
+    }
+
+    #[cfg(all(feature = "config", unix))]
+    #[tokio::test]
+    async fn a_cycle_that_never_returns_still_records_that_it_started() {
+        use std::sync::Arc as StdArc;
+
+        use rastreo_core::{HickoryResolver, Resolver};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sink.yaml");
+        // A FIFO read blocks until a writer closes, so a tick that is not fed never completes.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let startup_path = path.clone();
+        tokio::spawn(async move {
+            let _ = tokio::fs::write(&startup_path, "type: not-a-real-sink\n").await;
+        });
+
+        let resolver: StdArc<dyn Resolver> =
+            StdArc::new(HickoryResolver::from_system().expect("resolver"));
+        let state = AppState::new(resolver);
+        let cfg = SinkProbeConfig {
+            config_path: Some(path.clone()),
+            probe_interval: Duration::from_millis(50),
+            probe_timeout: Duration::from_secs(60),
+        };
+        let (_tx, rx) = make_shutdown();
+        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let handle = handle.expect("retry task spawned on parse failure");
+        let startup_ticks = after.sink_reachability.ticks.load(Ordering::Relaxed);
+
+        // Feeds on a dropped sender too, so a failing assertion cannot leave the read blocked.
+        let (feed, feed_signal) = std::sync::mpsc::channel::<()>();
+        let feed_path = path.clone();
+        let feeder = std::thread::spawn(move || {
+            let _ = feed_signal.recv();
+            let _ = std::fs::write(&feed_path, "type: stdout\n");
+        });
+
+        let reach = StdArc::clone(&after.sink_reachability);
+        wait_until("the wedged cycle to record its start", move || {
+            reach.ticks.load(Ordering::Relaxed) > startup_ticks
+        })
+        .await;
+        assert_eq!(
+            after.metrics.sink_probe_failure.load(Ordering::Relaxed),
+            1,
+            "the wedged cycle must not have reached a result, so only startup counted",
+        );
+
+        handle.abort();
+        feed.send(()).expect("release the feeder");
+        feeder.join().expect("feeder thread");
     }
 
     #[cfg(feature = "config")]

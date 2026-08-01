@@ -112,6 +112,23 @@ spec:
               Inspect broker / server connectivity, `/readyz`, and the
               `last_probe_error` field.
 
+        - alert: RastreoSinkProbeStalled
+          expr: |
+            increase(rastreo_server_sink_probe_ticks_total[5m]) == 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "rastreo-server sink probe task has stopped running"
+            description: |
+              The background sink reachability probe on
+              {{ `{{ $labels.instance }}` }} has not started a cycle in 5 minutes.
+              `rastreo_server_sink_reachable` is frozen at the value it last
+              published and no longer says anything about sink type
+              {{ `{{ $labels.sink_type }}` }}. /readyz reports the same state as
+              `sink_probe_stalled`. Widen this range if
+              RASTREO_SINK_PROBE_INTERVAL_SECS is longer than 5 minutes.
+
         - alert: RastreoBuildOld
           expr: |
             rastreo_server_uptime_seconds > {{ int .Values.alerts.buildAgeThresholdSeconds }}
