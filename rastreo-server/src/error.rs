@@ -74,15 +74,21 @@ impl From<RastreoError> for AppError {
     }
 }
 
-// Map client-supplied input errors to 4xx; everything internal to 500.
+// The trailing arm is what `#[non_exhaustive]` demands, not a decision: `every_rastreo_error_variant_declares_its_own_status` fails until a new variant has its own arm.
 fn status_for(err: &RastreoError) -> StatusCode {
     match err {
         RastreoError::Config(_) => StatusCode::BAD_REQUEST,
+        RastreoError::Classifier(_) => StatusCode::BAD_REQUEST,
         RastreoError::Resolver(inner) => match inner {
             ResolverError::DnsLookupFailed { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ResolverError::TargetNotAllowed { .. } => StatusCode::FORBIDDEN,
             _ => StatusCode::BAD_REQUEST,
         },
+        RastreoError::Probe(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        RastreoError::Encoder(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        RastreoError::Sink(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        RastreoError::Runtime(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        RastreoError::Resume(_) => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -112,7 +118,10 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rastreo_core::{ConfigError, EncoderError, ProbeError, ResolverError, RuntimeError};
+    use rastreo_core::{
+        ClassifierError, ConfigError, EncoderError, ProbeError, ResolverError, ResumeError,
+        RuntimeError,
+    };
 
     #[test]
     fn config_error_maps_to_400() {
@@ -226,6 +235,47 @@ mod tests {
     #[test]
     fn runtime_error_maps_to_500() {
         let err: AppError = RastreoError::Runtime(RuntimeError::TaskPanicked("p".into())).into();
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    fn uncompilable_classifier_error() -> RastreoError {
+        let config: rastreo_core::ClassifierConfig = serde_json::from_value(serde_json::json!({
+            "type": "rules",
+            "platform_rules": [
+                {"signal": "ssh_banner", "pattern": "([unclosed", "platform": "broken"}
+            ],
+        }))
+        .expect("classifier config parses");
+        rastreo_core::create_classifier(&config)
+            .err()
+            .expect("an uncompilable pattern is refused")
+    }
+
+    #[test]
+    fn classifier_error_maps_to_400() {
+        let err: AppError = uncompilable_classifier_error().into();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("([unclosed"),
+            "the 400 body names the pattern the caller sent: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn classifier_rule_shape_errors_map_to_400() {
+        for inner in [
+            ClassifierError::InvalidPlatformRule("captures os_version without a platform".into()),
+            ClassifierError::InvalidRoleRule("sysObjectID prefix is not dotted-decimal".into()),
+        ] {
+            let err: AppError = RastreoError::Classifier(inner).into();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn resume_error_maps_to_500() {
+        let err: AppError = RastreoError::Resume(ResumeError::FingerprintMismatch).into();
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -366,6 +416,50 @@ mod tests {
     fn error_chain_of_a_sourceless_error_is_its_display() {
         let err = RastreoError::Config(ConfigError::InvalidValue("bad".into()));
         assert_eq!(error_chain(&err), err.to_string());
+    }
+
+    const CORE_ERROR_SOURCE: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../rastreo-core/src/error.rs");
+    const OWN_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/error.rs");
+
+    fn umbrella_variants(source: &str) -> Vec<String> {
+        let (_, rest) = source
+            .split_once("pub enum RastreoError {")
+            .expect("RastreoError declaration");
+        let (body, _) = rest.split_once("\n}").expect("RastreoError body");
+        body.lines()
+            .filter_map(|line| line.trim().split(['(', '{', ',']).next())
+            .filter(|name| name.starts_with(char::is_uppercase))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn status_for_body(source: &str) -> &str {
+        let (_, rest) = source
+            .split_once("fn status_for(")
+            .expect("status_for declaration");
+        rest.split_once("\n}\n").expect("status_for body").0
+    }
+
+    // `#[non_exhaustive]` forces the trailing wildcard, so no compiler check can demand an arm per variant here.
+    #[test]
+    fn every_rastreo_error_variant_declares_its_own_status() {
+        let core = std::fs::read_to_string(CORE_ERROR_SOURCE).expect("read core error source");
+        let variants = umbrella_variants(&core);
+        // A count, not a named variant: a body the sweep truncated early still parses the first one.
+        assert!(
+            variants.len() >= 8,
+            "the sweep parsed a truncated RastreoError body: {variants:?}"
+        );
+
+        let own = std::fs::read_to_string(OWN_SOURCE).expect("read own source");
+        let arms = status_for_body(&own);
+        for variant in variants {
+            assert!(
+                arms.contains(&format!("RastreoError::{variant}")),
+                "RastreoError::{variant} inherits 500 from the trailing arm; give it an arm in status_for"
+            );
+        }
     }
 
     #[tokio::test]

@@ -118,11 +118,11 @@ When `POST /scans` returns an error, the HTTP status is derived from the `Rastre
 
 | Variant | HTTP status | Response body |
 |---|---|---|
-| `Config(_)` | `400 Bad Request` | `{"error": "<full error message>"}` |
+| `Config(_)`, `Classifier(_)` | `400 Bad Request` | `{"error": "<full error message>"}` |
 | `Resolver(TargetNotAllowed { .. })` | `403 Forbidden` | `{"error": "<full error message>"}` |
 | `Resolver(DnsLookupFailed { .. })` | `503 Service Unavailable` | authenticated: `{"error": "<message>: <cause>: ..."}` — unauthenticated: `{"error": "internal server error"}` |
 | All other `Resolver(_)` variants | `400 Bad Request` | `{"error": "<full error message>"}` |
-| `Probe(_)`, `Encoder(_)`, `Sink(_)`, `Runtime(_)`, `Classifier(_)`, `Resume(_)` | `500 Internal Server Error` | authenticated: `{"error": "<message>: <cause>: ..."}` — unauthenticated: `{"error": "internal server error"}` |
+| `Probe(_)`, `Encoder(_)`, `Sink(_)`, `Runtime(_)`, `Resume(_)` | `500 Internal Server Error` | authenticated: `{"error": "<message>: <cause>: ..."}` — unauthenticated: `{"error": "internal server error"}` |
 
 For `4xx` responses the body carries the full error message — these are caller-supplied input errors and the detail is safe to return.
 
@@ -134,7 +134,7 @@ For `5xx` responses the body depends on whether the caller had to authenticate t
 
 With authentication disabled (`RASTREO_AUTH_DISABLED=true`, or `auth.enabled: false`) any caller that can reach the endpoint gets in, so the body is redacted to `internal server error`. Both forms log the full error at `ERROR` level, tagged with a `disclosed` field, so operators reading logs see the same thing either way. See [rastreo-server · What a 5xx body tells you](../deploy/server.md#what-a-5xx-body-tells-you).
 
-Empty `targets` or empty `probers` are validated before the variant flow above and return `400` with the message `scenario.targets must not be empty` or `scenario.probers must not be empty` respectively. Requests that exceed `--request-timeout-ms` return `503 Service Unavailable` from the timeout middleware layer.
+Scenario validation runs before any target is resolved, on a dry-run as well as on a real scan. It raises `Config(_)` and `Classifier(_)` errors, both of which map to `400` through the table above. Empty `targets` reads `scenario.targets must not be empty`; empty `probers` reads `scenario.probers must not be empty`; a `platform_rules` entry whose `pattern` will not compile reads ``invalid regex `<pattern>` ``. Requests that exceed `--request-timeout-ms` return `503 Service Unavailable` from the timeout middleware layer.
 
 ## See also
 

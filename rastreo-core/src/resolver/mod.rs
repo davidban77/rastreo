@@ -311,6 +311,14 @@ fn range_bounds(start: IpAddr, end: IpAddr) -> Result<(IpAddr, IpAddr, u128), Ra
     }
 }
 
+/// The refusals a target earns from its own written form, before any lookup and independent of a resolver's host limit.
+pub(crate) fn ensure_target_shape(target: &Target) -> Result<(), RastreoError> {
+    match target {
+        Target::Ip(_) | Target::Cidr(_) | Target::DnsName(_) => Ok(()),
+        Target::Range { start, end } => range_bounds(*start, *end).map(|_| ()),
+    }
+}
+
 fn ip_to_bits(ip: IpAddr) -> (bool, u128) {
     match ip {
         IpAddr::V4(a) => (false, a.to_bits() as u128),

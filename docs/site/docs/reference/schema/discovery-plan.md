@@ -16,6 +16,8 @@ Structured plan of a single discovery scenario — what a dry-run would probe, w
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `classifier` | string | yes | Human-readable summary of the resolved classifier. |
+| `fuser` | string | yes | Human-readable summary of the resolved fuser chain, outermost layer first. |
 | `max_concurrent` | uint32 | yes | Effective in-flight probe cap for this run. |
 | `probe_rate` | uint32 \| null | no | Effective probes-per-second cap; `null` when unlimited. |
 | `probers` | array<string> | yes | Human-readable summary of each configured prober. |

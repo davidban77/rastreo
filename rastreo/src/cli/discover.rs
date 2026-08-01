@@ -21,9 +21,10 @@ use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
-    resolve_scenario_targets, run_discovery, CheckpointConfig, ConfigError, DiscoveryPlan,
-    DiscoveryProgress, DiscoverySummary, EncoderConfig, HickoryResolver, PlanKnobs, ProbeKind,
-    RastreoError, ResolvedScenarioTarget, RunOptions, SinkConfig, Target,
+    preflight_checkpoint_request, resolve_scenario_targets, run_discovery, CheckpointConfig,
+    ConfigError, DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig,
+    HickoryResolver, PlanKnobs, ProbeKind, RastreoError, ResolvedScenarioTarget, RunOptions,
+    SinkConfig, Target,
 };
 use tokio::sync::watch;
 
@@ -428,9 +429,21 @@ async fn run_dry_run(args: &DiscoverArgs, mode: OutputMode) -> Result<()> {
 
     let scenario = scenario_from_flags(args, mode)?;
     let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
-    let plan = build_scenario_plan("discovery", &scenario, &resolutions, args);
+    let plan = build_scenario_plan("discovery", &scenario, &resolutions, args)?;
+    dry_run_checkpoint_preflight(&scenario, args)?;
     render_dry_run(&[plan], dry_run_plan_format(args))?;
-    dry_run_exit_status(&[resolutions])
+    refuse_on_resolution_error(&resolutions, mode)
+}
+
+fn dry_run_checkpoint_preflight(
+    scenario: &DiscoverScenarioConfig,
+    args: &DiscoverArgs,
+) -> Result<(), RastreoError> {
+    let Some(config) = checkpoint_config(args) else {
+        return Ok(());
+    };
+    preflight_checkpoint_request(scenario, &config)?;
+    Ok(())
 }
 
 #[cfg(feature = "config")]
@@ -460,13 +473,16 @@ async fn run_dry_run_from_file(
             path.display()
         ));
     }
+    ensure_resume_is_single_scenario(args, &file, &path)?;
 
     let cli_sink = build_cli_sink_override(args)?;
     let cli_encoder = build_cli_encoder_override(args);
     let plan_format = dry_run_plan_format(args);
     let total = file.scenarios.len();
 
-    let mut scenarios: Vec<(String, DiscoverScenarioConfig)> = Vec::with_capacity(total);
+    let mut plans: Vec<DiscoveryPlan> = Vec::with_capacity(total);
+    let mut failed = 0usize;
+
     for (idx, entry) in file.scenarios.into_iter().enumerate() {
         let mut cfg = match entry {
             ScenarioEntry::Discover(cfg) => cfg,
@@ -476,18 +492,73 @@ async fn run_dry_run_from_file(
         merge_defaults(&mut cfg.base, &file.defaults);
         apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref(), cli_encoder.as_ref());
         let label = scenario_plan_label(&cfg.base, idx, total, plan_format);
-        scenarios.push((label, cfg));
+        if skip_prober_less_scenario(&cfg, &label, mode) {
+            continue;
+        }
+        // Ahead of resolution, so a scenario the run would refuse costs no DNS lookup.
+        if let Err(err) = cfg
+            .validate()
+            .and_then(|()| dry_run_checkpoint_preflight(&cfg, args))
+        {
+            failed += 1;
+            report_scenario_failure(&label, &err, mode);
+            continue;
+        }
+        let resolutions = resolve_scenario_targets(&cfg, resolver).await;
+        match build_scenario_plan(&label, &cfg, &resolutions, args) {
+            Ok(plan) => {
+                plans.push(plan);
+                // Planned so the render names which target refused, then counted as the run counts it.
+                if let Some(err) = first_resolution_error(&resolutions) {
+                    failed += 1;
+                    report_scenario_failure(&label, err, mode);
+                }
+            }
+            Err(err) => {
+                failed += 1;
+                report_scenario_failure(&label, &err, mode);
+            }
+        }
     }
 
-    let mut plans: Vec<DiscoveryPlan> = Vec::with_capacity(scenarios.len());
-    let mut all_resolutions: Vec<Vec<ResolvedScenarioTarget>> = Vec::with_capacity(scenarios.len());
-    for (label, scenario) in &scenarios {
-        let resolutions = resolve_scenario_targets(scenario, resolver).await;
-        plans.push(build_scenario_plan(label, scenario, &resolutions, args));
-        all_resolutions.push(resolutions);
-    }
     render_dry_run(&plans, plan_format)?;
-    dry_run_exit_status(&all_resolutions)
+    if failed > 0 {
+        return Err(anyhow!(
+            "{failed} of {total} scenario(s) failed; see individual errors above"
+        ));
+    }
+    Ok(())
+}
+
+// One checkpoint path cannot represent several scenarios' progress, so resume is single-scenario only.
+#[cfg(feature = "config")]
+fn ensure_resume_is_single_scenario(
+    args: &DiscoverArgs,
+    file: &ScenarioFile,
+    path: &Path,
+) -> Result<()> {
+    if args.resume && file.scenarios.len() > 1 {
+        return Err(anyhow!(
+            "--resume supports a single-scenario run; '{}' has {} scenarios",
+            path.display(),
+            file.scenarios.len()
+        ));
+    }
+    Ok(())
+}
+
+// One predicate and one message, so the run and the rehearsal cannot drift apart on which scenarios they skip.
+#[cfg(feature = "config")]
+fn skip_prober_less_scenario(
+    scenario: &DiscoverScenarioConfig,
+    label: &str,
+    mode: OutputMode,
+) -> bool {
+    if !scenario.probers.is_empty() {
+        return false;
+    }
+    print_notice(&format!("{label}: no probers configured, skipping"), mode);
+    true
 }
 
 // json carries the plain scenario name (matching rastreo-server's scenario_label so both surfaces emit the same DiscoveryPlan.scenario); text keeps the multi-scenario `'name' (N of M)` header decoration.
@@ -543,7 +614,7 @@ fn build_scenario_plan(
     scenario: &DiscoverScenarioConfig,
     resolutions: &[ResolvedScenarioTarget],
     args: &DiscoverArgs,
-) -> DiscoveryPlan {
+) -> Result<DiscoveryPlan, RastreoError> {
     DiscoveryPlan::new(
         label.to_string(),
         scenario,
@@ -587,7 +658,7 @@ fn write_scenario_plan(
     args: &DiscoverArgs,
 ) -> usize {
     use std::fmt::Write as _;
-    let plan = build_scenario_plan(label, scenario, resolutions, args);
+    let plan = build_scenario_plan(label, scenario, resolutions, args).expect("plan");
     write!(out, "{plan}").expect("write to String");
     plan.total_probes
 }
@@ -597,23 +668,25 @@ fn write_totals(out: &mut String, _scenario_count: usize, total_probes: usize) {
     writeln!(out, "total probes: {total_probes}").expect("write to String");
 }
 
-fn dry_run_exit_status(all: &[Vec<ResolvedScenarioTarget>]) -> Result<()> {
-    let mut had_any = false;
-    let mut had_success = false;
-    for scenario in all {
-        for entry in scenario {
-            had_any = true;
-            if entry.result.is_ok() {
-                had_success = true;
-            }
-        }
+// Any error here is one `Resolver::plan` folds with `?`, aborting the scan before its first probe.
+fn first_resolution_error(resolutions: &[ResolvedScenarioTarget]) -> Option<&RastreoError> {
+    resolutions
+        .iter()
+        .find_map(|entry| entry.result.as_ref().err())
+}
+
+fn refuse_on_resolution_error(
+    resolutions: &[ResolvedScenarioTarget],
+    mode: OutputMode,
+) -> Result<()> {
+    let Some(err) = first_resolution_error(resolutions) else {
+        return Ok(());
+    };
+    let rendered = render_error_chain(err);
+    if let Some(hint) = enrich_scan_error_hint(&rendered) {
+        print_hint(&hint, mode);
     }
-    if had_any && !had_success {
-        return Err(anyhow!(
-            "no targets resolved successfully — nothing would probe"
-        ));
-    }
-    Ok(())
+    Err(anyhow!("{rendered}"))
 }
 
 async fn run_discovery_reporting_progress(
@@ -634,6 +707,15 @@ async fn run_discovery_reporting_progress(
     let result = run_discovery(opts).await;
     let _ = display.await;
     result
+}
+
+#[cfg(feature = "config")]
+fn report_scenario_failure(label: &str, err: &RastreoError, mode: OutputMode) {
+    let rendered = render_error_chain(err);
+    print_failed(label, &rendered);
+    if let Some(hint) = enrich_scan_error_hint(&rendered) {
+        print_hint(&hint, mode);
+    }
 }
 
 // A failure line and a hint needle are both single-line, so flatten every level onto one line.
@@ -665,11 +747,8 @@ async fn run_legacy(
 ) -> Result<()> {
     let scenario = scenario_from_flags(args, mode)?;
     // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
-    print_start(
-        &build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, &[], args),
-        scenario.targets.len(),
-        mode,
-    );
+    let plan = build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, &[], args)?;
+    print_start(&plan, scenario.targets.len(), mode);
     match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args), mode).await {
         Ok(summary) => {
             print_complete(FLAG_DRIVEN_LABEL, &summary, mode);
@@ -713,14 +792,7 @@ async fn run_from_file(
         ));
     }
 
-    // One checkpoint path cannot represent several scenarios' progress, so resume is single-scenario only.
-    if args.resume && file.scenarios.len() > 1 {
-        return Err(anyhow!(
-            "--resume supports a single-scenario run; '{}' has {} scenarios",
-            path.display(),
-            file.scenarios.len()
-        ));
-    }
+    ensure_resume_is_single_scenario(args, &file, &path)?;
 
     let cli_sink = build_cli_sink_override(args)?;
     let cli_encoder = build_cli_encoder_override(args);
@@ -753,17 +825,20 @@ async fn run_from_file(
             print_blank(mode);
         }
 
-        if cfg.probers.is_empty() {
-            print_notice(&format!("{label}: no probers configured, skipping"), mode);
+        if skip_prober_less_scenario(&cfg, &label, mode) {
             continue;
         }
 
         // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
-        print_start(
-            &build_scenario_plan(&label, &cfg, &[], args),
-            cfg.targets.len(),
-            mode,
-        );
+        let plan = match build_scenario_plan(&label, &cfg, &[], args) {
+            Ok(plan) => plan,
+            Err(err) => {
+                tally.failed += 1;
+                report_scenario_failure(&label, &err, mode);
+                continue;
+            }
+        };
+        print_start(&plan, cfg.targets.len(), mode);
 
         match run_discovery_reporting_progress(&cfg, cancel.clone(), checkpoint_config(args), mode)
             .await
@@ -776,11 +851,7 @@ async fn run_from_file(
             }
             Err(err) => {
                 tally.failed += 1;
-                let rendered = render_error_chain(&err);
-                print_failed(&label, &rendered);
-                if let Some(hint) = enrich_scan_error_hint(&rendered) {
-                    print_hint(&hint, mode);
-                }
+                report_scenario_failure(&label, &err, mode);
             }
         }
     }
@@ -2244,7 +2315,7 @@ mod tests {
         let probes = write_scenario_plan(&mut legacy, "discovery", &scenario, &resolutions, &a);
         write_totals(&mut legacy, 1, probes);
 
-        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a);
+        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a).expect("plan");
         assert_eq!(render_dry_run_text(&[plan]), legacy);
     }
 
@@ -2255,7 +2326,7 @@ mod tests {
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
         let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
-        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a);
+        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a).expect("plan");
 
         let json = render_dry_run_json(&[plan]).expect("json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -2275,8 +2346,8 @@ mod tests {
             Target::Ip("127.0.0.1".parse().expect("ip")),
             Ok(vec!["127.0.0.1".parse().expect("ip")]),
         )];
-        let first = build_scenario_plan("one", &scenario, &resolutions, &a);
-        let second = build_scenario_plan("two", &scenario, &resolutions, &a);
+        let first = build_scenario_plan("one", &scenario, &resolutions, &a).expect("plan");
+        let second = build_scenario_plan("two", &scenario, &resolutions, &a).expect("plan");
 
         let json = render_dry_run_json(&[first, second]).expect("json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -2294,7 +2365,7 @@ mod tests {
             Target::Ip("127.0.0.1".parse().expect("ip")),
             Ok(vec!["127.0.0.1".parse().expect("ip")]),
         )];
-        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a);
+        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a).expect("plan");
         let json = render_dry_run_json(&[plan]).expect("json");
         assert!(!json.contains("[dry-run]"), "{json}");
         assert!(!json.contains("total probes:"), "{json}");
@@ -2325,7 +2396,7 @@ mod tests {
             out.contains("total probes: 1"),
             "single-scenario prints total: {out}"
         );
-        dry_run_exit_status(&[resolutions]).expect("exit ok");
+        assert!(first_resolution_error(&resolutions).is_none());
     }
 
     #[tokio::test]
@@ -2370,7 +2441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dry_run_dns_failure_prints_inline_error_and_continues() {
+    async fn dry_run_renders_every_target_though_one_failed_to_resolve() {
         let mut a = args(&["invalid.nx.does-not-exist.example", "127.0.0.1"], &[22]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
@@ -2383,32 +2454,69 @@ mod tests {
             "expected inline error for failing DNS target: {out}"
         );
         assert!(out.contains("127.0.0.1 → 127.0.0.1"), "{out}");
-        dry_run_exit_status(&[resolutions]).expect("at least one resolved => exit 0");
+        assert!(
+            first_resolution_error(&resolutions).is_some(),
+            "a target the scan would abort on must refuse the rehearsal too"
+        );
     }
 
-    #[tokio::test]
-    async fn dry_run_all_targets_failing_returns_error() {
-        let resolutions = vec![
+    fn resolution_failing_with(err: RastreoError) -> Vec<ResolvedScenarioTarget> {
+        vec![
             ResolvedScenarioTarget::new(
-                Target::DnsName("x.invalid".into()),
-                Err(rastreo_core::RastreoError::Resolver(
-                    rastreo_core::ResolverError::DnsNoRecords {
-                        name: "x.invalid".into(),
-                    },
-                )),
+                Target::Ip("127.0.0.1".parse().expect("ip")),
+                Ok(vec!["127.0.0.1".parse().expect("ip")]),
             ),
-            ResolvedScenarioTarget::new(
-                Target::DnsName("y.invalid".into()),
-                Err(rastreo_core::RastreoError::Resolver(
-                    rastreo_core::ResolverError::DnsNoRecords {
-                        name: "y.invalid".into(),
-                    },
-                )),
-            ),
+            ResolvedScenarioTarget::new(Target::DnsName("second".into()), Err(err)),
+        ]
+    }
+
+    #[test]
+    fn a_resolution_error_refuses_the_dry_run_whatever_variant_raised_it() {
+        use rastreo_core::ResolverError;
+        let refusals = [
+            RastreoError::Resolver(ResolverError::CidrTooLarge {
+                cidr: "10.0.0.0/8".into(),
+                hosts: 16_777_214,
+                limit: 65_536,
+            }),
+            RastreoError::Resolver(ResolverError::RangeTooLarge {
+                start: "10.0.0.1".into(),
+                end: "10.9.0.1".into(),
+                hosts: 589_825,
+                limit: 65_536,
+            }),
+            RastreoError::Resolver(ResolverError::DnsNoRecords {
+                name: "x.invalid".into(),
+            }),
+            RastreoError::Resolver(ResolverError::TargetNotAllowed {
+                ip: "203.0.113.1".parse().expect("ip"),
+            }),
+            RastreoError::Resolver(ResolverError::AggregateHostCapExceeded {
+                hosts: 300_000,
+                limit: 262_144,
+            }),
         ];
-        let err = dry_run_exit_status(&[resolutions]).expect_err("all-failed => Err");
-        let msg = format!("{err}");
-        assert!(msg.contains("no targets resolved"), "msg: {msg}");
+        for err in refusals {
+            let expected = err.to_string();
+            let resolutions = resolution_failing_with(err);
+            let refusal =
+                refuse_on_resolution_error(&resolutions, OutputMode::from(Verbosity::Quiet))
+                    .expect_err("a resolution error the scan aborts on must refuse the rehearsal");
+            assert!(
+                refusal.to_string().contains(&expected),
+                "the refusal must carry the resolver's own reason: {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_resolved_scenario_has_nothing_to_refuse() {
+        let resolutions = vec![ResolvedScenarioTarget::new(
+            Target::Ip("127.0.0.1".parse().expect("ip")),
+            Ok(vec!["127.0.0.1".parse().expect("ip")]),
+        )];
+        refuse_on_resolution_error(&resolutions, OutputMode::from(Verbosity::Quiet))
+            .expect("every target resolved");
     }
 
     #[cfg(feature = "kafka")]
@@ -2628,7 +2736,8 @@ scenarios:
                 retries: 0,
                 timeout_ms: 1,
             },
-        );
+        )
+        .expect("plan");
         let rendered = plan
             .probers
             .iter()

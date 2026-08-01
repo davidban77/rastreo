@@ -179,9 +179,21 @@ impl CheckpointWriter {
     }
 }
 
+/// Vet a checkpoint request against the scenario; `Some` only for a resume, carrying the checkpoint to continue from.
+pub fn preflight_checkpoint_request(
+    scenario: &DiscoverScenarioConfig,
+    config: &CheckpointConfig,
+) -> Result<Option<Checkpoint>, ResumeError> {
+    if config.resume {
+        return resume_preflight(scenario, &config.path).map(Some);
+    }
+    checkpoint_preflight(scenario, &config.path)?;
+    Ok(None)
+}
+
 /// Refuse a checkpoint request that would be a lie: a non-resumable scenario, or a path already
 /// holding a checkpoint (valid or corrupt) this run must not clobber. Only a free path proceeds.
-pub fn checkpoint_preflight(
+pub(crate) fn checkpoint_preflight(
     scenario: &DiscoverScenarioConfig,
     path: &Path,
 ) -> Result<(), ResumeError> {
@@ -199,7 +211,7 @@ pub fn checkpoint_preflight(
 /// Load and validate the checkpoint at `path` for a resume: a missing checkpoint refuses (`--resume`
 /// needs one), the scenario is re-vetted resume-safe, and the hard fingerprint must match the target
 /// sequence and sink destination. A changed perf/prober knob only warns — at-least-once tolerates it.
-pub fn resume_preflight(
+pub(crate) fn resume_preflight(
     scenario: &DiscoverScenarioConfig,
     path: &Path,
 ) -> Result<Checkpoint, ResumeError> {
@@ -1230,5 +1242,63 @@ mod tests {
         let checkpoint = resume_preflight(&s, &path).expect("clean match resumes");
         assert_eq!(checkpoint.highest_flushed_index, 41);
         assert_eq!(checkpoint.scan_id, "01J000000000000000000000AA");
+    }
+
+    fn request(path: &Path, resume: bool) -> CheckpointConfig {
+        CheckpointConfig {
+            path: path.to_path_buf(),
+            interval: 1,
+            resume,
+        }
+    }
+
+    #[test]
+    fn a_fresh_request_takes_the_clobber_guard_and_resumes_from_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        assert!(preflight_checkpoint_request(&s, &request(&path, false))
+            .expect("a free path proceeds")
+            .is_none());
+
+        sample_checkpoint().write(&path).expect("seed checkpoint");
+        assert!(matches!(
+            preflight_checkpoint_request(&s, &request(&path, false)),
+            Err(ResumeError::CheckpointExists { .. })
+        ));
+    }
+
+    #[test]
+    fn a_resume_request_takes_the_match_guard_and_returns_the_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(Some(*direct()), Vec::new(), Some(file_sink()));
+        assert!(matches!(
+            preflight_checkpoint_request(&s, &request(&path, true)),
+            Err(ResumeError::NoCheckpointToResume { .. })
+        ));
+
+        write_matching_checkpoint(&s, &path, 12);
+        let checkpoint = preflight_checkpoint_request(&s, &request(&path, true))
+            .expect("clean match resumes")
+            .expect("a resume carries its checkpoint");
+        assert_eq!(checkpoint.highest_flushed_index, 12);
+    }
+
+    #[test]
+    fn an_ineligible_scenario_is_refused_whether_or_not_it_asked_to_resume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        let s = scenario(None, Vec::new(), Some(SinkConfig::Stdout));
+        write_matching_checkpoint(&s, &path, 3);
+        for resume in [false, true] {
+            assert!(
+                matches!(
+                    preflight_checkpoint_request(&s, &request(&path, resume)),
+                    Err(ResumeError::SinkNotResumable { .. })
+                ),
+                "resume={resume} must refuse a sink with no durable destination"
+            );
+        }
     }
 }

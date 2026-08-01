@@ -4,7 +4,10 @@ use std::net::IpAddr;
 
 use schemars::JsonSchema;
 
+use crate::classifier::ClassifierConfig;
 use crate::config::DiscoverScenarioConfig;
+use crate::error::RastreoError;
+use crate::fuser::{DirectFuser, FuserConfig};
 use crate::model::Target;
 use crate::pipeline::ResolvedScenarioTarget;
 use crate::prober::ProberConfig;
@@ -22,6 +25,10 @@ pub struct DiscoveryPlan {
     pub targets: Vec<PlannedTarget>,
     /// Human-readable summary of each configured prober.
     pub probers: Vec<String>,
+    /// Human-readable summary of the resolved fuser chain, outermost layer first.
+    pub fuser: String,
+    /// Human-readable summary of the resolved classifier.
+    pub classifier: String,
     /// Human-readable summary of the configured sink.
     pub sink: String,
     /// Effective in-flight probe cap for this run.
@@ -63,12 +70,14 @@ pub struct PlanKnobs {
 }
 
 impl DiscoveryPlan {
+    /// Plan a scenario a run would accept; a scenario [`DiscoverScenarioConfig::validate`] rejects has no plan.
     pub fn new(
         scenario: String,
         config: &DiscoverScenarioConfig,
         resolutions: &[ResolvedScenarioTarget],
         knobs: PlanKnobs,
-    ) -> Self {
+    ) -> Result<Self, RastreoError> {
+        config.validate()?;
         let mut unique_ips: HashSet<IpAddr> = HashSet::new();
         let mut targets = Vec::with_capacity(resolutions.len());
         for entry in resolutions {
@@ -84,17 +93,19 @@ impl DiscoveryPlan {
         }
         let probers: Vec<String> = config.probers.iter().map(render_prober).collect();
         let total_probes = unique_ips.len().saturating_mul(config.probers.len());
-        Self {
+        Ok(Self {
             scenario,
             targets,
             probers,
+            fuser: render_fuser(config.base.fuser.as_ref()),
+            classifier: render_classifier(config.base.classifier.as_ref()),
             sink: render_sink(config.base.sink.as_ref()),
             max_concurrent: knobs.max_concurrent,
             probe_rate: knobs.probe_rate,
             retries: knobs.retries,
             timeout_ms: knobs.timeout_ms,
             total_probes,
-        }
+        })
     }
 }
 
@@ -113,6 +124,8 @@ impl fmt::Display for DiscoveryPlan {
             }
         }
         writeln!(f, "    probers: {}", format_prober_line(&self.probers))?;
+        writeln!(f, "    fuser: {}", self.fuser)?;
+        writeln!(f, "    classifier: {}", self.classifier)?;
         writeln!(f, "    sink: {}", self.sink)?;
         writeln!(f, "    concurrency: {}", self.max_concurrent)?;
         match self.probe_rate {
@@ -192,6 +205,90 @@ fn render_prober(config: &ProberConfig) -> String {
     }
 }
 
+fn render_fuser(fuser: Option<&FuserConfig>) -> String {
+    match fuser {
+        Some(config) => render_fuser_chain(config),
+        None => render_fuser_chain(&crate::fuser::default_fuser_config()),
+    }
+}
+
+fn render_fuser_chain(config: &FuserConfig) -> String {
+    let mut out = String::new();
+    let mut layer = config;
+    loop {
+        if !out.is_empty() {
+            out.push_str(" over ");
+        }
+        out.push_str(&render_fuser_layer(layer));
+        match inner_fuser(layer) {
+            Some(inner) => layer = inner,
+            None => return out,
+        }
+    }
+}
+
+fn inner_fuser(config: &FuserConfig) -> Option<&FuserConfig> {
+    match config {
+        FuserConfig::Direct { .. } => None,
+        #[cfg(feature = "mib_enrichment")]
+        FuserConfig::MibEnrichment { inner, .. } => Some(inner),
+        FuserConfig::Identity { inner, .. } => Some(inner),
+    }
+}
+
+fn render_fuser_layer(config: &FuserConfig) -> String {
+    match config {
+        FuserConfig::Direct {
+            include_unreachable,
+            confidence_baseline,
+            confidence_per_signal,
+        } => format!(
+            "direct (include_unreachable {}, confidence_baseline {}, confidence_per_signal {})",
+            include_unreachable.unwrap_or(DirectFuser::DEFAULT_INCLUDE_UNREACHABLE),
+            confidence_baseline.unwrap_or(DirectFuser::DEFAULT_CONFIDENCE_BASELINE),
+            confidence_per_signal.unwrap_or(DirectFuser::DEFAULT_CONFIDENCE_PER_SIGNAL),
+        ),
+        #[cfg(feature = "mib_enrichment")]
+        FuserConfig::MibEnrichment { data_path, .. } => match data_path {
+            Some(path) if !path.is_empty() => format!("mib_enrichment (table {path})"),
+            _ => "mib_enrichment (bundled table)".to_string(),
+        },
+        FuserConfig::Identity { identity_hints, .. } => {
+            if identity_hints.vrrp_groups.is_empty() {
+                "identity".to_string()
+            } else {
+                format!(
+                    "identity ({} vrrp groups)",
+                    identity_hints.vrrp_groups.len()
+                )
+            }
+        }
+    }
+}
+
+fn render_classifier(classifier: Option<&ClassifierConfig>) -> String {
+    match classifier {
+        Some(config) => render_classifier_config(config),
+        None => render_classifier_config(&crate::classifier::default_classifier_config()),
+    }
+}
+
+fn render_classifier_config(config: &ClassifierConfig) -> String {
+    match config {
+        ClassifierConfig::Noop => "noop".to_string(),
+        ClassifierConfig::Rules {
+            merge_mode,
+            platform_rules,
+            role_rules,
+        } => format!(
+            "rules (merge_mode {}, platform_rules {}, role_rules {})",
+            merge_mode.as_label(),
+            platform_rules.len(),
+            role_rules.len()
+        ),
+    }
+}
+
 fn render_sink(sink: Option<&SinkConfig>) -> String {
     let Some(sink) = sink else {
         return "stdout (default)".to_string();
@@ -267,7 +364,7 @@ fn format_ip_list(ips: &[IpAddr]) -> String {
 mod tests {
     use super::*;
     use crate::config::BaseProbeConfig;
-    use crate::error::{RastreoError, ResolverError};
+    use crate::error::{ConfigError, ResolverError};
     use std::net::Ipv4Addr;
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
@@ -279,7 +376,7 @@ mod tests {
         resolutions: &[ResolvedScenarioTarget],
         knobs: PlanKnobs,
     ) -> DiscoveryPlan {
-        DiscoveryPlan::new("discovery".to_string(), config, resolutions, knobs)
+        DiscoveryPlan::new("discovery".to_string(), config, resolutions, knobs).expect("plan")
     }
 
     fn default_knobs() -> PlanKnobs {
@@ -504,6 +601,143 @@ mod tests {
         assert_eq!(render_prober(&p), "http (ports 80, 443)");
     }
 
+    fn direct(include_unreachable: Option<bool>) -> FuserConfig {
+        FuserConfig::Direct {
+            include_unreachable,
+            confidence_baseline: None,
+            confidence_per_signal: None,
+        }
+    }
+
+    #[test]
+    fn render_fuser_none_prints_the_pipeline_default() {
+        assert_eq!(
+            render_fuser(None),
+            render_fuser_chain(&crate::fuser::default_fuser_config())
+        );
+        assert_eq!(
+            render_fuser(None),
+            "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)"
+        );
+    }
+
+    #[test]
+    fn render_fuser_direct_shows_the_effective_knobs_not_the_absent_ones() {
+        assert_eq!(
+            render_fuser(Some(&direct(Some(true)))),
+            "direct (include_unreachable true, confidence_baseline 0.1, confidence_per_signal 0.1)"
+        );
+    }
+
+    #[test]
+    fn render_fuser_lists_the_chain_outermost_first() {
+        let config = FuserConfig::Identity {
+            identity_hints: crate::fuser::IdentityHints::default(),
+            inner: Box::new(direct(None)),
+        };
+        assert!(
+            render_fuser(Some(&config)).starts_with("identity over direct ("),
+            "{}",
+            render_fuser(Some(&config))
+        );
+    }
+
+    #[test]
+    fn render_fuser_identity_counts_declared_vrrp_groups() {
+        let config = FuserConfig::Identity {
+            identity_hints: crate::fuser::IdentityHints::new(vec![crate::fuser::VrrpGroup {
+                virtual_ip: ip(10, 0, 0, 99),
+                virtual_mac: "00:00:5e:00:01:2a".to_string(),
+                members: Vec::new(),
+            }]),
+            inner: Box::new(direct(None)),
+        };
+        assert!(
+            render_fuser(Some(&config)).starts_with("identity (1 vrrp groups) over direct ("),
+            "{}",
+            render_fuser(Some(&config))
+        );
+    }
+
+    #[cfg(feature = "mib_enrichment")]
+    #[test]
+    fn render_fuser_names_the_enrichment_table_source() {
+        let bundled = FuserConfig::MibEnrichment {
+            data_path: None,
+            inner: Box::new(direct(None)),
+        };
+        assert!(
+            render_fuser(Some(&bundled))
+                .starts_with("mib_enrichment (bundled table) over direct ("),
+            "{}",
+            render_fuser(Some(&bundled))
+        );
+        let overlaid = FuserConfig::MibEnrichment {
+            data_path: Some("/etc/rastreo/mib.tsv".to_string()),
+            inner: Box::new(direct(None)),
+        };
+        assert!(
+            render_fuser(Some(&overlaid))
+                .starts_with("mib_enrichment (table /etc/rastreo/mib.tsv) over direct ("),
+            "{}",
+            render_fuser(Some(&overlaid))
+        );
+    }
+
+    #[test]
+    fn render_classifier_none_prints_the_pipeline_default() {
+        assert_eq!(
+            render_classifier(None),
+            render_classifier_config(&crate::classifier::default_classifier_config())
+        );
+        assert_eq!(
+            render_classifier(None),
+            "rules (merge_mode extend, platform_rules 0, role_rules 0)"
+        );
+    }
+
+    #[test]
+    fn render_classifier_noop_prints_noop() {
+        assert_eq!(render_classifier(Some(&ClassifierConfig::Noop)), "noop");
+    }
+
+    #[test]
+    fn render_classifier_rules_counts_user_supplied_rules() {
+        let config = ClassifierConfig::Rules {
+            merge_mode: crate::classifier::MergeMode::Replace,
+            platform_rules: vec![crate::classifier::PlatformRule {
+                signal: crate::classifier::SignalKind::SnmpSysDescr,
+                pattern: "Cisco".to_string(),
+                platform: Some("cisco_ios".to_string()),
+                os_version_capture: None,
+                ssh_version_capture: None,
+                http_server_capture: None,
+                http_version_capture: None,
+            }],
+            role_rules: Vec::new(),
+        };
+        assert_eq!(
+            render_classifier(Some(&config)),
+            "rules (merge_mode replace, platform_rules 1, role_rules 0)"
+        );
+    }
+
+    #[test]
+    fn a_selected_fuser_and_classifier_reach_the_plan_fields() {
+        let mut base = BaseProbeConfig::new();
+        base.sink = Some(SinkConfig::Stdout);
+        base.fuser = Some(direct(Some(true)));
+        base.classifier = Some(ClassifierConfig::Noop);
+        let config = DiscoverScenarioConfig::new(
+            base,
+            vec![Target::Ip(ip(127, 0, 0, 1))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        let plan = plan_of(&config, &[], default_knobs());
+        assert!(plan.fuser.contains("include_unreachable true"), "{plan:?}");
+        assert_eq!(plan.classifier, "noop");
+    }
+
     #[test]
     fn format_prober_line_none_when_empty() {
         assert_eq!(format_prober_line(&[]), "<none>");
@@ -556,8 +790,35 @@ mod tests {
             Ok(vec![ip(127, 0, 0, 1)]),
         )];
         let plan = plan_of(&config, &resolutions, default_knobs());
-        let expected = "  scenario: discovery\n    targets:\n      127.0.0.1 → 127.0.0.1\n    probers: tcp_connect (ports 22, 80)\n    sink: stdout\n    concurrency: 64\n    rate: unlimited\n    retries: 0\n    timeout_ms: 1000\n";
-        assert_eq!(plan.to_string(), expected);
+        insta::assert_snapshot!(plan.to_string());
+    }
+
+    #[test]
+    fn display_renders_a_selected_fuser_and_classifier() {
+        let mut base = BaseProbeConfig::new();
+        base.sink = Some(SinkConfig::Stdout);
+        base.fuser = Some(FuserConfig::Identity {
+            identity_hints: crate::fuser::IdentityHints::default(),
+            inner: Box::new(FuserConfig::Direct {
+                include_unreachable: Some(true),
+                confidence_baseline: Some(0.25),
+                confidence_per_signal: None,
+            }),
+        });
+        base.classifier = Some(ClassifierConfig::Noop);
+        let config = DiscoverScenarioConfig::new(
+            base,
+            vec![Target::Ip(ip(127, 0, 0, 1))],
+            vec![ProberConfig::TcpConnect {
+                ports: vec![22, 80],
+            }],
+        );
+        let resolutions = vec![ResolvedScenarioTarget::new(
+            Target::Ip(ip(127, 0, 0, 1)),
+            Ok(vec![ip(127, 0, 0, 1)]),
+        )];
+        let plan = plan_of(&config, &resolutions, default_knobs());
+        insta::assert_snapshot!(plan.to_string());
     }
 
     #[test]
@@ -597,18 +858,68 @@ mod tests {
     }
 
     #[test]
-    fn display_empty_probers_prints_none() {
+    fn display_of_a_plan_whose_probers_were_cleared_prints_none() {
+        let config = tcp_scenario();
+        let resolutions = vec![ResolvedScenarioTarget::new(
+            Target::Ip(ip(127, 0, 0, 1)),
+            Ok(vec![ip(127, 0, 0, 1)]),
+        )];
+        let mut plan = plan_of(&config, &resolutions, default_knobs());
+        plan.probers.clear();
+        assert!(plan.to_string().contains("    probers: <none>\n"));
+    }
+
+    #[test]
+    fn a_scenario_with_no_probers_has_no_plan() {
         let mut base = BaseProbeConfig::new();
         base.sink = Some(SinkConfig::Stdout);
         let config =
             DiscoverScenarioConfig::new(base, vec![Target::Ip(ip(10, 0, 0, 1))], Vec::new());
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip(ip(10, 0, 0, 1)),
-            Ok(vec![ip(10, 0, 0, 1)]),
-        )];
-        assert!(plan_of(&config, &resolutions, default_knobs())
-            .to_string()
-            .contains("    probers: <none>\n"));
+        let err = DiscoveryPlan::new("discovery".into(), &config, &[], default_knobs())
+            .expect_err("a scenario the run refuses must have no plan");
+        assert!(
+            matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("probers")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_scenario_with_an_unbuildable_prober_has_no_plan() {
+        let mut base = BaseProbeConfig::new();
+        base.sink = Some(SinkConfig::Stdout);
+        let config = DiscoverScenarioConfig::new(
+            base,
+            vec![Target::Ip(ip(10, 0, 0, 1))],
+            vec![ProberConfig::TcpConnect { ports: Vec::new() }],
+        );
+        let err = DiscoveryPlan::new("discovery".into(), &config, &[], default_knobs())
+            .expect_err("a scenario the run refuses must have no plan");
+        assert!(
+            matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("at least one port")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_scenario_with_an_out_of_range_fuser_knob_has_no_plan() {
+        let mut base = BaseProbeConfig::new();
+        base.sink = Some(SinkConfig::Stdout);
+        base.fuser = Some(FuserConfig::Direct {
+            include_unreachable: None,
+            confidence_baseline: Some(2.0),
+            confidence_per_signal: None,
+        });
+        let config = DiscoverScenarioConfig::new(
+            base,
+            vec![Target::Ip(ip(10, 0, 0, 1))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        let err = DiscoveryPlan::new("discovery".into(), &config, &[], default_knobs())
+            .expect_err("a scenario the run refuses must have no plan");
+        assert!(
+            matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("confidence_baseline")),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -679,6 +990,8 @@ mod tests {
         assert_eq!(json["total_probes"], 1);
         assert_eq!(json["probers"][0], "tcp_connect (ports 22, 80)");
         assert_eq!(json["targets"][0]["resolution"]["resolved"][0], "127.0.0.1");
+        assert_eq!(json["fuser"], render_fuser(None));
+        assert_eq!(json["classifier"], render_classifier(None));
     }
 
     #[test]

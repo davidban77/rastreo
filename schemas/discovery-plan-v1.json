@@ -54,6 +54,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Structured plan of a single discovery scenario — what a dry-run would probe, without executing it.",
   "properties": {
+    "classifier": {
+      "description": "Human-readable summary of the resolved classifier.",
+      "type": "string"
+    },
+    "fuser": {
+      "description": "Human-readable summary of the resolved fuser chain, outermost layer first.",
+      "type": "string"
+    },
     "max_concurrent": {
       "description": "Effective in-flight probe cap for this run.",
       "format": "uint32",
@@ -114,6 +122,8 @@
     "scenario",
     "targets",
     "probers",
+    "fuser",
+    "classifier",
     "sink",
     "max_concurrent",
     "retries",

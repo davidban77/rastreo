@@ -62,6 +62,8 @@ probers:
       - 8.8.8.8
 ```
 
+The same failure reaches [`rastreo validate`](../discover/validate.md#reverse_dns-and-minimal-container-images), because the lint builds every prober. A scenario that leaves `resolvers` empty is refused on an image with no `/etc/resolv.conf`, even though nothing is probed.
+
 ## Build feature
 
 The reverse DNS prober is always available — no build feature is required. It is present in every build of `rastreo-core`, including builds with `--no-default-features`.

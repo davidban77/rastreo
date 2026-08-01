@@ -18,7 +18,7 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 - [CollectionProfileRecord](collection-profile-record.md) — how to collect telemetry from a discovered endpoint (transport, encoding, advertised models), emitted per gNMI endpoint that returned capability data. Generated.
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
 - [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo discover --file`. Generated. Point an IDE YAML plugin at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json` for autocomplete and validation; see [Editor setup](#editor-setup) below for the concrete snippets. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
-- [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated.
+- [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, fuser, classifier, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated.
 - [Streaming API](streaming-api.md) — Kafka topic / NATS subject conventions, correlation IDs, the AsyncAPI spec.
 - [DlqEnvelope](dlq-envelope.md) — the `x-rastreo-*` header and payload contract on every dead-letter message.
 
@@ -61,6 +61,8 @@ Both patterns validate against the same schema. Pick whichever fits the workflow
 ## Versioning policy
 
 Additive changes stay on `v1` and remain backward-compatible. That includes new optional fields on `DeviceRecord`, new `#[non_exhaustive]` `Signal` variants, and new optional fields on `ScanMetadata`. Consumers that ignore unknown fields (the default for most JSON deserialisers) keep working across an additive bump.
+
+A schema whose stored copies no consumer replays can also gain required fields on `v1`. `DiscoveryPlan` is the only one: a saved plan is an artifact you read, not input any consumer validates. The record schemas get no such allowance, because consumers replay stored records.
 
 Breaking changes (renaming or removing a field, changing a field's type, tightening a previously-optional field to required) increment to `v2`. The bump ships alongside a new topic / subject name (`rastreo.discovery.records.v2`) so that `v1` and `v2` can run in parallel for one release cycle. Existing consumers migrate on their own schedule.
 

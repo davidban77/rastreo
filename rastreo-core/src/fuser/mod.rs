@@ -18,10 +18,15 @@ pub mod identity;
 pub(crate) mod keys;
 #[cfg(feature = "mib_enrichment")]
 pub mod mib;
+pub mod selection;
 
 pub use identity::{IdentityFuser, IdentityHints, VrrpGroup};
 #[cfg(feature = "mib_enrichment")]
 pub use mib::{MibEnrichmentFuser, MibTable};
+pub use selection::{
+    available_fuser_kinds, default_fuser_config, expand_fuser_selection, parse_fuser_selection,
+    FuserKind, FuserSelectionOptions, FUSER_KIND_COUNT,
+};
 
 /// Streaming fusion: `ingest` receives one target's outcomes at a time and returns any records
 /// ready to emit; `finish` flushes records held back for cross-target correlation. The pipeline
@@ -73,12 +78,13 @@ pub struct DirectFuser {
 impl DirectFuser {
     pub const DEFAULT_CONFIDENCE_BASELINE: f64 = 0.1;
     pub const DEFAULT_CONFIDENCE_PER_SIGNAL: f64 = 0.1;
+    pub const DEFAULT_INCLUDE_UNREACHABLE: bool = false;
 
     pub fn new() -> Self {
         Self {
             confidence_per_signal: Self::DEFAULT_CONFIDENCE_PER_SIGNAL,
             confidence_baseline: Self::DEFAULT_CONFIDENCE_BASELINE,
-            include_unreachable: false,
+            include_unreachable: Self::DEFAULT_INCLUDE_UNREACHABLE,
         }
     }
 

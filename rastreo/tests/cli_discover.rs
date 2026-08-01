@@ -1049,7 +1049,7 @@ async fn dry_run_yaml_mode_prints_per_scenario_blocks_and_total_probes() {
 }
 
 #[tokio::test]
-async fn dry_run_dns_failure_prints_inline_error_and_still_exits_zero() {
+async fn dry_run_dns_failure_prints_inline_error_and_refuses() {
     let output = tokio::task::spawn_blocking(move || {
         common::rastreo()
             .args([
@@ -1068,9 +1068,10 @@ async fn dry_run_dns_failure_prints_inline_error_and_still_exits_zero() {
     .await
     .expect("join");
 
-    assert!(
-        output.status.success(),
-        "one good target should keep exit 0; stderr: {}",
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a target the scan aborts on must fail the rehearsal; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
@@ -1556,5 +1557,552 @@ async fn resume_refuses_a_multi_scenario_file() {
         stderr.contains("--resume supports a single-scenario run")
             && stderr.contains("2 scenarios"),
         "stderr must explain the single-scenario limitation: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+const BAD_FUSER_SCENARIO: &str = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: bad-fuser-scenario\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n    fuser:\n      type: direct\n      confidence_baseline: 2.0\n";
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn dry_run_refuses_a_scenario_validate_rejects() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_yaml(&dir, "bad-fuser.yml", BAD_FUSER_SCENARIO);
+
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args(["discover", "--file"])
+            .arg(&path)
+            .arg("--dry-run")
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        !output.status.success(),
+        "a dry-run of an invalid scenario must not exit 0"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("confidence_baseline") && stderr.contains("bad-fuser-scenario"),
+        "stderr must name the scenario and the invalid knob: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        !stdout.contains("fuser:"),
+        "an invalid scenario must not be rendered as a runnable plan: {stdout}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn validate_dry_run_and_scan_agree_on_an_invalid_scenario() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_yaml(&dir, "bad-fuser.yml", BAD_FUSER_SCENARIO);
+
+    let file = path.to_string_lossy().to_string();
+    let invocations: Vec<Vec<String>> = vec![
+        vec!["validate".into(), file.clone()],
+        vec![
+            "discover".into(),
+            "--file".into(),
+            file.clone(),
+            "--dry-run".into(),
+        ],
+        vec!["discover".into(), "--file".into(), file],
+    ];
+
+    let mut codes = Vec::new();
+    for args in invocations {
+        let output = tokio::task::spawn_blocking(move || {
+            common::rastreo()
+                .args(&args)
+                .output()
+                .expect("spawn rastreo")
+        })
+        .await
+        .expect("join");
+        codes.push(output.status.code());
+    }
+
+    assert_eq!(
+        codes,
+        vec![Some(1); 3],
+        "validate, dry-run, and a real scan must agree that the scenario is invalid"
+    );
+}
+
+#[cfg(feature = "config")]
+const EMPTY_PORTS_SCENARIO: &str = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: empty-ports-scenario\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: []\n";
+
+#[cfg(feature = "config")]
+const BAD_CLASSIFIER_SCENARIO: &str = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: bad-classifier-scenario\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n    classifier:\n      type: rules\n      platform_rules:\n        - signal: ssh_banner\n          pattern: \"([unclosed\"\n          platform: broken\n";
+
+#[cfg(feature = "config")]
+const BACKWARDS_RANGE_SCENARIO: &str = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: backwards-range-scenario\n    targets:\n      - Range:\n          start: \"10.0.0.5\"\n          end: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n";
+
+#[cfg(feature = "config")]
+async fn exit_codes_across_every_surface(yaml: &str, name: &str) -> Vec<Option<i32>> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_yaml(&dir, name, yaml);
+    let file = path.to_string_lossy().to_string();
+    let invocations: Vec<Vec<String>> = vec![
+        vec!["validate".into(), file.clone()],
+        vec![
+            "discover".into(),
+            "--file".into(),
+            file.clone(),
+            "--dry-run".into(),
+        ],
+        vec!["discover".into(), "--file".into(), file],
+    ];
+
+    let mut codes = Vec::new();
+    for args in invocations {
+        let output = tokio::task::spawn_blocking(move || {
+            common::rastreo()
+                .args(&args)
+                .output()
+                .expect("spawn rastreo")
+        })
+        .await
+        .expect("join");
+        codes.push(output.status.code());
+    }
+    codes
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn validate_dry_run_and_scan_agree_on_a_prober_the_factory_refuses() {
+    assert_eq!(
+        exit_codes_across_every_surface(EMPTY_PORTS_SCENARIO, "empty-ports.yml").await,
+        vec![Some(1); 3],
+        "a port-less prober must be refused by every surface"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn validate_dry_run_and_scan_agree_on_a_classifier_the_factory_refuses() {
+    assert_eq!(
+        exit_codes_across_every_surface(BAD_CLASSIFIER_SCENARIO, "bad-classifier.yml").await,
+        vec![Some(1); 3],
+        "an uncompilable classifier pattern must be refused by every surface"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn validate_dry_run_and_scan_agree_on_a_backwards_range_target() {
+    assert_eq!(
+        exit_codes_across_every_surface(BACKWARDS_RANGE_SCENARIO, "backwards-range.yml").await,
+        vec![Some(1); 3],
+        "a range whose start exceeds its end must be refused by every surface"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn dry_run_plans_the_valid_scenarios_around_an_invalid_one() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\nscenarios:\n  - signal_type: discover\n    name: good-one\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n  - signal_type: discover\n    name: bad-fuser\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n    fuser:\n      type: direct\n      confidence_baseline: 2.0\n  - signal_type: discover\n    name: good-two\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n";
+    let path = write_yaml(&dir, "multi-mixed.yml", yaml);
+
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args(["discover", "--file"])
+            .arg(&path)
+            .arg("--dry-run")
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a file carrying one invalid scenario must exit 1"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("would run 2 scenarios")
+            && stdout.contains("good-one")
+            && stdout.contains("good-two"),
+        "the survivors must still be planned: {stdout}"
+    );
+    assert!(
+        !stdout.contains("bad-fuser"),
+        "the refused scenario must not be rendered as a runnable plan: {stdout}"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("bad-fuser") && stderr.contains("confidence_baseline"),
+        "stderr must name the refused scenario and the reason: {stderr}"
+    );
+    assert!(
+        stderr.contains("1 of 3 scenario(s) failed"),
+        "the tally must match the run's: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn the_run_and_the_dry_run_skip_the_same_prober_less_scenario() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: no-probers\n    timeout_ms: 500\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n";
+    let path = write_yaml(&dir, "skip-parity.yml", yaml);
+
+    let mut outcomes = Vec::new();
+    for extra in [Vec::new(), vec!["--dry-run".to_string()]] {
+        let path = path.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            common::rastreo()
+                .args(["discover", "--file"])
+                .arg(&path)
+                .args(&extra)
+                .output()
+                .expect("spawn rastreo")
+        })
+        .await
+        .expect("join");
+        let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+        outcomes.push((
+            output.status.code(),
+            stderr.contains("'no-probers' (1 of 1): no probers configured, skipping"),
+        ));
+    }
+
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "the run and the dry-run must skip the same scenario the same way"
+    );
+    assert_eq!(
+        outcomes[0],
+        (Some(0), true),
+        "a prober-less scenario is skipped with a notice and exits 0"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn dry_run_skips_a_prober_less_scenario_the_run_would_skip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: no-probers\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n";
+    let path = write_yaml(&dir, "no-probers.yml", yaml);
+
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args(["discover", "--file"])
+            .arg(&path)
+            .arg("--dry-run")
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        output.status.success(),
+        "a scenario the run skips must not fail the dry-run; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("no probers configured, skipping"),
+        "stderr must name the skipped scenario: {stderr}"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("would run 0 scenarios"),
+        "a skipped scenario must not be counted as runnable: {stdout}"
+    );
+}
+
+async fn dry_run_then_scan(args: Vec<String>) -> Vec<(Option<i32>, String)> {
+    let mut outcomes = Vec::new();
+    for extra in [vec!["--dry-run".to_string()], Vec::new()] {
+        let args = args.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            common::rastreo()
+                .args(&args)
+                .args(&extra)
+                .output()
+                .expect("spawn rastreo")
+        })
+        .await
+        .expect("join");
+        outcomes.push((
+            output.status.code(),
+            String::from_utf8(output.stderr).expect("utf-8 stderr"),
+        ));
+    }
+    outcomes
+}
+
+fn assert_both_refuse(outcomes: &[(Option<i32>, String)], needle: &str) {
+    for (label, (code, stderr)) in ["dry-run", "scan"].iter().zip(outcomes) {
+        assert_eq!(*code, Some(1), "the {label} must refuse; stderr: {stderr}");
+        assert!(
+            stderr.contains(needle),
+            "the {label} must name '{needle}': {stderr}"
+        );
+    }
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn the_dry_run_and_the_scan_agree_a_scenario_is_not_resume_safe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: cp-scenario\n    timeout_ms: 200\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n    sink:\n      type: stdout\n";
+    let path = write_yaml(&dir, "resume-unsafe.yml", yaml);
+    let checkpoint = dir.path().join("scan.checkpoint");
+
+    let args = vec![
+        "discover".to_string(),
+        "--file".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+    ];
+    assert_both_refuse(&dry_run_then_scan(args).await, "not resume-safe");
+    assert!(
+        !checkpoint.exists(),
+        "a refused checkpoint request must leave no file behind"
+    );
+}
+
+const PRIOR_CHECKPOINT: &str = r#"{"checkpoint_version":1,"scan_id":"prior-scan","initiated_at":"2026-01-01T00:00:00Z","resume_fingerprint":"sha256:0000","source_config_hash":null,"dns_pins":[],"highest_flushed_index":0}"#;
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn the_dry_run_and_the_scan_agree_a_checkpoint_path_is_occupied() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let records = dir.path().join("records.ndjson");
+    let yaml = format!("version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: cp-scenario\n    timeout_ms: 200\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n    sink:\n      type: file\n      path: \"{}\"\n", records.display());
+    let path = write_yaml(&dir, "resume-safe.yml", &yaml);
+    let checkpoint = dir.path().join("scan.checkpoint");
+    std::fs::write(&checkpoint, PRIOR_CHECKPOINT).expect("occupy checkpoint path");
+
+    let args = vec![
+        "discover".to_string(),
+        "--file".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+    ];
+    assert_both_refuse(
+        &dry_run_then_scan(args).await,
+        "a checkpoint already exists",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&checkpoint).expect("read checkpoint"),
+        PRIOR_CHECKPOINT,
+        "neither surface may clobber the checkpoint it refused over"
+    );
+}
+
+#[tokio::test]
+async fn the_flag_driven_dry_run_and_scan_agree_a_scenario_is_not_resume_safe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checkpoint = dir.path().join("scan.checkpoint");
+
+    let args = vec![
+        "discover".to_string(),
+        "--target".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        "22222".to_string(),
+        "--timeout-ms".to_string(),
+        "200".to_string(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+    ];
+    assert_both_refuse(&dry_run_then_scan(args).await, "not resume-safe");
+    assert!(
+        !checkpoint.exists(),
+        "a refused checkpoint request must leave no file behind"
+    );
+}
+
+#[tokio::test]
+async fn the_flag_driven_dry_run_and_scan_agree_a_checkpoint_path_is_occupied() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checkpoint = dir.path().join("scan.checkpoint");
+    std::fs::write(&checkpoint, PRIOR_CHECKPOINT).expect("occupy checkpoint path");
+    let records = dir.path().join("records.ndjson");
+
+    let args = vec![
+        "discover".to_string(),
+        "--target".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        "22222".to_string(),
+        "--timeout-ms".to_string(),
+        "200".to_string(),
+        "--sink".to_string(),
+        "file".to_string(),
+        "--output".to_string(),
+        records.to_string_lossy().into_owned(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+    ];
+    assert_both_refuse(
+        &dry_run_then_scan(args).await,
+        "a checkpoint already exists",
+    );
+    assert!(
+        !records.exists(),
+        "a refused checkpoint request must not open the sink"
+    );
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn the_dry_run_and_the_scan_agree_a_resume_needs_a_single_scenario() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let records = dir.path().join("records.ndjson");
+    let yaml = format!("version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 200\n  sink:\n    type: file\n    path: \"{}\"\nscenarios:\n  - signal_type: discover\n    name: first\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22222]\n  - signal_type: discover\n    name: second\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22223]\n", records.display());
+    let path = write_yaml(&dir, "multi-resume.yml", &yaml);
+    let checkpoint = dir.path().join("scan.checkpoint");
+
+    let args = vec![
+        "discover".to_string(),
+        "--file".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+        "--resume".to_string(),
+    ];
+    assert_both_refuse(
+        &dry_run_then_scan(args).await,
+        "--resume supports a single-scenario run",
+    );
+}
+
+// Not a `validate` surface: the host cap belongs to the resolver instance, not to the scenario.
+const RESOLVER_REFUSALS: &[(&str, &str, &str)] = &[
+    (
+        "10.0.0.0/8",
+        "      - Cidr: \"10.0.0.0/8\"\n",
+        "exceeds the configured limit",
+    ),
+    (
+        "10.0.0.1-10.9.0.1",
+        "      - Range:\n          start: \"10.0.0.1\"\n          end: \"10.9.0.1\"\n",
+        "exceeds the configured limit",
+    ),
+];
+
+#[tokio::test]
+async fn the_flag_driven_dry_run_and_scan_agree_on_every_resolver_refusal() {
+    for (target, _, needle) in RESOLVER_REFUSALS {
+        let args = vec![
+            "discover".to_string(),
+            "--target".to_string(),
+            "127.0.0.1".to_string(),
+            "--target".to_string(),
+            (*target).to_string(),
+            "--port".to_string(),
+            "22222".to_string(),
+            "--timeout-ms".to_string(),
+            "200".to_string(),
+        ];
+        assert_both_refuse(&dry_run_then_scan(args).await, needle);
+    }
+}
+
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn the_dry_run_and_the_scan_agree_on_every_resolver_refusal() {
+    for (label, yaml_target, needle) in RESOLVER_REFUSALS {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let yaml = format!("version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: over-cap\n    timeout_ms: 200\n    targets:\n      - Ip: \"127.0.0.1\"\n{yaml_target}    probers:\n      - type: tcp_connect\n        ports: [22222]\n");
+        let path = write_yaml(&dir, "over-cap.yml", &yaml);
+        let args = vec![
+            "discover".to_string(),
+            "--file".to_string(),
+            path.to_string_lossy().into_owned(),
+        ];
+        let outcomes = dry_run_then_scan(args).await;
+        assert_both_refuse(&outcomes, needle);
+        for (code, stderr) in &outcomes {
+            assert_eq!(*code, Some(1), "{label}: {stderr}");
+            assert!(
+                stderr.contains("1 of 1 scenario(s) failed"),
+                "{label}: both surfaces tally the scenario as failed: {stderr}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_dry_run_names_the_refusing_target_before_it_refuses() {
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--target",
+                "10.0.0.0/8",
+                "--port",
+                "22222",
+                "--timeout-ms",
+                "200",
+                "--dry-run",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("10.0.0.0/8 → <error:") && stdout.contains("127.0.0.1 → 127.0.0.1"),
+        "the plan must say which target refused and which resolved: {stdout}"
+    );
+}
+
+#[cfg(feature = "kafka")]
+#[tokio::test]
+async fn dry_run_refuses_a_record_format_the_sink_cannot_carry() {
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args([
+                "discover",
+                "--target",
+                "127.0.0.1",
+                "--port",
+                "22",
+                "--sink",
+                "kafka",
+                "--brokers",
+                "127.0.0.1:1",
+                "--topic",
+                "unreachable",
+                "--format",
+                "table",
+                "--dry-run",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    assert!(
+        !output.status.success(),
+        "a format the sink cannot carry must fail the dry-run as it fails the scan"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("table encoder"),
+        "stderr must name the refused encoder: {stderr}"
     );
 }

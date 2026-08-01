@@ -8,12 +8,12 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::Instrument;
 
 use crate::checkpoint::{resume_fingerprint, Checkpoint, CheckpointConfig, CheckpointWriter};
-use crate::classifier::{create_classifier, Classifier, ClassifierConfig, MergeMode};
+use crate::classifier::{create_classifier, Classifier};
 use crate::collection_profile::CollectionProfileAssembler;
 use crate::config::DiscoverScenarioConfig;
 use crate::encoder::{create_encoder, ensure_encoder_output_fits_sink, Encoder, EncoderConfig};
-use crate::error::{ConfigError, ProbeErrorKind, RastreoError};
-use crate::fuser::{create_fuser, Fuser, FuserConfig};
+use crate::error::{ProbeErrorKind, RastreoError};
+use crate::fuser::{create_fuser, Fuser};
 use crate::model::{
     DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, ScanMetadata,
     Target, PROBE_KIND_COUNT,
@@ -33,15 +33,6 @@ fn effective_encoder_config(scenario: &DiscoverScenarioConfig) -> EncoderConfig 
         .encoder
         .clone()
         .unwrap_or(EncoderConfig::Ndjson)
-}
-
-fn default_classifier_config() -> ClassifierConfig {
-    // Empty user lists under `Extend` resolve to the baked-in platform and role tables.
-    ClassifierConfig::Rules {
-        merge_mode: MergeMode::Extend,
-        platform_rules: Vec::new(),
-        role_rules: Vec::new(),
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -168,14 +159,9 @@ pub async fn run_discovery(opts: RunOptions<'_>) -> Result<DiscoverySummary, Ras
     } = opts;
 
     // Preflight is read-only and must precede sink construction, which opens files and dials brokers.
+    scenario.validate()?;
     let resume_from = match &checkpoint {
-        Some(config) if config.resume => {
-            Some(crate::checkpoint::resume_preflight(scenario, &config.path)?)
-        }
-        Some(config) => {
-            crate::checkpoint::checkpoint_preflight(scenario, &config.path)?;
-            None
-        }
+        Some(config) => crate::checkpoint::preflight_checkpoint_request(scenario, config)?,
         None => None,
     };
     let resolver = match resolver {
@@ -246,12 +232,6 @@ async fn run_discovery_core(
     checkpoint: Option<CheckpointConfig>,
     resume_from: Option<Checkpoint>,
 ) -> Result<DiscoverySummary, RastreoError> {
-    scenario.base.ensure_no_retired_fields()?;
-    scenario.base.ensure_retries_within_bound()?;
-    if scenario.probers.is_empty() {
-        return Err(ConfigError::invalid("scenario.probers must not be empty").into());
-    }
-
     let start = Instant::now();
 
     // Constant spans per scan: root + one per stage. Probe tasks are never spanned so a /16 stays zero-alloc.
@@ -307,19 +287,8 @@ async fn run_discovery_core(
     ensure_encoder_output_fits_sink(&encoder_config, sink.requires_structured_records().await)?;
     let encoder = create_encoder(&encoder_config)?;
 
-    let fuser_config = scenario.base.fuser.clone().unwrap_or(FuserConfig::Direct {
-        include_unreachable: None,
-        confidence_baseline: None,
-        confidence_per_signal: None,
-    });
-    let mut fuser = create_fuser(&fuser_config)?;
-
-    let classifier_config = scenario
-        .base
-        .classifier
-        .clone()
-        .unwrap_or_else(default_classifier_config);
-    let classifier = create_classifier(&classifier_config)?;
+    let mut fuser = create_fuser(&scenario.effective_fuser_config())?;
+    let classifier = create_classifier(&scenario.effective_classifier_config())?;
 
     let mut probers: Vec<Arc<dyn Prober>> = Vec::with_capacity(scenario.probers.len());
     for prober_config in &scenario.probers {
@@ -1021,9 +990,10 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
-    use crate::classifier::ClassifierConfig;
+    use crate::classifier::{ClassifierConfig, MergeMode};
     use crate::config::BaseProbeConfig;
     use crate::error::ConfigError;
+    use crate::fuser::FuserConfig;
     use crate::model::Target;
     use crate::prober::ProberConfig;
 
@@ -1085,6 +1055,59 @@ mod tests {
             }
             other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_discovery_empty_targets_returns_config_error() {
+        let scenario = DiscoverScenarioConfig {
+            base: BaseProbeConfig::default(),
+            targets: Vec::new(),
+            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        };
+        let err = run_discovery(RunOptions::new(&scenario))
+            .await
+            .expect_err("empty targets");
+        match err {
+            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                assert!(msg.contains("targets"), "unexpected message: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_invalid_fuser_knob_is_refused_before_the_sink_touches_its_destination() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("records.ndjson");
+        let base = BaseProbeConfig {
+            sink: Some(SinkConfig::File { path: path.clone() }),
+            fuser: Some(FuserConfig::Direct {
+                include_unreachable: None,
+                confidence_baseline: Some(5.0),
+                confidence_per_signal: None,
+            }),
+            timeout_ms: Some(500),
+            ..Default::default()
+        };
+        let scenario = DiscoverScenarioConfig {
+            base,
+            targets: vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        };
+
+        let err = run_discovery(RunOptions::new(&scenario))
+            .await
+            .expect_err("a confidence_baseline above 1.0 is invalid");
+        match err {
+            RastreoError::Config(ConfigError::InvalidValue(msg)) => {
+                assert!(msg.contains("confidence_baseline"), "msg: {msg}");
+            }
+            other => panic!("expected ConfigError::InvalidValue, got {other:?}"),
+        }
+        assert!(
+            !path.exists(),
+            "a config the pipeline can reject offline must not reach the sink"
+        );
     }
 
     #[tokio::test]
@@ -2675,7 +2698,8 @@ mod tests {
     }
 
     fn classified_by_default(signals: Vec<crate::model::Signal>) -> DeviceRecord {
-        let classifier = create_classifier(&default_classifier_config()).expect("classifier");
+        let classifier =
+            create_classifier(&crate::classifier::default_classifier_config()).expect("classifier");
         let mut record = DeviceRecord {
             identity_key: crate::model::IdentityKey::new("ip:10.0.0.1").expect("identity"),
             mgmt_ip: None,

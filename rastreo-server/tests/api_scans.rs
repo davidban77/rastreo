@@ -323,6 +323,108 @@ async fn post_scans_dry_run_with_empty_targets_returns_400() {
     );
 }
 
+fn bad_fuser_body() -> serde_json::Value {
+    json!({
+        "name": "bad-fuser-scenario",
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [22222]}],
+        "fuser": {"type": "direct", "confidence_baseline": 2.0},
+    })
+}
+
+async fn post_scenario(
+    server_addr: SocketAddr,
+    query: &str,
+    body: &serde_json::Value,
+) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{server_addr}/scans{query}"))
+        .json(body)
+        .send()
+        .await
+        .expect("send")
+}
+
+#[tokio::test]
+async fn post_scans_dry_run_with_an_invalid_fuser_returns_400() {
+    let server_addr = spawn_server().await;
+    let resp = post_scenario(server_addr, "?dry_run=true", &bad_fuser_body()).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert!(
+        payload["error"]
+            .as_str()
+            .is_some_and(|s| s.contains("confidence_baseline")),
+        "error must name the invalid knob, got {payload}"
+    );
+}
+
+#[tokio::test]
+async fn post_scans_answers_a_dry_run_and_a_scan_alike_for_an_invalid_scenario() {
+    let server_addr = spawn_server().await;
+    let body = bad_fuser_body();
+    let dry_run = post_scenario(server_addr, "?dry_run=true", &body).await;
+    let scan = post_scenario(server_addr, "", &body).await;
+    assert_eq!(dry_run.status(), scan.status());
+    assert_eq!(scan.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+fn uncompilable_classifier_body() -> serde_json::Value {
+    json!({
+        "name": "bad-classifier-scenario",
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [22222]}],
+        "classifier": {
+            "type": "rules",
+            "platform_rules": [
+                {"signal": "ssh_banner", "pattern": "([unclosed", "platform": "broken"}
+            ],
+        },
+    })
+}
+
+async fn assert_uncompilable_classifier_is_a_400(query: &str) {
+    let server_addr = spawn_server().await;
+    let resp = post_scenario(server_addr, query, &uncompilable_classifier_body()).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert!(
+        payload["error"]
+            .as_str()
+            .is_some_and(|s| s.contains("([unclosed")),
+        "error must name the pattern the caller sent, got {payload}"
+    );
+}
+
+#[tokio::test]
+async fn post_scans_with_an_uncompilable_classifier_rule_returns_400() {
+    assert_uncompilable_classifier_is_a_400("").await;
+}
+
+#[tokio::test]
+async fn post_scans_dry_run_with_an_uncompilable_classifier_rule_returns_400() {
+    assert_uncompilable_classifier_is_a_400("?dry_run=true").await;
+}
+
+#[tokio::test]
+async fn post_scans_dry_run_with_a_retired_field_returns_400() {
+    let server_addr = spawn_server().await;
+    let body = json!({
+        "rate_limit": 50,
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [22]}],
+    });
+    let resp = post_scenario(server_addr, "?dry_run=true", &body).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert!(
+        payload["error"]
+            .as_str()
+            .is_some_and(|s| s.contains("rate_limit")),
+        "error must name the retired field, got {payload}"
+    );
+}
+
 #[tokio::test]
 async fn post_scans_with_malformed_json_returns_400() {
     let server_addr = spawn_server().await;

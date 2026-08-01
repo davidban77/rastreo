@@ -104,7 +104,7 @@ Stdout (one line, formatted here across multiple lines for reading):
 The record's `probe_kinds` lists the five probers that actually observed something; `ssh` and `snmp` got no answer on this host, which is a normal negative result rather than a failure. Your `signals` list will differ — it is whatever the host answered with, so a switch, a printer, and a DNS resolver all produce different sets.
 
 !!! tip "Preview a scan before it sends anything"
-    `rastreo discover --target 1.1.1.1 --dry-run` resolves the targets and prints the probers and ports that would run, then exits without touching the network.
+    `rastreo discover --target 1.1.1.1 --dry-run` resolves the targets and prints the whole plan, then exits without touching the network. The plan lists the probers and their ports, the fuser and classifier, and the sink. It also shows the concurrency, rate, retry, and timeout settings. See [Dry-run mode](../discover/cli.md#dry-run-mode).
 
 If a scan returns zero records and at least one probe attempt happened, the CLI prints a hint on stderr explaining that no probe reached the target. The most common cause is an unreachable host or a firewall dropping every probe.
 
