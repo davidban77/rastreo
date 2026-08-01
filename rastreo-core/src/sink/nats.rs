@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,6 +11,7 @@ use chrono::Utc;
 use crate::error::{ConfigError, RastreoError};
 use crate::prober::Password;
 use crate::redact::redacted_server_list;
+use crate::sink::pending::{clamp_threshold, PendingBuffer};
 use crate::sink::{
     retry_with_backoff, RecordKind, Sink, SinkError, SinkErrorClass, SinkRetry, SinkType,
     DEFAULT_LINKS_DESTINATION, DEFAULT_PROFILES_DESTINATION, SINK_ERROR_CLASS_COUNT,
@@ -26,41 +26,8 @@ const MAX_PENDING_ACKS: usize = 512;
 /// One permit per deferred ack, plus slack: a cancelled drain leaves its permits with the client's acker task until each ack resolves or times out.
 const ACK_PERMIT_CAPACITY: usize = MAX_PENDING_ACKS + 64;
 
-fn clamp_threshold(bytes: usize) -> usize {
-    bytes.max(1)
-}
-
 fn should_drain_pending_acks(pending: usize) -> bool {
     pending >= MAX_PENDING_ACKS
-}
-
-fn should_flush_after_append(buffer_len: usize, threshold: usize) -> bool {
-    buffer_len >= threshold
-}
-
-fn buffer_record(buffer: &mut VecDeque<Bytes>, buffered_bytes: &mut usize, data: &[u8]) {
-    buffer.push_back(Bytes::from(data.to_vec()));
-    *buffered_bytes += data.len();
-}
-
-fn pop_accepted(buffer: &mut VecDeque<Bytes>, buffered_bytes: &mut usize) {
-    if let Some(entry) = buffer.pop_front() {
-        *buffered_bytes = buffered_bytes.saturating_sub(entry.len());
-    }
-}
-
-/// Puts payloads whose ack was rejected back at the head of `buffer`, ahead of anything written since.
-fn retain_unacked(
-    buffer: &mut VecDeque<Bytes>,
-    buffered_bytes: &mut usize,
-    mut unacked: VecDeque<Bytes>,
-) {
-    if unacked.is_empty() {
-        return;
-    }
-    *buffered_bytes += unacked.iter().map(Bytes::len).sum::<usize>();
-    unacked.append(buffer);
-    *buffer = unacked;
 }
 
 pub fn default_batch_threshold() -> usize {
@@ -143,8 +110,7 @@ pub struct NatsSink {
     stream: String,
     servers: Vec<String>,
     ctx: Context,
-    buffer: VecDeque<Bytes>,
-    buffered_bytes: usize,
+    buffer: PendingBuffer<Bytes>,
     buffer_threshold: usize,
     pending_acks: Vec<PendingPublish>,
     last_write_delivered: bool,
@@ -154,11 +120,9 @@ pub struct NatsSink {
     dlq_delivered: [AtomicU64; SINK_ERROR_CLASS_COUNT],
     retry: SinkRetry,
     links_subject: String,
-    links_buffer: VecDeque<Bytes>,
-    links_buffered_bytes: usize,
+    links_buffer: PendingBuffer<Bytes>,
     profiles_subject: String,
-    profiles_buffer: VecDeque<Bytes>,
-    profiles_buffered_bytes: usize,
+    profiles_buffer: PendingBuffer<Bytes>,
 }
 
 impl std::fmt::Debug for NatsSink {
@@ -168,7 +132,7 @@ impl std::fmt::Debug for NatsSink {
             .field("stream", &self.stream)
             .field("servers", &redacted_server_list(&self.servers))
             .field("buffered_records", &self.buffer.len())
-            .field("buffered_bytes", &self.buffered_bytes)
+            .field("buffered_bytes", &self.buffer.bytes())
             .field("buffer_threshold", &self.buffer_threshold)
             .field("pending_acks", &self.pending_acks.len())
             .field("last_write_delivered", &self.last_write_delivered)
@@ -255,8 +219,7 @@ impl NatsSink {
             stream,
             servers,
             ctx,
-            buffer: VecDeque::new(),
-            buffered_bytes: 0,
+            buffer: PendingBuffer::new(),
             buffer_threshold: 1,
             pending_acks: Vec::new(),
             last_write_delivered: false,
@@ -266,11 +229,9 @@ impl NatsSink {
             dlq_delivered: std::array::from_fn(|_| AtomicU64::new(0)),
             retry: SinkRetry::default(),
             links_subject: DEFAULT_LINKS_DESTINATION.to_string(),
-            links_buffer: VecDeque::new(),
-            links_buffered_bytes: 0,
+            links_buffer: PendingBuffer::new(),
             profiles_subject: DEFAULT_PROFILES_DESTINATION.to_string(),
-            profiles_buffer: VecDeque::new(),
-            profiles_buffered_bytes: 0,
+            profiles_buffer: PendingBuffer::new(),
         })
     }
 
@@ -400,9 +361,8 @@ impl NatsSink {
                 .await
             };
 
-            let primary_err = match publish_result {
+            let primary_err = match self.buffer.settle_front(publish_result) {
                 Ok(ack) => {
-                    pop_accepted(&mut self.buffer, &mut self.buffered_bytes);
                     self.pending_acks.push(PendingPublish { payload, ack });
                     if should_drain_pending_acks(self.pending_acks.len()) {
                         // A drain that put records back returns Err, so `?` leaves before this walk re-reads the buffer it mutated.
@@ -413,13 +373,11 @@ impl NatsSink {
                 Err(e) => e,
             };
 
-            if !self
+            let quarantined = self
                 .quarantine(payload, SinkErrorClass::PublishFailure, &primary_err)
-                .await
-            {
-                return Err(primary_err);
-            }
-            pop_accepted(&mut self.buffer, &mut self.buffered_bytes);
+                .await;
+            self.buffer
+                .settle_front(quarantined.then_some(()).ok_or(primary_err))?;
         }
         Ok(())
     }
@@ -434,7 +392,7 @@ impl NatsSink {
         // JetStream drains and the DLQ receives every quarantinable payload. Every retained
         // payload also sets that error, so a non-empty `unacked` and an `Err` return are the same event.
         let mut first_error: Option<RastreoError> = None;
-        let mut unacked: VecDeque<Bytes> = VecDeque::new();
+        let mut unacked: PendingBuffer<Bytes> = PendingBuffer::new();
 
         for PendingPublish { payload, ack } in pending.drain(..) {
             let Err(ack_err) = ack.await else {
@@ -449,7 +407,7 @@ impl NatsSink {
                 continue;
             }
 
-            unacked.push_back(payload);
+            unacked.push(payload);
             if first_error.is_none() {
                 first_error = Some(ack_error);
             }
@@ -457,7 +415,7 @@ impl NatsSink {
 
         // Drained empty but with its capacity intact, so a scan grows this once rather than once per drain.
         self.pending_acks = pending;
-        retain_unacked(&mut self.buffer, &mut self.buffered_bytes, unacked);
+        self.buffer.restore_front(unacked);
 
         match first_error {
             Some(err) => Err(err),
@@ -477,8 +435,8 @@ impl NatsSink {
 
     async fn write_link(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        buffer_record(&mut self.links_buffer, &mut self.links_buffered_bytes, data);
-        if should_flush_after_append(self.links_buffered_bytes, self.buffer_threshold) {
+        self.links_buffer.push_record(data);
+        if self.links_buffer.reached_threshold(self.buffer_threshold) {
             // publish_links_buffer awaits each ack inline, so the publish is the acceptance.
             self.publish_links_buffer().await?;
             self.last_write_delivered = true;
@@ -493,19 +451,17 @@ impl NatsSink {
             &self.servers,
             &self.links_subject,
             &mut self.links_buffer,
-            &mut self.links_buffered_bytes,
         )
         .await
     }
 
     async fn write_profile(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        buffer_record(
-            &mut self.profiles_buffer,
-            &mut self.profiles_buffered_bytes,
-            data,
-        );
-        if should_flush_after_append(self.profiles_buffered_bytes, self.buffer_threshold) {
+        self.profiles_buffer.push_record(data);
+        if self
+            .profiles_buffer
+            .reached_threshold(self.buffer_threshold)
+        {
             self.publish_profiles_buffer().await?;
             self.last_write_delivered = true;
         }
@@ -519,7 +475,6 @@ impl NatsSink {
             &self.servers,
             &self.profiles_subject,
             &mut self.profiles_buffer,
-            &mut self.profiles_buffered_bytes,
         )
         .await
     }
@@ -532,8 +487,7 @@ async fn publish_stream_buffer(
     retry: &SinkRetry,
     servers: &[String],
     subject: &str,
-    buffer: &mut VecDeque<Bytes>,
-    buffered_bytes: &mut usize,
+    buffer: &mut PendingBuffer<Bytes>,
 ) -> Result<(), RastreoError> {
     while let Some(payload) = buffer.front().cloned() {
         let ack = {
@@ -545,9 +499,8 @@ async fn publish_stream_buffer(
             })
             .await
         }?;
-        ack.await
-            .map_err(|e| build_ack_error(subject, servers, e))?;
-        pop_accepted(buffer, buffered_bytes);
+        let acked = ack.await.map_err(|e| build_ack_error(subject, servers, e));
+        buffer.settle_front(acked)?;
     }
     Ok(())
 }
@@ -585,8 +538,8 @@ async fn connect_with_credentials(
 impl Sink for NatsSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
         self.last_write_delivered = false;
-        buffer_record(&mut self.buffer, &mut self.buffered_bytes, data);
-        if should_flush_after_append(self.buffered_bytes, self.buffer_threshold) {
+        self.buffer.push_record(data);
+        if self.buffer.reached_threshold(self.buffer_threshold) {
             if self.buffer_threshold == 1 {
                 self.publish_and_drain().await?;
                 self.last_write_delivered = true;
@@ -724,30 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn clamp_threshold_coerces_zero_to_one() {
-        assert_eq!(clamp_threshold(0), 1);
-    }
-
-    #[test]
-    fn clamp_threshold_passes_through_non_zero_values() {
-        assert_eq!(clamp_threshold(1), 1);
-        assert_eq!(clamp_threshold(1024), 1024);
-        assert_eq!(clamp_threshold(usize::MAX), usize::MAX);
-    }
-
-    #[test]
-    fn should_flush_after_append_is_false_below_threshold() {
-        assert!(!should_flush_after_append(0, 1024));
-        assert!(!should_flush_after_append(1023, 1024));
-    }
-
-    #[test]
-    fn should_flush_after_append_is_true_at_or_above_threshold() {
-        assert!(should_flush_after_append(1024, 1024));
-        assert!(should_flush_after_append(2048, 1024));
-    }
-
-    #[test]
     fn should_drain_pending_acks_is_false_below_the_cap() {
         assert!(!should_drain_pending_acks(0));
         assert!(!should_drain_pending_acks(1));
@@ -758,101 +687,6 @@ mod tests {
     fn should_drain_pending_acks_is_true_at_or_above_the_cap() {
         assert!(should_drain_pending_acks(MAX_PENDING_ACKS));
         assert!(should_drain_pending_acks(MAX_PENDING_ACKS + 1));
-    }
-
-    fn buffered(records: &[&[u8]]) -> (VecDeque<Bytes>, usize) {
-        let mut buffer = VecDeque::new();
-        let mut bytes = 0usize;
-        for record in records {
-            buffer_record(&mut buffer, &mut bytes, record);
-        }
-        (buffer, bytes)
-    }
-
-    #[test]
-    fn buffer_record_keeps_each_record_a_distinct_entry() {
-        let (buffer, bytes) = buffered(&[b"one\n", b"two\n", b"three\n"]);
-        assert_eq!(
-            buffer.len(),
-            3,
-            "a batched flush of 3 records must issue 3 publishes, not one concatenated payload"
-        );
-        assert_eq!(buffer[0], b"one\n".as_slice());
-        assert_eq!(buffer[1], b"two\n".as_slice());
-        assert_eq!(buffer[2], b"three\n".as_slice());
-        assert_eq!(bytes, 4 + 4 + 6);
-    }
-
-    #[test]
-    fn pop_accepted_removes_the_head_and_debits_only_its_bytes() {
-        let (mut buffer, mut bytes) = buffered(&[b"one\n", b"two\n", b"three\n"]);
-        pop_accepted(&mut buffer, &mut bytes);
-        assert_eq!(buffer.len(), 2);
-        assert_eq!(buffer[0], b"two\n".as_slice());
-        assert_eq!(bytes, 4 + 6);
-    }
-
-    #[test]
-    fn popping_every_accepted_entry_leaves_an_empty_buffer_and_no_bytes() {
-        let (mut buffer, mut bytes) = buffered(&[b"one\n", b"two\n", b"three\n"]);
-        for _ in 0..3 {
-            pop_accepted(&mut buffer, &mut bytes);
-        }
-        assert!(buffer.is_empty());
-        assert_eq!(bytes, 0);
-    }
-
-    #[test]
-    fn pop_accepted_on_an_empty_buffer_is_a_no_op() {
-        let mut buffer: VecDeque<Bytes> = VecDeque::new();
-        let mut bytes = 0usize;
-        pop_accepted(&mut buffer, &mut bytes);
-        assert!(buffer.is_empty());
-        assert_eq!(bytes, 0);
-    }
-
-    #[test]
-    fn retain_unacked_puts_the_payloads_back_ahead_of_later_writes_in_order() {
-        let (mut buffer, mut bytes) = buffered(&[b"later\n"]);
-        let (unacked, unacked_bytes) = buffered(&[b"first\n", b"second\n"]);
-
-        retain_unacked(&mut buffer, &mut bytes, unacked);
-
-        assert_eq!(buffer.len(), 3);
-        assert_eq!(buffer[0], b"first\n".as_slice());
-        assert_eq!(buffer[1], b"second\n".as_slice());
-        assert_eq!(buffer[2], b"later\n".as_slice());
-        assert_eq!(bytes, unacked_bytes + 6);
-    }
-
-    #[test]
-    fn retain_unacked_on_an_empty_buffer_restores_the_whole_batch() {
-        let mut buffer: VecDeque<Bytes> = VecDeque::new();
-        let mut bytes = 0usize;
-        let (unacked, unacked_bytes) = buffered(&[b"one\n", b"two\n"]);
-
-        retain_unacked(&mut buffer, &mut bytes, unacked);
-
-        assert_eq!(buffer.len(), 2);
-        assert_eq!(bytes, unacked_bytes);
-    }
-
-    #[test]
-    fn retain_unacked_with_nothing_to_retain_leaves_the_buffer_untouched() {
-        let (mut buffer, mut bytes) = buffered(&[b"one\n"]);
-        retain_unacked(&mut buffer, &mut bytes, VecDeque::new());
-        assert_eq!(buffer.len(), 1);
-        assert_eq!(bytes, 4);
-    }
-
-    #[test]
-    fn a_retained_batch_still_triggers_the_flush_threshold_it_reached() {
-        let (mut buffer, mut bytes) = buffered(&[]);
-        let (unacked, _) = buffered(&[b"0123456789\n"]);
-
-        retain_unacked(&mut buffer, &mut bytes, unacked);
-
-        assert!(should_flush_after_append(bytes, 11));
     }
 
     #[test]
@@ -891,6 +725,35 @@ mod tests {
             .to_threshold(),
             4096
         );
+    }
+
+    fn buffered(records: &[&[u8]]) -> PendingBuffer<Bytes> {
+        let mut buffer = PendingBuffer::new();
+        for record in records {
+            buffer.push_record(record);
+        }
+        buffer
+    }
+
+    #[test]
+    fn nats_flush_mode_per_record_flushes_on_the_first_record() {
+        let threshold = NatsFlushMode::PerRecord.to_threshold();
+        assert!(!buffered(&[]).reached_threshold(threshold));
+        assert!(buffered(&[b"a"]).reached_threshold(threshold));
+    }
+
+    #[test]
+    fn nats_flush_mode_batched_holds_until_threshold_reached() {
+        let threshold = NatsFlushMode::Batched {
+            threshold_bytes: 4096,
+        }
+        .to_threshold();
+        let short = vec![b'x'; 4095];
+        let exact = vec![b'x'; 4096];
+        assert!(!buffered(&[]).reached_threshold(threshold));
+        assert!(!buffered(&[&short]).reached_threshold(threshold));
+        assert!(buffered(&[&exact]).reached_threshold(threshold));
+        assert!(buffered(&[&exact, &exact]).reached_threshold(threshold));
     }
 
     #[test]

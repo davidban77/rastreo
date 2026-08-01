@@ -4,6 +4,8 @@ pub mod kafka;
 pub mod memory;
 #[cfg(feature = "nats")]
 pub mod nats;
+#[cfg(any(feature = "kafka", feature = "nats"))]
+pub(crate) mod pending;
 pub mod retry;
 pub mod stdout;
 pub mod tee;
