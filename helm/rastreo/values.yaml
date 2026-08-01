@@ -86,11 +86,15 @@ readiness: {}
 # Server-side sink reachability probe. When `sink.config` is set the chart
 # renders a ConfigMap containing the YAML, mounts it at /etc/rastreo/sink/sink.yaml,
 # and the server periodically probes the resulting sink. `/readyz` reports the
-# cached result on `sink_reachable` and gates on `sink_unreachable`; `/metrics`
-# exposes `rastreo_server_sink_reachable{sink_type}` and
-# `rastreo_server_sink_reachability_probe_total{outcome,sink_type}`. Leave
-# `sink.config` empty (default) to run without a server-configured sink — the
-# reachability axis reports null and does not gate `/readyz`.
+# cached result on `sink_reachable`, whether the sink is attached at all on
+# `sink_attached`, and gates on `sink_unreachable` — plus `sink_probe_stalled`
+# when the probe task has stopped running and the cached result can no longer be
+# trusted. `/metrics` exposes `rastreo_server_sink_reachable{sink_type}`,
+# `rastreo_server_sink_reachability_probe_total{outcome,sink_type}`, and
+# `rastreo_server_sink_probe_ticks_total{sink_type}`, whose flatline is the
+# alertable form of `sink_probe_stalled`. Leave `sink.config` empty (default) to
+# run without a server-configured sink — the reachability axis reports null and
+# does not gate `/readyz`.
 sink:
   # SinkConfig YAML — mirrors the shape of the `sink:` field in a scenario file.
   # Example:

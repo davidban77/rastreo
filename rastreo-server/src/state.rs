@@ -571,6 +571,10 @@ pub(crate) fn current_epoch_ms() -> u64 {
 pub struct SinkReachability {
     pub reachable: AtomicBool,
     pub last_probe_epoch_ms: AtomicU64,
+    /// When the probe task last began a cycle, whether or not that cycle produced a probe result.
+    pub last_tick_epoch_ms: AtomicU64,
+    /// Cycles the probe task has begun; its gap over the probe outcome counters is the skipped-probe count.
+    pub ticks: AtomicU64,
     pub last_error: Mutex<Option<String>>,
     // Writable: a sink that builds on a retry relabels itself from the construction hint.
     sink_type: Mutex<Option<SinkType>>,
@@ -585,6 +589,8 @@ impl SinkReachability {
         Self {
             reachable: AtomicBool::new(false),
             last_probe_epoch_ms: AtomicU64::new(0),
+            last_tick_epoch_ms: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
             last_error: Mutex::new(None),
             sink_type: Mutex::new(None),
             configured: false,
@@ -602,6 +608,8 @@ impl SinkReachability {
         Self {
             reachable: AtomicBool::new(false),
             last_probe_epoch_ms: AtomicU64::new(0),
+            last_tick_epoch_ms: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
             last_error: Mutex::new(None),
             sink_type: Mutex::new(Some(sink_type)),
             configured: true,
@@ -620,6 +628,8 @@ impl SinkReachability {
         Self {
             reachable: AtomicBool::new(false),
             last_probe_epoch_ms: AtomicU64::new(current_epoch_ms()),
+            last_tick_epoch_ms: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
             last_error: Mutex::new(Some(error)),
             sink_type: Mutex::new(sink_type),
             configured: true,
@@ -635,6 +645,12 @@ impl SinkReachability {
     pub fn set_sink_type(&self, sink_type: SinkType) {
         let mut guard = self.sink_type.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(sink_type);
+    }
+
+    pub fn record_tick(&self) {
+        self.last_tick_epoch_ms
+            .store(current_epoch_ms(), Ordering::Relaxed);
+        self.ticks.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_success(&self) {
@@ -678,6 +694,10 @@ impl std::fmt::Debug for SinkReachability {
             .field(
                 "last_probe_epoch_ms",
                 &self.last_probe_epoch_ms.load(Ordering::Relaxed),
+            )
+            .field(
+                "last_tick_epoch_ms",
+                &self.last_tick_epoch_ms.load(Ordering::Relaxed),
             )
             .field("probe_interval", &self.probe_interval)
             .field("probe_timeout", &self.probe_timeout)

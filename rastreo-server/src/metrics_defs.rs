@@ -53,7 +53,7 @@ pub(crate) fn descriptors() -> &'static [MetricDescriptor] {
     &DESCRIPTORS
 }
 
-static DESCRIPTORS: [MetricDescriptor; 9] = [
+static DESCRIPTORS: [MetricDescriptor; 10] = [
     MetricDescriptor {
         name: "rastreo_server_scans_total",
         help: "POST /scans requests served, partitioned by outcome.",
@@ -89,6 +89,12 @@ static DESCRIPTORS: [MetricDescriptor; 9] = [
         help: "Server-side sink reachability probes, partitioned by outcome and sink type.",
         kind: MetricKind::CounterU64,
         read: read_sink_reachability_probe_total,
+    },
+    MetricDescriptor {
+        name: "rastreo_server_sink_probe_ticks_total",
+        help: "Sink reachability probe cycles started, partitioned by sink type. A cycle that skips its probe still counts.",
+        kind: MetricKind::CounterU64,
+        read: read_sink_probe_ticks_total,
     },
     MetricDescriptor {
         name: "rastreo_server_sink_reachable",
@@ -192,6 +198,16 @@ fn read_sink_reachability_probe_total(ctx: &MetricContext, emit: &mut SampleSink
     );
 }
 
+fn read_sink_probe_ticks_total(ctx: &MetricContext, emit: &mut SampleSink) {
+    let Some(sink_label) = ctx.reachability.sink_type_label() else {
+        return;
+    };
+    emit(
+        &[("sink_type", sink_label)],
+        MetricValue::U64(ctx.reachability.ticks.load(Ordering::Relaxed)),
+    );
+}
+
 fn read_sink_reachable(ctx: &MetricContext, emit: &mut SampleSink) {
     let Some(sink_label) = ctx.reachability.sink_type_label() else {
         return;
@@ -222,8 +238,9 @@ mod tests {
 
     use crate::state::SinkReachability;
 
-    const CONDITIONAL: [&str; 2] = [
+    const CONDITIONAL: [&str; 3] = [
         "rastreo_server_sink_reachability_probe_total",
+        "rastreo_server_sink_probe_ticks_total",
         "rastreo_server_sink_reachable",
     ];
 
@@ -286,9 +303,36 @@ mod tests {
             2
         );
         assert_eq!(
+            sample_count(descriptor("rastreo_server_sink_probe_ticks_total"), &ctx),
+            1
+        );
+        assert_eq!(
             sample_count(descriptor("rastreo_server_sink_reachable"), &ctx),
             1
         );
+    }
+
+    #[test]
+    fn the_tick_counter_reads_the_cycles_the_probe_task_recorded() {
+        let metrics = Metrics::new();
+        let reachability = SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        reachability.record_tick();
+        reachability.record_tick();
+        let ctx = MetricContext {
+            metrics: &metrics,
+            reachability: &reachability,
+        };
+        let mut observed = Vec::new();
+        (descriptor("rastreo_server_sink_probe_ticks_total").read)(&ctx, &mut |labels, value| {
+            if let MetricValue::U64(n) = value {
+                observed.push((labels.to_vec(), n));
+            }
+        });
+        assert_eq!(observed, vec![(vec![("sink_type", "kafka")], 2)]);
     }
 
     #[test]

@@ -201,23 +201,25 @@ curl -sS http://localhost:8080/healthz
 {"status":"ok"}
 ```
 
-`GET /readyz` is a readiness probe. It returns `200 OK` only when the server can accept new work; when an inflight-scan limit or a recent-error quarantine has fired it returns `503 SERVICE_UNAVAILABLE` with a `reason` string. Use it from Kubernetes readiness probes so the pod is temporarily removed from Service endpoints while it recovers, without triggering a restart.
+`GET /readyz` is a readiness probe. It returns `200 OK` only when the server can accept new work; when the inflight-scan limit, a sink gate, or a recent-error quarantine has fired it returns `503 SERVICE_UNAVAILABLE` with a `reason` string. Use it from Kubernetes readiness probes so the pod is temporarily removed from Service endpoints while it recovers, without triggering a restart.
 
 ```bash
-curl -sS http://localhost:8080/readyz
+curl -sS http://localhost:8080/readyz | jq
 ```
 
 ```json
 {
-  "status": "ready",
   "inflight_scans": 0,
+  "last_probe_error": null,
   "max_inflight_scans": 100,
-  "seconds_since_sink_error": null,
+  "seconds_since_last_probe": null,
+  "seconds_since_last_probe_tick": null,
   "seconds_since_scan_error": null,
+  "seconds_since_sink_error": null,
+  "sink_attached": null,
   "sink_reachable": null,
   "sink_type": null,
-  "seconds_since_last_probe": null,
-  "last_probe_error": null
+  "status": "ready"
 }
 ```
 
@@ -225,11 +227,13 @@ The gates and the `reason` values are documented in full in the [Health endpoint
 
 ## Sink reachability probe
 
-When `RASTREO_SINK_CONFIG_PATH` is unset the reachability axis reports null on `/readyz` and no series is emitted on `/metrics` — the server is a pure `POST /scans` control plane. When the env var points at a YAML file with a `SinkConfig`, the server builds the sink at startup and spawns a background probe task that fires every `RASTREO_SINK_PROBE_INTERVAL_SECS` (default 10s) with a per-probe timeout of `RASTREO_SINK_PROBE_TIMEOUT_SECS` (default 5s). The cached result feeds `/readyz` (`sink_reachable`, `sink_type`, `seconds_since_last_probe`, `last_probe_error`) and `/metrics` (`rastreo_server_sink_reachable{sink_type}`, `rastreo_server_sink_reachability_probe_total{outcome,sink_type}`).
+When `RASTREO_SINK_CONFIG_PATH` is unset the reachability axis reports null on `/readyz` and no series is emitted on `/metrics` — the server is a pure `POST /scans` control plane. When the env var points at a YAML file with a `SinkConfig`, the server builds the sink at startup and spawns a background probe task that fires every `RASTREO_SINK_PROBE_INTERVAL_SECS` (default 10s) with a per-probe timeout of `RASTREO_SINK_PROBE_TIMEOUT_SECS` (default 5s). The cached result feeds `/readyz` (`sink_reachable`, `sink_attached`, `sink_type`, `seconds_since_last_probe`, `seconds_since_last_probe_tick`, `last_probe_error`) and `/metrics` (`rastreo_server_sink_reachable{sink_type}`, `rastreo_server_sink_reachability_probe_total{outcome,sink_type}`, `rastreo_server_sink_probe_ticks_total{sink_type}`).
 
 The probe is proactive: a broker outage flips `sink_reachable` to `false` on the next tick, and `/readyz` returns 503 with `reason: "sink_unreachable"` before any scan-triggered sink write catches the fault. Records from `POST /scans` land in both the response body and the server-configured sink on the same pipeline pass (see [POST /scans](#post-scans) below).
 
-A sink that fails to build does not crash the pod, and in most cases does not need a restart either. The server stays up with `sink_reachable: false` and a `last_probe_error` string, and retries the build on the same interval, re-reading the config file every attempt — so a broker that comes back, a corrected ConfigMap, or a `!file` secret that is mounted late all resolve on their own. An unset environment variable is the exception: `${VAR}` reads the process environment, which is fixed once the process starts, so that one does need a restart. When a build succeeds the sink attaches to the running server: `/readyz` goes ready on the probe that follows, the next `POST /scans` writes to it, and the server logs one `INFO` line naming the config path and the sink kind. That line marks the point where config edits stop being read — the built sink is held for the process lifetime, and changing the file after it has no effect until the process restarts. `sink_type` does not wait for the build: it reads `unknown` only while the config file cannot be read or parsed, and carries the configured kind from the first attempt that parses it, on both `/readyz` and the `/metrics` series. Failed attempts are logged at `WARN` on the first failure and then on a doubling backoff (attempt 2, 4, 8, 16 …), plus whenever the error changes, so a broker that is gone for hours leaves a readable trail instead of one line per tick.
+`/readyz` also refuses to serve a probe result it can no longer vouch for: if the probe task stops starting cycles, readiness returns 503 with `reason: "sink_probe_stalled"` instead of continuing to publish the last cached verdict. A running scan does not trip that gate — records reach the sink through a fan-out that takes the lock one operation at a time, so ticks land between operations, and the gate reads when a cycle *started* rather than when a probe last returned. A tick skips its probe when one sink operation runs longer than `RASTREO_SINK_PROBE_TIMEOUT_SECS`, which points at broker latency rather than at server load. See [Health endpoints · When the probe task stops ticking](../reference/health-endpoints.md#when-the-probe-task-stops-ticking).
+
+A sink that fails to build does not crash the pod, and in most cases does not need a restart either. The server stays up with `sink_attached: false`, `sink_reachable: false`, and a `last_probe_error` string, and retries the build on the same interval, re-reading the config file every attempt — so a broker that comes back, a corrected ConfigMap, or a `!file` secret that is mounted late all resolve on their own. An unset environment variable is the exception: `${VAR}` reads the process environment, which is fixed once the process starts, so that one does need a restart. When a build succeeds the sink attaches to the running server: the same cycle that builds it also probes it, so `sink_attached` and `sink_reachable` both flip to `true` and `/readyz` goes ready without waiting for another interval. The next `POST /scans` writes to it, and the server logs one `INFO` line naming the config path and the sink kind. That line marks the point where config edits stop being read — the built sink is held for the process lifetime, and changing the file after it has no effect until the process restarts. `sink_type` does not wait for the build: it reads `unknown` only while the config file cannot be read or parsed, and carries the configured kind from the first attempt that parses it, on both `/readyz` and the `/metrics` series. Failed attempts are logged at `WARN` on the first failure and then on a doubling backoff (attempt 2, 4, 8, 16 …), plus whenever the error changes, so a broker that is gone for hours leaves a readable trail instead of one line per tick.
 
 Kubernetes example (Helm values):
 
@@ -287,6 +291,7 @@ Metrics exposed:
 | `rastreo_server_sink_errors_total` | counter | — | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant). |
 | `rastreo_server_scan_duration_seconds` | histogram | — | `POST /scans` request handling duration. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. |
 | `rastreo_server_sink_reachability_probe_total` | counter | `outcome`, `sink_type` | Server-side sink reachability probes. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
+| `rastreo_server_sink_probe_ticks_total` | counter | `sink_type` | Probe cycles the background task has started, counting cycles that skipped their probe. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. A flat counter is what the `sink_probe_stalled` readiness reason reports from the metrics side. |
 | `rastreo_server_sink_reachable` | gauge | `sink_type` | `1` when the last sink probe succeeded, `0` otherwise. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `rastreo_server_uptime_seconds` | gauge | — | Seconds since the server process started. |
 | `rastreo_server_build_info` | gauge | `version` | Static `1`; the `version` label carries the binary's `CARGO_PKG_VERSION`. |
@@ -511,7 +516,7 @@ When authentication is off (`RASTREO_AUTH_DISABLED=true`, or the chart's `auth.e
 Either way the server logs the full failure at `ERROR` level with a `disclosed` field recording which form the caller got, so nothing an operator needs is lost. `4xx` bodies are unaffected — they report what was wrong with the request and always carry the full message.
 
 !!! warning "A sink that has not built yet produces no 5xx at all"
-    If the sink build fails — an unreachable broker, an unset `${VAR}`, malformed YAML — the server keeps running with no sink attached. A `POST /scans` that arrives in that window returns `200 OK` with a normal summary, having written nothing to the configured destination. The build is retried every `RASTREO_SINK_PROBE_INTERVAL_SECS`, so the window closes as soon as the sink builds, and scans from that point on reach it. Check `/readyz` while it is open: it returns `503` with `reason: "sink_unreachable"` and names the failure in `last_probe_error`. See [Sink reachability probe](#sink-reachability-probe).
+    If the sink build fails — an unreachable broker, an unset `${VAR}`, malformed YAML — the server keeps running with no sink attached. A `POST /scans` that arrives in that window returns `200 OK` with a normal summary, having written nothing to the configured destination. The build is retried every `RASTREO_SINK_PROBE_INTERVAL_SECS`, so the window closes as soon as the sink builds, and scans from that point on reach it. Check `/readyz` while it is open: it returns `503` with `reason: "sink_unreachable"`, `sink_attached: false` — which is what marks this window rather than an attached sink whose broker is down — and names the failure in `last_probe_error`. See [Sink reachability probe](#sink-reachability-probe).
 
 Redaction is the default for every other error the API builds. The scan endpoint is the one place it lifts, and only because the bearer-token check ran on that exact request.
 

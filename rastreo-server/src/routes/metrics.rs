@@ -424,6 +424,10 @@ mod tests {
             !body.contains("rastreo_server_sink_reachability_probe_total"),
             "no probe counter expected when unconfigured; body was:\n{body}"
         );
+        assert!(
+            !body.contains("rastreo_server_sink_probe_ticks_total"),
+            "no tick counter expected when unconfigured; body was:\n{body}"
+        );
     }
 
     #[tokio::test]
@@ -439,6 +443,10 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
+        reach.record_tick();
+        reach.record_tick();
+        reach.record_tick();
+        reach.record_tick();
         state.metrics.record_sink_probe_success();
         state.metrics.record_sink_probe_success();
         state.metrics.record_sink_probe_failure();
@@ -450,6 +458,9 @@ mod tests {
             "# TYPE rastreo_server_sink_reachability_probe_total counter",
             "rastreo_server_sink_reachability_probe_total{outcome=\"success\",sink_type=\"kafka\"} 2",
             "rastreo_server_sink_reachability_probe_total{outcome=\"failure\",sink_type=\"kafka\"} 1",
+            "# HELP rastreo_server_sink_probe_ticks_total",
+            "# TYPE rastreo_server_sink_probe_ticks_total counter",
+            "rastreo_server_sink_probe_ticks_total{sink_type=\"kafka\"} 4",
             "# HELP rastreo_server_sink_reachable",
             "# TYPE rastreo_server_sink_reachable gauge",
             "rastreo_server_sink_reachable{sink_type=\"kafka\"} 1",
