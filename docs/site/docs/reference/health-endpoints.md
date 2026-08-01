@@ -36,7 +36,7 @@ livenessProbe:
 `GET /readyz` reports whether the server can actually accept a new scan. Four gates can flip readiness to `not_ready`:
 
 - **Inflight scan limit** — the number of in-flight `POST /scans` requests has reached `RASTREO_MAX_INFLIGHT_SCANS`. New scans would compete with running ones for CPU, sockets, and memory. Kubernetes removes the pod from Service endpoints until this drops.
-- **Sink unreachable** — the server-side reachability probe reported the sink as unreachable on its last tick. Proactive gate: fires before the sink-error quarantine, because a probe failure indicates downstream ingest is offline right now. Only active when `RASTREO_SINK_CONFIG_PATH` is set.
+- **Sink unreachable** — the server-side reachability probe reported the sink as unreachable on its last tick, or the sink has not built yet. Proactive gate: fires before the sink-error quarantine, because a probe failure indicates downstream ingest is offline right now. Only active when `RASTREO_SINK_CONFIG_PATH` is set. A sink that failed to build is rebuilt on every tick, so this gate clears by itself once the sink builds and probes clean.
 - **Recent sink error** — a scan failed in the last `RASTREO_SINK_ERROR_QUARANTINE_SECS` because the downstream sink (Kafka, NATS, file) errored. Reactive gate: catches transient errors between probe ticks; assumes the sink is still misbehaving until the window elapses.
 - **Recent scan error** — a `POST /scans` request failed in the last `RASTREO_SCAN_ERROR_QUARANTINE_SECS` for any reason (not necessarily a sink failure). Coarser check that catches an invalid scenario body, a resolver failure, or a runtime failure.
 
@@ -65,7 +65,7 @@ curl -sS http://localhost:8080/readyz
 }
 ```
 
-`seconds_since_*_error` is `null` when no such error has been observed since the process started, and a fractional-seconds `f64` otherwise. `sink_reachable` is `null` when `RASTREO_SINK_CONFIG_PATH` is unset (no sink configured — this axis does not gate readiness); `true` after the last probe succeeded; `false` after the last probe failed or after startup sink construction failed. `sink_type` carries the sink kind label (`kafka`, `nats`, `stdout`, `file`, `memory`) when a sink is configured; when the sink is configured but its type cannot be determined at startup (missing config file, malformed YAML), the label is `"unknown"`. `seconds_since_last_probe` reports the age of the cached probe result; `last_probe_error` carries the last failure message verbatim (or `null` after a success).
+`seconds_since_*_error` is `null` when no such error has been observed since the process started, and a fractional-seconds `f64` otherwise. `sink_reachable` is `null` when `RASTREO_SINK_CONFIG_PATH` is unset (no sink configured — this axis does not gate readiness); `true` after the last probe succeeded; `false` after the last probe failed or after the last sink build attempt failed. `sink_type` carries the sink kind label (`kafka`, `nats`, `stdout`, `file`, `memory`) when a sink is configured. It reads `"unknown"` only while the config file cannot be read or parsed (missing file, malformed YAML, unknown `type:`); once the file parses, the label is the kind it names, whether or not the sink has built — a valid Kafka config whose broker is down reports `sink_type: "kafka"` with `sink_reachable: false`. `seconds_since_last_probe` reports the age of the cached probe result. A build that keeps failing refreshes it on every attempt, but a tick that finds the sink locked by a running scan skips the probe and leaves the value where it was, so a value older than the probe interval has two causes: a long `POST /scans` holding the sink, or a probe task that has stopped ticking. `inflight_scans` on the same response tells them apart. `last_probe_error` carries the last failure message verbatim (or `null` after a success).
 
 ### Not-ready response
 
@@ -90,7 +90,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8080/readyz
 | `reason` | Meaning |
 |---|---|
 | `inflight_scan_limit_exceeded` | `inflight_scans >= max_inflight_scans`. New scans are rejected upstream by the readiness probe pulling the pod out of the Service. |
-| `sink_unreachable` | The server-side sink reachability probe reported the sink as unreachable on its last tick. Only fires when `RASTREO_SINK_CONFIG_PATH` is set. |
+| `sink_unreachable` | The server-side sink reachability probe reported the sink as unreachable on its last tick, or the sink has not built yet and the last build attempt failed. Only fires when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `sink_error_within_quarantine` | A sink error was observed less than `RASTREO_SINK_ERROR_QUARANTINE_SECS` ago. |
 | `scan_error_within_quarantine` | A scan error was observed less than `RASTREO_SCAN_ERROR_QUARANTINE_SECS` ago (and no sink error is currently quarantining). |
 
@@ -131,7 +131,7 @@ The three gates are tuned through environment variables read at server startup. 
 | `RASTREO_SINK_ERROR_QUARANTINE_SECS` | `30` | Window after any sink error during which `/readyz` returns `503`. Set to `0` to disable the check. |
 | `RASTREO_SCAN_ERROR_QUARANTINE_SECS` | `30` | Window after any scan error during which `/readyz` returns `503`. Set to `0` to disable the check. |
 | `RASTREO_SINK_CONFIG_PATH` | unset | Path to a `SinkConfig` YAML file the server builds and probes. Leave unset to disable the reachability probe; `/readyz` reports `sink_reachable: null` and does not gate on this axis. |
-| `RASTREO_SINK_PROBE_INTERVAL_SECS` | `10` | Sink reachability probe cadence in seconds. Only meaningful when `RASTREO_SINK_CONFIG_PATH` is set. Minimum 1. |
+| `RASTREO_SINK_PROBE_INTERVAL_SECS` | `10` | Sink reachability probe cadence in seconds, and the retry cadence for a sink that has not built yet. Only meaningful when `RASTREO_SINK_CONFIG_PATH` is set. Minimum 1. |
 | `RASTREO_SINK_PROBE_TIMEOUT_SECS` | `5` | Per-probe timeout in seconds. Probes exceeding this count as failures. Minimum 1. |
 
 ## Kubernetes deployment fragment

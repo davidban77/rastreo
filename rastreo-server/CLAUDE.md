@@ -17,8 +17,8 @@ src/
 ├── lib.rs         ← build_app(state) -> Router; reusable from tests
 ├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability, auth, max_body_bytes, max_result_bytes }
 │                    + HistogramShard + Metrics + ReadinessConfig + ReadinessState
-│                    + SinkProbeConfig + SinkReachability + AuthConfig + TargetGuardConfig
-├── sink_probe.rs  ← spawn_sink_probe + periodic probe task + run_probe helper
+│                    + SinkProbeConfig + SinkSlot + SinkReachability + AuthConfig + TargetGuardConfig
+├── sink_probe.rs  ← spawn_sink_probe + periodic probe/retry task + run_probe helper
 ├── observability.rs ← OTLP exporters + instrument callbacks (feature: otlp)
 ├── error.rs       ← AppError + IntoResponse + RastreoError -> HTTP mapping
 └── routes/
@@ -43,7 +43,7 @@ src/
 | —                      | `RASTREO_MAX_INFLIGHT_SCANS`           | `100`       | Inflight-scan cap: flips `/readyz` to 503 AND rejects a real `POST /scans` over the cap with 429; `0` disables. Dry-runs are never counted or rejected. |
 | —                      | `RASTREO_SINK_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` sink-error quarantine window; `0` disables |
 | —                      | `RASTREO_SCAN_ERROR_QUARANTINE_SECS`   | `30`        | `/readyz` scan-error quarantine window; `0` disables |
-| —                      | `RASTREO_SINK_CONFIG_PATH`             | unset       | Path to a YAML `SinkConfig`. When set, the server builds the sink at startup and probes it periodically. Unset ⇒ no probe, `/readyz` reports `sink_reachable: null`. |
+| —                      | `RASTREO_SINK_CONFIG_PATH`             | unset       | Path to a YAML `SinkConfig`. When set, the server builds the sink at startup and probes it periodically. A build that fails is retried on the probe interval and attaches to the running server (`SinkSlot`) when it succeeds — no restart. `sink_type` is `unknown` only while the file cannot be read or parsed; a parsed config labels its kind whether or not it built. Unset ⇒ no probe, `/readyz` reports `sink_reachable: null`. |
 | —                      | `RASTREO_SINK_PROBE_INTERVAL_SECS`     | `10`        | Sink reachability probe cadence in seconds (min 1). |
 | —                      | `RASTREO_SINK_PROBE_TIMEOUT_SECS`      | `5`         | Per-probe timeout in seconds (min 1). Elapsed probes count as failure. |
 | —                      | `RASTREO_TARGET_ALLOWLIST`             | unset       | Comma-separated CIDRs (or bare IPs, parsed as `/32`/`/128` host nets). When set, a `POST /scans` is rejected with 403 if any resolved target falls outside every listed range. Unset ⇒ allow all. Wraps the server resolver in a `GuardedResolver`; the CLI is unaffected. |

@@ -276,7 +276,7 @@ Setting `sink.config` and `sink.configYaml` together stops the render — the ch
 Error: execution error at (rastreo/templates/deployment.yaml:1:19): sink.config and sink.configYaml are both set: the chart writes one sink.yaml and will not merge them. Keep sink.config for a config Helm parses, or sink.configYaml for one it copies through verbatim (the only form that preserves a !file tag).
 ```
 
-A reference that cannot resolve is not fatal. The pod starts and stays up, `/readyz` returns `503` with `reason: "sink_unreachable"`, and `last_probe_error` names the variable or the path it could not read — see [rastreo-server · Sink reachability probe](server.md#sink-reachability-probe).
+A reference that cannot resolve is not fatal. The pod starts and stays up, `/readyz` returns `503` with `reason: "sink_unreachable"`, and `last_probe_error` names the variable or the path it could not read. The server re-reads the config file and rebuilds the sink every `RASTREO_SINK_PROBE_INTERVAL_SECS`, so a `!file` path that is mounted late, a corrected ConfigMap, or a broker that comes back clears the condition without a restart. An unset environment variable is the exception: a variable's value is fixed when the process starts, so `${VAR}` resolves the same way on every attempt and the pod does need restarting once the `Secret` is in place. See [rastreo-server · Sink reachability probe](server.md#sink-reachability-probe).
 
 ### Values the chart refuses to render
 
@@ -291,8 +291,10 @@ Kubernetes keeps the last duplicate of an environment variable, rejects two volu
 
 `extraEnvFrom` is not checked for collisions: an explicit `env` entry wins over an `envFrom` key of the same name, so a key arriving that way cannot displace what the chart sets.
 
-!!! note "A rotated Secret needs a pod restart"
-    The server builds its sink once, at startup. Rotating the `Secret` behind a `${VAR}` or `!file` reference changes what the next pod reads, not what a running one holds — run `kubectl rollout restart deployment/<release>` to pick it up. Editing `sink.config` or `sink.configYaml` and running `helm upgrade` rolls the pods on its own: the chart stamps a checksum of the sink config onto the pod template.
+!!! note "Sink config edits stop taking effect once the sink builds"
+    The server re-reads the sink config on every probe interval until the sink builds, and never again after that — the built sink is held for the process lifetime. Which side of that line you are on decides what an edit does. Before the sink builds, correcting the `ConfigMap` (or mounting a `!file` secret that was missing) is picked up within one `RASTREO_SINK_PROBE_INTERVAL_SECS` and the pod goes ready on its own. After it builds, the identical edit is read by nothing: no log line, no `/readyz` change, and the pod keeps writing to the topic it opened at build time. A rotated `Secret` behind a `${VAR}` or `!file` reference is the same rule — it changes what the next pod reads, not what a running one holds.
+
+    The server logs one `INFO` line the moment the sink attaches, naming the config path and the sink kind, so that line marks where self-healing stops. From then on, `kubectl rollout restart deployment/<release>` is what applies a sink config change. Editing `sink.config` or `sink.configYaml` and running `helm upgrade` rolls the pods on its own: the chart stamps a checksum of the sink config onto the pod template.
 
 ## Restricting scan targets
 
