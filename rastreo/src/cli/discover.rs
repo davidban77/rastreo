@@ -473,7 +473,7 @@ async fn run_dry_run_from_file(
             path.display()
         ));
     }
-    ensure_resume_is_single_scenario(args, &file, &path)?;
+    ensure_checkpoint_is_single_scenario(args, &file, &path)?;
 
     let cli_sink = build_cli_sink_override(args)?;
     let cli_encoder = build_cli_encoder_override(args);
@@ -482,6 +482,7 @@ async fn run_dry_run_from_file(
 
     let mut plans: Vec<DiscoveryPlan> = Vec::with_capacity(total);
     let mut failed = 0usize;
+    let mut skipped = 0usize;
 
     for (idx, entry) in file.scenarios.into_iter().enumerate() {
         let mut cfg = match entry {
@@ -493,6 +494,7 @@ async fn run_dry_run_from_file(
         apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref(), cli_encoder.as_ref());
         let label = scenario_plan_label(&cfg.base, idx, total, plan_format);
         if skip_prober_less_scenario(&cfg, &label, mode) {
+            skipped += 1;
             continue;
         }
         // Ahead of resolution, so a scenario the run would refuse costs no DNS lookup.
@@ -527,24 +529,37 @@ async fn run_dry_run_from_file(
             "{failed} of {total} scenario(s) failed; see individual errors above"
         ));
     }
-    Ok(())
+    ensure_not_every_scenario_was_skipped(skipped, total, &path)
 }
 
-// One checkpoint path cannot represent several scenarios' progress, so resume is single-scenario only.
+// One checkpoint path cannot represent several scenarios' progress, so the write is refused where the resume would be: before the scan, not after it.
 #[cfg(feature = "config")]
-fn ensure_resume_is_single_scenario(
+fn ensure_checkpoint_is_single_scenario(
     args: &DiscoverArgs,
     file: &ScenarioFile,
     path: &Path,
 ) -> Result<()> {
-    if args.resume && file.scenarios.len() > 1 {
-        return Err(anyhow!(
-            "--resume supports a single-scenario run; '{}' has {} scenarios",
-            path.display(),
-            file.scenarios.len()
-        ));
+    if args.checkpoint.is_none() || file.scenarios.len() < 2 {
+        return Ok(());
     }
-    Ok(())
+    Err(anyhow!(
+        "--checkpoint supports a single-scenario run; '{}' has {} scenarios. \
+         One checkpoint path cannot record several scenarios' progress, so a checkpoint written here could not be resumed.",
+        path.display(),
+        file.scenarios.len()
+    ))
+}
+
+// A file whose every scenario was skipped probed nothing, and a run that probed nothing did not succeed.
+#[cfg(feature = "config")]
+fn ensure_not_every_scenario_was_skipped(skipped: usize, total: usize, path: &Path) -> Result<()> {
+    if skipped == 0 || skipped < total {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "every scenario in '{}' was skipped for having no probers; there is nothing to probe",
+        path.display()
+    ))
 }
 
 // One predicate and one message, so the run and the rehearsal cannot drift apart on which scenarios they skip.
@@ -792,7 +807,7 @@ async fn run_from_file(
         ));
     }
 
-    ensure_resume_is_single_scenario(args, &file, &path)?;
+    ensure_checkpoint_is_single_scenario(args, &file, &path)?;
 
     let cli_sink = build_cli_sink_override(args)?;
     let cli_encoder = build_cli_encoder_override(args);
@@ -802,6 +817,7 @@ async fn run_from_file(
         ..ScenarioTally::default()
     };
     let mut aggregate = DiscoverySummary::default();
+    let mut skipped = 0usize;
 
     for (idx, entry) in file.scenarios.into_iter().enumerate() {
         if *cancel.borrow() {
@@ -826,6 +842,7 @@ async fn run_from_file(
         }
 
         if skip_prober_less_scenario(&cfg, &label, mode) {
+            skipped += 1;
             continue;
         }
 
@@ -867,6 +884,7 @@ async fn run_from_file(
             tally.failed
         ));
     }
+    ensure_not_every_scenario_was_skipped(skipped, total, &path)?;
     Ok((tally, aggregate))
 }
 
@@ -1784,6 +1802,82 @@ mod tests {
         let mut a = args(&["127.0.0.1"], &[80]);
         a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
         assert!(!checkpoint_config(&a).expect("set").resume);
+    }
+
+    #[cfg(feature = "config")]
+    fn scenario_file_of(scenarios: usize) -> ScenarioFile {
+        let mut yaml = String::from("version: 1\nkind: discovery\nscenarios:\n");
+        for i in 0..scenarios {
+            yaml.push_str(&format!("  - signal_type: discover\n    name: s{i}\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n"));
+        }
+        parse_scenario_file(&yaml).expect("parse scenario file")
+    }
+
+    #[cfg(feature = "config")]
+    fn checkpoint_args(resume: bool) -> DiscoverArgs {
+        let mut a = args(&["127.0.0.1"], &[80]);
+        a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
+        a.resume = resume;
+        a
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_multi_scenario_checkpoint_is_refused_whether_or_not_resume_was_asked_for() {
+        for resume in [false, true] {
+            let err = ensure_checkpoint_is_single_scenario(
+                &checkpoint_args(resume),
+                &scenario_file_of(2),
+                Path::new("scan.yml"),
+            )
+            .expect_err("one checkpoint path cannot record two scenarios' progress");
+            assert!(
+                err.to_string()
+                    .contains("--checkpoint supports a single-scenario run"),
+                "{err}"
+            );
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_single_scenario_file_accepts_a_checkpoint_request() {
+        for resume in [false, true] {
+            assert!(ensure_checkpoint_is_single_scenario(
+                &checkpoint_args(resume),
+                &scenario_file_of(1),
+                Path::new("scan.yml"),
+            )
+            .is_ok());
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_multi_scenario_file_asking_for_no_checkpoint_is_accepted() {
+        assert!(ensure_checkpoint_is_single_scenario(
+            &args(&["127.0.0.1"], &[80]),
+            &scenario_file_of(2),
+            Path::new("scan.yml"),
+        )
+        .is_ok());
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_file_refuses_only_once_every_one_of_its_scenarios_was_skipped() {
+        let path = Path::new("scan.yml");
+        assert!(ensure_not_every_scenario_was_skipped(0, 1, path).is_ok());
+        assert!(ensure_not_every_scenario_was_skipped(1, 2, path).is_ok());
+        let err = ensure_not_every_scenario_was_skipped(2, 2, path)
+            .expect_err("a run that probed nothing did not succeed");
+        assert!(err.to_string().contains("nothing to probe"), "{err}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_file_that_skipped_nothing_is_never_reported_as_all_skipped() {
+        assert!(ensure_not_every_scenario_was_skipped(0, 0, Path::new("scan.yml")).is_ok());
     }
 
     #[test]

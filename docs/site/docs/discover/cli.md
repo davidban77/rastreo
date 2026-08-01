@@ -424,6 +424,7 @@ The output shows one block per scenario. Each block lists:
 - the configured probers with their parameters
 - the [fuser](../reference/glossary.md#fuser) chain that would merge probe results into device records, outermost layer first
 - the [classifier](classification.md) that would derive the canonical `platform`, `role`, and version fields
+- the [record format](#record-format) each record would be written in — `table` or `ndjson`
 - the sink kind and destination
 - the effective concurrency, probe rate, and per-probe timeout
 
@@ -447,6 +448,7 @@ rastreo discover --target 10.0.0.0/24 --probe tcp_connect --port 22,80 --dry-run
     probers: tcp_connect (ports 22, 80)
     fuser: direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)
     classifier: rules (merge_mode extend, platform_rules 0, role_rules 0)
+    encoder: table
     sink: stdout
     concurrency: 64
     rate: unlimited
@@ -456,6 +458,8 @@ total probes: 254
 ```
 
 The `fuser` and `classifier` lines show the stages that would run after probing, with the settings they would use. A scenario that names neither gets the pipeline defaults you see above: `direct` fusion, and the `rules` classifier over the tables built into rastreo. The `platform_rules` and `role_rules` counts cover only the rules the scenario added, so `0` means those built-in tables run on their own.
+
+The `encoder` line is the last stage before the sink: it names the format each record is written in, after [the destination has decided](#where-the-default-comes-from) and any `--format` has been applied. Add `--sink file --output scan.ndjson` to the command above and the line reads `encoder: ndjson`. Check it before a production run to confirm the consumer on the other end gets what it expects. The line names the format only — a table's column width is measured from your terminal at run time, so it is left out to keep one scenario from printing two different plans.
 
 !!! tip "Safe to log or share"
     The plan strips inline credentials from a sink URL. A NATS server written as `nats://user:pass@host` renders as `nats://host`.
@@ -475,6 +479,7 @@ rastreo discover --target nx.invalid --target 10.0.0.0/8 --probe tcp_connect --p
     probers: tcp_connect (ports 22)
     fuser: direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)
     classifier: rules (merge_mode extend, platform_rules 0, role_rules 0)
+    encoder: table
     sink: stdout
     concurrency: 64
     rate: unlimited
@@ -501,13 +506,22 @@ The same refusal covers a prober rastreo cannot build, a classifier rule that wi
 !!! note "A target that fails to resolve is a different case"
     An unresolvable target leaves the scenario itself valid. rastreo still renders the plan, marks the target that failed, and exits `1`. See [Dry-run mode](#dry-run-mode).
 
-A scenario with an empty `probers:` list is not refused, because a real run does not refuse it either. The run skips that scenario and carries on with the rest of the file. The dry-run predicts that: the scenario is left out of the plan, a notice says why, and the exit code stays `0`. Here the second scenario in a two-scenario file, `placeholder`, has no probers:
+A scenario with an empty `probers:` list is not refused on its own, because a real run does not refuse it either. The run skips that scenario and carries on with the rest of the file, and the dry-run predicts that: the scenario is left out of the plan and a notice says why. Here the second scenario in a two-scenario file, `placeholder`, has no probers, and the run still exits `0` because the first scenario probed:
 
 ```text
 • 'placeholder' (2 of 2): no probers configured, skipping
 ```
 
-[`rastreo validate`](validate.md) judges the same file more strictly. It calls a scenario with no probers invalid, because a scenario that runs nothing is a mistake in the file. See [How it differs from a dry-run](validate.md#how-it-differs-from-a-dry-run).
+**A file whose every scenario is skipped probes nothing, and exits `1`.** A run that reported success there would be indistinguishable from a scan that found nothing, which is the one result you most need to tell apart. The dry-run refuses it on the same terms:
+
+```text
+• 'placeholder' (1 of 1): no probers configured, skipping
+[dry-run] would run 0 scenarios
+total probes: 0
+Error: every scenario in 'scan.yml' was skipped for having no probers; there is nothing to probe
+```
+
+[`rastreo validate`](validate.md) judges the same file more strictly still. It calls *any* scenario with no probers invalid, even one sitting beside a scenario that would run, because a scenario that runs nothing is a mistake in the file. See [How it differs from a dry-run](validate.md#how-it-differs-from-a-dry-run).
 
 ### Checkpoint and resume checks
 
@@ -515,7 +529,7 @@ A run refuses more than a bad scenario. It also refuses a *request* it cannot ac
 
 - **The scenario must be resume-safe.** See [Which scans can checkpoint](#which-scans-can-checkpoint) for the fuser, prober, and sink rules.
 - **The `--checkpoint` path must be free.** A path that already holds a checkpoint is refused, not overwritten.
-- **`--resume` needs a single scenario.** A `--file` holding several scenarios is refused, because one checkpoint path cannot record several scenarios' progress.
+- **`--checkpoint` needs a single scenario.** A `--file` holding several scenarios is refused, because one checkpoint path cannot record several scenarios' progress. The refusal lands on the `--checkpoint` that would write it, not only on the `--resume` that would read it back.
 
 The second check is why a dry-run reads the disk. Here a checkpoint from an earlier run is still at that path:
 
@@ -552,6 +566,7 @@ The output is a JSON array with one object per scenario. Each object carries the
 - `probers` — the probers that would run, with their ports.
 - `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
 - `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the scenario added.
+- `encoder` — the format each record would be written in: `ndjson` or `table`. A table's column width is not carried, because it is measured from the terminal at run time. It reads `ndjson` in the plan below because `--format json` set the record format too, not only the plan's.
 - `sink` — the destination, rendered from what the scenario configured. A scenario that names no `sink:` at all reads `stdout (default)` instead.
 - `max_concurrent` — probes allowed in flight at once.
 - `probe_rate` — probes started per second, or `null` when no pacing is set.
@@ -581,6 +596,7 @@ The `lab` scenario behind the plan below declares `sink: {type: stdout}`, one `/
     ],
     "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
     "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
+    "encoder": "ndjson",
     "sink": "stdout",
     "max_concurrent": 64,
     "probe_rate": null,
@@ -709,11 +725,11 @@ Error: no checkpoint to resume at /var/log/scan.checkpoint; --resume requires an
 !!! info "One target may be scanned twice"
     Resume restarts at the last checkpointed target, not the one after it. So exactly one target — the boundary — may be scanned in both runs. Its record is a harmless duplicate that a consumer keying on [`identity_key`](identity.md) collapses. This is deliberate. It guarantees no scanned target is ever skipped, even if the process died while writing that target's record.
 
-!!! note "`--resume` runs one scenario at a time"
-    Resume works for a single-scenario run: the flag-driven form, or a `--file` with exactly one scenario. A multi-scenario file is refused, because one checkpoint path cannot record several scenarios' progress.
+!!! note "Checkpointing runs one scenario at a time"
+    A checkpoint covers a single-scenario run: the flag-driven form, or a `--file` with exactly one scenario. A multi-scenario file is refused, because one checkpoint path cannot record several scenarios' progress. The refusal comes at `--checkpoint`, before the scan, rather than at the `--resume` that would later find the file unusable.
 
     ```text
-    Error: --resume supports a single-scenario run; 'scan.yml' has 2 scenarios
+    Error: --checkpoint supports a single-scenario run; 'scan.yml' has 2 scenarios. One checkpoint path cannot record several scenarios' progress, so a checkpoint written here could not be resumed.
     ```
 
 ### Which scans can checkpoint

@@ -58,6 +58,10 @@
       "description": "Human-readable summary of the resolved classifier.",
       "type": "string"
     },
+    "encoder": {
+      "description": "Wire format records leave in: `ndjson` or `table`.",
+      "type": "string"
+    },
     "fuser": {
       "description": "Human-readable summary of the resolved fuser chain, outermost layer first.",
       "type": "string"
@@ -124,6 +128,7 @@
     "probers",
     "fuser",
     "classifier",
+    "encoder",
     "sink",
     "max_concurrent",
     "retries",

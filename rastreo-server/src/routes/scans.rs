@@ -1345,6 +1345,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn create_scan_dry_run_plan_names_no_client_supplied_encoder() {
+        let state = state_with_system_resolver();
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        s.base.encoder = Some(EncoderConfig::Table { width: 100 });
+
+        let plan = dry_run_body(state, &s).await;
+        assert_eq!(
+            plan["encoder"], "ndjson",
+            "the plan must not render a format the server discards: {plan}"
+        );
+    }
+
     #[cfg(feature = "nats")]
     #[tokio::test]
     async fn create_scan_dry_run_plan_leaks_no_client_sink_credentials() {

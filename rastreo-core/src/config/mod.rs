@@ -231,6 +231,10 @@ impl DiscoverScenarioConfig {
             .unwrap_or_else(crate::classifier::default_classifier_config)
     }
 
+    pub(crate) fn effective_encoder_config(&self) -> EncoderConfig {
+        self.base.encoder.clone().unwrap_or(EncoderConfig::Ndjson)
+    }
+
     /// Everything a run refuses this scenario for without touching the network.
     pub fn validate(&self) -> Result<(), RastreoError> {
         self.base.ensure_no_retired_fields()?;

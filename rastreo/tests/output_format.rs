@@ -218,7 +218,7 @@ async fn format_json_keeps_the_skip_notice_when_a_scenario_has_no_probers() {
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: empty\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n";
     let output = run_scenario(yaml, &["--format", "json"]).await;
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8(output.stdout).expect("utf-8").is_empty(),
         "stdout must stay a clean record stream"
@@ -232,15 +232,24 @@ async fn format_json_keeps_the_skip_notice_when_a_scenario_has_no_probers() {
 
 #[cfg(feature = "config")]
 #[tokio::test]
-async fn quiet_still_silences_the_skip_notice() {
+async fn quiet_still_silences_the_skip_notice_but_not_the_failure() {
     let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: empty\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n";
     let output = run_scenario(yaml, &["-q"]).await;
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert!(
-        output.stderr.is_empty(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !stderr.contains("no probers configured, skipping"),
+        "-q silences the notice: {stderr}"
+    );
+    assert!(
+        stderr.contains("nothing to probe"),
+        "-q silences status output, not failures: {stderr}"
+    );
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "the failure is the whole of what -q leaves behind: {stderr}"
     );
 }
 
