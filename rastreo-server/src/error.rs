@@ -4,6 +4,10 @@ use axum::Json;
 use rastreo_core::{RastreoError, ResolverError};
 use serde::Serialize;
 
+use crate::routes::auth::ErrorDisclosure;
+
+const REDACTED_SERVER_ERROR: &str = "internal server error";
+
 #[derive(Debug)]
 pub struct AppError {
     pub status: StatusCode,
@@ -29,6 +33,24 @@ impl AppError {
     pub fn too_many_requests(message: impl Into<String>) -> Self {
         Self::new(StatusCode::TOO_MANY_REQUESTS, message)
     }
+
+    /// Maps a [`RastreoError`] to a response; 5xx detail is disclosed only when `disclosure` proves the caller authenticated.
+    pub fn from_rastreo(err: RastreoError, disclosure: ErrorDisclosure) -> Self {
+        let status = status_for(&err);
+        let disclose = disclosure.caller_authenticated();
+        if status.is_server_error() {
+            tracing::error!(
+                ?err,
+                status = %status,
+                disclosed = disclose,
+                "internal server error returned to client"
+            );
+        }
+        Self {
+            status,
+            message: response_message(&err, status, disclose),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -45,29 +67,46 @@ impl IntoResponse for AppError {
     }
 }
 
-// Map client-supplied input errors to 4xx; everything internal to 500.
+/// Redacts 5xx detail; a route that can prove its caller authenticated uses [`AppError::from_rastreo`].
 impl From<RastreoError> for AppError {
     fn from(err: RastreoError) -> Self {
-        let status = match &err {
-            RastreoError::Config(_) => StatusCode::BAD_REQUEST,
-            RastreoError::Resolver(inner) => match inner {
-                ResolverError::DnsLookupFailed { .. } => StatusCode::SERVICE_UNAVAILABLE,
-                ResolverError::TargetNotAllowed { .. } => StatusCode::FORBIDDEN,
-                _ => StatusCode::BAD_REQUEST,
-            },
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-
-        // 5xx messages are redacted; the detail is logged for operators instead.
-        let message = if status.is_client_error() {
-            err.to_string()
-        } else {
-            tracing::error!(?err, status = %status, "internal server error returned to client");
-            "internal server error".to_string()
-        };
-
-        Self { status, message }
+        Self::from_rastreo(err, ErrorDisclosure::default())
     }
+}
+
+// Map client-supplied input errors to 4xx; everything internal to 500.
+fn status_for(err: &RastreoError) -> StatusCode {
+    match err {
+        RastreoError::Config(_) => StatusCode::BAD_REQUEST,
+        RastreoError::Resolver(inner) => match inner {
+            ResolverError::DnsLookupFailed { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            ResolverError::TargetNotAllowed { .. } => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_REQUEST,
+        },
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn response_message(err: &dyn std::error::Error, status: StatusCode, disclose: bool) -> String {
+    if status.is_client_error() {
+        err.to_string()
+    } else if disclose {
+        error_chain(err)
+    } else {
+        REDACTED_SERVER_ERROR.to_string()
+    }
+}
+
+// A transparent umbrella variant renders as its inner Display alone; the cause it wraps is the actionable part.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut rendered = err.to_string();
+    let mut next = err.source();
+    while let Some(source) = next {
+        rendered.push_str(": ");
+        rendered.push_str(&source.to_string());
+        next = source.source();
+    }
+    rendered
 }
 
 #[cfg(test)]
@@ -235,6 +274,98 @@ mod tests {
         let err = AppError::too_many_requests("inflight scan limit reached");
         assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(err.message, "inflight scan limit reached");
+    }
+
+    fn sink_failure(detail: &str) -> RastreoError {
+        use rastreo_core::{SinkError, SinkErrorClass};
+        RastreoError::Sink(SinkError::new(
+            SinkErrorClass::PublishFailure,
+            std::io::Error::other(detail.to_string()),
+        ))
+    }
+
+    #[test]
+    fn a_5xx_for_an_authenticated_caller_carries_the_cause_chain() {
+        let err = sink_failure("authorization violation: nats: authorization violation");
+        let message = response_message(&err, StatusCode::INTERNAL_SERVER_ERROR, true);
+        assert!(
+            message.contains("authorization violation: nats: authorization violation"),
+            "the disclosed body must reach the cause, not stop at the umbrella: {message}"
+        );
+    }
+
+    #[test]
+    fn a_5xx_for_an_unauthenticated_caller_is_redacted() {
+        let err = sink_failure("authorization violation");
+        let message = response_message(&err, StatusCode::INTERNAL_SERVER_ERROR, false);
+        assert_eq!(message, REDACTED_SERVER_ERROR);
+    }
+
+    #[test]
+    fn a_4xx_body_does_not_change_with_disclosure() {
+        let err = RastreoError::Config(ConfigError::InvalidValue("max_concurrent".into()));
+        assert_eq!(
+            response_message(&err, StatusCode::BAD_REQUEST, true),
+            response_message(&err, StatusCode::BAD_REQUEST, false)
+        );
+        assert!(response_message(&err, StatusCode::BAD_REQUEST, false).contains("max_concurrent"));
+    }
+
+    #[derive(Debug)]
+    struct Cause;
+
+    impl std::fmt::Display for Cause {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the cause")
+        }
+    }
+
+    impl std::error::Error for Cause {}
+
+    #[derive(Debug)]
+    struct Wrapper(Cause);
+
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the wrapper")
+        }
+    }
+
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn a_4xx_body_never_grows_a_cause_chain_for_an_authenticated_caller() {
+        assert_eq!(
+            response_message(&Wrapper(Cause), StatusCode::BAD_REQUEST, true),
+            "the wrapper"
+        );
+    }
+
+    #[test]
+    fn a_disclosed_5xx_body_appends_every_cause() {
+        assert_eq!(
+            response_message(&Wrapper(Cause), StatusCode::INTERNAL_SERVER_ERROR, true),
+            "the wrapper: the cause"
+        );
+    }
+
+    #[test]
+    fn from_rastreo_with_the_default_disclosure_redacts() {
+        let err =
+            AppError::from_rastreo(sink_failure("broker refused"), ErrorDisclosure::default());
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.message, REDACTED_SERVER_ERROR);
+        assert!(!err.message.contains("broker refused"));
+    }
+
+    #[test]
+    fn error_chain_of_a_sourceless_error_is_its_display() {
+        let err = RastreoError::Config(ConfigError::InvalidValue("bad".into()));
+        assert_eq!(error_chain(&err), err.to_string());
     }
 
     #[tokio::test]

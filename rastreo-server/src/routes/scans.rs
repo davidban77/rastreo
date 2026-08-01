@@ -17,6 +17,7 @@ use tokio::sync::watch;
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 use crate::error::AppError;
+use crate::routes::auth::ErrorDisclosure;
 use crate::state::{AppState, Metrics, ReadinessState};
 
 const DEFAULT_CONCURRENCY: u32 = 64;
@@ -99,19 +100,23 @@ fn scenario_label(scenario: &DiscoverScenarioConfig) -> String {
         .unwrap_or_else(|| "unnamed".to_string())
 }
 
-fn scenario_from_body(body: serde_json::Value) -> Result<DiscoverScenarioConfig, AppError> {
-    parse_discover_scenario_json(body).map_err(AppError::from)
+fn scenario_from_body(
+    body: serde_json::Value,
+    disclosure: ErrorDisclosure,
+) -> Result<DiscoverScenarioConfig, AppError> {
+    parse_discover_scenario_json(body).map_err(|err| AppError::from_rastreo(err, disclosure))
 }
 
 /// Submit a discovery scenario. `?dry_run=true` resolves targets and returns the [`DiscoveryPlan`] without probing or writing a sink; otherwise the scenario runs synchronously and records are returned in the response body (the client-supplied `sink` field is ignored on the real-scan path).
 pub async fn create_scan(
     State(state): State<AppState>,
     Query(params): Query<ScanParams>,
+    disclosure: ErrorDisclosure,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Response, AppError> {
     let start = Instant::now();
     // Uncounted by the scan-error metric the checks below feed: its scenario label does not exist until the body parses.
-    let scenario = scenario_from_body(body)?;
+    let scenario = scenario_from_body(body, disclosure)?;
     let label = scenario_label(&scenario);
 
     if scenario.targets.is_empty() {
@@ -133,7 +138,7 @@ pub async fn create_scan(
         return Ok(Json(dry_run_plan(&state, &scenario, label).await).into_response());
     }
 
-    Ok(run_scan(state, scenario, start, label)
+    Ok(run_scan(state, scenario, start, label, disclosure)
         .await?
         .into_response())
 }
@@ -162,6 +167,7 @@ async fn run_scan(
     scenario: DiscoverScenarioConfig,
     start: Instant,
     scenario_label: String,
+    disclosure: ErrorDisclosure,
 ) -> Result<Json<ScanResponse>, AppError> {
     let Some(_inflight) = InflightGuard::try_acquire(
         state.readiness.clone(),
@@ -243,7 +249,7 @@ async fn run_scan(
                 .record_scan_error(start.elapsed(), sink_class, &scenario_label);
             state.readiness.record_scan_error(is_sink_error);
             outcome_guard.disarm();
-            Err(err.into())
+            Err(AppError::from_rastreo(err, disclosure))
         }
     }
 }
@@ -331,7 +337,14 @@ mod tests {
         scenario: DiscoverScenarioConfig,
     ) -> Result<Json<ScanResponse>, AppError> {
         let label = scenario_label(&scenario);
-        run_scan(state, scenario, Instant::now(), label).await
+        run_scan(
+            state,
+            scenario,
+            Instant::now(),
+            label,
+            ErrorDisclosure::default(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -344,6 +357,7 @@ mod tests {
         let err = create_scan(
             State(state),
             Query(ScanParams::default()),
+            ErrorDisclosure::default(),
             json_body(&scenario),
         )
         .await
@@ -362,6 +376,7 @@ mod tests {
         let err = create_scan(
             State(state),
             Query(ScanParams::default()),
+            ErrorDisclosure::default(),
             json_body(&scenario),
         )
         .await
@@ -1011,7 +1026,13 @@ mod tests {
 
         // Poll run_scan exactly once — enough to arm the guard at its first await — then drop it,
         // exactly as a request-timeout drops the handler future mid-scan.
-        let mut scan = Box::pin(run_scan(state, s, Instant::now(), label));
+        let mut scan = Box::pin(run_scan(
+            state,
+            s,
+            Instant::now(),
+            label,
+            ErrorDisclosure::default(),
+        ));
         tokio::select! {
             biased;
             _ = scan.as_mut() => panic!("scan must not complete before it is dropped"),
@@ -1068,6 +1089,7 @@ mod tests {
         let response = create_scan(
             State(state),
             Query(ScanParams { dry_run: true }),
+            ErrorDisclosure::default(),
             json_body(&s),
         )
         .await
@@ -1132,6 +1154,7 @@ mod tests {
         let response = create_scan(
             State(state),
             Query(ScanParams { dry_run: true }),
+            ErrorDisclosure::default(),
             json_body(&s),
         )
         .await
@@ -1175,6 +1198,7 @@ mod tests {
         let err = create_scan(
             State(state),
             Query(ScanParams { dry_run: true }),
+            ErrorDisclosure::default(),
             json_body(&s),
         )
         .await
@@ -1190,7 +1214,8 @@ mod tests {
             "probers": [{"type": "tcp_connect", "ports": [22]}],
             "fuser": {"type": "oui_enrichment", "inner": {"type": "direct"}},
         });
-        let err = scenario_from_body(body).expect_err("a retired type tag must be rejected");
+        let err = scenario_from_body(body, ErrorDisclosure::default())
+            .expect_err("a retired type tag must be rejected");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("oui_enrichment"), "{}", err.message);
         assert!(err.message.contains("mib_enrichment"), "{}", err.message);
@@ -1207,7 +1232,8 @@ mod tests {
             "targets": [{"Ip": "127.0.0.1"}],
             "probers": [{"type": "carrier_pigeon"}],
         });
-        let err = scenario_from_body(body).expect_err("an unknown prober must be rejected");
+        let err = scenario_from_body(body, ErrorDisclosure::default())
+            .expect_err("an unknown prober must be rejected");
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("carrier_pigeon"), "{}", err.message);
     }
@@ -1219,7 +1245,8 @@ mod tests {
             "targets": [{"Ip": "127.0.0.1"}],
             "probers": [{"type": "tcp_connect", "ports": [22]}],
         });
-        let scenario = scenario_from_body(body).expect("a valid body parses");
+        let scenario =
+            scenario_from_body(body, ErrorDisclosure::default()).expect("a valid body parses");
         assert_eq!(scenario.base.name.as_deref(), Some("lab"));
         assert_eq!(scenario.targets.len(), 1);
         assert_eq!(scenario.probers.len(), 1);

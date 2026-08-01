@@ -304,7 +304,7 @@ When authentication is enabled (the default), the request must carry a bearer to
 
 When `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running, a new `POST /scans` is rejected with `429 Too Many Requests` instead of being queued. The same cap also makes `/readyz` return `503`, so it both marks the pod not-ready and refuses new scans. A dry-run does not count against the cap and is never rejected. Set `RASTREO_MAX_INFLIGHT_SCANS=0` to disable the cap. See [GET /readyz](#get-healthz-and-get-readyz) for the readiness gate.
 
-When `RASTREO_SINK_CONFIG_PATH` is set, each record is fanned out to both the in-memory capture and the server-configured sink on the same pipeline pass. The response body remains identical to the unconfigured case; the server-configured sink additionally receives every record. A write error from the server-configured sink aborts the scan and returns 500 — the response body's `records` list is not returned even if the in-memory capture succeeded. When `RASTREO_SINK_CONFIG_PATH` is unset, the response body is the only destination and behavior is identical to earlier releases.
+When `RASTREO_SINK_CONFIG_PATH` is set, each record is fanned out to both the in-memory capture and the server-configured sink on the same pipeline pass. The response body remains identical to the unconfigured case; the server-configured sink additionally receives every record. A write error from the server-configured sink aborts the scan and returns 500 — the response body's `records` list is not returned even if the in-memory capture succeeded, and an authenticated caller gets the sink's own failure in the error body (see [What a 5xx body tells you](#what-a-5xx-body-tells-you)). When `RASTREO_SINK_CONFIG_PATH` is unset, the response body is the only destination and behavior is identical to earlier releases.
 
 ```bash
 curl -sS -X POST http://localhost:8080/scans \
@@ -481,10 +481,39 @@ Error surfaces:
 | `413`  | The request body exceeded `RASTREO_MAX_BODY_BYTES`. Rejected before the JSON body is parsed. See [Restricting scan targets](#restricting-scan-targets). |
 | `429`  | `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running. The body is `{"error":"inflight scan limit reached; retry once running scans complete"}`. A dry-run never counts against the cap and is never rejected. Setting the cap to `0` disables it. See [POST /scans](#post-scans). |
 | `400`  | `scenario.targets` empty, `scenario.probers` empty, malformed JSON body, the request exceeded `RASTREO_MAX_TOTAL_HOSTS`, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). |
-| `500`  | Internal probe / encoder / sink / runtime error. The response body carries `{"error":"internal server error"}` — full detail is logged for operators, not returned to the client. |
-| `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`) or the request exceeded `--request-timeout-ms`. A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
+| `500`  | Internal probe / encoder / sink / runtime error. What the body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). |
+| `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`), or the request exceeded `--request-timeout-ms`. What a DNS-failure body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
 
-The response body is JSON in all cases: `{"error": "<message>"}` for 4xx and 5xx.
+Most errors carry a JSON body of the shape `{"error": "<message>"}`. Three are different:
+
+- `400` — a request body that is not valid JSON returns plain text.
+- `413` — a request body over `RASTREO_MAX_BODY_BYTES` returns plain text.
+- `503` — a request dropped by `--request-timeout-ms` returns no body at all.
+
+### What a 5xx body tells you
+
+A `5xx` body carries the full failure — the message and every cause under it — when the caller presented a valid bearer token. That is the case whenever authentication is enabled, since the token is checked before the handler runs. A broker that goes down after startup, a publish the destination refuses: the caller reads the reason and acts on it without shell access to the pod.
+
+```json
+{"error":"output sink failed: nats sink: publish to subject 'rastreo.discovery.records.v1' at server(s) 'nats://127.0.0.1:4222' was not acked: no stream found for given subject"}
+```
+
+The message names the subject and the server list, so you can match the failure against your sink config. Any `user:pass@` prefix on a server URL is stripped before the message is built, so a password written into a URL never reaches the body.
+
+When authentication is off (`RASTREO_AUTH_DISABLED=true`, or the chart's `auth.enabled: false`) the endpoint is open to anyone who can reach it, so `5xx` bodies are redacted to a fixed string instead:
+
+```json
+{"error": "internal server error"}
+```
+
+Either way the server logs the full failure at `ERROR` level with a `disclosed` field recording which form the caller got, so nothing an operator needs is lost. `4xx` bodies are unaffected — they report what was wrong with the request and always carry the full message.
+
+!!! warning "A sink that never started produces no 5xx at all"
+    The server builds the configured sink once, at startup. If that build fails — an unreachable broker, an unset `${VAR}`, malformed YAML — the server keeps running with no sink attached. Every later `POST /scans` then returns `200 OK` with a normal summary, having written nothing to the configured destination. Check `/readyz` for this case: it returns `503` with `reason: "sink_unreachable"` and names the failure in `last_probe_error`. See [Sink reachability probe](#sink-reachability-probe).
+
+Redaction is the default for every other error the API builds. The scan endpoint is the one place it lifts, and only because the bearer-token check ran on that exact request.
+
+`/healthz`, `/readyz`, and `/metrics` are a separate surface. They need no bearer token, and redaction does not apply to them. `/readyz` publishes `last_probe_error` verbatim to any caller that can reach it. So an anonymous caller can read sink-failure detail there that a redacted `POST /scans` body withholds. Keep `/readyz` inside the cluster. See [Health endpoints · `/readyz`](../reference/health-endpoints.md#readyz-readiness) for the full response and what the field carries.
 
 ### Preview a scenario with a dry-run
 

@@ -1,9 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use rastreo_core::{HickoryResolver, MemorySink, Resolver, Sink, SinkType};
+use rastreo_core::{
+    HickoryResolver, MemorySink, RastreoError, Resolver, Sink, SinkError, SinkErrorClass, SinkType,
+};
 use rastreo_server::build_app;
-use rastreo_server::state::{AppState, SharedSink, SinkReachability};
+use rastreo_server::state::{AppState, AuthConfig, SharedSink, SinkReachability};
 use serde_json::json;
 
 async fn spawn_server() -> SocketAddr {
@@ -36,6 +38,174 @@ async fn spawn_target_listener() -> u16 {
         }
     });
     port
+}
+
+const TOKEN: &str = "scan-detail-token";
+const SINK_DETAIL: &str = "authorization violation: nats: authorization violation";
+
+struct FailingSink;
+
+#[async_trait::async_trait]
+impl Sink for FailingSink {
+    async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+        Err(RastreoError::Sink(SinkError::new(
+            SinkErrorClass::PublishFailure,
+            std::io::Error::other(SINK_DETAIL),
+        )))
+    }
+    async fn flush(&mut self) -> Result<(), RastreoError> {
+        Ok(())
+    }
+    fn last_write_delivered(&self) -> bool {
+        true
+    }
+    fn kind(&self) -> SinkType {
+        SinkType::Memory
+    }
+}
+
+async fn spawn_server_whose_sink_fails(auth: AuthConfig) -> SocketAddr {
+    let resolver: Arc<dyn Resolver> =
+        Arc::new(HickoryResolver::from_system().expect("system resolver"));
+    let shared: SharedSink = Arc::new(tokio::sync::Mutex::new(
+        Box::new(FailingSink) as Box<dyn Sink>
+    ));
+    let reach = Arc::new(SinkReachability::configured(
+        SinkType::Memory,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(5),
+    ));
+    reach.record_success();
+    let state = AppState::new(resolver)
+        .with_auth(auth)
+        .with_sink(Some(shared), reach);
+    let app = build_app(state);
+
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind server");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    addr
+}
+
+fn enabled_auth() -> AuthConfig {
+    AuthConfig::Enabled {
+        token: TOKEN.to_string(),
+    }
+}
+
+async fn scan_body_hitting_an_open_port() -> serde_json::Value {
+    let target_port = spawn_target_listener().await;
+    json!({
+        "name": "failing-sink-scan",
+        "timeout_ms": 500,
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "tcp_connect", "ports": [target_port]}],
+    })
+}
+
+#[tokio::test]
+async fn post_scans_500_carries_the_error_detail_for_an_authenticated_caller() {
+    let addr = spawn_server_whose_sink_fails(enabled_auth()).await;
+    let body = scan_body_hitting_an_open_port().await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/scans"))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    let message = payload["error"].as_str().expect("error string");
+    assert!(
+        message.contains(SINK_DETAIL),
+        "an authenticated caller must be told what failed, got {message:?}"
+    );
+}
+
+#[tokio::test]
+async fn post_scans_500_is_redacted_when_auth_is_disabled() {
+    let addr = spawn_server_whose_sink_fails(AuthConfig::Disabled).await;
+    let body = scan_body_hitting_an_open_port().await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/scans"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert_eq!(payload["error"], "internal server error");
+    assert!(
+        !payload.to_string().contains("authorization violation"),
+        "an unauthenticated endpoint must not disclose the failure: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn post_scans_400_body_is_unchanged_for_an_authenticated_caller() {
+    let addr = spawn_server_whose_sink_fails(enabled_auth()).await;
+    let client = reqwest::Client::new();
+
+    let unparsable = json!({
+        "targets": [{"Ip": "127.0.0.1"}],
+        "probers": [{"type": "carrier_pigeon"}],
+    });
+    let resp = client
+        .post(format!("http://{addr}/scans"))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .json(&unparsable)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    let message = payload["error"].as_str().expect("error string");
+    assert!(
+        message.contains("carrier_pigeon"),
+        "a 4xx already carried its full message, got {message:?}"
+    );
+
+    let empty_targets = json!({
+        "targets": [],
+        "probers": [{"type": "tcp_connect", "ports": [22]}],
+    });
+    let resp = client
+        .post(format!("http://{addr}/scans"))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .json(&empty_targets)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert_eq!(payload["error"], "scenario.targets must not be empty");
+}
+
+#[tokio::test]
+async fn readyz_stays_open_and_unchanged_on_a_server_that_discloses_scan_errors() {
+    let addr = spawn_server_whose_sink_fails(enabled_auth()).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let payload: serde_json::Value = resp.json().await.expect("body json");
+    assert_eq!(payload["status"], "ready");
+    assert_eq!(payload["sink_reachable"], true);
+    assert!(payload["last_probe_error"].is_null());
 }
 
 #[tokio::test]

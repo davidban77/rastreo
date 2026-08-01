@@ -120,11 +120,21 @@ When `POST /scans` returns an error, the HTTP status is derived from the `Rastre
 |---|---|---|
 | `Config(_)` | `400 Bad Request` | `{"error": "<full error message>"}` |
 | `Resolver(TargetNotAllowed { .. })` | `403 Forbidden` | `{"error": "<full error message>"}` |
-| `Resolver(DnsLookupFailed { .. })` | `503 Service Unavailable` | `{"error": "internal server error"}` |
+| `Resolver(DnsLookupFailed { .. })` | `503 Service Unavailable` | authenticated: `{"error": "<message>: <cause>: ..."}` — unauthenticated: `{"error": "internal server error"}` |
 | All other `Resolver(_)` variants | `400 Bad Request` | `{"error": "<full error message>"}` |
-| `Probe(_)`, `Encoder(_)`, `Sink(_)`, `Runtime(_)`, `Classifier(_)`, `Resume(_)` | `500 Internal Server Error` | `{"error": "internal server error"}` |
+| `Probe(_)`, `Encoder(_)`, `Sink(_)`, `Runtime(_)`, `Classifier(_)`, `Resume(_)` | `500 Internal Server Error` | authenticated: `{"error": "<message>: <cause>: ..."}` — unauthenticated: `{"error": "internal server error"}` |
 
-For `4xx` responses the body carries the full error message — these are caller-supplied input errors and the detail is safe to return. For `5xx` responses the body is redacted to `internal server error`; the full error is logged at server level with `tracing::error!` for operators to inspect. Empty `targets` or empty `probers` are validated before the variant flow above and return `400` with the message `scenario.targets must not be empty` or `scenario.probers must not be empty` respectively. Requests that exceed `--request-timeout-ms` return `503 Service Unavailable` from the timeout middleware layer.
+For `4xx` responses the body carries the full error message — these are caller-supplied input errors and the detail is safe to return.
+
+For `5xx` responses the body depends on whether the caller had to authenticate to reach the endpoint. With authentication enabled (`RASTREO_API_TOKEN` set to a non-empty value, or the chart's `auth.enabled: true` default) the request already passed the bearer-token check, so the body carries the error and every cause beneath it, joined with `: `. A NATS publish to a subject no stream covers reads:
+
+```json
+{"error":"output sink failed: nats sink: publish to subject 'rastreo.discovery.records.v1' at server(s) 'nats://127.0.0.1:4222' was not acked: no stream found for given subject"}
+```
+
+With authentication disabled (`RASTREO_AUTH_DISABLED=true`, or `auth.enabled: false`) any caller that can reach the endpoint gets in, so the body is redacted to `internal server error`. Both forms log the full error at `ERROR` level, tagged with a `disclosed` field, so operators reading logs see the same thing either way. See [rastreo-server · What a 5xx body tells you](../deploy/server.md#what-a-5xx-body-tells-you).
+
+Empty `targets` or empty `probers` are validated before the variant flow above and return `400` with the message `scenario.targets must not be empty` or `scenario.probers must not be empty` respectively. Requests that exceed `--request-timeout-ms` return `503 Service Unavailable` from the timeout middleware layer.
 
 ## See also
 
