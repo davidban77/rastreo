@@ -13,8 +13,7 @@ use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig, MAX_RETRIES}
 #[cfg(feature = "snmp")]
 use rastreo_core::prober::Community;
 use rastreo_core::prober::{
-    apply_runnability_filter, consumes_shared_ports, expand_probe_selection, is_compiled_in,
-    parse_probe_selection, required_feature, ProbeSelectionOptions,
+    apply_runnability_filter, expand_probe_selection, parse_probe_selection, ProbeSelectionOptions,
 };
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
@@ -1124,11 +1123,11 @@ fn reject_uncompiled_probe_ports(args: &DiscoverArgs) -> Result<(), RastreoError
     match args
         .probe_ports
         .iter()
-        .find(|(kind, _)| !is_compiled_in(*kind))
+        .find(|(kind, _)| !kind.is_compiled_in())
     {
         Some((kind, _)) => Err(ConfigError::ProbeKindNotCompiled {
             kind: kind.label(),
-            feature: required_feature(*kind).unwrap_or(kind.label()),
+            feature: kind.required_feature().unwrap_or(kind.label()),
         }
         .into()),
         None => Ok(()),
@@ -1216,7 +1215,7 @@ impl ParameterFlag {
             consumers: consumers
                 .iter()
                 .copied()
-                .filter(|kind| is_compiled_in(*kind))
+                .filter(|kind| kind.is_compiled_in())
                 .collect(),
             supplied,
         }
@@ -1339,7 +1338,7 @@ fn selection_notes(args: &DiscoverArgs, selected: &SelectedProbes) -> Vec<String
     let (port_takers, others): (Vec<ProbeKind>, Vec<ProbeKind>) = selected
         .kinds
         .iter()
-        .partition(|kind| consumes_shared_ports(**kind));
+        .partition(|kind| kind.consumes_shared_ports());
 
     if port_takers.is_empty() {
         notes.push(unused_port_note(&others));
@@ -3356,15 +3355,15 @@ scenarios:
             a.probe_ports = vec![(*kind, vec![1234])];
             match reject_uncompiled_probe_ports(&a) {
                 Ok(()) => assert!(
-                    is_compiled_in(*kind),
+                    kind.is_compiled_in(),
                     "{} is not in this build",
                     kind.label()
                 ),
                 Err(err) => {
-                    assert!(!is_compiled_in(*kind), "{} is in this build", kind.label());
+                    assert!(!kind.is_compiled_in(), "{} is in this build", kind.label());
                     let msg = err.to_string();
                     assert!(msg.contains(kind.label()), "{msg}");
-                    if let Some(feature) = required_feature(*kind) {
+                    if let Some(feature) = kind.required_feature() {
                         assert!(msg.contains(feature), "{msg}");
                     }
                 }

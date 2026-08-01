@@ -2,8 +2,7 @@
 
 use crate::error::{ConfigError, RastreoError};
 use crate::fuser::{FuserConfig, IdentityHints};
-
-pub const FUSER_KIND_COUNT: usize = 3;
+use crate::kind_vocabulary::kind_vocabulary;
 
 // Higher ranks nest further out: the base innermost, enrichers over it, then the correlator
 // `FuserConfig::validate` requires outermost.
@@ -15,43 +14,21 @@ const fn nesting_rank(kind: FuserKind) -> u8 {
     }
 }
 
-/// Every fuser this crate knows by name, whether or not this build compiled it in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum FuserKind {
-    Direct,
-    MibEnrichment,
-    Identity,
+kind_vocabulary! {
+    /// Every fuser this crate knows by name, whether or not this build compiled it in. Each
+    /// [`FuserKind::label`] is the `type:` discriminant of the matching [`FuserConfig`] variant.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum FuserKind {
+        Direct => "direct",
+        MibEnrichment => "mib_enrichment",
+        Identity => "identity",
+    }
+
+    pub const FUSER_KIND_COUNT;
 }
 
 impl FuserKind {
-    pub const fn all() -> &'static [FuserKind; FUSER_KIND_COUNT] {
-        &[
-            FuserKind::Direct,
-            FuserKind::MibEnrichment,
-            FuserKind::Identity,
-        ]
-    }
-
-    /// snake_case label, matching the `type:` discriminant of the matching [`FuserConfig`] variant.
-    pub const fn label(self) -> &'static str {
-        match self {
-            FuserKind::Direct => "direct",
-            FuserKind::MibEnrichment => "mib_enrichment",
-            FuserKind::Identity => "identity",
-        }
-    }
-
-    /// Inverse of [`FuserKind::label`]; `None` for any string that is not a canonical label.
-    pub fn from_label(label: &str) -> Option<FuserKind> {
-        match label {
-            "direct" => Some(FuserKind::Direct),
-            "mib_enrichment" => Some(FuserKind::MibEnrichment),
-            "identity" => Some(FuserKind::Identity),
-            _ => None,
-        }
-    }
-
     pub const fn is_compiled_in(self) -> bool {
         match self {
             FuserKind::Direct | FuserKind::Identity => true,
@@ -250,19 +227,6 @@ mod tests {
                 FuserKind::from_label(kind.label()),
                 Some(kind),
                 "{} did not round-trip",
-                kind.label()
-            );
-        }
-    }
-
-    #[test]
-    fn all_lists_every_kind_exactly_once() {
-        let kinds = FuserKind::all();
-        for kind in kinds.iter().copied() {
-            assert_eq!(
-                kinds.iter().filter(|other| **other == kind).count(),
-                1,
-                "{} appears more than once",
                 kind.label()
             );
         }

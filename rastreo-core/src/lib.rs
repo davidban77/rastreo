@@ -6,6 +6,7 @@ pub mod encoder;
 pub mod error;
 pub mod fuser;
 pub mod hints;
+pub(crate) mod kind_vocabulary;
 pub mod model;
 pub mod observability;
 pub(crate) mod oid;

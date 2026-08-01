@@ -2,39 +2,21 @@
 
 use crate::classifier::{ClassifierConfig, MergeMode};
 use crate::error::{ConfigError, RastreoError};
-
-pub const CLASSIFIER_KIND_COUNT: usize = 2;
+use crate::kind_vocabulary::kind_vocabulary;
 
 pub const DEFAULT_CLASSIFIER_KIND: ClassifierKind = ClassifierKind::Rules;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ClassifierKind {
-    Noop,
-    Rules,
-}
-
-impl ClassifierKind {
-    pub const fn all() -> &'static [ClassifierKind; CLASSIFIER_KIND_COUNT] {
-        &[ClassifierKind::Noop, ClassifierKind::Rules]
+kind_vocabulary! {
+    /// Every classifier this crate knows by name. Each [`ClassifierKind::label`] is the `type:`
+    /// discriminant of the matching [`ClassifierConfig`] variant.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum ClassifierKind {
+        Noop => "noop",
+        Rules => "rules",
     }
 
-    /// snake_case label, matching the `type:` discriminant of the matching [`ClassifierConfig`] variant.
-    pub const fn label(self) -> &'static str {
-        match self {
-            ClassifierKind::Noop => "noop",
-            ClassifierKind::Rules => "rules",
-        }
-    }
-
-    /// Inverse of [`ClassifierKind::label`]; `None` for any string that is not a canonical label.
-    pub fn from_label(label: &str) -> Option<ClassifierKind> {
-        match label {
-            "noop" => Some(ClassifierKind::Noop),
-            "rules" => Some(ClassifierKind::Rules),
-            _ => None,
-        }
-    }
+    pub const CLASSIFIER_KIND_COUNT;
 }
 
 pub fn parse_classifier_selection(value: &str) -> Result<ClassifierKind, RastreoError> {
@@ -103,19 +85,6 @@ mod tests {
                 ClassifierKind::from_label(kind.label()),
                 Some(kind),
                 "{} did not round-trip",
-                kind.label()
-            );
-        }
-    }
-
-    #[test]
-    fn all_lists_every_kind_exactly_once() {
-        let kinds = ClassifierKind::all();
-        for kind in kinds.iter().copied() {
-            assert_eq!(
-                kinds.iter().filter(|other| **other == kind).count(),
-                1,
-                "{} appears more than once",
                 kind.label()
             );
         }
