@@ -525,8 +525,8 @@ async fn stream_discovery(
     let capacity = scheduler.max_concurrent().max(1);
     let (tx, mut rx) = mpsc::channel::<TargetScan>(capacity);
 
-    let scan = scheduler.run_scan(probers, targets, ctx, cancel.clone(), tx);
-    tokio::pin!(scan);
+    // Owned, not pinned: a `tokio::pin!` borrow would leave the future alive past the drop below.
+    let mut scan = scheduler.run_scan(probers, targets, ctx, cancel.clone(), tx);
 
     let mut acc = ScanAccumulation::default();
     let mut best_key: Option<(usize, usize)> = None;
@@ -534,6 +534,8 @@ async fn stream_discovery(
     let mut next_expected: usize = 0;
     let mut buf: Vec<u8> = Vec::new();
     let mut records_emitted: usize = 0;
+    let mut links_emitted: usize = 0;
+    let mut profiles_emitted: usize = 0;
     let mut targets_completed: usize = 0;
     let mut emit_err: Option<RastreoError> = None;
     let mut scan_done = false;
@@ -557,162 +559,174 @@ async fn stream_discovery(
 
     let stream_span = tracing::info_span!(parent: scan_span, "stream");
 
-    loop {
-        tokio::select! {
-            // `biased` polls the scan branch first so its completion is observed before the channel
-            // closes, latching `cancelled` at the same point the batch pipeline would.
-            biased;
-            _ = &mut scan, if !scan_done => {
-                acc.cancelled = *cancel.borrow();
-                scan_done = true;
-            }
-            maybe = rx.recv() => {
-                let Some(target_scan) = maybe else { break };
-                reorder.insert(target_scan.target_index, target_scan);
-                reorder_peak.fetch_max(reorder.len(), Ordering::Relaxed);
-                while let Some(ready) = reorder.remove(&next_expected) {
-                    accumulate_target(&mut acc, &prober_kinds, &ready, &mut best_key);
-                    // On an emit error, stop emitting but keep draining so remaining targets still
-                    // probe and their metrics still accumulate — the summary metrics stay complete.
-                    if emit_err.is_none() {
-                        emit_target_records(
-                            ready.outcomes,
-                            fuser,
-                            classifier,
-                            encoder,
-                            sink,
-                            scan_metadata,
-                            &mut assembler,
-                            &mut profile_assembler,
-                            &mut buf,
-                            &mut records_emitted,
-                            &mut emit_err,
-                        )
-                        .await?;
-                    }
-                    next_expected += 1;
-                    targets_completed += 1;
-                    publish(targets_completed, records_emitted, acc.probe_attempts);
-                    // Flush-then-checkpoint at the cadence; a set emit_err froze the flushed prefix,
-                    // so stop checkpointing and leave the last good checkpoint in place.
-                    if emit_err.is_none() {
-                        if let Some(writer) = checkpoint.as_mut() {
-                            if let Err(e) = writer.maybe_checkpoint(sink, next_expected).await {
-                                emit_err = Some(e);
+    // A `?` inside this block exits to the close below, never past it.
+    let halted_err = async {
+        loop {
+            tokio::select! {
+                // `biased` polls the scan branch first so its completion is observed before the channel
+                // closes, latching `cancelled` at the same point the batch pipeline would.
+                biased;
+                _ = &mut scan, if !scan_done => {
+                    acc.cancelled = *cancel.borrow();
+                    scan_done = true;
+                }
+                maybe = rx.recv() => {
+                    let Some(target_scan) = maybe else { break };
+                    reorder.insert(target_scan.target_index, target_scan);
+                    reorder_peak.fetch_max(reorder.len(), Ordering::Relaxed);
+                    while let Some(ready) = reorder.remove(&next_expected) {
+                        accumulate_target(&mut acc, &prober_kinds, &ready, &mut best_key);
+                        // On an emit error, stop emitting but keep draining so remaining targets still
+                        // probe and their metrics still accumulate — the summary metrics stay complete.
+                        if emit_err.is_none() {
+                            emit_target_records(
+                                ready.outcomes,
+                                fuser,
+                                classifier,
+                                encoder,
+                                sink,
+                                scan_metadata,
+                                &mut assembler,
+                                &mut profile_assembler,
+                                &mut buf,
+                                &mut records_emitted,
+                                &mut emit_err,
+                            )
+                            .await?;
+                        }
+                        next_expected += 1;
+                        targets_completed += 1;
+                        publish(targets_completed, records_emitted, acc.probe_attempts);
+                        // Flush-then-checkpoint at the cadence; a set emit_err froze the flushed prefix,
+                        // so stop checkpointing and leave the last good checkpoint in place.
+                        if emit_err.is_none() {
+                            if let Some(writer) = checkpoint.as_mut() {
+                                if let Err(e) = writer.maybe_checkpoint(sink, next_expected).await {
+                                    emit_err = Some(e);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    // A cancelled scan sends only fully-completed targets as a contiguous prefix, so the buffer is
-    // normally empty here. Drain any straggler in ascending index order to match the batch order.
-    for (_, ready) in std::mem::take(&mut reorder) {
-        accumulate_target(&mut acc, &prober_kinds, &ready, &mut best_key);
-        if emit_err.is_none() {
-            emit_target_records(
-                ready.outcomes,
-                fuser,
-                classifier,
-                encoder,
-                sink,
-                scan_metadata,
-                &mut assembler,
-                &mut profile_assembler,
-                &mut buf,
-                &mut records_emitted,
-                &mut emit_err,
-            )
-            .await?;
+        // A cancelled scan sends only fully-completed targets as a contiguous prefix, so the buffer is
+        // normally empty here. Drain any straggler in ascending index order to match the batch order.
+        for (_, ready) in std::mem::take(&mut reorder) {
+            accumulate_target(&mut acc, &prober_kinds, &ready, &mut best_key);
+            if emit_err.is_none() {
+                emit_target_records(
+                    ready.outcomes,
+                    fuser,
+                    classifier,
+                    encoder,
+                    sink,
+                    scan_metadata,
+                    &mut assembler,
+                    &mut profile_assembler,
+                    &mut buf,
+                    &mut records_emitted,
+                    &mut emit_err,
+                )
+                .await?;
+            }
+            targets_completed += 1;
+            publish(targets_completed, records_emitted, acc.probe_attempts);
         }
-        targets_completed += 1;
+        drop(stream_span);
+
+        let finish_span = tracing::info_span!(
+            parent: scan_span,
+            "finish",
+            records_emitted = tracing::field::Empty
+        );
+        let mut tail = fuser.finish()?;
+        for record in &mut tail {
+            classifier.classify(record)?;
+            stamp_scan_metadata(record, scan_metadata);
+            assembler.observe_record(record);
+            profile_assembler.observe_record(record);
+        }
+        for record in &tail {
+            if emit_err.is_some() {
+                break;
+            }
+            buf.clear();
+            if let Err(e) = encoder.encode_record(record, &mut buf) {
+                emit_err = Some(e);
+                break;
+            }
+            match write_encoded(sink, RecordKind::Device, &buf).await {
+                Ok(written) => records_emitted += usize::from(written),
+                Err(e) => {
+                    emit_err = Some(e);
+                    break;
+                }
+            }
+        }
+        finish_span.record("records_emitted", records_emitted as u64);
+        drop(finish_span);
+
+        // Second streams flush after every device record so the identity index is complete before correlation.
+        for link in &assembler.finish() {
+            if emit_err.is_some() {
+                break;
+            }
+            buf.clear();
+            if let Err(e) = encoder.encode_link(link, &mut buf) {
+                emit_err = Some(e);
+                break;
+            }
+            match write_encoded(sink, RecordKind::Link, &buf).await {
+                Ok(written) => links_emitted += usize::from(written),
+                Err(e) => {
+                    emit_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        for profile in &profile_assembler.finish() {
+            if emit_err.is_some() {
+                break;
+            }
+            buf.clear();
+            if let Err(e) = encoder.encode_profile(profile, &mut buf) {
+                emit_err = Some(e);
+                break;
+            }
+            match write_encoded(sink, RecordKind::CollectionProfile, &buf).await {
+                Ok(written) => profiles_emitted += usize::from(written),
+                Err(e) => {
+                    emit_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        // Final snapshot: a buffering fuser (identity) emits its records in the finish block above, after the last drain-time publish.
         publish(targets_completed, records_emitted, acc.probe_attempts);
+        Ok::<(), RastreoError>(())
     }
-    drop(stream_span);
+    .await
+    .err();
 
-    let finish_span =
-        tracing::info_span!(parent: scan_span, "finish", records_emitted = tracing::field::Empty);
-    let mut tail = fuser.finish()?;
-    for record in &mut tail {
-        classifier.classify(record)?;
-        stamp_scan_metadata(record, scan_metadata);
-        assembler.observe_record(record);
-        profile_assembler.observe_record(record);
-    }
-    for record in &tail {
-        if emit_err.is_some() {
-            break;
-        }
-        buf.clear();
-        if let Err(e) = encoder.encode_record(record, &mut buf) {
-            emit_err = Some(e);
-            break;
-        }
-        match write_encoded(sink, RecordKind::Device, &buf).await {
-            Ok(written) => records_emitted += usize::from(written),
-            Err(e) => {
-                emit_err = Some(e);
-                break;
-            }
-        }
-    }
-    finish_span.record("records_emitted", records_emitted as u64);
-    drop(finish_span);
+    // Aborts probes still in flight: nothing reads their outcomes and a broker close can take seconds.
+    drop(scan);
 
-    // Second streams flush after every device record so the identity index is complete before correlation.
-    let mut links_emitted: usize = 0;
-    for link in &assembler.finish() {
-        if emit_err.is_some() {
-            break;
-        }
-        buf.clear();
-        if let Err(e) = encoder.encode_link(link, &mut buf) {
-            emit_err = Some(e);
-            break;
-        }
-        match write_encoded(sink, RecordKind::Link, &buf).await {
-            Ok(written) => links_emitted += usize::from(written),
-            Err(e) => {
-                emit_err = Some(e);
-                break;
-            }
-        }
-    }
-
-    let mut profiles_emitted: usize = 0;
-    for profile in &profile_assembler.finish() {
-        if emit_err.is_some() {
-            break;
-        }
-        buf.clear();
-        if let Err(e) = encoder.encode_profile(profile, &mut buf) {
-            emit_err = Some(e);
-            break;
-        }
-        match write_encoded(sink, RecordKind::CollectionProfile, &buf).await {
-            Ok(written) => profiles_emitted += usize::from(written),
-            Err(e) => {
-                emit_err = Some(e);
-                break;
-            }
-        }
-    }
-
-    // Final snapshot: a buffering fuser (identity) emits its records in the finish block above, after the last drain-time publish.
-    publish(targets_completed, records_emitted, acc.probe_attempts);
-
+    // The guarantee stops here: a fallible call added between the block above and this line escapes it.
     let close_err = sink.close().await.err();
 
     if acc.cancelled {
         tracing::info!(records_emitted, "discovery cancelled; sink closed");
     }
 
-    // Finalize on a clean drain only: a mid-scan sink error (emit or flush) or a close failure leaves
-    // the last good checkpoint untouched. A completed scan deletes it (nothing to resume); a cancelled
-    // scan records a final checkpoint over the full flushed prefix that close() just made durable.
-    let checkpoint_err = if emit_err.is_none() && close_err.is_none() {
+    // Finalize on a clean drain only: a fuse or classify failure, a mid-scan sink error (emit or
+    // flush), or a close failure leaves the last good checkpoint untouched. A completed scan deletes it
+    // (nothing to resume); a cancelled scan records a final checkpoint over the full flushed prefix
+    // that close() just made durable.
+    let checkpoint_err = if halted_err.is_none() && emit_err.is_none() && close_err.is_none() {
         finalize_checkpoint(checkpoint.as_ref(), acc.cancelled, next_expected).err()
     } else {
         None
@@ -724,6 +738,10 @@ async fn stream_discovery(
         .fold(0u64, |sum, (_, _, c)| sum.saturating_add(*c)) as usize;
     let probes_by_kind = build_probes_by_kind(&acc.attempts_by_kind, &acc.errors_by_kind);
 
+    // Ranked first: it halted record production, where a set emit_err only stopped emission mid-scan.
+    if let Some(e) = halted_err {
+        return Err(e);
+    }
     if let Some(e) = emit_err {
         return Err(e);
     }
@@ -815,7 +833,7 @@ fn accumulate_scans(
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn finish_discovery_ref(
-    acc: ScanAccumulation,
+    mut acc: ScanAccumulation,
     fuser: &mut dyn Fuser,
     classifier: &dyn Classifier,
     encoder: &dyn Encoder,
@@ -830,13 +848,7 @@ async fn finish_discovery_ref(
     assembler.observe_outcomes(&acc.all_outcomes);
     let mut profile_assembler = CollectionProfileAssembler::new(Arc::clone(scan_metadata));
     profile_assembler.observe_outcomes(&acc.all_outcomes);
-    let mut records = crate::fuser::drive_fuser(fuser, acc.all_outcomes)?;
-    for record in &mut records {
-        classifier.classify(record)?;
-        stamp_scan_metadata(record, scan_metadata);
-        assembler.observe_record(record);
-        profile_assembler.observe_record(record);
-    }
+    let all_outcomes = std::mem::take(&mut acc.all_outcomes);
 
     let mut buf: Vec<u8> = Vec::new();
     let mut records_emitted: usize = 0;
@@ -844,56 +856,70 @@ async fn finish_discovery_ref(
     let mut profiles_emitted: usize = 0;
     let mut emit_err: Option<RastreoError> = None;
 
-    for record in &records {
-        buf.clear();
-        if let Err(e) = encoder.encode_record(record, &mut buf) {
-            emit_err = Some(e);
-            break;
+    // A `?` inside this block exits to the close below, never past it.
+    let halted_err = async {
+        let mut records = crate::fuser::drive_fuser(fuser, all_outcomes)?;
+        for record in &mut records {
+            classifier.classify(record)?;
+            stamp_scan_metadata(record, scan_metadata);
+            assembler.observe_record(record);
+            profile_assembler.observe_record(record);
         }
-        match write_encoded(sink, RecordKind::Device, &buf).await {
-            Ok(written) => records_emitted += usize::from(written),
-            Err(e) => {
-                emit_err = Some(e);
-                break;
-            }
-        }
-    }
 
-    for link in &assembler.finish() {
-        if emit_err.is_some() {
-            break;
-        }
-        buf.clear();
-        if let Err(e) = encoder.encode_link(link, &mut buf) {
-            emit_err = Some(e);
-            break;
-        }
-        match write_encoded(sink, RecordKind::Link, &buf).await {
-            Ok(written) => links_emitted += usize::from(written),
-            Err(e) => {
+        for record in &records {
+            buf.clear();
+            if let Err(e) = encoder.encode_record(record, &mut buf) {
                 emit_err = Some(e);
                 break;
             }
+            match write_encoded(sink, RecordKind::Device, &buf).await {
+                Ok(written) => records_emitted += usize::from(written),
+                Err(e) => {
+                    emit_err = Some(e);
+                    break;
+                }
+            }
         }
-    }
 
-    for profile in &profile_assembler.finish() {
-        if emit_err.is_some() {
-            break;
-        }
-        buf.clear();
-        if let Err(e) = encoder.encode_profile(profile, &mut buf) {
-            emit_err = Some(e);
-            break;
-        }
-        match write_encoded(sink, RecordKind::CollectionProfile, &buf).await {
-            Ok(written) => profiles_emitted += usize::from(written),
-            Err(e) => {
+        for link in &assembler.finish() {
+            if emit_err.is_some() {
+                break;
+            }
+            buf.clear();
+            if let Err(e) = encoder.encode_link(link, &mut buf) {
                 emit_err = Some(e);
                 break;
             }
+            match write_encoded(sink, RecordKind::Link, &buf).await {
+                Ok(written) => links_emitted += usize::from(written),
+                Err(e) => {
+                    emit_err = Some(e);
+                    break;
+                }
+            }
         }
+
+        for profile in &profile_assembler.finish() {
+            if emit_err.is_some() {
+                break;
+            }
+            buf.clear();
+            if let Err(e) = encoder.encode_profile(profile, &mut buf) {
+                emit_err = Some(e);
+                break;
+            }
+            match write_encoded(sink, RecordKind::CollectionProfile, &buf).await {
+                Ok(written) => profiles_emitted += usize::from(written),
+                Err(e) => {
+                    emit_err = Some(e);
+                    break;
+                }
+            }
+        }
+        Ok::<(), RastreoError>(())
     }
+    .await
+    .err();
 
     let close_err = sink.close().await.err();
 
@@ -903,6 +929,9 @@ async fn finish_discovery_ref(
         .fold(0u64, |sum, (_, _, c)| sum.saturating_add(*c)) as usize;
     let probes_by_kind = build_probes_by_kind(&acc.attempts_by_kind, &acc.errors_by_kind);
 
+    if let Some(e) = halted_err {
+        return Err(e);
+    }
     if let Some(e) = emit_err {
         return Err(e);
     }
@@ -5182,6 +5211,537 @@ mod tests {
             run_discovery(RunOptions::new(&scenario))
                 .await
                 .expect("the memory sink carries table output");
+        }
+    }
+
+    mod close_on_every_exit {
+        use super::*;
+
+        use std::time::SystemTime;
+
+        use crate::classifier::NoopClassifier;
+        use crate::model::{
+            Confidence, IdentityKey, Signal, CURRENT_SCHEMA_ID, CURRENT_SCHEMA_VERSION,
+        };
+
+        const INGEST_REFUSED: &str = "ingest refused";
+        const FINISH_REFUSED: &str = "finish refused";
+        const CLASSIFY_REFUSED: &str = "classify refused";
+        const WRITE_REFUSED: &str = "write refused";
+
+        fn refusal(detail: &str) -> RastreoError {
+            ConfigError::invalid(detail).into()
+        }
+
+        fn one_record() -> DeviceRecord {
+            DeviceRecord {
+                identity_key: IdentityKey::new("ip:10.0.0.1").expect("identity"),
+                mgmt_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+                mac: None,
+                manufacturer: None,
+                model: None,
+                product_family: None,
+                platform: None,
+                os_version: None,
+                ssh_version: None,
+                http_server: None,
+                http_version: None,
+                role: None,
+                confidence: Confidence::new(0.5).expect("confidence"),
+                last_seen: SystemTime::UNIX_EPOCH,
+                signals: Vec::new(),
+                probe_kinds: Vec::new(),
+                schema_version: CURRENT_SCHEMA_VERSION.to_string(),
+                schema_id: CURRENT_SCHEMA_ID.to_string(),
+                alt_ips: Vec::new(),
+                possible_alias_of: None,
+                scan_metadata: Arc::new(ScanMetadata::default()),
+            }
+        }
+
+        struct IngestFailsFuser;
+
+        impl Fuser for IngestFailsFuser {
+            fn ingest(
+                &mut self,
+                _outcomes: Vec<ProbeOutcome>,
+            ) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Err(refusal(INGEST_REFUSED))
+            }
+            fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Ok(Vec::new())
+            }
+        }
+
+        struct FinishFailsFuser;
+
+        impl Fuser for FinishFailsFuser {
+            fn ingest(
+                &mut self,
+                _outcomes: Vec<ProbeOutcome>,
+            ) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Ok(Vec::new())
+            }
+            fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Err(refusal(FINISH_REFUSED))
+            }
+        }
+
+        // Emits per ingest like DirectFuser, so a classifier runs while the scan is draining.
+        struct PerIngestFuser;
+
+        impl Fuser for PerIngestFuser {
+            fn ingest(
+                &mut self,
+                _outcomes: Vec<ProbeOutcome>,
+            ) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Ok(vec![one_record()])
+            }
+            fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Ok(Vec::new())
+            }
+        }
+
+        struct EmitsThenFinishFailsFuser;
+
+        impl Fuser for EmitsThenFinishFailsFuser {
+            fn ingest(
+                &mut self,
+                _outcomes: Vec<ProbeOutcome>,
+            ) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Ok(vec![one_record()])
+            }
+            fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Err(refusal(FINISH_REFUSED))
+            }
+        }
+
+        // Buffers until finish like IdentityFuser, so a classifier runs in the finish block.
+        struct OnFinishFuser;
+
+        impl Fuser for OnFinishFuser {
+            fn ingest(
+                &mut self,
+                _outcomes: Vec<ProbeOutcome>,
+            ) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Ok(Vec::new())
+            }
+            fn finish(&mut self) -> Result<Vec<DeviceRecord>, RastreoError> {
+                Ok(vec![one_record()])
+            }
+        }
+
+        struct FailingClassifier;
+
+        impl Classifier for FailingClassifier {
+            fn classify(&self, _record: &mut DeviceRecord) -> Result<(), RastreoError> {
+                Err(refusal(CLASSIFY_REFUSED))
+            }
+        }
+
+        struct ReachableProber;
+
+        #[async_trait::async_trait]
+        impl Prober for ReachableProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::TcpConnect
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                _ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                Ok(ProbeOutcome {
+                    lldp: None,
+                    gnmi_endpoint: None,
+                    kind: ProbeKind::TcpConnect,
+                    target_ip: target.ip,
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![Signal::OpenPort(22)],
+                    fault: None,
+                })
+            }
+        }
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Writes {
+            Succeed,
+            Fail,
+        }
+
+        struct CloseCountingSink {
+            closes: Arc<AtomicUsize>,
+            writes: Writes,
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for CloseCountingSink {
+            async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+                if self.writes == Writes::Fail {
+                    return Err(RastreoError::Sink(crate::sink::SinkError::new(
+                        SinkErrorClass::WriteFailure,
+                        std::io::Error::other(WRITE_REFUSED),
+                    )));
+                }
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            async fn close(&mut self) -> Result<(), RastreoError> {
+                self.closes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
+            }
+        }
+
+        // Stands in for a probe that keeps hitting the network: it advances whenever the runtime polls it.
+        struct SpinsOnSecondTargetProber {
+            polls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Prober for SpinsOnSecondTargetProber {
+            fn kind(&self) -> ProbeKind {
+                ProbeKind::TcpConnect
+            }
+            async fn probe(
+                &self,
+                target: &ResolvedTarget,
+                ctx: &ProbeCtx,
+            ) -> Result<ProbeOutcome, RastreoError> {
+                if target.ip == IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)) {
+                    loop {
+                        self.polls.fetch_add(1, Ordering::SeqCst);
+                        tokio::task::yield_now().await;
+                    }
+                }
+                ReachableProber.probe(target, ctx).await
+            }
+        }
+
+        struct SlowClosingSink {
+            polls: Arc<AtomicUsize>,
+            polls_before_close: Arc<AtomicUsize>,
+            polls_during_close: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Sink for SlowClosingSink {
+            async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            async fn close(&mut self) -> Result<(), RastreoError> {
+                let before = self.polls.load(Ordering::SeqCst);
+                self.polls_before_close.store(before, Ordering::SeqCst);
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                self.polls_during_close
+                    .store(self.polls.load(Ordering::SeqCst) - before, Ordering::SeqCst);
+                Ok(())
+            }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Memory
+            }
+        }
+
+        async fn stream_into(
+            sink: &mut dyn Sink,
+            probers: Vec<Arc<dyn Prober>>,
+            fuser: &mut dyn Fuser,
+            classifier: &dyn Classifier,
+            checkpoint: Option<CheckpointWriter>,
+        ) -> Result<DiscoverySummary, RastreoError> {
+            let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+            let scheduler = BoundedScheduler::new(4);
+            let targets: Vec<ResolvedTarget> = (1..=2u8)
+                .map(|last| {
+                    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, last));
+                    ResolvedTarget {
+                        ip,
+                        original: Target::Ip(ip),
+                        resolved_at: SystemTime::UNIX_EPOCH,
+                    }
+                })
+                .collect();
+            let targets_resolved = targets.len();
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let peak = AtomicUsize::new(0);
+            let scan_span = tracing::info_span!("scan");
+            stream_discovery(
+                &scheduler,
+                probers,
+                Box::new(targets.into_iter()),
+                ProbeCtx::new(Duration::from_millis(100), 0),
+                watch::channel(false).1,
+                fuser,
+                classifier,
+                encoder.as_ref(),
+                sink,
+                &scan_metadata,
+                targets_resolved,
+                Instant::now(),
+                0,
+                &peak,
+                &scan_span,
+                None,
+                checkpoint,
+            )
+            .await
+        }
+
+        async fn stream_with(
+            fuser: &mut dyn Fuser,
+            classifier: &dyn Classifier,
+            checkpoint: Option<CheckpointWriter>,
+            writes: Writes,
+        ) -> (Result<DiscoverySummary, RastreoError>, usize) {
+            let closes = Arc::new(AtomicUsize::new(0));
+            let mut sink = CloseCountingSink {
+                closes: Arc::clone(&closes),
+                writes,
+            };
+            let result = stream_into(
+                &mut sink,
+                vec![Arc::new(ReachableProber)],
+                fuser,
+                classifier,
+                checkpoint,
+            )
+            .await;
+            (result, closes.load(Ordering::SeqCst))
+        }
+
+        async fn batch_with(
+            fuser: &mut dyn Fuser,
+            classifier: &dyn Classifier,
+        ) -> (Result<DiscoverySummary, RastreoError>, usize) {
+            let closes = Arc::new(AtomicUsize::new(0));
+            let mut sink: Box<dyn Sink> = Box::new(CloseCountingSink {
+                closes: Arc::clone(&closes),
+                writes: Writes::Succeed,
+            });
+            let encoder = create_encoder(&EncoderConfig::Ndjson).expect("encoder");
+            let scan_metadata = Arc::new(ScanMetadata::default());
+            let acc = ScanAccumulation {
+                all_outcomes: vec![ProbeOutcome {
+                    lldp: None,
+                    gnmi_endpoint: None,
+                    kind: ProbeKind::TcpConnect,
+                    target_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    timestamp: SystemTime::UNIX_EPOCH,
+                    reachable: true,
+                    signals: vec![Signal::OpenPort(22)],
+                    fault: None,
+                }],
+                ..Default::default()
+            };
+            let result = finish_discovery_ref(
+                acc,
+                fuser,
+                classifier,
+                encoder.as_ref(),
+                sink.as_mut(),
+                &scan_metadata,
+                1,
+                Instant::now(),
+            )
+            .await;
+            (result, closes.load(Ordering::SeqCst))
+        }
+
+        fn refusal_detail(result: Result<DiscoverySummary, RastreoError>) -> String {
+            result
+                .expect_err("the fuser or classifier refusal must reach the caller")
+                .to_string()
+        }
+
+        #[tokio::test]
+        async fn a_clean_run_closes_the_sink_exactly_once() {
+            let (result, closes) =
+                stream_with(&mut PerIngestFuser, &NoopClassifier, None, Writes::Succeed).await;
+            result.expect("a clean run summarises");
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn a_fuser_that_fails_on_ingest_still_closes_the_sink() {
+            let (result, closes) = stream_with(
+                &mut IngestFailsFuser,
+                &NoopClassifier,
+                None,
+                Writes::Succeed,
+            )
+            .await;
+            assert!(refusal_detail(result).contains(INGEST_REFUSED));
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn a_fuser_that_fails_on_finish_still_closes_the_sink() {
+            let (result, closes) = stream_with(
+                &mut FinishFailsFuser,
+                &NoopClassifier,
+                None,
+                Writes::Succeed,
+            )
+            .await;
+            assert!(refusal_detail(result).contains(FINISH_REFUSED));
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn a_classifier_that_fails_while_draining_still_closes_the_sink() {
+            let (result, closes) = stream_with(
+                &mut PerIngestFuser,
+                &FailingClassifier,
+                None,
+                Writes::Succeed,
+            )
+            .await;
+            assert!(refusal_detail(result).contains(CLASSIFY_REFUSED));
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn a_classifier_that_fails_in_the_finish_block_still_closes_the_sink() {
+            let (result, closes) = stream_with(
+                &mut OnFinishFuser,
+                &FailingClassifier,
+                None,
+                Writes::Succeed,
+            )
+            .await;
+            assert!(refusal_detail(result).contains(CLASSIFY_REFUSED));
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn a_finish_failure_outranks_a_sink_error_the_drain_already_captured() {
+            let (result, closes) = stream_with(
+                &mut EmitsThenFinishFailsFuser,
+                &NoopClassifier,
+                None,
+                Writes::Fail,
+            )
+            .await;
+            let detail = refusal_detail(result);
+            assert!(detail.contains(FINISH_REFUSED), "{detail}");
+            assert!(!detail.contains(WRITE_REFUSED), "{detail}");
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn the_batch_reference_closes_the_sink_when_the_fuser_refuses() {
+            let (result, closes) = batch_with(&mut IngestFailsFuser, &NoopClassifier).await;
+            assert!(refusal_detail(result).contains(INGEST_REFUSED));
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn the_batch_reference_closes_the_sink_when_the_classifier_refuses() {
+            let (result, closes) = batch_with(&mut PerIngestFuser, &FailingClassifier).await;
+            assert!(refusal_detail(result).contains(CLASSIFY_REFUSED));
+            assert_eq!(closes, 1);
+        }
+
+        #[tokio::test]
+        async fn a_fuser_failure_leaves_the_last_good_checkpoint_in_place() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("scan.checkpoint");
+            std::fs::write(&path, b"prior run").expect("seed the checkpoint");
+            let writer = CheckpointWriter::new(
+                CheckpointConfig {
+                    path: path.clone(),
+                    interval: 1_000,
+                    resume: false,
+                },
+                &ScanMetadata::default(),
+                "fingerprint".to_string(),
+                Vec::new(),
+            );
+
+            let (result, closes) = stream_with(
+                &mut IngestFailsFuser,
+                &NoopClassifier,
+                Some(writer),
+                Writes::Succeed,
+            )
+            .await;
+
+            assert!(refusal_detail(result).contains(INGEST_REFUSED));
+            assert_eq!(closes, 1);
+            assert!(path.exists());
+        }
+
+        #[tokio::test]
+        async fn a_finish_failure_still_commits_the_records_the_drain_buffered() {
+            let mut sink = BatchingSink::new();
+            let handle = sink.handle();
+
+            let result = stream_into(
+                &mut sink,
+                vec![Arc::new(ReachableProber)],
+                &mut EmitsThenFinishFailsFuser,
+                &NoopClassifier,
+                None,
+            )
+            .await;
+
+            assert!(refusal_detail(result).contains(FINISH_REFUSED));
+            let committed = handle.committed.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                committed.len(),
+                2,
+                "close() must land the records the drain buffered before the fuser refused"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_in_flight_probe_stops_before_the_sink_closes() {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let polls_before_close = Arc::new(AtomicUsize::new(0));
+            let polls_during_close = Arc::new(AtomicUsize::new(0));
+            let mut sink = SlowClosingSink {
+                polls: Arc::clone(&polls),
+                polls_before_close: Arc::clone(&polls_before_close),
+                polls_during_close: Arc::clone(&polls_during_close),
+            };
+
+            let result = stream_into(
+                &mut sink,
+                vec![Arc::new(SpinsOnSecondTargetProber {
+                    polls: Arc::clone(&polls),
+                })],
+                &mut IngestFailsFuser,
+                &NoopClassifier,
+                None,
+            )
+            .await;
+
+            assert!(refusal_detail(result).contains(INGEST_REFUSED));
+            assert!(
+                polls_before_close.load(Ordering::SeqCst) > 0,
+                "the second target's probe must still be in flight when the fuser refused"
+            );
+            assert_eq!(
+                polls_during_close.load(Ordering::SeqCst),
+                0,
+                "an abandoned scan must not keep probing while the sink closes"
+            );
         }
     }
 }
