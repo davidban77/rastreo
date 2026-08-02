@@ -98,7 +98,7 @@ pub const SCHEMAS: [(&str, SchemaSource); 6] = [
     ),
     ("scan-metadata-v1.json", scan_metadata_schema),
     ("scenario-v1.json", scenario_file_schema),
-    ("discovery-plan-v1.json", discovery_plan_schema),
+    ("discovery-plan-v2.json", discovery_plan_schema),
 ];
 
 pub fn generate_into(dirs: &[&Path]) -> Result<()> {
@@ -151,7 +151,7 @@ pub fn render_all() -> Result<()> {
         "rastreo-core/src/config/mod.rs",
     )?;
     render_schema_file(
-        &schemas_dir.join("discovery-plan-v1.json"),
+        &schemas_dir.join("discovery-plan-v2.json"),
         &docs_dir.join("discovery-plan.md"),
         "rastreo-core/src/plan.rs",
     )?;
@@ -201,7 +201,7 @@ pub fn scenario_file_schema() -> Result<String> {
 pub fn discovery_plan_schema() -> Result<String> {
     render_schema_json(
         schema_for!(rastreo_core::DiscoveryPlan),
-        "discovery-plan-v1.json",
+        "discovery-plan-v2.json",
         "DiscoveryPlan",
     )
 }
@@ -921,7 +921,7 @@ mod tests {
         let value = discovery_plan_schema_value();
         assert_eq!(
             value["$id"].as_str(),
-            Some(format!("{SCHEMA_BASE_URL}/discovery-plan-v1.json").as_str())
+            Some(format!("{SCHEMA_BASE_URL}/discovery-plan-v2.json").as_str())
         );
     }
 

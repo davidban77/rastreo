@@ -54,7 +54,7 @@ pub use model::{
 pub use pipeline::{
     run_discovery, DiscoveryProgress, DiscoverySummary, ProbeKindSummary, RunOptions,
 };
-pub use plan::{DiscoveryPlan, PlanKnobs, PlannedTarget, TargetResolution};
+pub use plan::{DiscoveryPlan, PlanKnobs, PlannedTarget, ScenarioPlan, TargetResolution};
 #[cfg(feature = "icmp")]
 pub use prober::IcmpProber;
 #[cfg(feature = "ssh")]
@@ -65,7 +65,8 @@ pub use prober::{
     ProbeSelection, ProbeSelectionOptions, Prober, ProberConfig, ReverseDnsProber, TcpConnectProber,
 };
 pub use resolver::{
-    resolve_scenario, GuardedResolver, HickoryResolver, ResolvedPlan, Resolver, ScenarioResolution,
+    resolve_scenario, GuardedResolver, HickoryResolver, ResolvedAddresses, ResolvedPlan, Resolver,
+    ScenarioResolution, SAMPLED_ADDRESSES,
 };
 pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{

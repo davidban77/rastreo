@@ -665,13 +665,10 @@ mod tests {
         ))
     }
 
-    fn shared_memory_sink() -> Option<(crate::state::SharedSink, rastreo_core::SinkType)> {
-        Some((
-            Arc::new(tokio::sync::Mutex::new(
-                Box::new(rastreo_core::MemorySink::new()) as Box<dyn rastreo_core::Sink>,
-            )),
-            rastreo_core::SinkType::Memory,
-        ))
+    fn shared_memory_sink() -> Option<crate::state::SharedSink> {
+        Some(Arc::new(tokio::sync::Mutex::new(
+            Box::new(rastreo_core::MemorySink::new()) as Box<dyn rastreo_core::Sink>,
+        )))
     }
 
     fn past_the_staleness_window() -> Duration {

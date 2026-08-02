@@ -78,7 +78,7 @@ async fn spawn_server_whose_sink_fails(auth: AuthConfig) -> SocketAddr {
     reach.record_success();
     let state = AppState::new(resolver)
         .with_auth(auth)
-        .with_sink(Some((shared, SinkType::File)), reach);
+        .with_sink(Some(shared), reach);
     let app = build_app(state);
 
     let listener =
@@ -249,8 +249,7 @@ async fn post_scans_dry_run_returns_plan_and_writes_no_records_to_server_sink() 
         std::time::Duration::from_secs(5),
     ));
     reach.record_success();
-    let state =
-        AppState::new(resolver).with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
+    let state = AppState::new(resolver).with_sink(Some(Arc::clone(&shared)), reach);
     let app = build_app(state);
 
     let listener =
@@ -285,7 +284,7 @@ async fn post_scans_dry_run_returns_plan_and_writes_no_records_to_server_sink() 
         "plan carries total_probes: {payload}"
     );
     assert_eq!(
-        payload["targets"][0]["resolution"]["resolved"][0],
+        payload["targets"][0]["resolution"]["resolved"]["sample"][0],
         "127.0.0.1"
     );
     assert!(
@@ -585,8 +584,7 @@ async fn post_scans_concurrent_requests_serialize_on_shared_sink_and_both_succee
         std::time::Duration::from_secs(5),
     ));
     reach.record_success();
-    let state =
-        AppState::new(resolver).with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
+    let state = AppState::new(resolver).with_sink(Some(Arc::clone(&shared)), reach);
     let app = build_app(state);
 
     let listener =
@@ -672,8 +670,7 @@ async fn post_scans_dual_writes_records_to_server_configured_sink_and_response_b
         std::time::Duration::from_secs(5),
     ));
     reach.record_success();
-    let state =
-        AppState::new(resolver).with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
+    let state = AppState::new(resolver).with_sink(Some(Arc::clone(&shared)), reach);
     let app = build_app(state);
 
     let listener =

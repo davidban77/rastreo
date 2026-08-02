@@ -1,5 +1,4 @@
 use std::fmt;
-use std::net::IpAddr;
 
 use schemars::JsonSchema;
 
@@ -10,10 +9,43 @@ use crate::error::RastreoError;
 use crate::fuser::{DirectFuser, FuserConfig};
 use crate::model::Target;
 use crate::prober::ProberConfig;
-use crate::resolver::ScenarioResolution;
+use crate::resolver::{ResolvedAddresses, ScenarioResolution};
 use crate::sink::{SinkConfig, SinkType};
 
-const IP_LIST_CUTOFF: usize = 6;
+/// The pipeline stages a scenario alone determines, rendered without resolving a single target.
+///
+/// Counting what a scan would probe takes a [`ScenarioResolution`], and [`ScenarioPlan::resolve`]
+/// is the only way there, so nothing publishes a count no resolution produced:
+///
+/// ```compile_fail
+/// fn publish(stages: rastreo_core::ScenarioPlan) -> String {
+///     serde_json::to_string(&stages).expect("stages serialize")
+/// }
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ScenarioPlan {
+    /// Name of the scenario this plan describes.
+    pub scenario: String,
+    /// Human-readable summary of each configured prober.
+    pub probers: Vec<String>,
+    /// Human-readable summary of the resolved fuser chain, outermost layer first.
+    pub fuser: String,
+    /// Human-readable summary of the resolved classifier.
+    pub classifier: String,
+    /// Wire format records leave in: `ndjson` or `table`.
+    pub encoder: String,
+    /// Where records would go; several destinations, comma-separated, when the run fans out.
+    pub sink: String,
+    /// Effective in-flight probe cap for this run.
+    pub max_concurrent: u32,
+    /// Effective probes-per-second cap; `null` when unlimited.
+    pub probe_rate: Option<u32>,
+    /// Effective retransmit attempts for connectionless probers.
+    pub retries: u32,
+    /// Effective per-probe timeout in milliseconds.
+    pub timeout_ms: u64,
+}
 
 /// Structured plan of a single discovery scenario — what a dry-run would probe, without executing it.
 #[derive(Debug, Clone, serde::Serialize, JsonSchema)]
@@ -21,7 +53,7 @@ const IP_LIST_CUTOFF: usize = 6;
 pub struct DiscoveryPlan {
     /// Name of the scenario this plan describes.
     pub scenario: String,
-    /// Each configured target with the IPs it resolved to, or its resolution error.
+    /// Each configured target with what it contributes to the scan, or its resolution error.
     pub targets: Vec<PlannedTarget>,
     /// Human-readable summary of each configured prober.
     pub probers: Vec<String>,
@@ -53,7 +85,7 @@ pub struct DiscoveryPlan {
 pub struct PlannedTarget {
     /// The target as written in the scenario.
     pub target: String,
-    /// IPs the target resolved to, or the resolution error.
+    /// What the target contributes to the scan, or the resolution error.
     pub resolution: TargetResolution,
 }
 
@@ -61,7 +93,7 @@ pub struct PlannedTarget {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TargetResolution {
-    Resolved(Vec<IpAddr>),
+    Resolved(ResolvedAddresses),
     Error(String),
 }
 
@@ -74,60 +106,12 @@ pub struct PlanKnobs {
     pub timeout_ms: u64,
 }
 
-enum PlannedSink<'a> {
-    Scenario,
-    Injected(&'a [SinkType]),
-}
-
-impl DiscoveryPlan {
-    /// Plan the stages a scenario alone determines, leaving every resolution-derived field unset; a scenario [`DiscoverScenarioConfig::validate`] rejects has no plan.
-    pub fn new(
+impl ScenarioPlan {
+    pub(crate) fn build(
         scenario: String,
         config: &DiscoverScenarioConfig,
         knobs: PlanKnobs,
-    ) -> Result<Self, RastreoError> {
-        Self::build(scenario, config, None, knobs, PlannedSink::Scenario)
-    }
-
-    /// Plan the scan a resolution would run, counting the addresses that resolution streams.
-    pub fn resolved(
-        scenario: String,
-        config: &DiscoverScenarioConfig,
-        resolution: &ScenarioResolution,
-        knobs: PlanKnobs,
-    ) -> Result<Self, RastreoError> {
-        Self::build(
-            scenario,
-            config,
-            Some(resolution),
-            knobs,
-            PlannedSink::Scenario,
-        )
-    }
-
-    /// Plan the scan a resolution would run for a caller that injects its own sink, rendering `destinations` in write order instead of the scenario's `sink:`.
-    pub fn resolved_into(
-        scenario: String,
-        config: &DiscoverScenarioConfig,
-        resolution: &ScenarioResolution,
-        knobs: PlanKnobs,
-        destinations: &[SinkType],
-    ) -> Result<Self, RastreoError> {
-        Self::build(
-            scenario,
-            config,
-            Some(resolution),
-            knobs,
-            PlannedSink::Injected(destinations),
-        )
-    }
-
-    fn build(
-        scenario: String,
-        config: &DiscoverScenarioConfig,
-        resolution: Option<&ScenarioResolution>,
-        knobs: PlanKnobs,
-        planned_sink: PlannedSink<'_>,
+        destinations: Option<&[SinkType]>,
     ) -> Result<Self, RastreoError> {
         config.validate()?;
         // Exhaustive, so a field added to the config cannot reach a run until the plan states whether it renders.
@@ -148,43 +132,51 @@ impl DiscoveryPlan {
             targets: _,
             probers: prober_configs,
         } = config;
-        let targets = resolution.map_or_else(Vec::new, |resolution| {
-            resolution
-                .entries()
-                .iter()
-                .map(|(target, result)| PlannedTarget {
-                    target: render_target(target),
-                    resolution: match result {
-                        Ok(ips) => TargetResolution::Resolved(ips.clone()),
-                        Err(err) => TargetResolution::Error(err.to_string()),
-                    },
-                })
-                .collect()
-        });
-        let probers: Vec<String> = prober_configs.iter().map(render_prober).collect();
-        let total_probes = resolution
-            .map_or(0, ScenarioResolution::total_hosts)
-            .saturating_mul(prober_configs.len());
         Ok(Self {
             scenario,
-            targets,
-            probers,
+            probers: prober_configs.iter().map(render_prober).collect(),
             fuser: render_fuser(fuser.as_ref()),
             classifier: render_classifier(classifier.as_ref()),
             encoder: render_encoder(&config.effective_encoder_config()),
-            sink: match planned_sink {
-                PlannedSink::Scenario => render_sink(sink.as_ref()),
-                PlannedSink::Injected(destinations) => render_destinations(destinations),
+            sink: match destinations {
+                Some(destinations) => render_destinations(destinations),
+                None => render_sink(sink.as_ref()),
             },
             max_concurrent: knobs.max_concurrent,
             probe_rate: knobs.probe_rate,
             retries: knobs.retries,
             timeout_ms: knobs.timeout_ms,
-            total_probes,
-            refusal: resolution
-                .and_then(ScenarioResolution::refusal)
-                .map(ToString::to_string),
         })
+    }
+
+    /// Count the scan `resolution` describes onto these stages.
+    pub fn resolve(self, resolution: &ScenarioResolution) -> DiscoveryPlan {
+        let total_probes = resolution.total_hosts().saturating_mul(self.probers.len());
+        DiscoveryPlan {
+            scenario: self.scenario,
+            targets: resolution
+                .entries()
+                .iter()
+                .map(|(target, result)| PlannedTarget {
+                    target: render_target(target),
+                    resolution: match result {
+                        Ok(addresses) => TargetResolution::Resolved(addresses.clone()),
+                        Err(err) => TargetResolution::Error(err.to_string()),
+                    },
+                })
+                .collect(),
+            probers: self.probers,
+            fuser: self.fuser,
+            classifier: self.classifier,
+            encoder: self.encoder,
+            sink: self.sink,
+            max_concurrent: self.max_concurrent,
+            probe_rate: self.probe_rate,
+            retries: self.retries,
+            timeout_ms: self.timeout_ms,
+            total_probes,
+            refusal: resolution.refusal().map(ToString::to_string),
+        }
     }
 }
 
@@ -194,8 +186,13 @@ impl fmt::Display for DiscoveryPlan {
         writeln!(f, "    targets:")?;
         for planned in &self.targets {
             match &planned.resolution {
-                TargetResolution::Resolved(ips) => {
-                    writeln!(f, "      {} → {}", planned.target, format_ip_list(ips))?;
+                TargetResolution::Resolved(addresses) => {
+                    writeln!(
+                        f,
+                        "      {} → {}",
+                        planned.target,
+                        format_addresses(addresses)
+                    )?;
                 }
                 TargetResolution::Error(err) => {
                     writeln!(f, "      {} → <error: {err}>", planned.target)?;
@@ -435,31 +432,21 @@ fn format_ports(ports: &[u16]) -> String {
     buf
 }
 
-fn format_ip_list(ips: &[IpAddr]) -> String {
-    if ips.len() <= IP_LIST_CUTOFF {
-        let mut buf = String::new();
-        for (i, ip) in ips.iter().enumerate() {
-            if i > 0 {
-                buf.push_str(", ");
-            }
-            buf.push_str(&ip.to_string());
-        }
-        return buf;
-    }
+fn format_addresses(addresses: &ResolvedAddresses) -> String {
+    let held = addresses.sample.len();
+    let shown = if addresses.total <= held { held } else { 3 };
     let mut buf = String::new();
-    for ip in ips.iter().take(3) {
+    for ip in addresses.sample.iter().take(shown) {
         if !buf.is_empty() {
             buf.push_str(", ");
         }
         buf.push_str(&ip.to_string());
     }
-    let plural = if ips.len() == 1 {
-        "address"
-    } else {
-        "addresses"
-    };
-    let count = ips.len();
-    format!("{buf}, ... ({count} {plural})")
+    if addresses.total <= held {
+        return buf;
+    }
+    let count = addresses.total;
+    format!("{buf}, ... ({count} addresses)")
 }
 
 #[cfg(test)]
@@ -467,7 +454,10 @@ mod tests {
     use super::*;
     use crate::config::BaseProbeConfig;
     use crate::error::ConfigError;
-    use std::net::Ipv4Addr;
+    use crate::pipeline::RunOptions;
+    use crate::resolver::SAMPLED_ADDRESSES;
+    use crate::sink::{MemorySink, TeeChild, TeeSink};
+    use std::net::{IpAddr, Ipv4Addr};
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
@@ -477,8 +467,35 @@ mod tests {
         Target::Cidr(s.parse().expect("cidr"))
     }
 
-    fn plan_of(config: &DiscoverScenarioConfig, knobs: PlanKnobs) -> DiscoveryPlan {
-        DiscoveryPlan::new("discovery".to_string(), config, knobs).expect("plan")
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    }
+
+    fn plan_of(config: &DiscoverScenarioConfig, knobs: PlanKnobs) -> ScenarioPlan {
+        try_plan_of(config, knobs).expect("plan")
+    }
+
+    fn try_plan_of(
+        config: &DiscoverScenarioConfig,
+        knobs: PlanKnobs,
+    ) -> Result<ScenarioPlan, RastreoError> {
+        rt().block_on(RunOptions::new(config).plan("discovery".to_string(), knobs))
+    }
+
+    fn plan_into(
+        config: &DiscoverScenarioConfig,
+        knobs: PlanKnobs,
+        sink: Box<dyn crate::sink::Sink>,
+    ) -> ScenarioPlan {
+        rt().block_on(
+            RunOptions::new(config)
+                .sink(sink)
+                .plan("discovery".to_string(), knobs),
+        )
+        .expect("plan")
     }
 
     fn resolved_plan_of(
@@ -486,7 +503,7 @@ mod tests {
         resolution: &ScenarioResolution,
         knobs: PlanKnobs,
     ) -> DiscoveryPlan {
-        DiscoveryPlan::resolved("discovery".to_string(), config, resolution, knobs).expect("plan")
+        plan_of(config, knobs).resolve(resolution)
     }
 
     // Every resolution a plan test reads comes from the resolver a scan would use, on targets that
@@ -499,11 +516,7 @@ mod tests {
         let resolver = crate::resolver::HickoryResolver::from_system()
             .expect("system resolver")
             .with_limit(limit);
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime")
-            .block_on(crate::resolver::resolve_scenario(&resolver, targets))
+        rt().block_on(crate::resolver::resolve_scenario(&resolver, targets))
     }
 
     fn default_knobs() -> PlanKnobs {
@@ -563,24 +576,27 @@ mod tests {
     }
 
     #[test]
-    fn an_injected_destination_replaces_the_scenario_sink_in_the_plan() {
+    fn an_injected_sink_replaces_the_scenario_sink_in_the_plan() {
         let mut config = tcp_scenario();
         config.base.sink = Some(SinkConfig::File {
             path: "/tmp/ignored.ndjson".into(),
         });
-        let resolution = resolution_of(&config.targets);
-        let plan = DiscoveryPlan::resolved_into(
-            "discovery".to_string(),
-            &config,
-            &resolution,
-            default_knobs(),
-            &[SinkType::Memory, SinkType::Nats],
-        )
-        .expect("plan");
+        let plan = plan_into(&config, default_knobs(), Box::new(MemorySink::new()));
         assert_eq!(
-            plan.sink, "memory, nats",
-            "a caller that injects its own sink must not have the scenario's rendered",
+            plan.sink, "memory",
+            "a run that injects its own sink must not have the scenario's rendered",
         );
+    }
+
+    #[test]
+    fn a_fan_out_sink_is_planned_as_every_child_it_writes_to_in_write_order() {
+        let config = tcp_scenario();
+        let tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(MemorySink::new())),
+            TeeChild::Owned(Box::new(crate::sink::StdoutSink::new())),
+        ]);
+        let plan = plan_into(&config, default_knobs(), Box::new(tee));
+        assert_eq!(plan.sink, "memory, stdout");
     }
 
     #[test]
@@ -944,21 +960,29 @@ mod tests {
         );
     }
 
+    fn addresses(total: usize) -> ResolvedAddresses {
+        ResolvedAddresses {
+            total,
+            sample: (1..=total.min(SAMPLED_ADDRESSES) as u8)
+                .map(|i| ip(10, 0, 0, i))
+                .collect(),
+        }
+    }
+
     #[test]
-    fn format_ip_list_under_cutoff_prints_all_addresses() {
-        let ips: Vec<IpAddr> = (1..=IP_LIST_CUTOFF as u8)
-            .map(|i| ip(10, 0, 0, i))
-            .collect();
-        let out = format_ip_list(&ips);
-        assert!(!out.contains("..."), "no ellipsis at cutoff: {out}");
+    fn format_addresses_prints_every_address_a_target_holds() {
+        let out = format_addresses(&addresses(SAMPLED_ADDRESSES));
+        assert!(
+            !out.contains("..."),
+            "no ellipsis at the sample size: {out}"
+        );
         assert!(out.contains("10.0.0.1"));
         assert!(out.contains("10.0.0.6"));
     }
 
     #[test]
-    fn format_ip_list_over_cutoff_uses_ellipsis_and_count() {
-        let ips: Vec<IpAddr> = (1..=8).map(|i| ip(10, 0, 0, i)).collect();
-        let out = format_ip_list(&ips);
+    fn format_addresses_over_the_sample_ends_in_the_full_count() {
+        let out = format_addresses(&addresses(8));
         assert!(
             out.starts_with("10.0.0.1, 10.0.0.2, 10.0.0.3, ..."),
             "got: {out}"
@@ -967,8 +991,19 @@ mod tests {
     }
 
     #[test]
-    fn format_ip_list_single_entry_prints_bare_address() {
-        assert_eq!(format_ip_list(&[ip(10, 0, 0, 1)]), "10.0.0.1");
+    fn format_addresses_of_a_single_address_prints_it_bare() {
+        assert_eq!(format_addresses(&addresses(1)), "10.0.0.1");
+    }
+
+    #[test]
+    fn the_sample_is_long_enough_for_every_render_the_cutoff_asks_for() {
+        assert_eq!(
+            format_addresses(&addresses(SAMPLED_ADDRESSES + 1))
+                .matches("10.0.0")
+                .count(),
+            3,
+            "an over-sample target renders three addresses, so the sample is never short"
+        );
     }
 
     #[test]
@@ -1022,7 +1057,8 @@ mod tests {
     fn display_names_the_encoder_records_would_leave_in() {
         let mut config = tcp_scenario();
         config.base.encoder = Some(EncoderConfig::Table { width: 120 });
-        assert!(plan_of(&config, default_knobs())
+        let resolution = resolution_of(&config.targets);
+        assert!(resolved_plan_of(&config, &resolution, default_knobs())
             .to_string()
             .contains("    encoder: table\n"));
     }
@@ -1055,7 +1091,7 @@ mod tests {
         base.sink = Some(SinkConfig::Stdout);
         let config =
             DiscoverScenarioConfig::new(base, vec![Target::Ip(ip(10, 0, 0, 1))], Vec::new());
-        let err = DiscoveryPlan::new("discovery".into(), &config, default_knobs())
+        let err = try_plan_of(&config, default_knobs())
             .expect_err("a scenario the run refuses must have no plan");
         assert!(
             matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("probers")),
@@ -1072,7 +1108,7 @@ mod tests {
             vec![Target::Ip(ip(10, 0, 0, 1))],
             vec![ProberConfig::TcpConnect { ports: Vec::new() }],
         );
-        let err = DiscoveryPlan::new("discovery".into(), &config, default_knobs())
+        let err = try_plan_of(&config, default_knobs())
             .expect_err("a scenario the run refuses must have no plan");
         assert!(
             matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("at least one port")),
@@ -1094,7 +1130,7 @@ mod tests {
             vec![Target::Ip(ip(10, 0, 0, 1))],
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let err = DiscoveryPlan::new("discovery".into(), &config, default_knobs())
+        let err = try_plan_of(&config, default_knobs())
             .expect_err("a scenario the run refuses must have no plan");
         assert!(
             matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("confidence_baseline")),
@@ -1139,7 +1175,7 @@ mod tests {
         );
         assert_eq!(plan.total_probes, 0);
         assert!(
-            matches!(&plan.targets[0].resolution, TargetResolution::Resolved(ips) if ips == &[ip(10, 0, 0, 1)]),
+            matches!(&plan.targets[0].resolution, TargetResolution::Resolved(a) if a.sample == [ip(10, 0, 0, 1)] && a.total == 1),
             "the resolvable target is still attributed: {:?}",
             plan.targets
         );
@@ -1187,14 +1223,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_plan_counts_no_probes_and_lists_no_targets() {
-        let plan = plan_of(
-            &two_prober_scenario(vec![cidr("10.0.0.0/30")]),
-            default_knobs(),
-        );
-        assert_eq!(plan.total_probes, 0);
-        assert!(plan.targets.is_empty());
-        assert_eq!(plan.refusal, None);
+    fn a_targets_whole_address_space_never_reaches_the_plan() {
+        let targets = vec![cidr("10.0.0.0/16")];
+        let config = two_prober_scenario(targets.clone());
+        let plan = resolved_plan_of(&config, &resolution_of(&targets), default_knobs());
+        assert_eq!(plan.total_probes, 65_534 * 2);
+        let TargetResolution::Resolved(addresses) = &plan.targets[0].resolution else {
+            panic!("the target resolves: {:?}", plan.targets);
+        };
+        assert_eq!(addresses.total, 65_534);
+        assert_eq!(addresses.sample.len(), SAMPLED_ADDRESSES);
     }
 
     #[test]
@@ -1215,7 +1253,11 @@ mod tests {
         assert_eq!(json["scenario"], "discovery");
         assert_eq!(json["total_probes"], 1);
         assert_eq!(json["probers"][0], "tcp_connect (ports 22, 80)");
-        assert_eq!(json["targets"][0]["resolution"]["resolved"][0], "127.0.0.1");
+        assert_eq!(json["targets"][0]["resolution"]["resolved"]["total"], 1);
+        assert_eq!(
+            json["targets"][0]["resolution"]["resolved"]["sample"][0],
+            "127.0.0.1"
+        );
         assert_eq!(json["fuser"], render_fuser(None));
         assert_eq!(json["classifier"], render_classifier(None));
         assert_eq!(json["encoder"], "ndjson");

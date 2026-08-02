@@ -206,6 +206,12 @@ pub trait Sink: Send + Sync {
         self.kind().requires_structured_records()
     }
 
+    /// Every destination a write reaches, in write order. Defaults to `kind()`, which is the whole
+    /// answer for a sink that writes one place; a fan-out sink overrides with its children's.
+    async fn destinations(&self) -> Vec<SinkType> {
+        vec![self.kind()]
+    }
+
     /// Cumulative count of records delivered to a dead-letter destination.
     ///
     /// Default is `0`; sinks with DLQ support increment the counter only when a
@@ -1233,6 +1239,12 @@ mod tests {
         assert!(s.requires_structured_records().await);
         let s: Box<dyn Sink> = Box::new(KindOnlySink(SinkType::Stdout));
         assert!(!s.requires_structured_records().await);
+    }
+
+    #[tokio::test]
+    async fn the_trait_default_names_the_sink_itself_as_its_only_destination() {
+        let s: Box<dyn Sink> = Box::new(KindOnlySink(SinkType::Kafka));
+        assert_eq!(s.destinations().await, vec![SinkType::Kafka]);
     }
 
     #[tokio::test]

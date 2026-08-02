@@ -17,6 +17,7 @@ use crate::model::{
     DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, ScanMetadata,
     PROBE_KIND_COUNT,
 };
+use crate::plan::{PlanKnobs, ScenarioPlan};
 use crate::prober::{create_prober, Prober};
 use crate::resolver::{HickoryResolver, ResolvedPlan, Resolver};
 use crate::scheduler::{BoundedScheduler, Scheduler, TargetScan};
@@ -117,8 +118,7 @@ impl<'a> RunOptions<'a> {
         self
     }
 
-    /// Overrides the scenario's own sink; a caller that does this must plan with
-    /// [`DiscoveryPlan::resolved_into`], or its plan names a destination the run discarded.
+    /// Overrides the scenario's own sink.
     pub fn sink(mut self, sink: Box<dyn Sink>) -> Self {
         self.sink = Some(sink);
         self
@@ -137,6 +137,20 @@ impl<'a> RunOptions<'a> {
     pub fn checkpoint(mut self, checkpoint: CheckpointConfig) -> Self {
         self.checkpoint = Some(checkpoint);
         self
+    }
+
+    /// Render the stages a run with these options resolves to. The destination is read off the sink
+    /// this run would write to, so a plan cannot name one the run discards.
+    pub async fn plan(
+        &self,
+        label: String,
+        knobs: PlanKnobs,
+    ) -> Result<ScenarioPlan, RastreoError> {
+        let destinations = match &self.sink {
+            Some(sink) => Some(sink.destinations().await),
+            None => None,
+        };
+        ScenarioPlan::build(label, self.scenario, knobs, destinations.as_deref())
     }
 }
 

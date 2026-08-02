@@ -18,7 +18,7 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 - [CollectionProfileRecord](collection-profile-record.md) — how to collect telemetry from a discovered endpoint (transport, encoding, advertised models), emitted per gNMI endpoint that returned capability data. Generated.
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
 - [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo discover --file`. Generated. Point an IDE YAML plugin at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json` for autocomplete and validation; see [Editor setup](#editor-setup) below for the concrete snippets. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
-- [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, fuser, classifier, encoder, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated.
+- [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, fuser, classifier, encoder, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated. Currently `v2`: a target's `resolution.resolved` is now an object carrying the address `total` and a six-address `sample`, where `v1` carried a bare array of addresses. Expressions like `.targets[].resolution.resolved[]` become `.targets[].resolution.resolved.sample[]`, and `discovery-plan-v1.json` stays fetchable at its own URL.
 - [Streaming API](streaming-api.md) — Kafka topic / NATS subject conventions, correlation IDs, the AsyncAPI spec.
 - [DlqEnvelope](dlq-envelope.md) — the `x-rastreo-*` header and payload contract on every dead-letter message.
 
@@ -71,9 +71,9 @@ The `signals` array is open-ended on purpose. A consumer that meets an entry who
 !!! warning "Refresh a cached schema copy before validating signals strictly"
     `device-record-v1.json` lists the signal kinds that existed when it was published. It allows no other key inside a `signals` entry. A strict validator running against an old cached copy therefore rejects a record carrying a newer signal kind. Refetch the schema by its `schema_id` URL when that happens. You can also skip strict validation of the `signals` array.
 
-A schema whose stored copies no consumer replays can also gain required fields on `v1`. `DiscoveryPlan` is the only one: a saved plan is an artifact you read, not input any consumer validates. The record schemas get no such allowance, because consumers replay stored records.
+The producer-only allowance is narrower than it looks. A schema whose stored copies no consumer replays — `DiscoveryPlan` is the only one — may **gain required fields** on `v1`, because `required` binds validators and no validator runs against a plan. It may **not** change a field's type, rename a field, or remove one: those break a consumer that merely *reads* the document, which is the one thing every consumer of a plan does. The record schemas get no allowance at all, because consumers replay stored records.
 
-Breaking changes (renaming or removing a field, changing a field's type, tightening a previously-optional field to required) increment to `v2`. The bump comes with a new topic / subject name (`rastreo.discovery.records.v2`) so that `v1` and `v2` can run in parallel for one release cycle. Existing consumers migrate on their own schedule.
+Breaking changes (renaming or removing a field, changing a field's type, tightening a previously-optional field to required) increment the schema's version, `v1` → `v2`. What the bump costs depends on how the schema is delivered. Schemas published on a topic bump with a new topic / subject name (`rastreo.discovery.records.v2`) so `v1` and `v2` run in parallel for one release cycle, and consumers migrate on their own schedule. Schemas delivered synchronously in a response body, or read as an input file — `discovery-plan`, `scenario` — have no parallel channel: the bump publishes a new file, the release notes call it out, and the old file stays fetchable at its `v1` URL as a frozen copy. Either way the promise is the same: a fixed `vN` URL always describes one shape.
 
 ## Consumer discovery pattern
 
@@ -90,7 +90,7 @@ All published schemas use JSON Schema **draft 2020-12**:
 - `collection-profile-record-v1.json`
 - `scan-metadata-v1.json`
 - `scenario-v1.json`
-- `discovery-plan-v1.json`
+- `discovery-plan-v2.json` (and the frozen `discovery-plan-v1.json`)
 - `dlq-envelope-v1.json`
 
 Four properties of the schema text matter when you write a validator against them:
@@ -130,7 +130,8 @@ schemas/
 ├── asyncapi.yaml                      # AsyncAPI 3.0 description of the streaming surface
 ├── collection-profile-record-v1.json # JSON Schema for CollectionProfileRecord
 ├── device-record-v1.json             # JSON Schema for DeviceRecord
-├── discovery-plan-v1.json            # JSON Schema for DiscoveryPlan
+├── discovery-plan-v1.json            # JSON Schema for DiscoveryPlan (frozen, superseded by v2)
+├── discovery-plan-v2.json            # JSON Schema for DiscoveryPlan
 ├── dlq-envelope-v1.json              # JSON Schema for DlqEnvelope (hand-written)
 ├── link-record-v1.json               # JSON Schema for LinkRecord
 ├── scan-metadata-v1.json             # JSON Schema for ScanMetadata

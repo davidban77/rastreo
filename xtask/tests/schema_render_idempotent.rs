@@ -91,7 +91,7 @@ fn committed_scenario_render_matches_current_schema() {
 #[test]
 fn committed_discovery_plan_render_matches_current_schema() {
     let root = workspace_root();
-    let raw = fs::read_to_string(root.join("schemas/discovery-plan-v1.json"))
+    let raw = fs::read_to_string(root.join("schemas/discovery-plan-v2.json"))
         .expect("read discovery-plan schema");
     let value: serde_json::Value = serde_json::from_str(&raw).expect("parse schema");
     let rendered = xtask::render_schema(&value, "rastreo-core/src/plan.rs");
@@ -101,6 +101,30 @@ fn committed_discovery_plan_render_matches_current_schema() {
     assert_eq!(
         rendered, committed,
         "committed discovery-plan.md is out of sync with the schema. Run `task schema:all`."
+    );
+}
+
+#[test]
+fn the_superseded_discovery_plan_v1_still_describes_the_v1_shape() {
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("schemas/discovery-plan-v1.json"))
+        .expect("read schemas/discovery-plan-v1.json");
+    let served = fs::read_to_string(root.join("docs/site/docs/schemas/discovery-plan-v1.json"))
+        .expect("read docs/site/docs/schemas/discovery-plan-v1.json");
+    assert_eq!(
+        source, served,
+        "the v1 URL must keep resolving to the same bytes the repo copy holds"
+    );
+    let value: serde_json::Value = serde_json::from_str(&served).expect("parse schema");
+    assert_eq!(
+        value["$id"].as_str(),
+        Some(format!("{}/discovery-plan-v1.json", xtask::SCHEMA_BASE_URL).as_str())
+    );
+    let resolved = &value["$defs"]["TargetResolution"]["oneOf"][0]["properties"]["resolved"];
+    assert_eq!(
+        resolved["type"].as_str(),
+        Some("array"),
+        "v1 promised an array of addresses; the object shape is what v2 is for"
     );
 }
 
