@@ -30,70 +30,72 @@ const UDP_PROTOCOL_PARAM: &str =
     "a udp protocol (ntp | sip_options | memcached_stats | stun_binding)";
 const DNS_QUERY_PARAM: &str = "at least one dns query name";
 
-pub const fn is_compiled_in(kind: ProbeKind) -> bool {
-    match kind {
-        ProbeKind::TcpConnect | ProbeKind::Udp | ProbeKind::Dns | ProbeKind::ReverseDns => true,
-        ProbeKind::Http => cfg!(feature = "http"),
-        ProbeKind::Snmp => cfg!(feature = "snmp"),
-        ProbeKind::Lldp => cfg!(feature = "lldp"),
-        ProbeKind::Arp => cfg!(feature = "arp"),
-        ProbeKind::Ndp => cfg!(feature = "ndp"),
-        ProbeKind::Ssh => cfg!(feature = "ssh"),
-        ProbeKind::Icmp => cfg!(feature = "icmp"),
-        ProbeKind::Tls => cfg!(feature = "tls"),
-        ProbeKind::Gnmi => cfg!(feature = "gnmi"),
+impl ProbeKind {
+    pub const fn is_compiled_in(self) -> bool {
+        match self {
+            ProbeKind::TcpConnect | ProbeKind::Udp | ProbeKind::Dns | ProbeKind::ReverseDns => true,
+            ProbeKind::Http => cfg!(feature = "http"),
+            ProbeKind::Snmp => cfg!(feature = "snmp"),
+            ProbeKind::Lldp => cfg!(feature = "lldp"),
+            ProbeKind::Arp => cfg!(feature = "arp"),
+            ProbeKind::Ndp => cfg!(feature = "ndp"),
+            ProbeKind::Ssh => cfg!(feature = "ssh"),
+            ProbeKind::Icmp => cfg!(feature = "icmp"),
+            ProbeKind::Tls => cfg!(feature = "tls"),
+            ProbeKind::Gnmi => cfg!(feature = "gnmi"),
+        }
     }
-}
 
-pub const fn required_feature(kind: ProbeKind) -> Option<&'static str> {
-    match kind {
-        ProbeKind::TcpConnect | ProbeKind::Udp | ProbeKind::Dns | ProbeKind::ReverseDns => None,
-        ProbeKind::Http => Some("http"),
-        ProbeKind::Snmp => Some("snmp"),
-        ProbeKind::Lldp => Some("lldp"),
-        ProbeKind::Arp => Some("arp"),
-        ProbeKind::Ndp => Some("ndp"),
-        ProbeKind::Ssh => Some("ssh"),
-        ProbeKind::Icmp => Some("icmp"),
-        ProbeKind::Tls => Some("tls"),
-        ProbeKind::Gnmi => Some("gnmi"),
+    pub const fn required_feature(self) -> Option<&'static str> {
+        match self {
+            ProbeKind::TcpConnect | ProbeKind::Udp | ProbeKind::Dns | ProbeKind::ReverseDns => None,
+            ProbeKind::Http => Some("http"),
+            ProbeKind::Snmp => Some("snmp"),
+            ProbeKind::Lldp => Some("lldp"),
+            ProbeKind::Arp => Some("arp"),
+            ProbeKind::Ndp => Some("ndp"),
+            ProbeKind::Ssh => Some("ssh"),
+            ProbeKind::Icmp => Some("icmp"),
+            ProbeKind::Tls => Some("tls"),
+            ProbeKind::Gnmi => Some("gnmi"),
+        }
     }
-}
 
-/// Whether the kind draws from [`ProbeSelectionOptions::ports`] — true for the kinds whose
-/// `ProberConfig` requires an explicit port list, false for those carrying a protocol default.
-pub const fn consumes_shared_ports(kind: ProbeKind) -> bool {
-    match kind {
-        ProbeKind::TcpConnect | ProbeKind::Http | ProbeKind::Udp => true,
-        ProbeKind::Dns
-        | ProbeKind::Snmp
-        | ProbeKind::Lldp
-        | ProbeKind::Arp
-        | ProbeKind::Ndp
-        | ProbeKind::Ssh
-        | ProbeKind::Icmp
-        | ProbeKind::Tls
-        | ProbeKind::Gnmi
-        | ProbeKind::ReverseDns => false,
+    /// Whether the kind draws from [`ProbeSelectionOptions::ports`] — true for the kinds whose
+    /// `ProberConfig` requires an explicit port list, false for those carrying a protocol default.
+    pub const fn consumes_shared_ports(self) -> bool {
+        match self {
+            ProbeKind::TcpConnect | ProbeKind::Http | ProbeKind::Udp => true,
+            ProbeKind::Dns
+            | ProbeKind::Snmp
+            | ProbeKind::Lldp
+            | ProbeKind::Arp
+            | ProbeKind::Ndp
+            | ProbeKind::Ssh
+            | ProbeKind::Icmp
+            | ProbeKind::Tls
+            | ProbeKind::Gnmi
+            | ProbeKind::ReverseDns => false,
+        }
     }
-}
 
-/// Whether the kind feeds a second record stream, which makes a scenario containing it
-/// resume-ineligible.
-pub const fn emits_second_stream(kind: ProbeKind) -> bool {
-    match kind {
-        ProbeKind::Lldp | ProbeKind::Gnmi => true,
-        ProbeKind::TcpConnect
-        | ProbeKind::Udp
-        | ProbeKind::Http
-        | ProbeKind::Dns
-        | ProbeKind::Snmp
-        | ProbeKind::Arp
-        | ProbeKind::Ndp
-        | ProbeKind::Ssh
-        | ProbeKind::Icmp
-        | ProbeKind::Tls
-        | ProbeKind::ReverseDns => false,
+    /// Whether the kind feeds a second record stream, which makes a scenario containing it
+    /// resume-ineligible.
+    pub const fn emits_second_stream(self) -> bool {
+        match self {
+            ProbeKind::Lldp | ProbeKind::Gnmi => true,
+            ProbeKind::TcpConnect
+            | ProbeKind::Udp
+            | ProbeKind::Http
+            | ProbeKind::Dns
+            | ProbeKind::Snmp
+            | ProbeKind::Arp
+            | ProbeKind::Ndp
+            | ProbeKind::Ssh
+            | ProbeKind::Icmp
+            | ProbeKind::Tls
+            | ProbeKind::ReverseDns => false,
+        }
     }
 }
 
@@ -150,17 +152,17 @@ const fn has_runnability_precondition(kind: ProbeKind) -> bool {
 }
 
 const fn is_default_eligible(kind: ProbeKind) -> bool {
-    is_compiled_in(kind)
+    kind.is_compiled_in()
         && !requires_explicit_param(kind)
         && !is_link_layer(kind)
-        && !emits_second_stream(kind)
+        && !kind.emits_second_stream()
 }
 
 pub fn available_probe_kinds() -> Vec<ProbeKind> {
     ProbeKind::all()
         .iter()
         .copied()
-        .filter(|kind| is_compiled_in(*kind))
+        .filter(|kind| kind.is_compiled_in())
         .collect()
 }
 
@@ -222,8 +224,13 @@ pub fn expand_probe_selection(
         return Err(ConfigError::EmptyProbeSelection.into());
     }
 
-    let mut configs = Vec::with_capacity(kinds.len());
-    for &kind in kinds {
+    let mut unique: Vec<ProbeKind> = Vec::with_capacity(kinds.len());
+    for kind in kinds.iter().copied() {
+        push_unique(&mut unique, kind);
+    }
+
+    let mut configs = Vec::with_capacity(unique.len());
+    for kind in unique {
         match kind {
             ProbeKind::TcpConnect => configs.push(ProberConfig::TcpConnect {
                 ports: resolve_ports(kind, options, DEFAULT_TCP_PORTS),
@@ -360,7 +367,7 @@ pub struct ProbeSelection {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ProbeSelectionOptions {
-    /// Ports applied to every selected kind for which [`consumes_shared_ports`] holds; empty means absent.
+    /// Ports applied to every selected kind for which [`ProbeKind::consumes_shared_ports`] holds; empty means absent.
     pub ports: Vec<u16>,
     pub ports_by_kind: BTreeMap<ProbeKind, Vec<u16>>,
     /// Empty means absent, which makes `dns` un-expandable.
@@ -417,7 +424,7 @@ fn resolve_ports(kind: ProbeKind, options: &ProbeSelectionOptions, intrinsic: &[
     {
         return explicit.clone();
     }
-    if consumes_shared_ports(kind) && !options.ports.is_empty() {
+    if kind.consumes_shared_ports() && !options.ports.is_empty() {
         return options.ports.clone();
     }
     intrinsic.to_vec()
@@ -456,7 +463,7 @@ fn missing_param(kind: ProbeKind, param: &'static str) -> RastreoError {
     reason = "every call site is a #[cfg(not(feature = ...))] expansion arm"
 )]
 fn not_compiled(kind: ProbeKind) -> RastreoError {
-    let feature = match required_feature(kind) {
+    let feature = match kind.required_feature() {
         Some(feature) => feature,
         None => kind.label(),
     };
@@ -493,7 +500,7 @@ mod tests {
     #[cfg(feature = "config")]
     fn yaml_default_config(kind: ProbeKind) -> ProberConfig {
         let mut yaml = format!("type: {}\n", kind.label());
-        if consumes_shared_ports(kind) {
+        if kind.consumes_shared_ports() {
             yaml.push_str(&format!("ports: {EXPLICIT_PORTS:?}\n"));
         }
         match kind {
@@ -568,9 +575,9 @@ mod tests {
     #[test]
     fn required_feature_is_none_only_for_kinds_present_in_every_build() {
         for kind in ProbeKind::all().iter().copied() {
-            if required_feature(kind).is_none() {
+            if kind.required_feature().is_none() {
                 assert!(
-                    is_compiled_in(kind),
+                    kind.is_compiled_in(),
                     "{} names no feature yet is absent from this build",
                     kind.label()
                 );
@@ -582,7 +589,7 @@ mod tests {
     fn available_probe_kinds_lists_only_compiled_kinds_in_canonical_order() {
         let available = available_probe_kinds();
         for kind in &available {
-            assert!(is_compiled_in(*kind), "{} is not compiled in", kind.label());
+            assert!(kind.is_compiled_in(), "{} is not compiled in", kind.label());
         }
         let indexes: Vec<usize> = available.iter().map(|kind| kind.index()).collect();
         let mut sorted = indexes.clone();
@@ -609,7 +616,7 @@ mod tests {
         for kind in ProbeKind::all().iter().copied() {
             let admitted = !requires_explicit_param(kind)
                 && !is_link_layer(kind)
-                && !emits_second_stream(kind);
+                && !kind.emits_second_stream();
             assert_eq!(
                 DEFAULT_ORDER.contains(&kind),
                 admitted,
@@ -625,7 +632,7 @@ mod tests {
         for kind in ProbeKind::all().iter().copied() {
             assert_eq!(
                 defaults.contains(&kind),
-                DEFAULT_ORDER.contains(&kind) && is_compiled_in(kind),
+                DEFAULT_ORDER.contains(&kind) && kind.is_compiled_in(),
                 "{} classified wrong",
                 kind.label()
             );
@@ -659,7 +666,7 @@ mod tests {
             let type_alone_suffices = serde_yaml_ng::from_str::<ProberConfig>(&yaml).is_ok();
             assert_eq!(
                 !type_alone_suffices,
-                consumes_shared_ports(kind) || requires_explicit_param(kind),
+                kind.consumes_shared_ports() || requires_explicit_param(kind),
                 "{} needs more than `type:` in YAML but is classified otherwise",
                 kind.label()
             );
@@ -673,7 +680,7 @@ mod tests {
             let configs = expand_probe_selection(&[kind], &options).expect("expands");
             assert_eq!(
                 !crate::checkpoint::probers_support_resume(&configs),
-                emits_second_stream(kind),
+                kind.emits_second_stream(),
                 "{} disagrees with the checkpoint's second-stream verdict",
                 kind.label()
             );
@@ -705,7 +712,7 @@ mod tests {
     fn every_expansion_default_matches_the_yaml_default_for_the_same_kind() {
         let ports_by_kind = available_probe_kinds()
             .into_iter()
-            .filter(|kind| consumes_shared_ports(*kind))
+            .filter(|kind| kind.consumes_shared_ports())
             .map(|kind| (kind, EXPLICIT_PORTS.to_vec()))
             .collect();
         let options = ProbeSelectionOptions {
@@ -731,7 +738,7 @@ mod tests {
                 for kind in ProbeKind::all().iter().copied() {
                     assert_eq!(
                         available.split(", ").any(|label| label == kind.label()),
-                        is_compiled_in(kind),
+                        kind.is_compiled_in(),
                         "{} listed against its compilation state",
                         kind.label()
                     );
@@ -869,6 +876,39 @@ mod tests {
     }
 
     #[test]
+    fn a_kind_named_twice_expands_into_one_config() {
+        let configs = expand_probe_selection(
+            &[ProbeKind::TcpConnect, ProbeKind::TcpConnect],
+            &ProbeSelectionOptions::default(),
+        )
+        .expect("expands");
+        assert_eq!(configs.len(), 1, "{configs:?}");
+    }
+
+    #[test]
+    fn a_repeated_kind_keeps_the_position_of_its_first_occurrence() {
+        let kinds = [
+            ProbeKind::ReverseDns,
+            ProbeKind::TcpConnect,
+            ProbeKind::ReverseDns,
+        ];
+        let configs =
+            expand_probe_selection(&kinds, &ProbeSelectionOptions::default()).expect("expands");
+        assert_eq!(configs.len(), 2, "{configs:?}");
+        assert!(matches!(configs[0], ProberConfig::ReverseDns { .. }));
+        assert!(matches!(configs[1], ProberConfig::TcpConnect { .. }));
+    }
+
+    #[test]
+    fn every_compiled_kind_survives_being_named_twice() {
+        let options = expandable_options();
+        for kind in available_probe_kinds() {
+            let configs = expand_probe_selection(&[kind, kind], &options).expect("expands");
+            assert_eq!(configs.len(), 1, "{} expanded twice", kind.label());
+        }
+    }
+
+    #[test]
     fn expansion_preserves_the_requested_order() {
         let kinds = [ProbeKind::ReverseDns, ProbeKind::TcpConnect];
         let configs =
@@ -936,7 +976,7 @@ mod tests {
             ..expandable_options()
         };
         for kind in available_probe_kinds() {
-            if !consumes_shared_ports(kind) {
+            if !kind.consumes_shared_ports() {
                 continue;
             }
             assert_eq!(
@@ -956,7 +996,7 @@ mod tests {
             ..expandable_options()
         };
         for kind in available_probe_kinds() {
-            if consumes_shared_ports(kind) {
+            if kind.consumes_shared_ports() {
                 continue;
             }
             let Some(yaml_ports) = ports_of(&yaml_default_config(kind)) else {
@@ -1198,7 +1238,7 @@ mod tests {
     #[test]
     fn every_uncompiled_kind_reports_its_missing_feature_rather_than_a_bad_name() {
         for kind in ProbeKind::all().iter().copied() {
-            if is_compiled_in(kind) {
+            if kind.is_compiled_in() {
                 continue;
             }
             let err = expand_probe_selection(&[kind], &expandable_options())
@@ -1209,7 +1249,7 @@ mod tests {
                     feature,
                 } => {
                     assert_eq!(named, kind.label());
-                    assert_eq!(Some(feature), required_feature(kind));
+                    assert_eq!(Some(feature), kind.required_feature());
                 }
                 other => panic!(
                     "expected ProbeKindNotCompiled for {}, got {other:?}",

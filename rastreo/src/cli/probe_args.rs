@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn probe_long_help_names_the_cargo_feature_every_gated_kind_needs() {
         for kind in ProbeKind::all() {
-            let Some(feature) = rastreo_core::prober::required_feature(*kind) else {
+            let Some(feature) = kind.required_feature() else {
                 continue;
             };
             assert!(

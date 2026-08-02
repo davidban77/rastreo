@@ -6,123 +6,44 @@ use schemars::JsonSchema;
 use tokio::sync::Semaphore;
 
 use crate::error::ProbeErrorKind;
+use crate::kind_vocabulary::kind_vocabulary;
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-    JsonSchema,
-)]
-#[non_exhaustive]
-pub enum ProbeKind {
-    #[default]
-    TcpConnect,
-    Udp,
-    Http,
-    Dns,
-    Snmp,
-    Arp,
-    Ndp,
-    Ssh,
-    Icmp,
-    Tls,
-    ReverseDns,
-    Gnmi,
-    Lldp,
-}
-
-/// Number of `ProbeKind` variants — indexes fixed-size counter arrays without heap allocation.
-///
-/// Adding a variant to `ProbeKind` requires bumping this constant and extending
-/// `ProbeKind::all()` in the same change; the compiler surfaces the miss via the
-/// array-size mismatch.
-pub const PROBE_KIND_COUNT: usize = 13;
-
-impl ProbeKind {
-    /// Every variant in a stable, deterministic order — used for iterating fixed-size counter arrays.
-    pub const fn all() -> &'static [ProbeKind; PROBE_KIND_COUNT] {
-        &[
-            ProbeKind::TcpConnect,
-            ProbeKind::Udp,
-            ProbeKind::Http,
-            ProbeKind::Dns,
-            ProbeKind::Snmp,
-            ProbeKind::Arp,
-            ProbeKind::Ndp,
-            ProbeKind::Ssh,
-            ProbeKind::Icmp,
-            ProbeKind::Tls,
-            ProbeKind::ReverseDns,
-            ProbeKind::Gnmi,
-            ProbeKind::Lldp,
-        ]
+kind_vocabulary! {
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        Default,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+        JsonSchema,
+    )]
+    #[non_exhaustive]
+    pub enum ProbeKind {
+        // Labels are the `probe_kind` metric attribute; a rename breaks consumer queries.
+        #[default]
+        TcpConnect => "tcp_connect",
+        Udp => "udp",
+        Http => "http",
+        Dns => "dns",
+        Snmp => "snmp",
+        Arp => "arp",
+        Ndp => "ndp",
+        Ssh => "ssh",
+        Icmp => "icmp",
+        Tls => "tls",
+        ReverseDns => "reverse_dns",
+        Gnmi => "gnmi",
+        Lldp => "lldp",
     }
 
-    /// Stable index for use in fixed-size `[T; PROBE_KIND_COUNT]` arrays.
-    pub const fn index(self) -> usize {
-        match self {
-            ProbeKind::TcpConnect => 0,
-            ProbeKind::Udp => 1,
-            ProbeKind::Http => 2,
-            ProbeKind::Dns => 3,
-            ProbeKind::Snmp => 4,
-            ProbeKind::Arp => 5,
-            ProbeKind::Ndp => 6,
-            ProbeKind::Ssh => 7,
-            ProbeKind::Icmp => 8,
-            ProbeKind::Tls => 9,
-            ProbeKind::ReverseDns => 10,
-            ProbeKind::Gnmi => 11,
-            ProbeKind::Lldp => 12,
-        }
-    }
-
-    /// snake_case label used in `/metrics` and OTLP attribute values.
-    pub const fn label(self) -> &'static str {
-        match self {
-            ProbeKind::TcpConnect => "tcp_connect",
-            ProbeKind::Udp => "udp",
-            ProbeKind::Http => "http",
-            ProbeKind::Dns => "dns",
-            ProbeKind::Snmp => "snmp",
-            ProbeKind::Arp => "arp",
-            ProbeKind::Ndp => "ndp",
-            ProbeKind::Ssh => "ssh",
-            ProbeKind::Icmp => "icmp",
-            ProbeKind::Tls => "tls",
-            ProbeKind::ReverseDns => "reverse_dns",
-            ProbeKind::Gnmi => "gnmi",
-            ProbeKind::Lldp => "lldp",
-        }
-    }
-
-    /// Inverse of [`ProbeKind::label`]; `None` for any string that is not a canonical label.
-    pub fn from_label(label: &str) -> Option<ProbeKind> {
-        match label {
-            "tcp_connect" => Some(ProbeKind::TcpConnect),
-            "udp" => Some(ProbeKind::Udp),
-            "http" => Some(ProbeKind::Http),
-            "dns" => Some(ProbeKind::Dns),
-            "snmp" => Some(ProbeKind::Snmp),
-            "arp" => Some(ProbeKind::Arp),
-            "ndp" => Some(ProbeKind::Ndp),
-            "ssh" => Some(ProbeKind::Ssh),
-            "icmp" => Some(ProbeKind::Icmp),
-            "tls" => Some(ProbeKind::Tls),
-            "reverse_dns" => Some(ProbeKind::ReverseDns),
-            "gnmi" => Some(ProbeKind::Gnmi),
-            "lldp" => Some(ProbeKind::Lldp),
-            _ => None,
-        }
-    }
+    /// Number of `ProbeKind` variants — indexes fixed-size counter arrays without heap allocation.
+    pub const PROBE_KIND_COUNT;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -269,24 +190,10 @@ mod tests {
 
     #[test]
     fn probe_kind_round_trips_json() {
-        for kind in [
-            ProbeKind::TcpConnect,
-            ProbeKind::Udp,
-            ProbeKind::Http,
-            ProbeKind::Dns,
-            ProbeKind::Snmp,
-            ProbeKind::Arp,
-            ProbeKind::Ndp,
-            ProbeKind::Ssh,
-            ProbeKind::Icmp,
-            ProbeKind::Tls,
-            ProbeKind::ReverseDns,
-            ProbeKind::Gnmi,
-            ProbeKind::Lldp,
-        ] {
-            let s = serde_json::to_string(&kind).expect("serialize");
+        for kind in ProbeKind::all() {
+            let s = serde_json::to_string(kind).expect("serialize");
             let back: ProbeKind = serde_json::from_str(&s).expect("deserialize");
-            assert_eq!(kind, back);
+            assert_eq!(*kind, back);
         }
     }
 
@@ -481,27 +388,6 @@ mod tests {
             let back: Signal = serde_json::from_str(&s).expect("deserialize");
             assert_eq!(signal, back);
         }
-    }
-
-    #[test]
-    fn probe_kind_all_lists_every_variant_in_index_order() {
-        let all = ProbeKind::all();
-        assert_eq!(all.len(), PROBE_KIND_COUNT);
-        for (i, kind) in all.iter().enumerate() {
-            assert_eq!(kind.index(), i, "kind {kind:?} index mismatch");
-        }
-    }
-
-    #[test]
-    fn probe_kind_indexes_are_unique_and_bounded() {
-        let mut seen = [false; PROBE_KIND_COUNT];
-        for kind in ProbeKind::all() {
-            let idx = kind.index();
-            assert!(idx < PROBE_KIND_COUNT, "index {idx} out of bounds");
-            assert!(!seen[idx], "duplicate index {idx}");
-            seen[idx] = true;
-        }
-        assert!(seen.iter().all(|s| *s), "not every index visited");
     }
 
     #[test]

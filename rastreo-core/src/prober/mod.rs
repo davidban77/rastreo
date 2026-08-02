@@ -60,9 +60,9 @@ pub use redacted::Community;
 pub use redacted::Password;
 pub use reverse_dns::ReverseDnsProber;
 pub use selection::{
-    apply_runnability_filter, available_probe_kinds, consumes_shared_ports, default_probe_kinds,
-    emits_second_stream, expand_probe_selection, is_compiled_in, parse_probe_selection,
-    required_feature, ProbeSelection, ProbeSelectionOptions, DEFAULT_HTTP_PORTS, DEFAULT_TCP_PORTS,
+    apply_runnability_filter, available_probe_kinds, default_probe_kinds, expand_probe_selection,
+    parse_probe_selection, ProbeSelection, ProbeSelectionOptions, DEFAULT_HTTP_PORTS,
+    DEFAULT_TCP_PORTS,
 };
 #[cfg(feature = "snmp")]
 pub use snmp::{SnmpProber, SnmpVersion, UsmAuth, UsmCredentials, UsmPrivacy};
