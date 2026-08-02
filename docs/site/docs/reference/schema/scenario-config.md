@@ -228,8 +228,8 @@ A single regex-based platform-detection rule.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `http_server_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`. |
-| `http_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_version`. Requires `http_server_capture`, and is rejected at classifier construction without it. Only meaningful for `signal: http_banner`. |
-| `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. Requires `platform`, and is rejected at classifier construction without it. When absent, or when the group is not present in the actual match, `os_version` stays null. |
+| `http_version_capture` | string \| null | no | Named regex capture group whose matched text populates the record's `http_version`. Requires `http_server_capture`, and the scenario is rejected without it. Only meaningful for `signal: http_banner`. |
+| `os_version_capture` | string \| null | no | Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. Requires `platform`, and the scenario is rejected without it. When absent, or when the group is not present in the actual match, `os_version` stays null. |
 | `pattern` | string | yes | — |
 | `platform` | string \| null | no | Platform label assigned on match. Omit it for a rule that only extracts `ssh_version`, `http_server`, or `http_version` from a service banner. |
 | `signal` | [`SignalKind`](#signalkind) | yes | — |
@@ -255,7 +255,7 @@ One of:
 
 ### `RoleRule` {#rolerule}
 
-A single role-detection rule. Three match strategies are supported: OID-subtree containment on `SnmpSysObjectId`, regex over any signal kind, and all-of set membership over `OpenPort` signals.
+A single role-detection rule. Three match strategies are supported: OID-subtree containment on the device's SNMP `sysObjectID`, a regex over any signal kind, and an all-of check over the device's open ports.
 
 One of:
 
@@ -285,7 +285,7 @@ One of:
 
 ### `SignalKind` {#signalkind}
 
-Which probe-emitted signal a classifier rule matches against. Shared by `PlatformRule` and `RoleRule::SignalMatch`.
+Which probe-emitted signal a classifier rule matches against. Named by every `platform_rules` entry, and by a `role_rules` entry of `type: signal_match`.
 
 One of:
 
@@ -311,8 +311,7 @@ One of:
 
 Bounded exponential-backoff retry policy for a sink's primary delivery.
 
-`max_attempts` counts total primary attempts: `1` disables retry (today's
-immediate-DLQ behavior), `3` (the default) is the initial attempt plus two retries.
+`max_attempts` counts total primary attempts: `1` disables retry and dead-letters immediately, `3` (the default) is the initial attempt plus two retries.
 
 | Field | Type | Required | Description |
 |---|---|---|---|

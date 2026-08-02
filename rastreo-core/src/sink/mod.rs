@@ -275,7 +275,7 @@ pub enum SinkConfig {
     Kafka {
         brokers: Vec<String>,
         topic: String,
-        /// Topic the `Link` record stream is produced to; defaults to `rastreo.discovery.links.v1`.
+        /// Topic the link record stream is produced to; defaults to `rastreo.discovery.links.v1`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         links_topic: Option<String>,
         /// Topic the collection-profile stream is produced to; defaults to `rastreo.discovery.profiles.v1`.
@@ -297,7 +297,7 @@ pub enum SinkConfig {
         servers: Vec<String>,
         subject: String,
         stream: String,
-        /// Subject the `Link` record stream is published to; defaults to `rastreo.discovery.links.v1`.
+        /// Subject the link record stream is published to; defaults to `rastreo.discovery.links.v1`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         links_subject: Option<String>,
         /// Subject the collection-profile stream is published to; defaults to `rastreo.discovery.profiles.v1`.

@@ -54,12 +54,11 @@ fn measure(body: impl FnOnce()) -> Allocations {
 const SPECS: u8 = 10;
 
 // Non-overlapping specs written in the same number of characters, so the target render costs the
-// same whatever the block covers; `noop` keeps the default rule tables' megabytes of regex — the
-// same megabytes at every prefix length — from drowning the figure.
-fn scenario(prefix_len: u8) -> DiscoverScenarioConfig {
+// same whatever the block covers.
+fn scenario(prefix_len: u8, classifier: Option<ClassifierConfig>) -> DiscoverScenarioConfig {
     let mut base = BaseProbeConfig::new();
     base.sink = Some(SinkConfig::Stdout);
-    base.classifier = Some(ClassifierConfig::Noop);
+    base.classifier = classifier;
     let targets = (0..SPECS)
         .map(|i| Target::Cidr(format!("10.{i}.0.0/{prefix_len}").parse().expect("cidr")))
         .collect();
@@ -116,16 +115,20 @@ fn planning_a_scan_costs_the_same_whatever_address_space_its_specs_cover() {
     let rt = runtime();
     let resolver = system_resolver();
 
-    let narrow = plan_cost(&rt, &resolver, &scenario(24));
-    let wide = plan_cost(&rt, &resolver, &scenario(17));
+    let narrow = plan_cost(&rt, &resolver, &scenario(24, None));
+    let wide = plan_cost(&rt, &resolver, &scenario(17, None));
 
     assert_eq!(
         narrow, wide,
         "ten /17 specs cover 129× the addresses of ten /24s and must cost the same to plan"
     );
+
+    // The ceiling bounds the plan's own text; the rule tables cost the same at every prefix length.
+    let wide_without_rule_tables =
+        plan_cost(&rt, &resolver, &scenario(17, Some(ClassifierConfig::Noop)));
     assert!(
-        wide.bytes < 64 * 1024,
-        "a plan is a page of text, not an address space: {wide:?}"
+        wide_without_rule_tables.bytes < 64 * 1024,
+        "a plan is a page of text, not an address space: {wide_without_rule_tables:?}"
     );
 }
 
@@ -150,8 +153,8 @@ fn planning_a_refused_scan_costs_the_same_whatever_address_space_its_specs_cover
         plan_cost(&rt, &guard, scenario)
     };
 
-    let narrow = capped(&scenario(24), 1_000);
-    let wide = capped(&scenario(17), 100_000);
+    let narrow = capped(&scenario(24, None), 1_000);
+    let wide = capped(&scenario(17, None), 100_000);
 
     assert_eq!(
         narrow.count, wide.count,
@@ -163,8 +166,26 @@ fn planning_a_refused_scan_costs_the_same_whatever_address_space_its_specs_cover
         "129× the addresses cost {} extra bytes to plan",
         wide.bytes.abs_diff(narrow.bytes)
     );
+    let wide_without_rule_tables = capped(&scenario(17, Some(ClassifierConfig::Noop)), 100_000);
     assert!(
-        wide.bytes < 64 * 1024,
-        "a refused plan carries a count and a refusal, nothing wider: {wide:?}"
+        wide_without_rule_tables.bytes < 64 * 1024,
+        "a refused plan carries a count and a refusal, nothing wider: {wide_without_rule_tables:?}"
+    );
+}
+
+#[test]
+fn planning_a_scan_does_not_recompile_the_default_classifier_rules() {
+    let rt = runtime();
+    let resolver = system_resolver();
+
+    let default = plan_cost(&rt, &resolver, &scenario(24, None));
+    let noop = plan_cost(&rt, &resolver, &scenario(24, Some(ClassifierConfig::Noop)));
+
+    // Cloning the baked tables costs ~26 KB and compiling them ~6.4 MB, so the budget sits 20×
+    // above the clone and 12× below the recompile.
+    assert!(
+        default.bytes.abs_diff(noop.bytes) < 512 * 1024,
+        "the baked platform and role tables compile once and are cloned into each classifier; a \
+         plan that compiles them again costs {default:?} against {noop:?}"
     );
 }

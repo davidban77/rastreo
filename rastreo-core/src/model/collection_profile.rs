@@ -18,9 +18,9 @@ pub const COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION: &str = "v1";
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct CollectionProfileRecord {
-    /// Schema version tag; always `COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION` for records emitted by this build.
+    /// Schema version tag; `v1` for records emitted by this build. Versioned independently of the device record.
     pub schema_version: String,
-    /// Canonical schema URL; always `COLLECTION_PROFILE_SCHEMA_ID` for records emitted by this build.
+    /// URL of the JSON Schema this record conforms to — the same value as this schema's `$id`.
     pub schema_id: String,
     /// Identity of the device this profile belongs to; shared across the device's endpoints.
     pub identity_key: String,

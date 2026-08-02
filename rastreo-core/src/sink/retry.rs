@@ -6,8 +6,7 @@ use crate::error::RastreoError;
 
 /// Bounded exponential-backoff retry policy for a sink's primary delivery.
 ///
-/// `max_attempts` counts total primary attempts: `1` disables retry (today's
-/// immediate-DLQ behavior), `3` (the default) is the initial attempt plus two retries.
+/// `max_attempts` counts total primary attempts: `1` disables retry and dead-letters immediately, `3` (the default) is the initial attempt plus two retries.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct SinkRetry {

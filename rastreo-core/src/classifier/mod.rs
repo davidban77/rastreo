@@ -7,6 +7,8 @@ pub use selection::{
     ClassifierKind, ClassifierSelectionOptions, CLASSIFIER_KIND_COUNT, DEFAULT_CLASSIFIER_KIND,
 };
 
+use std::sync::OnceLock;
+
 use regex::Regex;
 use schemars::JsonSchema;
 
@@ -33,7 +35,7 @@ impl Classifier for NoopClassifier {
     }
 }
 
-/// Which probe-emitted signal a classifier rule matches against. Shared by `PlatformRule` and `RoleRule::SignalMatch`.
+/// Which probe-emitted signal a classifier rule matches against. Named by every `platform_rules` entry, and by a `role_rules` entry of `type: signal_match`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -111,7 +113,7 @@ pub struct PlatformRule {
     /// Platform label assigned on match. Omit it for a rule that only extracts `ssh_version`, `http_server`, or `http_version` from a service banner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-    /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. Requires `platform`, and is rejected at classifier construction without it. When absent, or when the group is not present in the actual match, `os_version` stays null.
+    /// Named regex capture group (e.g. `version` for `(?P<version>\d+\.\d+)`) whose matched text populates the record's `os_version`. Requires `platform`, and the scenario is rejected without it. When absent, or when the group is not present in the actual match, `os_version` stays null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_version_capture: Option<String>,
     /// Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`.
@@ -120,17 +122,17 @@ pub struct PlatformRule {
     /// Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_server_capture: Option<String>,
-    /// Named regex capture group whose matched text populates the record's `http_version`. Requires `http_server_capture`, and is rejected at classifier construction without it. Only meaningful for `signal: http_banner`.
+    /// Named regex capture group whose matched text populates the record's `http_version`. Requires `http_server_capture`, and the scenario is rejected without it. Only meaningful for `signal: http_banner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version_capture: Option<String>,
 }
 
-/// A single role-detection rule. Three match strategies are supported: OID-subtree containment on `SnmpSysObjectId`, regex over any signal kind, and all-of set membership over `OpenPort` signals.
+/// A single role-detection rule. Three match strategies are supported: OID-subtree containment on the device's SNMP `sysObjectID`, a regex over any signal kind, and an all-of check over the device's open ports.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RoleRule {
-    /// Matches when the record carries a `Signal::SnmpSysObjectId` equal to `prefix` or inside its subtree. Whole arcs are compared, so `1.3.6.1.4.1.9.1` does not match `1.3.6.1.4.1.9.15`. `prefix` must be dotted-decimal with no leading dot, and is rejected at classifier construction otherwise.
+    /// Matches when the device's `SnmpSysObjectId` signal equals `prefix` or sits inside its subtree. Whole arcs are compared, so `1.3.6.1.4.1.9.1` does not match `1.3.6.1.4.1.9.15`. `prefix` must be dotted-decimal with no leading dot, and the scenario is rejected otherwise.
     SysObjectIdPrefix { prefix: String, role: String },
     /// Matches when `pattern` matches the text of any `signal`-kind signal on the record.
     SignalMatch {
@@ -138,7 +140,7 @@ pub enum RoleRule {
         pattern: String,
         role: String,
     },
-    /// Matches when the record carries a `Signal::OpenPort(p)` for every `p` in `ports`. Empty `ports` is rejected at classifier construction.
+    /// Matches when the device carries an `OpenPort` signal for every port in `ports`. An empty `ports` list is rejected.
     PortsOpen { ports: Vec<u16>, role: String },
 }
 
@@ -173,6 +175,7 @@ pub fn create_classifier(config: &ClassifierConfig) -> Result<Box<dyn Classifier
     }
 }
 
+#[derive(Clone)]
 struct CompiledRule {
     signal: SignalKind,
     regex: Regex,
@@ -183,6 +186,7 @@ struct CompiledRule {
     http_version_capture: Option<String>,
 }
 
+#[derive(Clone)]
 enum CompiledRoleRule {
     SysObjectIdPrefix {
         prefix: String,
@@ -213,74 +217,91 @@ pub struct RulesClassifier {
 }
 
 impl RulesClassifier {
-    /// Builds a classifier by resolving `merge_mode` into an effective rule list per phase, compiling every pattern, and validating each role rule.
+    /// Builds a classifier by compiling every user pattern, validating each user role rule, and — under [`MergeMode::Extend`] — appending the baked-in tables.
     /// Returns `ClassifierError::InvalidRegex` if any pattern fails to compile, or `ClassifierError::InvalidRoleRule` if a role rule fails validation.
     pub fn new(
         merge_mode: MergeMode,
         user_platform_rules: Vec<PlatformRule>,
         user_role_rules: Vec<RoleRule>,
     ) -> Result<Self, ClassifierError> {
-        let effective_platform = match merge_mode {
-            MergeMode::Extend => {
-                let mut merged = user_platform_rules;
-                merged.extend(platform_rules::baked_platform_rules());
-                merged
-            }
-            MergeMode::Replace => user_platform_rules,
-        };
-
-        let mut compiled = Vec::with_capacity(effective_platform.len());
-        for rule in effective_platform {
-            if rule.platform.is_none() {
-                if let Some(group) = &rule.os_version_capture {
-                    return Err(ClassifierError::InvalidPlatformRule(format!(
-                        "platform rule `{}` captures os_version from `{group}` but claims no platform; os_version is the version of the platform, so a rule without one can never write it",
-                        rule.pattern
-                    )));
-                }
-            }
-            if rule.http_server_capture.is_none() {
-                if let Some(group) = &rule.http_version_capture {
-                    return Err(ClassifierError::InvalidPlatformRule(format!(
-                        "platform rule `{}` captures http_version from `{group}` but captures no http_server; http_version is the version of the http_server, so a rule without one can never write it",
-                        rule.pattern
-                    )));
-                }
-            }
-            let regex =
-                Regex::new(&rule.pattern).map_err(|source| ClassifierError::InvalidRegex {
-                    pattern: rule.pattern.clone(),
-                    source,
-                })?;
-            compiled.push(CompiledRule {
-                signal: rule.signal,
-                regex,
-                platform: rule.platform,
-                os_version_capture: rule.os_version_capture,
-                ssh_version_capture: rule.ssh_version_capture,
-                http_server_capture: rule.http_server_capture,
-                http_version_capture: rule.http_version_capture,
-            });
+        let mut platform_rules = compile_platform_rules(user_platform_rules)?;
+        let mut role_rules = compile_role_rules(user_role_rules)?;
+        if merge_mode == MergeMode::Extend {
+            platform_rules.extend(baked_platform_table()?.iter().cloned());
+            role_rules.extend(baked_role_table()?.iter().cloned());
         }
-
-        let effective_role = match merge_mode {
-            MergeMode::Extend => {
-                let mut merged = user_role_rules;
-                merged.extend(role_rules::baked_role_rules());
-                merged
-            }
-            MergeMode::Replace => user_role_rules,
-        };
-        let mut compiled_roles = Vec::with_capacity(effective_role.len());
-        for rule in effective_role {
-            compiled_roles.push(compile_role_rule(rule)?);
-        }
-
         Ok(Self {
-            platform_rules: compiled,
-            role_rules: compiled_roles,
+            platform_rules,
+            role_rules,
         })
     }
+}
+
+// Callers clone rather than borrow: a cloned `Regex` shares the compiled program but gets its own search-cache pool, so concurrent scans never contend for one.
+fn baked_platform_table() -> Result<&'static [CompiledRule], ClassifierError> {
+    static COMPILED: OnceLock<Vec<CompiledRule>> = OnceLock::new();
+    if let Some(compiled) = COMPILED.get() {
+        return Ok(compiled);
+    }
+    let compiled = compile_platform_rules(platform_rules::baked_platform_rules())?;
+    Ok(COMPILED.get_or_init(|| compiled))
+}
+
+fn baked_role_table() -> Result<&'static [CompiledRoleRule], ClassifierError> {
+    static COMPILED: OnceLock<Vec<CompiledRoleRule>> = OnceLock::new();
+    if let Some(compiled) = COMPILED.get() {
+        return Ok(compiled);
+    }
+    let compiled = compile_role_rules(role_rules::baked_role_rules())?;
+    Ok(COMPILED.get_or_init(|| compiled))
+}
+
+fn compile_platform_rules(rules: Vec<PlatformRule>) -> Result<Vec<CompiledRule>, ClassifierError> {
+    let mut compiled = Vec::with_capacity(rules.len());
+    for rule in rules {
+        compiled.push(compile_platform_rule(rule)?);
+    }
+    Ok(compiled)
+}
+
+fn compile_platform_rule(rule: PlatformRule) -> Result<CompiledRule, ClassifierError> {
+    if rule.platform.is_none() {
+        if let Some(group) = &rule.os_version_capture {
+            return Err(ClassifierError::InvalidPlatformRule(format!(
+                "platform rule `{}` captures os_version from `{group}` but claims no platform; os_version is the version of the platform, so a rule without one can never write it",
+                rule.pattern
+            )));
+        }
+    }
+    if rule.http_server_capture.is_none() {
+        if let Some(group) = &rule.http_version_capture {
+            return Err(ClassifierError::InvalidPlatformRule(format!(
+                "platform rule `{}` captures http_version from `{group}` but captures no http_server; http_version is the version of the http_server, so a rule without one can never write it",
+                rule.pattern
+            )));
+        }
+    }
+    let regex = Regex::new(&rule.pattern).map_err(|source| ClassifierError::InvalidRegex {
+        pattern: rule.pattern.clone(),
+        source,
+    })?;
+    Ok(CompiledRule {
+        signal: rule.signal,
+        regex,
+        platform: rule.platform,
+        os_version_capture: rule.os_version_capture,
+        ssh_version_capture: rule.ssh_version_capture,
+        http_server_capture: rule.http_server_capture,
+        http_version_capture: rule.http_version_capture,
+    })
+}
+
+fn compile_role_rules(rules: Vec<RoleRule>) -> Result<Vec<CompiledRoleRule>, ClassifierError> {
+    let mut compiled = Vec::with_capacity(rules.len());
+    for rule in rules {
+        compiled.push(compile_role_rule(rule)?);
+    }
+    Ok(compiled)
 }
 
 fn compile_role_rule(rule: RoleRule) -> Result<CompiledRoleRule, ClassifierError> {
@@ -1099,6 +1120,137 @@ mod tests {
             record.platform.is_none(),
             "baked-in cisco_ios rule must not run under Replace"
         );
+    }
+
+    fn warm_the_baked_tables() {
+        create_classifier(&extend_rules(vec![])).expect("the baked tables compile");
+    }
+
+    #[test]
+    fn a_classifier_built_over_the_warm_baked_tables_still_puts_user_rules_first() {
+        warm_the_baked_tables();
+        let user = vec![PlatformRule {
+            signal: SignalKind::SnmpSysDescr,
+            pattern: r"^Cisco IOS Software".to_string(),
+            platform: Some("user_defined".to_string()),
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
+        }];
+        let c = create_classifier(&extend_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(cisco_ios_sys_descr());
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.platform.as_deref(), Some("user_defined"));
+    }
+
+    #[test]
+    fn replace_still_ignores_the_baked_platform_table_once_it_is_warm() {
+        warm_the_baked_tables();
+        let user = vec![PlatformRule {
+            signal: SignalKind::SnmpSysDescr,
+            pattern: r"^SomethingElse".to_string(),
+            platform: Some("user_only".to_string()),
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
+        }];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+
+        let mut baked = empty_record();
+        baked.signals.push(cisco_ios_sys_descr());
+        c.classify(&mut baked).expect("classify ok");
+        assert!(baked.platform.is_none());
+
+        let mut mine = empty_record();
+        mine.signals
+            .push(Signal::SnmpSysDescr("SomethingElse 1.0".into()));
+        c.classify(&mut mine).expect("classify ok");
+        assert_eq!(
+            mine.platform.as_deref(),
+            Some("user_only"),
+            "the classifier under test must be the one this construction built"
+        );
+    }
+
+    #[test]
+    fn a_user_platform_rule_is_rejected_on_a_construction_after_the_baked_tables_are_warm() {
+        warm_the_baked_tables();
+        let user = vec![PlatformRule {
+            signal: SignalKind::SnmpSysDescr,
+            pattern: r"(unclosed".to_string(),
+            platform: Some("irrelevant".to_string()),
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: None,
+            http_version_capture: None,
+        }];
+        let err = match create_classifier(&extend_rules(user)) {
+            Ok(_) => panic!("a user pattern compiles on every construction, warm table or not"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, RastreoError::Classifier(_)));
+    }
+
+    #[test]
+    fn a_classifier_built_over_the_warm_baked_tables_still_puts_user_role_rules_first() {
+        warm_the_baked_tables();
+        let user = vec![RoleRule::PortsOpen {
+            ports: vec![22, 179],
+            role: "user_router".into(),
+        }];
+        let c = create_classifier(&extend_role_rules(user)).expect("create");
+        let mut record = empty_record();
+        record.signals.push(Signal::OpenPort(22));
+        record.signals.push(Signal::OpenPort(179));
+        c.classify(&mut record).expect("classify ok");
+        assert_eq!(record.role.as_deref(), Some("user_router"));
+    }
+
+    #[test]
+    fn replace_still_ignores_the_baked_role_table_once_it_is_warm() {
+        warm_the_baked_tables();
+        let user = vec![RoleRule::PortsOpen {
+            ports: vec![8080],
+            role: "user_only".into(),
+        }];
+        let c = create_classifier(&replace_role_rules(user)).expect("create");
+
+        let mut baked = empty_record();
+        baked.signals.push(Signal::OpenPort(22));
+        baked.signals.push(Signal::OpenPort(179));
+        c.classify(&mut baked).expect("classify ok");
+        assert!(baked.role.is_none());
+
+        let mut mine = empty_record();
+        mine.signals.push(Signal::OpenPort(8080));
+        c.classify(&mut mine).expect("classify ok");
+        assert_eq!(
+            mine.role.as_deref(),
+            Some("user_only"),
+            "the classifier under test must be the one this construction built"
+        );
+    }
+
+    #[test]
+    fn a_user_role_rule_is_rejected_on_a_construction_after_the_baked_tables_are_warm() {
+        warm_the_baked_tables();
+        let user = vec![RoleRule::PortsOpen {
+            ports: vec![],
+            role: "invalid".into(),
+        }];
+        let err = match create_classifier(&extend_role_rules(user)) {
+            Ok(_) => {
+                panic!("a user role rule is validated on every construction, warm table or not")
+            }
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            RastreoError::Classifier(ClassifierError::InvalidRoleRule(_))
+        ));
     }
 
     #[test]

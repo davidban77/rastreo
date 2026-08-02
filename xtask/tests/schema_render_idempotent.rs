@@ -1,11 +1,62 @@
 use std::fs;
 use std::path::PathBuf;
 
+use serde_json::Value;
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask has a parent")
         .to_path_buf()
+}
+
+fn visit_descriptions(value: &Value, path: &str, visit: &mut impl FnMut(&str, &str)) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                match (key.as_str(), child.as_str()) {
+                    ("description", Some(text)) => visit(path, text),
+                    _ => visit_descriptions(child, &format!("{path}/{key}"), visit),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                visit_descriptions(child, &format!("{path}/{index}"), visit);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn no_schema_description_quotes_rust_syntax() {
+    const RUST_SYNTAX: [&str; 4] = ["::", "Vec<", "Option<", "..="];
+    let root = workspace_root();
+    let mut leaks = Vec::new();
+    for (name, _) in xtask::SCHEMAS {
+        let raw = fs::read_to_string(root.join("schemas").join(name))
+            .unwrap_or_else(|e| panic!("read schemas/{name}: {e}"));
+        let value: Value = serde_json::from_str(&raw).expect("parse schema");
+        let mut described = 0usize;
+        visit_descriptions(&value, "", &mut |path, text| {
+            described += 1;
+            for token in RUST_SYNTAX {
+                if text.contains(token) {
+                    leaks.push(format!("{name}{path}: `{token}` in {text:?}"));
+                }
+            }
+        });
+        assert!(
+            described > 0,
+            "{name} rendered no description at all, so this guard proved nothing"
+        );
+    }
+    assert!(
+        leaks.is_empty(),
+        "schema descriptions are read by consumers who do not write Rust; say it in wire terms:\n{}",
+        leaks.join("\n")
+    );
 }
 
 #[test]

@@ -22,8 +22,8 @@ into one record keyed by the unordered pair of LLDP chassis-ids.
 | `discovered_via` | string | yes | Discovery mechanism that produced the link (`lldp` today; leaves room for `cdp`/`gnmi`). |
 | `observed_at` | string (date-time) | yes | RFC 3339 UTC timestamp of when the link was observed. |
 | `scan_metadata` | [`ScanMetadata`](#scanmetadata) | yes | Provenance stamped by the pipeline at scan entry. |
-| `schema_id` | string | yes | Canonical schema URL; always `LINK_SCHEMA_ID` for records emitted by this build. |
-| `schema_version` | string | yes | Schema version tag; always `LINK_CURRENT_SCHEMA_VERSION` for records emitted by this build. |
+| `schema_id` | string | yes | URL of the JSON Schema this record conforms to — the same value as this schema's `$id`. |
+| `schema_version` | string | yes | Schema version tag; `v1` for records emitted by this build. Versioned independently of the device record. |
 
 ## Definitions
 
