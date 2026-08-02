@@ -38,7 +38,7 @@ pub async fn spawn_sink_probe(
                 config.probe_timeout,
             ));
             let sink: SharedSink = Arc::new(Mutex::new(sink));
-            slot.attach(Arc::clone(&sink));
+            slot.attach(Arc::clone(&sink), sink_type);
             log_sink_attached(path, sink_type, failures.attempts);
             run_probe(&sink, &reachability, &state.metrics, config.probe_timeout).await;
             reachability
@@ -129,6 +129,22 @@ impl ConstructionFailures {
     }
 }
 
+#[cfg(feature = "config")]
+fn construction_timed_out(
+    construction_timeout: Duration,
+    hint: Option<SinkType>,
+) -> ConstructError {
+    let label = hint.map(SinkType::as_label).unwrap_or("unknown");
+    ConstructError {
+        hint,
+        err: anyhow::anyhow!(
+            "sink construction timed out after {}s: {label}",
+            construction_timeout.as_secs()
+        ),
+    }
+}
+
+/// Read, parse, and build the sink at `path`, with every await bounded by one shared `construction_timeout` deadline.
 async fn load_and_construct_sink(
     path: &std::path::Path,
     construction_timeout: Duration,
@@ -138,33 +154,28 @@ async fn load_and_construct_sink(
         use anyhow::Context;
         use rastreo_core::config::parse_sink_config;
         use rastreo_core::sink::create_sink;
+        use tokio::time::{timeout_at, Instant};
 
-        let raw = tokio::fs::read_to_string(path)
-            .await
-            .with_context(|| format!("failed to read sink config at {}", path.display()))
-            .map_err(|err| ConstructError { hint: None, err })?;
+        let deadline = Instant::now() + construction_timeout;
+        let raw = match timeout_at(deadline, tokio::fs::read_to_string(path)).await {
+            Ok(read) => read
+                .with_context(|| format!("failed to read sink config at {}", path.display()))
+                .map_err(|err| ConstructError { hint: None, err })?,
+            Err(_) => return Err(construction_timed_out(construction_timeout, None)),
+        };
         let config = parse_sink_config(&raw)
             .with_context(|| format!("failed to parse sink config at {}", path.display()))
             .map_err(|err| ConstructError { hint: None, err })?;
         // A parsed config names its kind even when it cannot be built: `unknown` means unreadable.
         let hint = Some(config.sink_type());
-        match timeout(construction_timeout, create_sink(&config)).await {
+        match timeout_at(deadline, create_sink(&config)).await {
             Ok(Ok(sink)) => Ok(sink),
             Ok(Err(err)) => Err(ConstructError {
                 hint,
                 err: anyhow::Error::new(err)
                     .context(format!("failed to build sink from {}", path.display())),
             }),
-            Err(_) => {
-                let label = hint.map(SinkType::as_label).unwrap_or("unknown");
-                Err(ConstructError {
-                    hint,
-                    err: anyhow::anyhow!(
-                        "sink construction timed out after {}s: {label}",
-                        construction_timeout.as_secs()
-                    ),
-                })
-            }
+            Err(_) => Err(construction_timed_out(construction_timeout, hint)),
         }
     }
     #[cfg(not(feature = "config"))]
@@ -222,8 +233,8 @@ async fn probe_tick(
     let sink = match slot.get() {
         Some(sink) => sink,
         None => match retry_construction(config, reachability, metrics, failures).await {
-            Some(sink) => {
-                slot.attach(Arc::clone(&sink));
+            Some((sink, kind)) => {
+                slot.attach(Arc::clone(&sink), kind);
                 sink
             }
             None => return,
@@ -255,14 +266,14 @@ async fn retry_construction(
     reachability: &Arc<SinkReachability>,
     metrics: &Arc<Metrics>,
     failures: &mut ConstructionFailures,
-) -> Option<SharedSink> {
+) -> Option<(SharedSink, SinkType)> {
     let path = config.config_path.as_ref()?;
     match load_and_construct_sink(path, config.probe_timeout).await {
         Ok(sink) => {
             let sink_type = sink.kind();
             reachability.set_sink_type(sink_type);
             log_sink_attached(path, sink_type, failures.attempts);
-            Some(Arc::new(Mutex::new(sink)))
+            Some((Arc::new(Mutex::new(sink)), sink_type))
         }
         Err(ConstructError { hint, err }) => {
             let detail = format!("{err:#}");
@@ -430,7 +441,7 @@ mod tests {
         run_probe(&sink, &reach, &metrics, Duration::from_secs(1)).await;
         assert!(reach.reachable.load(Ordering::Relaxed));
         assert!(reach.last_error_snapshot().is_none());
-        assert!(reach.last_probe_epoch_ms.load(Ordering::Relaxed) > 0);
+        assert!(reach.last_probe.age().is_some());
         assert_eq!(metrics.sink_probe_success.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.sink_probe_failure.load(Ordering::Relaxed), 0);
     }
@@ -496,13 +507,13 @@ mod tests {
         });
         hold_ready.notified().await;
 
-        let baseline_probe_epoch = reach.last_probe_epoch_ms.load(Ordering::Relaxed);
+        let baseline_probe = reach.last_probe.age();
         let baseline_reachable = reach.reachable.load(Ordering::Relaxed);
         run_probe(&sink, &reach, &metrics, Duration::from_millis(20)).await;
         assert_eq!(
-            reach.last_probe_epoch_ms.load(Ordering::Relaxed),
-            baseline_probe_epoch,
-            "lock-held skip must not stamp last_probe_epoch_ms",
+            reach.last_probe.age(),
+            baseline_probe,
+            "a lock-held skip must not stamp the probe result",
         );
         assert_eq!(
             reach.reachable.load(Ordering::Relaxed),
@@ -520,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn probe_tick_stamps_the_liveness_tick_when_the_sink_lock_is_held() {
         let sink = shared(Box::new(AlwaysOk));
-        let slot = SinkSlot::attached(Arc::clone(&sink));
+        let slot = SinkSlot::attached(Arc::clone(&sink), SinkType::Stdout);
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Stdout,
             Duration::from_millis(50),
@@ -549,12 +560,11 @@ mod tests {
         probe_tick(&slot, &config, &reach, &metrics, &mut failures).await;
 
         assert!(
-            reach.last_tick_epoch_ms.load(Ordering::Relaxed) > 0,
+            reach.last_tick.age().is_some(),
             "a tick that skips the probe still proves the task is alive",
         );
-        assert_eq!(
-            reach.last_probe_epoch_ms.load(Ordering::Relaxed),
-            0,
+        assert!(
+            reach.last_probe.age().is_none(),
             "a skipped probe produces no result to stamp",
         );
         assert_eq!(reach.ticks.load(Ordering::Relaxed), 1);
@@ -581,7 +591,7 @@ mod tests {
         let sink = shared(Box::new(HangingProbe {
             started: Arc::clone(&started),
         }));
-        let slot = SinkSlot::attached(Arc::clone(&sink));
+        let slot = SinkSlot::attached(Arc::clone(&sink), SinkType::Nats);
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Nats,
             probe_interval,
@@ -666,12 +676,8 @@ mod tests {
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(after.sink().is_none());
         assert!(!after.sink_reachability.configured);
-        assert_eq!(
-            after
-                .sink_reachability
-                .last_tick_epoch_ms
-                .load(Ordering::Relaxed),
-            0,
+        assert!(
+            after.sink_reachability.last_tick.age().is_none(),
             "an unconfigured sink has no probe task, so it must never look stalled",
         );
         assert!(handle.is_none(), "no task spawned when no sink configured");
@@ -731,11 +737,7 @@ mod tests {
         let (_tx, rx) = make_shutdown();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(
-            after
-                .sink_reachability
-                .last_probe_epoch_ms
-                .load(Ordering::Relaxed)
-                > 0,
+            after.sink_reachability.last_probe.age().is_some(),
             "first probe must complete before spawn_sink_probe returns",
         );
         assert!(after.sink_reachability.reachable.load(Ordering::Relaxed));
@@ -772,11 +774,7 @@ mod tests {
         let (_tx, rx) = make_shutdown();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         assert!(
-            after
-                .sink_reachability
-                .last_tick_epoch_ms
-                .load(Ordering::Relaxed)
-                > 0,
+            after.sink_reachability.last_tick.age().is_some(),
             "the startup cycle counts as a tick, so /readyz is never gated on it",
         );
         if let Some(h) = handle {
@@ -803,13 +801,7 @@ mod tests {
         };
         let (_tx, rx) = make_shutdown();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
-        assert!(
-            after
-                .sink_reachability
-                .last_tick_epoch_ms
-                .load(Ordering::Relaxed)
-                > 0,
-        );
+        assert!(after.sink_reachability.last_tick.age().is_some());
         handle.expect("retry task spawned").abort();
     }
 
@@ -867,6 +859,46 @@ mod tests {
         );
 
         handle.abort();
+        feed.send(()).expect("release the feeder");
+        feeder.join().expect("feeder thread");
+    }
+
+    #[cfg(all(feature = "config", unix))]
+    #[tokio::test]
+    async fn a_config_read_that_never_completes_is_bounded_by_the_construction_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sink.yaml");
+        // A FIFO read blocks until a writer closes, so an unfed read only ends on the timeout.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let probe_timeout = Duration::from_millis(200);
+        let bounded = tokio::time::timeout(
+            Duration::from_secs(5),
+            load_and_construct_sink(&path, probe_timeout),
+        )
+        .await;
+
+        // Feeds on a dropped sender too, so a failing assertion cannot leave the read blocked.
+        let (feed, feed_signal) = std::sync::mpsc::channel::<()>();
+        let feed_path = path.clone();
+        let feeder = std::thread::spawn(move || {
+            let _ = feed_signal.recv();
+            let _ = std::fs::write(&feed_path, "type: stdout\n");
+        });
+
+        let outcome = bounded.expect("the config read must not outlive the construction timeout");
+        let err = outcome.err().expect("an unfed read cannot build a sink");
+        let detail = format!("{:#}", err.err);
+        assert!(detail.contains("timed out"), "error was: {detail}");
+        assert!(
+            err.hint.is_none(),
+            "a config that never parsed names no kind"
+        );
+
         feed.send(()).expect("release the feeder");
         feeder.join().expect("feeder thread");
     }
@@ -1213,32 +1245,30 @@ mod tests {
         let start = Instant::now();
         let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
         let handle = handle.expect("retry task spawned");
-        let first_stamp = after
-            .sink_reachability
-            .last_probe_epoch_ms
-            .load(Ordering::Relaxed);
 
         let metrics = StdArc::clone(&after.metrics);
-        wait_until("two retries to fail", move || {
-            metrics.sink_probe_failure.load(Ordering::Relaxed) >= 3
+        wait_until("four retries to fail", move || {
+            metrics.sink_probe_failure.load(Ordering::Relaxed) >= 5
         })
         .await;
         let elapsed = start.elapsed();
 
         assert!(
-            elapsed >= interval_dur * 2,
+            elapsed >= interval_dur * 4,
             "retries must be paced by the probe interval, not spun: {elapsed:?}",
         );
         assert!(after.sink().is_none());
         assert!(!after.sink_reachability.reachable.load(Ordering::Relaxed));
         assert!(after.sink_reachability.last_error_snapshot().is_some());
+        let probe_age = after
+            .sink_reachability
+            .last_probe
+            .age()
+            .expect("a retry stamps a probe result");
         assert!(
-            after
-                .sink_reachability
-                .last_probe_epoch_ms
-                .load(Ordering::Relaxed)
-                > first_stamp,
-            "each retry must refresh seconds_since_last_probe on /readyz",
+            probe_age * 2 < elapsed,
+            "each retry must refresh seconds_since_last_probe on /readyz: \
+             the stamp is {probe_age:?} old after {elapsed:?} of retries",
         );
         handle.abort();
     }

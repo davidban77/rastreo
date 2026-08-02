@@ -375,7 +375,7 @@ The summary fields:
 | `probes_by_kind` | Per-prober `attempted` / `errored` breakdown. Omitted when no probes ran. |
 | `first_probe_error` | The first probe fault, as an object with a `kind` field (the fault kind) and a `detail` field (a sample detail string). Omitted when no probe faulted. |
 | `dlq_records` | Records the sink diverted to a dead-letter destination. |
-| `sink_type` | Sink the scan wrote to. Always `tee` on `POST /scans`: the server writes every record to the in-memory buffer it returns in the response, and to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set. |
+| `sink_type` | Sink the scan wrote to. Always `tee` on `POST /scans`: the server writes every record to the in-memory buffer it returns in the response, and to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set. This names the wrapper; a [dry-run](#preview-a-scenario-with-a-dry-run) plan's `sink` names the destinations inside it. |
 | `cancelled` | `true` when the scan stopped early; the counters then reflect partial progress. |
 | `elapsed_ms` | Wall-clock duration of the scan. |
 
@@ -565,7 +565,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 - `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
 - `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the request added.
 - `encoder` — always reads `ndjson` on `POST /scans`. See the warning below.
-- `sink` — always reads `stdout (default)` on `POST /scans`. See the warning below.
+- `sink` — every destination the scan writes to, in write order. `memory` is the in-memory capture the server returns to you in this response's `records`; a second entry names the sink from `RASTREO_SINK_CONFIG_PATH`, and is absent while no such sink is attached. A completed scan's `sink_type` names the wrapper holding these destinations, so it reads `tee` where this list reads `memory`.
 - `max_concurrent` — the most probes the scan would run at once.
 - `probe_rate` — the probes-per-second pace, or `null` for unlimited.
 - `retries` — the retransmit count for connectionless probers.
@@ -583,7 +583,7 @@ The response is a `DiscoveryPlan`. Its fields are:
   "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
   "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
   "encoder": "ndjson",
-  "sink": "stdout (default)",
+  "sink": "memory",
   "max_concurrent": 64,
   "probe_rate": null,
   "retries": 0,
@@ -594,8 +594,8 @@ The response is a `DiscoveryPlan`. Its fields are:
 
 A request that names no `fuser` and no `classifier` gets the pipeline defaults shown above: `direct` fusion, and the `rules` classifier over the tables built into rastreo. The `platform_rules` and `role_rules` counts cover only the rules the request added, so `0` means those built-in tables run on their own. See [Classification](../discover/classification.md).
 
-!!! warning "The plan's `sink` and `encoder` lines do not name the server's destination"
-    The plan's `sink` always reads `stdout (default)` and its `encoder` always reads `ndjson`, because the server has already dropped the one and pinned the other. A real scan returns its records in the response body. It also writes them to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set.
+!!! note "The plan's `sink` and `encoder` lines name the server's destination, never yours"
+    The server drops the `sink` you send and pins `encoder` to `ndjson`, so the plan reports where records would actually go: `memory` alone when the response body is the only destination, and `memory, kafka` (or `memory, nats`, `memory, file`) once the sink from `RASTREO_SINK_CONFIG_PATH` has been built and attached. A sink that is configured but has not built yet is not listed, because a scan submitted right now would not reach it either — check `sink_attached` on [`/readyz`](#get-healthz-and-get-readyz) to see why.
 
 A real scan rejects an out-of-allow-list target with a hard `403` and probes nothing. A dry-run is more informative. It resolves what it can and reports the blocked target in the plan: the blocked target carries an `error` in its `resolution`, the `refusal` names the rejection the scan would return, and `total_probes` reads `0` — one blocked target stops the whole scan, so nothing else is counted either.
 
@@ -609,7 +609,7 @@ A real scan rejects an out-of-allow-list target with a hard `403` and probes not
   "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
   "classifier": "rules (merge_mode extend, platform_rules 0, role_rules 0)",
   "encoder": "ndjson",
-  "sink": "stdout (default)",
+  "sink": "memory",
   "max_concurrent": 64,
   "probe_rate": null,
   "retries": 0,

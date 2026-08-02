@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::state::{current_epoch_ms, AppState, SinkReachability};
+use crate::state::{AppState, SinkReachability};
 
 pub async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
@@ -21,20 +21,15 @@ pub async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) 
     let readiness = &state.readiness;
     let config = &readiness.config;
     let inflight = readiness.inflight_scans.load(Ordering::Relaxed);
-    let last_sink_ms = readiness.last_sink_error_epoch_ms.load(Ordering::Relaxed);
-    let last_scan_ms = readiness.last_scan_error_epoch_ms.load(Ordering::Relaxed);
-    let now_ms = current_epoch_ms();
 
-    let seconds_since_sink_error = seconds_since(now_ms, last_sink_ms);
-    let seconds_since_scan_error = seconds_since(now_ms, last_scan_ms);
+    let seconds_since_sink_error = readiness.last_sink_error.age_secs();
+    let seconds_since_scan_error = readiness.last_scan_error.age_secs();
 
     let reach = &state.sink_reachability;
     let sink_reachable = reachability_state(reach);
     let sink_attached = reach.configured.then(|| state.sink().is_some());
-    let seconds_since_last_probe =
-        seconds_since(now_ms, reach.last_probe_epoch_ms.load(Ordering::Relaxed));
-    let seconds_since_last_probe_tick =
-        seconds_since(now_ms, reach.last_tick_epoch_ms.load(Ordering::Relaxed));
+    let seconds_since_last_probe = reach.last_probe.age_secs();
+    let seconds_since_last_probe_tick = reach.last_tick.age_secs();
     let last_probe_error = reach.last_error_snapshot();
 
     let reason = classify(&ReadinessSignals {
@@ -116,14 +111,6 @@ fn reachability_state(reach: &SinkReachability) -> Option<bool> {
         return None;
     }
     Some(reach.reachable.load(Ordering::Relaxed))
-}
-
-fn seconds_since(now_ms: u64, then_ms: u64) -> Option<f64> {
-    if then_ms == 0 {
-        return None;
-    }
-    let delta_ms = now_ms.saturating_sub(then_ms);
-    Some(delta_ms as f64 / 1000.0)
 }
 
 struct ReadinessSignals {
@@ -678,16 +665,17 @@ mod tests {
         ))
     }
 
-    fn shared_memory_sink() -> crate::state::SharedSink {
-        Arc::new(tokio::sync::Mutex::new(
-            Box::new(rastreo_core::MemorySink::new()) as Box<dyn rastreo_core::Sink>,
+    fn shared_memory_sink() -> Option<(crate::state::SharedSink, rastreo_core::SinkType)> {
+        Some((
+            Arc::new(tokio::sync::Mutex::new(
+                Box::new(rastreo_core::MemorySink::new()) as Box<dyn rastreo_core::Sink>,
+            )),
+            rastreo_core::SinkType::Memory,
         ))
     }
 
-    fn stale_tick_epoch_ms() -> u64 {
-        let stale_after_ms =
-            (probe_stale_after_secs(DEFAULT_INTERVAL, DEFAULT_TIMEOUT) * 1000.0 + 1000.0) as u64;
-        current_epoch_ms().saturating_sub(stale_after_ms)
+    fn past_the_staleness_window() -> Duration {
+        Duration::from_secs_f64(probe_stale_after_secs(DEFAULT_INTERVAL, DEFAULT_TIMEOUT) + 1.0)
     }
 
     #[tokio::test]
@@ -708,7 +696,7 @@ mod tests {
         let reach = configured_reach(rastreo_core::SinkType::Kafka);
         reach.record_failure("broker down".into());
         reach.record_tick();
-        let state = build_state().with_sink(Some(shared_memory_sink()), reach);
+        let state = build_state().with_sink(shared_memory_sink(), reach);
         let (status, Json(body)) = readyz(State(state)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["reason"], "sink_unreachable");
@@ -719,31 +707,27 @@ mod tests {
         assert_eq!(body["sink_reachable"], false);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn readyz_reports_a_stale_probe_tick_as_sink_probe_stalled() {
         let reach = configured_reach(rastreo_core::SinkType::Kafka);
         reach.record_success();
-        reach
-            .last_tick_epoch_ms
-            .store(stale_tick_epoch_ms(), Ordering::Relaxed);
-        let state = build_state().with_sink(Some(shared_memory_sink()), reach);
+        reach.record_tick();
+        let state = build_state().with_sink(shared_memory_sink(), reach);
+        tokio::time::advance(past_the_staleness_window()).await;
         let (status, Json(body)) = readyz(State(state)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["reason"], "sink_probe_stalled");
         assert!(body["seconds_since_last_probe_tick"].is_number());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn readyz_stays_ready_while_a_long_scan_holds_the_sink_lock() {
         let reach = configured_reach(rastreo_core::SinkType::Kafka);
         reach.record_success();
         // A scan holding the lock skips the probe, so the result ages while the task keeps ticking.
-        reach.last_probe_epoch_ms.store(
-            current_epoch_ms().saturating_sub(600_000),
-            Ordering::Relaxed,
-        );
+        tokio::time::advance(Duration::from_secs(600)).await;
         reach.record_tick();
-        let state = build_state().with_sink(Some(shared_memory_sink()), reach);
+        let state = build_state().with_sink(shared_memory_sink(), reach);
         state.readiness.inflight_scans.store(1, Ordering::Relaxed);
         let (status, Json(body)) = readyz(State(state)).await;
         assert_eq!(status, StatusCode::OK);
@@ -763,23 +747,60 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn readyz_leaves_the_sink_error_quarantine_once_the_monotonic_window_passes() {
+        let state = build_state_with(ReadinessConfig {
+            max_inflight_scans: 100,
+            sink_error_quarantine: Duration::from_secs(30),
+            scan_error_quarantine: Duration::from_secs(30),
+        });
+        state.readiness.record_scan_error(true);
+        let (status, Json(body)) = readyz(State(state.clone())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["reason"], "sink_error_within_quarantine");
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let (status, Json(body)) = readyz(State(state)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the quarantine must expire on elapsed monotonic time: {body}",
+        );
+        assert_eq!(body["seconds_since_sink_error"], 31.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readyz_leaves_the_scan_error_quarantine_once_the_monotonic_window_passes() {
+        let state = build_state_with(ReadinessConfig {
+            max_inflight_scans: 100,
+            sink_error_quarantine: Duration::ZERO,
+            scan_error_quarantine: Duration::from_secs(30),
+        });
+        state.readiness.record_scan_error(false);
+        let (status, _) = readyz(State(state.clone())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let (status, Json(body)) = readyz(State(state)).await;
+        assert_eq!(status, StatusCode::OK, "body was {body}");
+        assert_eq!(body["seconds_since_scan_error"], 31.0);
+    }
+
     #[tokio::test]
     async fn readyz_stays_ready_before_the_first_probe_tick_is_stamped() {
         let reach = configured_reach(rastreo_core::SinkType::Kafka);
         reach.record_success();
-        let state = build_state().with_sink(Some(shared_memory_sink()), reach);
+        let state = build_state().with_sink(shared_memory_sink(), reach);
         let (status, Json(body)) = readyz(State(state)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["seconds_since_last_probe_tick"].is_null());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn readyz_never_gates_on_staleness_when_no_sink_is_configured() {
         let state = build_state();
-        state
-            .sink_reachability
-            .last_tick_epoch_ms
-            .store(stale_tick_epoch_ms(), Ordering::Relaxed);
+        state.sink_reachability.record_tick();
+        tokio::time::advance(past_the_staleness_window()).await;
         let (status, Json(body)) = readyz(State(state)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "ready");

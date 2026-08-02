@@ -117,6 +117,8 @@ impl<'a> RunOptions<'a> {
         self
     }
 
+    /// Overrides the scenario's own sink; a caller that does this must plan with
+    /// [`DiscoveryPlan::resolved_into`], or its plan names a destination the run discarded.
     pub fn sink(mut self, sink: Box<dyn Sink>) -> Self {
         self.sink = Some(sink);
         self
