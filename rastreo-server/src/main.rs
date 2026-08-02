@@ -16,6 +16,9 @@ use rastreo_server::{
 };
 use tokio::sync::watch;
 
+#[cfg(test)]
+mod argv;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 enum LogFormat {
     /// Human-readable text output (default).
@@ -247,24 +250,32 @@ fn init_otlp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{Parser, ValueEnum};
+    use clap::ValueEnum;
+
+    fn parse_cli<I, S>(argv: I) -> std::result::Result<Cli, clap::Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString> + Clone,
+    {
+        argv::parse_without_env(argv)
+    }
 
     #[test]
     fn args_request_timeout_ms_defaults_to_60000() {
-        let cli = Cli::try_parse_from(["rastreo-server"]).expect("default parse");
+        let cli = parse_cli(["rastreo-server"]).expect("default parse");
         assert_eq!(cli.request_timeout_ms, 60_000);
     }
 
     #[test]
     fn args_request_timeout_ms_rejects_zero() {
-        let result = Cli::try_parse_from(["rastreo-server", "--request-timeout-ms", "0"]);
+        let result = parse_cli(["rastreo-server", "--request-timeout-ms", "0"]);
         assert!(result.is_err(), "zero must be rejected");
     }
 
     #[test]
     fn args_request_timeout_ms_accepts_explicit_value() {
-        let cli = Cli::try_parse_from(["rastreo-server", "--request-timeout-ms", "30000"])
-            .expect("explicit parse");
+        let cli =
+            parse_cli(["rastreo-server", "--request-timeout-ms", "30000"]).expect("explicit parse");
         assert_eq!(cli.request_timeout_ms, 30_000);
     }
 
@@ -307,26 +318,19 @@ mod tests {
 
     #[test]
     fn cli_defaults_log_format_to_text() {
-        // SAFETY: no other test in this binary reads or writes RASTREO_LOG_FORMAT concurrently;
-        // clearing an ambient value protects the default-parse assertion against a caller
-        // (e.g., `RASTREO_LOG_FORMAT=json cargo test`) that would otherwise flip the default.
-        unsafe {
-            std::env::remove_var("RASTREO_LOG_FORMAT");
-        }
-        let cli = Cli::try_parse_from(["rastreo-server"]).expect("default parse");
+        let cli = parse_cli(["rastreo-server"]).expect("default parse");
         assert_eq!(cli.log_format, LogFormat::Text);
     }
 
     #[test]
     fn cli_accepts_log_format_json() {
-        let cli = Cli::try_parse_from(["rastreo-server", "--log-format", "json"])
-            .expect("explicit parse");
+        let cli = parse_cli(["rastreo-server", "--log-format", "json"]).expect("explicit parse");
         assert_eq!(cli.log_format, LogFormat::Json);
     }
 
     #[test]
     fn cli_rejects_unknown_log_format() {
-        let result = Cli::try_parse_from(["rastreo-server", "--log-format", "yaml"]);
+        let result = parse_cli(["rastreo-server", "--log-format", "yaml"]);
         assert!(result.is_err(), "unknown log format must be rejected");
     }
 }

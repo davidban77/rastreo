@@ -1,0 +1,10 @@
+# The table form of `leak-timeout` below landed in 0.9.95; an older nextest fails on it with a
+# config-parse error that names neither the key nor the version.
+nextest-version = { required = "0.9.95" }
+
+[profile.default]
+# `leak-timeout` is a wall-clock race: nextest waits this long after a test process exits for
+# its captured-output pipe to reach EOF. At the 100ms default a busy machine loses that race and
+# reports a test that spawns nothing at all. A subprocess that outlives its test holds the pipe
+# for as long as it runs, so a window past the runner's own scheduling jitter reports only those.
+leak-timeout = { period = "5s", result = "fail" }

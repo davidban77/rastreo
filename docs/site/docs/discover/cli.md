@@ -13,7 +13,7 @@ rastreo discover [OPTIONS] --target <TARGET>...
 rastreo discover [OPTIONS] --file <SCENARIO.yml>
 ```
 
-`--file` is mutually exclusive with every flag-driven scan argument. Exactly one of the two modes must be selected — clap rejects the command otherwise.
+`--file` is mutually exclusive with every flag-driven scan argument. Exactly one of the two modes must be selected — the CLI rejects the command otherwise.
 
 ## Flag-driven mode
 

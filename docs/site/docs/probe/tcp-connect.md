@@ -24,7 +24,7 @@ probers:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"tcp_connect"`. |
-| `ports` | array of u16 | yes | Ports to probe. Sorted and deduplicated at construction. |
+| `ports` | array of port numbers | yes | Ports to probe. Sorted and deduplicated at construction. |
 
 The prober opens one connection per port, bounded by the scenario-level `timeout_ms`. It runs against every resolved target.
 
@@ -38,7 +38,7 @@ A port that is closed, refused, or silent is a normal negative result, not an er
 
 ## Build feature
 
-The TCP-connect prober is always available — no Cargo feature is required. It uses only `tokio::net::TcpStream`, so it is present in every build of `rastreo-core`, including builds with `--no-default-features`.
+The TCP-connect prober is always available — no build feature is required. It needs nothing beyond a plain TCP socket, so it is present in every build, including one with all optional features turned off.
 
 ## Example scenario
 

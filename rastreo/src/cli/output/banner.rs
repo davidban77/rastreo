@@ -372,7 +372,10 @@ mod tests {
         let line = strip_ansi(&start_line(&plan("discover", vec![22, 80], 3), 3));
         assert_eq!(
             line,
-            "▶ discover  targets: 3 | probes: tcp_connect (ports 22, 80) | concurrency: 64 | timeout: 1000ms | sink: stdout"
+            format!(
+                "{} discover  targets: 3 | probes: tcp_connect (ports 22, 80) | concurrency: 64 | timeout: 1000ms | sink: stdout",
+                glyphs().start
+            )
         );
     }
 
@@ -413,7 +416,10 @@ mod tests {
         let line = strip_ansi(&complete_line("discover", &summary()));
         assert_eq!(
             line,
-            "■ discover  completed in 4.2s | hosts: 254 | records: 12 | probes: 1,778 | faults: 0 | sink: stdout"
+            format!(
+                "{} discover  completed in 4.2s | hosts: 254 | records: 12 | probes: 1,778 | faults: 0 | sink: stdout",
+                glyphs().done
+            )
         );
     }
 
@@ -664,7 +670,10 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0],
-            "  • probes by kind tcp_connect 254 (0 err) | dns 254 (2 err)"
+            format!(
+                "  {} probes by kind tcp_connect 254 (0 err) | dns 254 (2 err)",
+                glyphs().bullet
+            )
         );
     }
 
@@ -694,13 +703,12 @@ mod tests {
             "raw socket requires CAP_NET_RAW",
         ));
         let lines: Vec<String> = detail_lines(&s).iter().map(|l| strip_ansi(l)).collect();
-        assert!(
-            lines
-                .iter()
-                .any(|l| l
-                    == "  • first fault    permission_denied → raw socket requires CAP_NET_RAW"),
-            "{lines:#?}"
+        let expected = format!(
+            "  {} first fault    permission_denied {} raw socket requires CAP_NET_RAW",
+            glyphs().bullet,
+            glyphs().arrow
         );
+        assert!(lines.contains(&expected), "{lines:#?}");
     }
 
     #[test]
@@ -726,7 +734,11 @@ mod tests {
         ));
         assert_eq!(
             line,
-            "■ scenario 'bad' (1 of 2)  failed → output sink failed: pipe broke"
+            format!(
+                "{} scenario 'bad' (1 of 2)  failed {} output sink failed: pipe broke",
+                glyphs().done,
+                glyphs().arrow
+            )
         );
     }
 
@@ -743,14 +755,16 @@ mod tests {
     #[test]
     fn the_aggregate_label_counts_every_scenario_when_all_of_them_ran() {
         let line = strip_ansi(&aggregate_line(tally(3, 3, 0), &summary()));
-        assert!(line.starts_with("■ 3 scenarios  completed in"), "{line}");
+        let expected = format!("{} 3 scenarios  completed in", glyphs().done);
+        assert!(line.starts_with(&expected), "{line}");
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn the_aggregate_label_names_the_shortfall_when_a_scenario_did_not_complete() {
         let line = strip_ansi(&aggregate_line(tally(3, 1, 1), &summary()));
-        assert!(line.starts_with("■ 1 of 3 scenarios"), "{line}");
+        let expected = format!("{} 1 of 3 scenarios", glyphs().done);
+        assert!(line.starts_with(&expected), "{line}");
     }
 
     #[cfg(feature = "config")]

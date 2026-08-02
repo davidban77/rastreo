@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn hint_line_carries_the_warn_glyph_and_the_hint_prefix() {
         let line = super::super::theme::strip_ansi(&hint_line("check the port list"));
-        assert_eq!(line, "⚠ hint: check the port list");
+        assert_eq!(line, format!("{} hint: check the port list", glyphs().warn));
     }
 
     #[test]
@@ -346,7 +346,10 @@ mod tests {
     #[test]
     fn note_line_carries_the_bullet_glyph_and_the_note_prefix() {
         let line = super::super::theme::strip_ansi(&note_line("icmp is not in the default set"));
-        assert_eq!(line, "• note: icmp is not in the default set");
+        assert_eq!(
+            line,
+            format!("{} note: icmp is not in the default set", glyphs().bullet)
+        );
     }
 
     #[test]

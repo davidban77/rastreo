@@ -8,12 +8,12 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 
 - Version: **v1**
 - Schema ID: `https://davidban77.github.io/rastreo/schemas/device-record-v1.json`
-- Source of truth: `rastreo-core/src/model/device.rs::DeviceRecord`
+- Source of truth: `rastreo-core/src/model/device.rs`
 - Generated JSON Schema files ship in `schemas/` in the source repo AND at `https://davidban77.github.io/rastreo/schemas/` alongside these docs, so editors and consumers can fetch them directly over HTTPS. Field-by-field reference pages are generated from those files and live under this section.
 
 ## Pages in this section
 
-- [DeviceRecord](device-record.md) — every field on the emitted record. Generated from the schemars derives.
+- [DeviceRecord](device-record.md) — every field on the emitted record. Generated from the published JSON Schema.
 - [LinkRecord](link-record.md) — a topology edge between two endpoints, emitted when the [LLDP prober](../../probe/lldp.md) discovers links. Generated. See [Topology](../../discover/topology.md).
 - [CollectionProfileRecord](collection-profile-record.md) — how to collect telemetry from a discovered endpoint (transport, encoding, advertised models), emitted per gNMI endpoint that returned capability data. Generated.
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
@@ -60,11 +60,20 @@ Both patterns validate against the same schema. Pick whichever fits the workflow
 
 ## Versioning policy
 
-Additive changes stay on `v1` and remain backward-compatible. That includes new optional fields on `DeviceRecord`, new `#[non_exhaustive]` `Signal` variants, and new optional fields on `ScanMetadata`. Consumers that ignore unknown fields (the default for most JSON deserialisers) keep working across an additive bump.
+Additive changes stay on `v1` and remain backward-compatible. Three kinds of change qualify:
+
+- a new optional field on `DeviceRecord`
+- a new signal kind inside the `signals` array
+- a new optional field on `ScanMetadata`
+
+The `signals` array is open-ended on purpose. A consumer that meets an entry whose key it does not recognise must skip that entry, not reject the record. Consumers that ignore unknown fields — the default for most JSON libraries — keep working across an additive bump.
+
+!!! warning "Refresh a cached schema copy before validating signals strictly"
+    `device-record-v1.json` lists the signal kinds that existed when it was published. It allows no other key inside a `signals` entry. A strict validator running against an old cached copy therefore rejects a record carrying a newer signal kind. Refetch the schema by its `schema_id` URL when that happens. You can also skip strict validation of the `signals` array.
 
 A schema whose stored copies no consumer replays can also gain required fields on `v1`. `DiscoveryPlan` is the only one: a saved plan is an artifact you read, not input any consumer validates. The record schemas get no such allowance, because consumers replay stored records.
 
-Breaking changes (renaming or removing a field, changing a field's type, tightening a previously-optional field to required) increment to `v2`. The bump ships alongside a new topic / subject name (`rastreo.discovery.records.v2`) so that `v1` and `v2` can run in parallel for one release cycle. Existing consumers migrate on their own schedule.
+Breaking changes (renaming or removing a field, changing a field's type, tightening a previously-optional field to required) increment to `v2`. The bump comes with a new topic / subject name (`rastreo.discovery.records.v2`) so that `v1` and `v2` can run in parallel for one release cycle. Existing consumers migrate on their own schedule.
 
 ## Consumer discovery pattern
 
@@ -108,7 +117,7 @@ validator_cls(schema).validate(record)
 A validator that only understands draft-07 may not interpret `$defs` and `const` correctly. Use one that understands 2020-12.
 
 !!! note "The schema written by hand"
-    `dlq-envelope-v1.json` is written by hand rather than generated from the Rust types. It is on 2020-12 as well. It carries no `$defs`, no single-value `const` fields, and no bounded integers, so only the `$schema` property above applies to it.
+    `dlq-envelope-v1.json` is written by hand rather than generated. It is on 2020-12 as well. It carries no `$defs`, no single-value `const` fields, and no bounded integers, so only the `$schema` property above applies to it.
 
 ## Confluent Schema Registry (future, opt-in)
 
@@ -128,4 +137,4 @@ schemas/
 └── scenario-v1.json                  # JSON Schema for ScenarioFile (YAML scenario input)
 ```
 
-Regenerate everything (JSON Schemas + this doc section) locally with `task schema:all`. The CI drift-check job re-runs the same command and fails if the committed files diverge from what the Rust type derives produce.
+Regenerate everything (JSON Schemas + this doc section) locally with `task schema:all`. The CI drift-check job re-runs the same command and fails if the committed files differ from what the generator produces.

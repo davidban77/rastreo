@@ -39,12 +39,12 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"gnmi"`. |
-| `ports` | array of u16 | no | `[57400]` | Ports to probe. Sorted and deduplicated at construction. Common gNMI ports are `57400` (SR Linux, IOS-XR), `6030` (Arista EOS), and `9339` (the IANA-assigned port). |
-| `plaintext` | bool | no | `false` | When `false`, the prober connects over TLS. When `true`, it connects over cleartext gRPC (no TLS) — use this for lab devices with TLS disabled on the gNMI port. See [Transport and certificate handling](#transport-and-certificate-handling). |
+| `ports` | array of port numbers | no | `[57400]` | Ports to probe. Sorted and deduplicated at construction. Common gNMI ports are `57400` (SR Linux, IOS-XR), `6030` (Arista EOS), and `9339` (the IANA-assigned port). |
+| `plaintext` | boolean | no | `false` | When `false`, the prober connects over TLS. When `true`, it connects over cleartext gRPC (no TLS) — use this for lab devices with TLS disabled on the gNMI port. See [Transport and certificate handling](#transport-and-certificate-handling). |
 | `username` | string | no | `""` | gNMI username. Empty means an anonymous probe — no credentials are sent. See [Authentication](#authentication). |
 | `password` | string | no | `""` | gNMI password. Redacted from logs and from any debug output. Supports the `${VAR}` and `!file /path` secret syntax — see [Secrets](../reference/secrets.md). |
 | `get_paths` | array of string | no | `["/system/state/hostname", "/system/state/software-version"]` | gNMI paths for the Get call. Each path is a slash-separated location in the device's data tree. An empty list skips the Get call and runs Capabilities only. See [Path syntax](#path-syntax) for origins and list keys. |
-| `lldp` | bool | no | `false` | When `true`, also discover LLDP neighbors over the OpenConfig `/lldp` tree for topology — see [Topology](../discover/topology.md). Runs alongside `get_paths`; both run on the same probe. Requires the device to support the `openconfig-lldp` model. See [LLDP topology](#lldp-topology). |
+| `lldp` | boolean | no | `false` | When `true`, also discover LLDP neighbors over the OpenConfig `/lldp` tree for topology — see [Topology](../discover/topology.md). Runs alongside `get_paths`; both run on the same probe. Requires the device to support the `openconfig-lldp` model. See [LLDP topology](#lldp-topology). |
 
 `username` and `password` are checked when the scenario loads. A value with a control character is not a valid gRPC header, so it is rejected before the scan starts rather than failing mid-probe.
 
@@ -165,7 +165,7 @@ An `auth_failed` fault is the expected result of an anonymous probe against a pr
 
 ## Build feature
 
-The gNMI prober is gated behind the `gnmi` Cargo feature on `rastreo-core`. The published release binaries, the Docker image, and the Helm chart all bundle `--features gnmi`, so no extra step is needed when using them. Building from source, opt in with:
+The gNMI prober is gated behind the `gnmi` Cargo feature. The published release binaries, the Docker image, and the Helm chart all bundle `--features gnmi`, so no extra step is needed when using them. Building from source, opt in with:
 
 ```bash
 cargo build -p rastreo --features gnmi

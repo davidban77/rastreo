@@ -21,6 +21,7 @@ src/
 ├── main.rs   ← entrypoint: tokio::main, tracing init, ctrl-c handler
 └── cli/
     ├── mod.rs         ← Cli struct + Command enum + clap dispatch
+    ├── argv.rs        ← parse_without_env: the env-free clap parse every in-process test uses (cfg(test))
     ├── catalog.rs     ← @name resolution across catalog directories (feature = "config")
     ├── validate.rs    ← validate subcommand handler: offline config-shape + sink-config lint (feature = "config")
     ├── discover.rs    ← discover subcommand handler + arg parsing
@@ -62,6 +63,10 @@ Refusal output is the exemption on both, and it is the whole diagnosis or none o
 `width.rs` measures **stdout**, not stderr, because it is sizing the record grid rather than the banners. A redirected stdout yields no width and no knowable consumer, so the table falls back to the encoder's fixed default and stays byte-identical between runs; the layout does the clamping, so a measured width is passed through untouched. The completion glyph turns yellow only on a scan-level problem (cancellation, quarantined records, a failed scenario in the multi-scenario aggregate) — never on probe faults, which are expected data on any real scan and are reported as `faults:`. The aggregate banner labels how many scenarios actually completed, so an interrupted or partly-failed file never reads as a clean run.
 
 Integration tests build their command with `tests/common::rastreo()`, which spawns the binary with an **empty** environment: its only inputs are the flags and the variables the test set itself. A deny-list of the variables the binary reads is not enough, because the ones that move the output are read by dependencies rather than by any rastreo source file — `anyhow` turns an exported `RUST_BACKTRACE` into 70 lines of stderr under a failure assertion, and `owo-colors`' CI detection turns `CI` / `GITHUB_ACTIONS` into ANSI on a pty run. `tests/env_isolation.rs` pins both halves of the rule: an exported `RUST_BACKTRACE` never reaches the child, and no test file outside `tests/common/mod.rs` may name the binary-path macro, since a hand-built `Command` inherits the whole shell.
+
+An in-process parse has no child for that empty environment to reach, and clap resolves an `env =` argument against the developer's shell — `RASTREO_FORMAT=json` alone decided `--format` in a unit test. `cli/argv.rs` owns the answer: `parse_without_env` builds the command, resets every argument's env source through the tree, and parses from the result, so an assertion about a default reads the argv and nothing else. Its own tests need no `set_var` to prove it — a probe argument reading `PATH` comes back populated through a raw parse and empty through the stripped one — and a second test asserts no argument in the whole command tree survives the reset, which covers an `env =` added tomorrow without touching a list. Mutating the process environment to make a parse assertion deterministic is the bug, not the fix: `set_var` can reallocate the environ array under every other test in the binary, and a panic between the set and the unset leaks the value into the rest of the run.
+
+The class is closed workspace-wide rather than per crate, because the sibling binary had the identical bug: `xtask/tests/argv_parsing.rs` walks every crate's sources and fails on any clap entry point that takes an argv — `parse_from` / `try_parse_from`, `update_from` / `try_update_from`, and the three `get_matches_from` forms — outside the two files that define the env-free parse. Production's `Cli::parse()` is deliberately not in that list: reading the environment is its job. Env-backed parsing is asserted from `tests/`, against a spawned binary whose environment the test sets itself.
 
 ## CLI Surface
 

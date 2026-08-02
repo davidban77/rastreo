@@ -74,6 +74,8 @@ Types, and the changelog section each one lands in:
 | `build` — build system | not in the changelog |
 | `deps` — dependency bumps | not in the changelog |
 
+This table is the list. The PR-title check, the changelog config, and dependabot's commit prefixes are all checked against it by `xtask/tests/commit_types.rs`, so adding a type means adding a row here first.
+
 Scope examples: `core`, `cli`, `server`, `ci`.
 
 The first line must be 72 characters or fewer. Use the body for context when the change is non-obvious.

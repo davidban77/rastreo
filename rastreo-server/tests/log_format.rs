@@ -1,14 +1,11 @@
 mod common;
 
 use std::io::{BufRead, BufReader};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[test]
-fn json_log_format_emits_listening_line_as_json() {
-    let mut child = common::rastreo_server()
-        .args(["--log-format", "json", "--port", "0"])
-        .env("RASTREO_AUTH_DISABLED", "true")
+fn listening_line(command: &mut Command) -> String {
+    let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -18,18 +15,15 @@ fn json_log_format_emits_listening_line_as_json() {
     let mut reader = BufReader::new(stderr);
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut listening_line: Option<String> = None;
+    let mut found: Option<String> = None;
     while Instant::now() < deadline {
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
                 let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
-                    continue;
-                }
                 if trimmed.contains("rastreo-server listening") {
-                    listening_line = Some(trimmed);
+                    found = Some(trimmed);
                     break;
                 }
             }
@@ -39,8 +33,17 @@ fn json_log_format_emits_listening_line_as_json() {
 
     let _ = child.kill();
     let _ = child.wait();
+    found.expect("expected `rastreo-server listening` log line before timeout")
+}
 
-    let line = listening_line.expect("expected `rastreo-server listening` log line before timeout");
+#[test]
+fn json_log_format_emits_listening_line_as_json() {
+    let line = listening_line(
+        common::rastreo_server()
+            .args(["--log-format", "json", "--port", "0"])
+            .env("RASTREO_AUTH_DISABLED", "true"),
+    );
+
     let value: serde_json::Value = serde_json::from_str(&line)
         .unwrap_or_else(|e| panic!("listening line was not valid JSON: {line:?} ({e})"));
 
@@ -71,42 +74,26 @@ fn json_log_format_emits_listening_line_as_json() {
 }
 
 #[test]
+fn the_log_format_env_var_reaches_the_binary() {
+    let line = listening_line(
+        common::rastreo_server()
+            .args(["--port", "0"])
+            .env("RASTREO_AUTH_DISABLED", "true")
+            .env("RASTREO_LOG_FORMAT", "json"),
+    );
+
+    serde_json::from_str::<serde_json::Value>(&line)
+        .unwrap_or_else(|e| panic!("listening line was not valid JSON: {line:?} ({e})"));
+}
+
+#[test]
 fn text_log_format_default_does_not_emit_json() {
-    let mut child = common::rastreo_server()
-        .args(["--port", "0"])
-        .env("RASTREO_AUTH_DISABLED", "true")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn rastreo-server");
+    let line = listening_line(
+        common::rastreo_server()
+            .args(["--port", "0"])
+            .env("RASTREO_AUTH_DISABLED", "true"),
+    );
 
-    let stderr = child.stderr.take().expect("take stderr");
-    let mut reader = BufReader::new(stderr);
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut listening_line: Option<String> = None;
-    while Instant::now() < deadline {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {
-                let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if trimmed.contains("rastreo-server listening") {
-                    listening_line = Some(trimmed);
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-
-    let _ = child.kill();
-    let _ = child.wait();
-
-    let line = listening_line.expect("expected listening log line before timeout");
     assert!(
         serde_json::from_str::<serde_json::Value>(&line).is_err(),
         "text-format listening line should not parse as JSON: {line:?}"

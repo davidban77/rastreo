@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod argv;
 #[cfg(feature = "config")]
 pub mod catalog;
 pub mod discover;
@@ -14,6 +16,8 @@ use discover::DiscoverArgs;
 use output::OutputMode;
 use output::Verbosity;
 
+#[cfg(test)]
+pub(crate) use argv::parse_without_env;
 pub(crate) use output::theme::stderr_supports_colour;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]

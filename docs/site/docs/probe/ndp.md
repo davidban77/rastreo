@@ -30,7 +30,7 @@ There is no `ports` field. NDP runs directly over ICMPv6; there is no port conce
 
 ## Interface selection
 
-When `interface` is empty, the prober picks an interface at probe time by walking `pnet_datalink::interfaces()` and matching the target IPv6 address against each interface's assigned IPv6 subnets:
+When `interface` is empty, the prober picks an interface at probe time. It reads the host's network interfaces and matches the target IPv6 address against the IPv6 subnets assigned to each one:
 
 - If the target is a link-local address (`fe80::/10`), the prober prefers an interface that itself has a link-local address, so the scope IDs match.
 - If the target is a global unicast address, the prober prefers a non-loopback interface with a matching IPv6 subnet.
@@ -50,7 +50,7 @@ The Neighbor Solicitation is sent to the Solicited-Node multicast address `ff02:
 The prober computes both addresses at send time from the target IPv6; there is no static routing table or configuration to keep in sync.
 
 ??? note "ICMPv6 checksum (implementation detail)"
-    The ICMPv6 checksum is computed over the ICMPv6 payload plus an IPv6 pseudo-header (source, destination, ICMPv6 length, next-header=58) per RFC 4443 §2.3. The pseudo-header binds the checksum to the exact source and destination addresses used on the wire, so a bit-flipped or spoofed IPv6 header is detected at the receiver. The prober delegates checksum computation to `pnet_packet::icmpv6::checksum`, which does the same one's-complement sum required by every ICMPv6 sender.
+    The ICMPv6 checksum is computed over the ICMPv6 payload plus an IPv6 pseudo-header (source, destination, ICMPv6 length, next-header=58) per RFC 4443 §2.3. The pseudo-header binds the checksum to the exact source and destination addresses used on the wire, so a bit-flipped or spoofed IPv6 header is detected at the receiver. The prober computes the same one's-complement sum that every ICMPv6 sender must produce.
 
 ## Degenerate case: probing your own address
 
@@ -68,16 +68,16 @@ A target that sends no Neighbor Advertisement before the timeout is marked unrea
 
 ## Build feature
 
-The NDP prober is gated behind the `ndp` Cargo feature on `rastreo-core`. Enable it explicitly when building from source:
+The NDP prober is gated behind the `ndp` Cargo feature. Enable it explicitly when building from source:
 
 ```bash
 cargo build --features ndp
 cargo build --release --features arp,ndp,snmp,http,kafka
 ```
 
-The published Docker image and release binaries bundle the `ndp` feature by default. When the feature is disabled the prober module is not compiled and the `ndp` variant of `ProberConfig` is not present — scenarios that reference `type: ndp` will fail to deserialize with an unknown-variant error.
+The published Docker image and release binaries bundle the `ndp` feature by default. A binary built without it does not know the name `ndp`. A scenario that uses `type: ndp` then fails to load with ``unknown variant `ndp` ``, and the CLI prints a hint naming the feature to rebuild with.
 
-The feature pulls in `pnet_datalink` and `pnet_packet` from the libpnet family, plus `ipnetwork` for subnet arithmetic and `socket2` for sizing the socket receive buffer. The dependency graph is identical to the `arp` feature; enabling both incurs the same transitive compile cost as enabling either alone.
+`ndp` and `arp` need the same dependencies, so enabling both costs no more build time than enabling either one alone.
 
 !!! note "Tuning the capture buffer for very large scans"
     All probes on one interface share one receive socket. A very large scan sends a burst of replies that must not overflow the kernel capture buffer. On Linux this is handled for you: rastreo requests an 8 MiB receive buffer, and the kernel caps it at `net.core.rmem_max`. On macOS the BPF capture buffer is capped by `debug.bpf_maxbufsize`, often around 512 KiB by default. That is fine for typical scans, but a very large scan can drop replies. Raise the cap before a huge local scan:
@@ -134,7 +134,7 @@ A successful probe emits a single `Mac` signal:
 ## See also
 
 - [ARP prober](arp.md) — the IPv4 equivalent of NDP.
-- [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Scenario schema](../reference/scenario.md) — full prober configuration reference.
 - [Discover CLI](../discover/cli.md#choosing-probers) — `--probe ndp` runs it from the command line, with `--interface` to pin the interface.
 - [Kubernetes deployment](../deploy/kubernetes.md#podsecuritynetraw-arp-and-ndp-probers) — the `podSecurity.netRaw` toggle for granting the capability in-cluster.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

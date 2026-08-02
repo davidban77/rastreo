@@ -26,10 +26,10 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"http"`. |
-| `ports` | array of u16 | yes | — | Ports to probe. Must not be empty; sorted and deduplicated at construction. |
+| `ports` | array of port numbers | yes | — | Ports to probe. Must not be empty; sorted and deduplicated at construction. |
 | `scheme` | string | no | `auto` | `auto`, `http`, or `https`. See [Scheme resolution](#scheme-resolution). |
 | `path` | string | no | `/` | Request path. Must start with `/`. |
-| `tls_verify` | bool | no | `false` | When `false`, TLS handshakes accept self-signed and expired certificates — appropriate for probing unknown networks. |
+| `tls_verify` | boolean | no | `false` | When `false`, TLS handshakes accept self-signed and expired certificates — appropriate for probing unknown networks. |
 | `user_agent` | string | no | `rastreo/<version>` | Sent as the `User-Agent` request header on every probe. |
 
 ## Scheme resolution
@@ -44,7 +44,7 @@ When `scheme: auto`, the scheme is chosen per-port using the table below. Settin
 
 ## TLS behaviour
 
-`tls_verify: false` (the default) lets the prober complete handshakes against hosts that present self-signed certificates, expired certificates, or names that do not match the certificate's Subject Alternative Names. Enabling verification (`tls_verify: true`) fails the probe when the certificate chain does not verify against the built-in list of trusted certificate authorities that browsers ship with (the webpki root store) — appropriate when probing known-good hosts on a trusted network.
+`tls_verify: false` (the default) lets the prober complete handshakes against hosts that present self-signed certificates, expired certificates, or names that do not match the certificate's Subject Alternative Names. Enabling verification (`tls_verify: true`) fails the probe when the certificate chain does not verify. rastreo checks the chain against a built-in list of trusted certificate authorities, the same set browsers use. Turn verification on when probing known-good hosts on a trusted network.
 
 The prober disables HTTP redirects (`301`, `302`, `307`, and `308` count as reachable, banner-carrying responses rather than being followed).
 
@@ -67,7 +67,7 @@ The [rules classifier](../discover/classification.md) runs by default, so an `Ht
 
 ## Build feature
 
-The HTTP prober is gated behind the `http` Cargo feature on `rastreo-core`. The published release binaries ship with `--features kafka,http`, so no extra step is needed when using the tarball, Docker image, or Helm chart.
+The HTTP prober is gated behind the `http` Cargo feature. The published release binaries ship with `--features kafka,http`, so no extra step is needed when using the tarball, Docker image, or Helm chart.
 
 Library consumers building from source must opt in:
 
@@ -99,7 +99,7 @@ A record produced against a default nginx install contains at least one `HttpBan
 
 ## See also
 
-- [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Scenario schema](../reference/scenario.md) — full prober configuration reference.
 - [Discover CLI](../discover/cli.md#choosing-probers) — `http` is in the default probe set, and `--port` / `--http-path` tune it.
 - [Probe index](index.md) — pointers to every prober.
 - [Sinks](../discover/sinks.md) — where the resulting records are written.

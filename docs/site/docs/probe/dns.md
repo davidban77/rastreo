@@ -28,11 +28,11 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"dns"`. |
-| `ports` | array of u16 | no | `[53]` | Ports to probe. Sorted and deduplicated at construction. |
+| `ports` | array of port numbers | no | `[53]` | Ports to probe. Sorted and deduplicated at construction. |
 | `query_names` | array of string | yes | — | DNS names to query. Each name must have non-empty labels no longer than 63 bytes and a total length no greater than 253 bytes. |
 | `query_type` | string | no | `a` | One of `a`, `aaaa`, `mx`, `txt`, `ptr`, `ns`, `cname`. See [Query types](#query-types). |
 | `transport` | string | no | `udp` | One of `udp`, `tcp`. See [Transport](#transport). |
-| `recursion_desired` | bool | no | `true` | Asks the server to chase the answer through other DNS servers on your behalf (the RD, or Recursion Desired, flag). Set to `false` when probing authoritative-only servers — servers that hold their own names and will not chase names they do not own. See [Recursion](#recursion). |
+| `recursion_desired` | boolean | no | `true` | Asks the server to chase the answer through other DNS servers on your behalf (the RD, or Recursion Desired, flag). Set to `false` when probing authoritative-only servers — servers that hold their own names and will not chase names they do not own. See [Recursion](#recursion). |
 
 The prober issues one query per `(port, query_name)` combination — the total probe count per target is `len(ports) × len(query_names)`. A scenario with `ports: [53]` and `query_names: [a, b, c]` fires three queries per target IP.
 
@@ -64,9 +64,9 @@ Answer names are emitted as the server returned them; DNS names are typically fu
 
 ## Transport
 
-`transport: udp` (the default) matches the wire protocol most resolvers speak on port 53. UDP responses can be truncated when they exceed 512 bytes (or the negotiated EDNS payload size); when the truncation flag is set, the hickory client does not automatically fall back to TCP inside a single probe. Set `transport: tcp` explicitly when querying zones whose responses are large — TCP has no per-message size limit.
+`transport: udp` (the default) matches the wire protocol most resolvers speak on port 53. UDP responses can be truncated when they exceed 512 bytes, or the negotiated EDNS payload size. When the server sets the truncation flag, the probe does not retry over TCP on its own. Set `transport: tcp` explicitly when querying zones whose responses are large — TCP has no per-message size limit.
 
-Both transports honour the scenario-level `timeout_ms`. The prober owns the deadline via `tokio::time::timeout`; the hickory inner timeout is disabled so a per-query retry cannot exceed the configured probe timeout.
+Both transports honour the scenario-level `timeout_ms`. That value is the whole budget for the probe, retries included, so a per-query retry can never push a probe past it.
 
 ## Recursion
 
@@ -86,7 +86,7 @@ A target that answers none of the `(port, query_name)` combinations — every qu
 
 ## Build feature
 
-The DNS prober is always available — no Cargo feature is required. The `hickory-resolver` dependency is already pulled in for target resolution, so the DNS prober adds no additional binary surface. It is present in every build of `rastreo-core`, including builds with `--no-default-features`.
+The DNS prober is always available — no build feature is required. It reuses the DNS client that target resolution already needs, so it adds nothing to the binary size. It is present in every build, including one with all optional features turned off.
 
 ## Example scenario
 
@@ -118,6 +118,6 @@ Probing an authoritative name server for the same zone would use `recursion_desi
 
 ## See also
 
-- [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Scenario schema](../reference/scenario.md) — full prober configuration reference.
 - [Discover CLI](../discover/cli.md#choosing-probers) — `--probe dns --dns-query <name>` runs it from the command line, with `--dns-query-type` for the record type.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

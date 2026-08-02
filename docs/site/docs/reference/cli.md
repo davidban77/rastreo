@@ -75,7 +75,7 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` i
 | `-f`, `--file <PATH>` | path | — | Load a YAML scenario file instead of building the scan from flags. Accepts a filesystem path, or an `@name` [catalog](../discover/catalog.md) reference resolved via the catalog search path. Mutually exclusive with every flag-driven scan argument (`--target`, `--port`, `--probe`, `--probe-ports`, and the per-prober parameters). Requires the `config` build feature (on by default). See [Discover · CLI](../discover/cli.md#yaml-driven-mode). |
 | `--target <TARGET>...` | string | — (required) | Target to probe. Accepts a single IP, a CIDR block (`10.0.0.0/24`), an IP range (`10.0.0.1-10.0.0.5`), or a DNS name. Repeatable; multiple values per flag accepted. See [Targets](../discover/targets.md). |
 | `--probe <KIND>` | string list | the default set | Probe kinds to run. Repeatable; comma-separated values accepted (`--probe icmp,snmp`). Accepts any kind name, the `tcp` alias for `tcp_connect`, and the `default` keyword. Omit it to run the default set. See [Choosing probers](../discover/cli.md#choosing-probers). |
-| `-p`, `--port <PORT>` | u16 | per-prober defaults | Ports for the probers that have no well-known port: `tcp_connect`, `http`, and `udp`. Repeatable; comma-separated values accepted (`-p 22,80,443`). Probers with a protocol port (`dns` 53, `snmp` 161, `ssh` 22, `tls` 443, `gnmi` 57400) ignore it — retarget those with `--probe-ports`. |
+| `-p`, `--port <PORT>` | port number | per-prober defaults | Ports for the probers that have no well-known port: `tcp_connect`, `http`, and `udp`. Repeatable; comma-separated values accepted (`-p 22,80,443`). Probers with a protocol port (`dns` 53, `snmp` 161, `ssh` 22, `tls` 443, `gnmi` 57400) ignore it — retarget those with `--probe-ports`. |
 | `--probe-ports <KIND>=<PORT>` | string | — | Port list for one prober, overriding both `--port` and the prober's own default. Repeatable, one prober per flag (`--probe-ports snmp=1161 --probe-ports http=8080,8443`). Repeating it for the *same* prober is last-wins; put every port in one comma-separated value instead. |
 | `--udp-protocol <PROTOCOL>` | enum | — | UDP service to fingerprint. Required when `udp` is selected. Values: `ntp`, `sip_options`, `memcached_stats`, `stun_binding`. See [UDP](../probe/udp.md). |
 | `--dns-query <NAME>` | string list | — | Name to look up against each target. Required when `dns` is selected. Repeatable; comma-separated values accepted. See [DNS](../probe/dns.md). |
@@ -83,7 +83,7 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` i
 | `--snmp-community <COMMUNITY>` | string | `public` | SNMP read community for the flag-driven scan. Env var: `RASTREO_SNMP_COMMUNITY` — prefer it, because a flag value is visible to anyone who can run `ps`. Neither form affects a `--file` run, which takes the community from the scenario's `community:` field. Requires the `snmp` build feature. |
 | `--snmp-version <VERSION>` | enum | `v2c` | SNMP protocol version. Values: `v1`, `v2c`, `v3`. Requires the `snmp` build feature. |
 | `--http-path <PATH>` | string | `/` | Request path for the HTTP prober. Requires the `http` build feature. |
-| `--icmp-count <N>` | u32 | `3` | Echo requests per target for the ICMP prober. Minimum 1. Requires the `icmp` build feature. |
+| `--icmp-count <N>` | integer | `3` | Echo requests per target for the ICMP prober. Minimum 1. Requires the `icmp` build feature. |
 | `--interface <NAME>` | string | auto-select | Interface the ARP and NDP probers send from. Unset means auto-select per target from the local subnets. Requires the `arp` or `ndp` build feature. See [ARP](../probe/arp.md) and [NDP](../probe/ndp.md). |
 | `--format <FORMAT>` | enum | `table` on stdout, `json` elsewhere | Record format. Values: `table` (aliased `text`) for the aligned triage grid, `json` (aliased `ndjson`) for one JSON object per line. Env var: `RASTREO_FORMAT`. Unset, the destination decides: a `--file` scenario with a stdout sink and no `encoder:` renders the table too. An explicit value overrides the scenario's `encoder`. See [Record format](../discover/cli.md#record-format). |
 | `--sink <SINK>` | enum | `stdout`, or the scenario's `sink` under `--file` | Output destination. Values: `stdout`, `file`. `kafka` is available only when the binary is built with the `kafka` Cargo feature. Setting it under `--file` overrides the scenario's own `sink`. See [Sinks](../discover/sinks.md). |
@@ -91,14 +91,14 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` i
 | `--brokers <BROKERS>` | string list | — | Comma-separated Kafka brokers. Requires `--sink kafka`, and rejected before any probe runs without it. Requires the `kafka` build feature. |
 | `--topic <TOPIC>` | string | — | Kafka topic. Requires `--sink kafka`, and rejected before any probe runs without it. Requires the `kafka` build feature. |
 | `--kafka-flush-per-record` | flag | — | Flush every `DeviceRecord` as a separate Kafka message. Mutually exclusive with `--kafka-batch-threshold`. Requires `--sink kafka` and the `kafka` build feature. |
-| `--kafka-batch-threshold <BYTES>` | usize | `65536` | Bytes accumulated in the sink buffer before one produce request goes out, carrying one message per record. Minimum 1. Requires `--sink kafka` and the `kafka` build feature. |
-| `--concurrency <N>` | u32 | `64` | Maximum number of probes in flight at once. Minimum 1. |
-| `--rate <N>` | u32 | unset | Maximum number of probes started per second. Minimum 1. Unset means probes start as fast as concurrency allows. |
-| `--retries <N>` | u32 | `0` | Retransmit attempts for the connectionless probers — UDP, SNMP, DNS, and reverse DNS. `0` is single-shot (default). Range 0–1024. It divides `--timeout-ms` across attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. With `--file`, it overrides the scenario `retries`. See [Discover · CLI](../discover/cli.md#retries-on-lossy-links). |
-| `--timeout-ms <MS>` | u64 | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum 1. |
+| `--kafka-batch-threshold <BYTES>` | integer | `65536` | Bytes accumulated in the sink buffer before one produce request goes out, carrying one message per record. Minimum 1. Requires `--sink kafka` and the `kafka` build feature. |
+| `--concurrency <N>` | integer | `64` | Maximum number of probes in flight at once. Minimum 1. |
+| `--rate <N>` | integer | unset | Maximum number of probes started per second. Minimum 1. Unset means probes start as fast as concurrency allows. |
+| `--retries <N>` | integer | `0` | Retransmit attempts for the connectionless probers — UDP, SNMP, DNS, and reverse DNS. `0` is single-shot (default). Range 0–1024. It divides `--timeout-ms` across attempts, so the total time per probe is unchanged. TCP-based probers (`tcp_connect`, `http`, `ssh`, `tls`) and ICMP ignore it. With `--file`, it overrides the scenario `retries`. See [Discover · CLI](../discover/cli.md#retries-on-lossy-links). |
+| `--timeout-ms <MS>` | integer | `1000` | Per-probe TCP-connect timeout in milliseconds. Minimum 1. |
 | `--dry-run` | flag | — | Resolve targets and print the plan without probing or opening a sink. Applies the same refusals a run applies, including the `--checkpoint` and `--resume` checks. With `--format json` the plan is a JSON array instead of the text plan. See [Discover · CLI](../discover/cli.md#dry-run-mode). |
 | `--checkpoint <PATH>` | path | — | Write a resume checkpoint to this file during the scan. The scenario must be resume-safe — a durable sink (`file`, `kafka`, `nats`), no `identity` fuser, no `lldp` / `gnmi` prober — or the scan is refused before probing. Removed on success, kept on cancellation. See [Discover · CLI](../discover/cli.md#checkpoints). |
-| `--checkpoint-interval <N>` | usize | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. |
+| `--checkpoint-interval <N>` | integer | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. |
 | `--resume` | flag | — | Resume from the checkpoint at `--checkpoint <PATH>`: skip the already-flushed targets, restore the original scan identity, and continue. The checkpoint must exist and still match the scenario's targets and sink destination, or the resume is refused before probing. Single-scenario runs only. Requires `--checkpoint`. See [Discover · CLI](../discover/cli.md#resuming). |
 | `-v`, `--verbose` | counter | — | See top-level flags above. |
 | `-q`, `--quiet` | flag | — | See top-level flags above. |
@@ -132,8 +132,8 @@ Run the HTTP control plane. Every flag has both a CLI form and an environment-va
 | Flag | Type | Default | Env var | Notes |
 |---|---|---|---|---|
 | `--bind <BIND>` | IP address | `0.0.0.0` | `RASTREO_SERVER_BIND` | Address the HTTP listener binds to. Accepts IPv4 or IPv6. |
-| `--port <PORT>` | u16 | `8080` | `RASTREO_SERVER_PORT` | TCP port the HTTP listener binds to. |
-| `--request-timeout-ms <MS>` | u64 | `60000` | `RASTREO_SERVER_REQUEST_TIMEOUT_MS` | Per-request timeout. Requests that exceed this return `503 Service Unavailable`. Minimum 1. |
+| `--port <PORT>` | port number | `8080` | `RASTREO_SERVER_PORT` | TCP port the HTTP listener binds to. |
+| `--request-timeout-ms <MS>` | integer | `60000` | `RASTREO_SERVER_REQUEST_TIMEOUT_MS` | Per-request timeout. Requests that exceed this return `503 Service Unavailable`. Minimum 1. |
 | `--log-format <FORMAT>` | enum | `text` | `RASTREO_LOG_FORMAT` | Log line format on stderr. Values: `text` (human-readable) or `json` (one JSON object per line). See [Logging](logging.md). |
 | `-h`, `--help` | flag | — | — | Print help and exit. |
 | `-V`, `--version` | flag | — | — | Print version and exit. |
@@ -146,7 +146,7 @@ For both binaries, the precedence from lowest to highest is: built-in default, t
 
 ## Build features
 
-Several CLI surfaces appear conditionally based on which Cargo features were enabled at build time. The `rastreo-core` library declares the features below; the `rastreo` and `rastreo-server` binaries inherit them via their dependency on the core crate.
+Some flags and flag values only exist when the matching Cargo feature was enabled at build time. The features below apply to `rastreo` and `rastreo-server` alike.
 
 | Feature | Default | Effect on CLI |
 |---|---|---|

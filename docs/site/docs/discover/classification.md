@@ -40,7 +40,7 @@ The classifier is the fourth stage. Each stage has one job:
 - **probe** — runs each configured prober and produces raw probe outcomes per target.
 - **fuse** — groups outcomes into `DeviceRecord` objects and correlates records that describe the same physical device.
 - **classify** — assigns `platform`, `os_version`, `ssh_version`, `http_server`, `http_version`, and `role` on each merged record.
-- **encode** — serialises the record for output.
+- **encode** — renders the record in the output format.
 - **sink** — delivers the encoded record to Kafka, NATS, a file, stdout, or memory.
 
 Because the classifier runs after fusion, it operates on merged records. A device with three interfaces classifies once, not three times.
@@ -307,7 +307,7 @@ Prefer `sys_object_id_prefix` when the OID subtree distinguishes the role cleanl
 
 `ports_open` rules match when **every** port in the `ports` list appears as an `OpenPort` signal on the record. Extra open ports on the device do not cause a mismatch: `ports: [22, 179]` matches a record that also has `OpenPort(443)`, but does not match a record that only has `OpenPort(22)`.
 
-Every prober that opens a TCP connection to a target port emits `Signal::OpenPort(port)` alongside its protocol-specific signals. `tcp_connect`, `http`, `ssh`, and `tls` all satisfy this contract today. A `ports_open` rule matching `[80]` fires against a record produced by any of them.
+Every prober that opens a TCP connection to a target port emits an `OpenPort` signal alongside its protocol-specific signals. `tcp_connect`, `http`, `ssh`, and `tls` all satisfy this contract today. A `ports_open` rule matching `[80]` fires against a record produced by any of them.
 
 Because rule evaluation is first-match-wins, ordering matters for role rules with overlapping port sets. A `[22, 179]` rule for `router` must be listed before a `[22]` rule for `host`, otherwise every router with SSH open would classify as `host`. Keep more specific port sets ahead of less specific ones — and remember that `merge_mode: extend` puts *your* whole list ahead of the baked-in defaults, so a single-port rule you add without repeating the defaults first will shadow them. Within your list, rules run in the order you wrote them: rastreo does not reorder by rule kind or evidence strength, so put `sys_object_id_prefix` and `signal_match` rules ahead of your own `ports_open` rules if you want the stronger fingerprint to win.
 

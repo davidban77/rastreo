@@ -81,25 +81,35 @@ fn indent(src: &str) -> String {
 
 pub fn generate_all() -> Result<()> {
     let root = workspace_root()?;
-    let schemas_dir = root.join("schemas");
-    let docs_schemas_dir = root.join("docs").join("site").join("docs").join("schemas");
-    fs::create_dir_all(&schemas_dir)
-        .with_context(|| format!("create {}", schemas_dir.display()))?;
-    fs::create_dir_all(&docs_schemas_dir)
-        .with_context(|| format!("create {}", docs_schemas_dir.display()))?;
-    for (name, content) in [
-        ("device-record-v1.json", device_record_schema()?),
-        ("link-record-v1.json", link_record_schema()?),
-        (
-            "collection-profile-record-v1.json",
-            collection_profile_record_schema()?,
-        ),
-        ("scan-metadata-v1.json", scan_metadata_schema()?),
-        ("scenario-v1.json", scenario_file_schema()?),
-        ("discovery-plan-v1.json", discovery_plan_schema()?),
-    ] {
-        write_schema(&schemas_dir, name, &content)?;
-        write_schema(&docs_schemas_dir, name, &content)?;
+    generate_into(&[
+        &root.join("schemas"),
+        &root.join("docs").join("site").join("docs").join("schemas"),
+    ])
+}
+
+pub type SchemaSource = fn() -> Result<String>;
+
+pub const SCHEMAS: [(&str, SchemaSource); 6] = [
+    ("device-record-v1.json", device_record_schema),
+    ("link-record-v1.json", link_record_schema),
+    (
+        "collection-profile-record-v1.json",
+        collection_profile_record_schema,
+    ),
+    ("scan-metadata-v1.json", scan_metadata_schema),
+    ("scenario-v1.json", scenario_file_schema),
+    ("discovery-plan-v1.json", discovery_plan_schema),
+];
+
+pub fn generate_into(dirs: &[&Path]) -> Result<()> {
+    for dir in dirs {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    for (name, schema) in SCHEMAS {
+        let content = schema()?;
+        for dir in dirs {
+            write_schema(dir, name, &content)?;
+        }
     }
     Ok(())
 }

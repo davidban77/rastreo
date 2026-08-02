@@ -15,7 +15,7 @@ Every metric uses the `rastreo_server_` prefix. All counters are monotonic acros
 | `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | requests | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. A scan dropped by the request timeout counts as `cancelled` — it does not trigger the `/readyz` scan-error quarantine. See [A rising `cancelled` count](../deploy/server.md#get-metrics). |
 | `rastreo_server_probes_total` | counter | `outcome="success"\|"error"`, `probe_kind` | probes | Probes executed across all scans, partitioned by outcome and probe kind. See the [probe_kind taxonomy](#probe_kind-taxonomy) and [what `outcome` means](#what-outcome-means) below. `success` is a monotonic per-scan counter incremented by `probe_attempts` minus the faulted probes so both `/metrics` and the OTLP observable counter remain non-decreasing per attribute-set. |
 | `rastreo_server_records_emitted_total` | counter | — | records | `DeviceRecord` events emitted across all scans. |
-| `rastreo_server_sink_errors_total` | counter | `error_class` | errors | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant), partitioned by error class. See the [error_class taxonomy](#error_class-taxonomy) below. |
+| `rastreo_server_sink_errors_total` | counter | `error_class` | errors | Failures of the configured output destination, surfaced via `POST /scans` and split by error class. See the [error_class taxonomy](#error_class-taxonomy) below. |
 | `rastreo_server_dlq_records_total` | counter | `sink_type`, `error_class` | records | Records delivered to a dead-letter destination during scan handling, partitioned by sink type and error class. See [DLQ error-class attribution](#dlq-error-class-attribution) below. |
 | `rastreo_server_scan_duration_seconds` | histogram | `scenario` | seconds | `POST /scans` request handling duration, partitioned by scenario name. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. See the [scenario label](#scenario-label) below. |
 | `rastreo_server_sink_reachability_probe_total` | counter | `outcome="success"\|"failure"`, `sink_type` | probes | Server-side sink reachability probes. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. See [Sink reachability probe](#sink-reachability-probe) below. |
@@ -38,7 +38,7 @@ A target that does not answer is a normal discovery result, so it never raises t
 
 ### probe_kind taxonomy
 
-The `probe_kind` label carries the snake_case name of the probe that produced the row. The taxonomy is closed at the crate boundary — every prober built into rastreo maps to exactly one label. The full set: `tcp_connect`, `udp`, `http`, `dns`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `reverse_dns`, `gnmi`, `lldp`. Adding a new prober requires updating the enum and its label table in the same change; consumers can query on the label without a hardcoded list.
+The `probe_kind` label carries the snake_case name of the probe that produced the row. The set is closed: every prober built into rastreo maps to exactly one label, and no other value can appear. The full set is `tcp_connect`, `udp`, `http`, `dns`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `reverse_dns`, `gnmi`, and `lldp`. You can group or filter on the label without keeping a hardcoded list in your queries.
 
 ### error_class taxonomy
 

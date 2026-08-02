@@ -5935,6 +5935,7 @@ dependencies = [
  "rastreo-core",
  "schemars 1.2.1",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "tonic-prost-build",
 ]

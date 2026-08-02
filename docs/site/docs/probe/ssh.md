@@ -25,7 +25,7 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"ssh"`. |
-| `ports` | array of u16 | no | `[22]` | Ports to probe. Sorted and deduplicated at construction. |
+| `ports` | array of port numbers | no | `[22]` | Ports to probe. Sorted and deduplicated at construction. |
 
 ## Signals emitted
 
@@ -47,7 +47,7 @@ A socket failure on the scan host itself — file-descriptor exhaustion, for exa
 
 ## Build feature
 
-The SSH prober is gated behind the `ssh` Cargo feature on `rastreo-core`. The published release binaries ship with `--features ssh` bundled, so no extra step is needed when using the tarball, Docker image, or Helm chart.
+The SSH prober is gated behind the `ssh` Cargo feature. The published release binaries ship with `--features ssh` bundled, so no extra step is needed when using the tarball, Docker image, or Helm chart.
 
 Library consumers building from source must opt in:
 

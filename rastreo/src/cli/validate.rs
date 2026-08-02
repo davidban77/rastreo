@@ -74,6 +74,14 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn parse_args<I, S>(argv: I) -> std::result::Result<ValidateArgs, clap::Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString> + Clone,
+    {
+        crate::cli::parse_without_env(argv)
+    }
+
     fn write_scenario(contents: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");
         f.write_all(contents.as_bytes()).expect("write");
@@ -82,14 +90,13 @@ mod tests {
 
     #[test]
     fn validate_args_parses_positional_file() {
-        let parsed =
-            ValidateArgs::try_parse_from(["validate", "/tmp/scenario.yml"]).expect("parses");
+        let parsed = parse_args(["validate", "/tmp/scenario.yml"]).expect("parses");
         assert_eq!(parsed.file, PathBuf::from("/tmp/scenario.yml"));
     }
 
     #[test]
     fn validate_args_requires_a_file() {
-        let result = ValidateArgs::try_parse_from(["validate"]);
+        let result = parse_args(["validate"]);
         assert!(result.is_err(), "validate without a file must be rejected");
     }
 

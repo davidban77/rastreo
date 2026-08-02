@@ -30,7 +30,7 @@ The prober does not take a `ports` field. ARP has no TCP/UDP port concept; the f
 
 ## Interface selection
 
-When `interface` is empty, the prober picks an interface at probe time by walking `pnet_datalink::interfaces()` and matching the target IPv4 address against each interface's assigned IPv4 subnets. If more than one interface's subnet contains the target, the one with the smallest netmask (most specific prefix) wins. This is the same longest-prefix-match logic a routing table would apply for the directly-connected route.
+When `interface` is empty, the prober picks an interface at probe time. It reads the host's network interfaces and matches the target IPv4 address against the IPv4 subnets assigned to each one. If more than one interface's subnet contains the target, the one with the smallest netmask (most specific prefix) wins. This is the same longest-prefix-match logic a routing table would apply for the directly-connected route.
 
 Two failure modes surface when auto-selection cannot find a candidate:
 
@@ -57,16 +57,16 @@ A target that sends no ARP Reply before the timeout is marked unreachable and co
 
 ## Build feature
 
-The ARP prober is gated behind the `arp` Cargo feature on `rastreo-core`. Enable it explicitly when building from source:
+The ARP prober is gated behind the `arp` Cargo feature. Enable it explicitly when building from source:
 
 ```bash
 cargo build --features arp
 cargo build --release --features arp,ndp,snmp,http,kafka
 ```
 
-The published Docker image and release binaries bundle the `arp` feature by default. When the feature is disabled the prober module is not compiled and the `arp` variant of `ProberConfig` is not present — scenarios that reference `type: arp` will fail to deserialize with an unknown-variant error.
+The published Docker image and release binaries bundle the `arp` feature by default. A binary built without it does not know the name `arp`. A scenario that uses `type: arp` then fails to load with ``unknown variant `arp` ``, and the CLI prints a hint naming the feature to rebuild with.
 
-The feature pulls in `pnet_datalink` and `pnet_packet` from the libpnet family, plus `ipnetwork` for subnet arithmetic and `socket2` for sizing the socket receive buffer. On Linux the raw send/receive path uses `AF_PACKET` sockets directly — no libpcap dependency — so musl static builds work unchanged.
+On Linux the send and receive path uses `AF_PACKET` sockets directly, so there is no libpcap dependency and static musl builds need no extra work.
 
 !!! note "Tuning the capture buffer for very large scans"
     All probes on one interface share one receive socket. A very large scan sends a burst of replies that must not overflow the kernel capture buffer. On Linux this is handled for you: rastreo requests an 8 MiB receive buffer, and the kernel caps it at `net.core.rmem_max`. On macOS the BPF capture buffer is capped by `debug.bpf_maxbufsize`, often around 512 KiB by default. That is fine for typical scans, but a very large scan can drop replies. Raise the cap before a huge local scan:
@@ -131,7 +131,7 @@ probers:
 ## See also
 
 - [NDP prober](ndp.md) — the IPv6 equivalent of ARP.
-- [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Scenario schema](../reference/scenario.md) — full prober configuration reference.
 - [Discover CLI](../discover/cli.md#choosing-probers) — `--probe arp` runs it from the command line, with `--interface` to pin the interface.
 - [Kubernetes deployment](../deploy/kubernetes.md#podsecuritynetraw-arp-and-ndp-probers) — the `podSecurity.netRaw` toggle for granting the capability in-cluster.
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.
