@@ -1492,9 +1492,16 @@ pub(crate) fn parse_target(input: &str) -> Result<Target, ConfigError> {
 mod tests {
     use super::super::output::RecordDestination;
     use super::*;
-    use clap::Parser;
     use rastreo_core::ProberConfig;
     use std::net::Ipv4Addr;
+
+    fn parse_args<I, S>(argv: I) -> std::result::Result<DiscoverArgs, clap::Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString> + Clone,
+    {
+        crate::cli::parse_without_env(argv)
+    }
 
     #[test]
     fn render_error_chain_flattens_every_level_onto_one_line() {
@@ -1720,7 +1727,7 @@ mod tests {
 
     #[test]
     fn discover_rejects_concurrency_zero() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1734,7 +1741,7 @@ mod tests {
 
     #[test]
     fn discover_rejects_timeout_ms_zero() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1748,7 +1755,7 @@ mod tests {
 
     #[test]
     fn discover_accepts_concurrency_one() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1763,7 +1770,7 @@ mod tests {
 
     #[test]
     fn discover_rejects_checkpoint_interval_zero() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1782,7 +1789,7 @@ mod tests {
 
     #[test]
     fn discover_rejects_checkpoint_interval_without_checkpoint() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1914,7 +1921,7 @@ mod tests {
 
     #[test]
     fn discover_accepts_resume_with_checkpoint() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1930,7 +1937,7 @@ mod tests {
 
     #[test]
     fn discover_rejects_resume_without_checkpoint() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1947,7 +1954,7 @@ mod tests {
 
     #[test]
     fn discover_accepts_rate_flag() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1962,7 +1969,7 @@ mod tests {
 
     #[test]
     fn discover_accepts_retries_flag() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1978,7 +1985,7 @@ mod tests {
     #[test]
     fn discover_accepts_retries_at_max() {
         let max = MAX_RETRIES.to_string();
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -1993,7 +2000,7 @@ mod tests {
 
     #[test]
     fn discover_rejects_retries_over_max() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2025,7 +2032,7 @@ mod tests {
 
     #[test]
     fn discover_rejects_rate_zero() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2039,7 +2046,7 @@ mod tests {
 
     #[test]
     fn discover_accepts_timeout_ms_one() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2055,8 +2062,7 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_accepts_file_flag_without_target_or_port() {
-        let parsed =
-            DiscoverArgs::try_parse_from(["discover", "--file", "/tmp/x.yml"]).expect("parses");
+        let parsed = parse_args(["discover", "--file", "/tmp/x.yml"]).expect("parses");
         assert_eq!(parsed.file, Some(PathBuf::from("/tmp/x.yml")));
         assert!(parsed.target.is_empty());
         assert!(parsed.port.is_empty());
@@ -2065,35 +2071,27 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_accepts_short_f_flag() {
-        let parsed =
-            DiscoverArgs::try_parse_from(["discover", "-f", "/tmp/x.yml"]).expect("parses");
+        let parsed = parse_args(["discover", "-f", "/tmp/x.yml"]).expect("parses");
         assert_eq!(parsed.file, Some(PathBuf::from("/tmp/x.yml")));
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn parse_rejects_file_and_target_together() {
-        let result = DiscoverArgs::try_parse_from([
-            "discover",
-            "--file",
-            "/tmp/x.yml",
-            "--target",
-            "127.0.0.1",
-        ]);
+        let result = parse_args(["discover", "--file", "/tmp/x.yml", "--target", "127.0.0.1"]);
         assert!(result.is_err(), "expected --file + --target to be rejected");
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn parse_rejects_file_and_port_together() {
-        let result =
-            DiscoverArgs::try_parse_from(["discover", "--file", "/tmp/x.yml", "--port", "80"]);
+        let result = parse_args(["discover", "--file", "/tmp/x.yml", "--port", "80"]);
         assert!(result.is_err(), "expected --file + --port to be rejected");
     }
 
     #[test]
     fn parse_rejects_neither_file_nor_target() {
-        let result = DiscoverArgs::try_parse_from(["discover"]);
+        let result = parse_args(["discover"]);
         assert!(
             result.is_err(),
             "expected discover without --file or --target to be rejected"
@@ -2313,7 +2311,7 @@ mod tests {
     #[cfg(feature = "kafka")]
     #[test]
     fn discover_rejects_kafka_flush_per_record_with_batch_threshold() {
-        let result = DiscoverArgs::try_parse_from([
+        let result = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2352,7 +2350,7 @@ mod tests {
 
     #[test]
     fn parse_accepts_dry_run_flag() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2367,14 +2365,13 @@ mod tests {
     #[test]
     fn parse_dry_run_defaults_to_false() {
         let parsed =
-            DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1", "--port", "22"])
-                .expect("parses");
+            parse_args(["discover", "--target", "127.0.0.1", "--port", "22"]).expect("parses");
         assert!(!parsed.dry_run);
     }
 
     #[test]
     fn the_dry_run_plan_is_text_unless_json_is_asked_for() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2387,7 +2384,7 @@ mod tests {
     }
 
     fn parse_with_dry_run_format(value: &str) -> DiscoverArgs {
-        DiscoverArgs::try_parse_from([
+        parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -2893,8 +2890,8 @@ scenarios:
 
     #[test]
     fn port_is_no_longer_required_without_a_file() {
-        let parsed = DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1"])
-            .expect("--target alone must parse");
+        let parsed =
+            parse_args(["discover", "--target", "127.0.0.1"]).expect("--target alone must parse");
         assert!(parsed.port.is_empty());
         assert!(parsed.probe.is_empty());
     }
@@ -3625,7 +3622,7 @@ scenarios:
     #[cfg(feature = "snmp")]
     #[test]
     fn the_snmp_community_is_redacted_in_the_parsed_arguments() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -3663,7 +3660,7 @@ scenarios:
 
     #[test]
     fn discover_parses_a_comma_separated_probe_list() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -3676,7 +3673,7 @@ scenarios:
 
     #[test]
     fn discover_parses_repeated_probe_ports_flags() {
-        let parsed = DiscoverArgs::try_parse_from([
+        let parsed = parse_args([
             "discover",
             "--target",
             "127.0.0.1",
@@ -3697,34 +3694,22 @@ scenarios:
 
     #[test]
     fn discover_rejects_a_malformed_probe_ports_value() {
-        assert!(DiscoverArgs::try_parse_from([
-            "discover",
-            "--target",
-            "127.0.0.1",
-            "--probe-ports",
-            "dns",
-        ])
-        .is_err());
+        assert!(
+            parse_args(["discover", "--target", "127.0.0.1", "--probe-ports", "dns",]).is_err()
+        );
     }
 
     #[cfg(feature = "icmp")]
     #[test]
     fn discover_rejects_icmp_count_zero() {
-        assert!(DiscoverArgs::try_parse_from([
-            "discover",
-            "--target",
-            "127.0.0.1",
-            "--icmp-count",
-            "0",
-        ])
-        .is_err());
+        assert!(parse_args(["discover", "--target", "127.0.0.1", "--icmp-count", "0",]).is_err());
     }
 
     #[cfg(feature = "config")]
     fn rejects_alongside_file(extra: &[&str]) -> bool {
         let mut argv = vec!["discover", "--file", "/tmp/x.yml"];
         argv.extend_from_slice(extra);
-        DiscoverArgs::try_parse_from(argv)
+        parse_args(argv)
             .err()
             .is_some_and(|err| err.kind() == clap::error::ErrorKind::ArgumentConflict)
     }
@@ -3796,22 +3781,15 @@ scenarios:
 
     #[test]
     fn format_defaults_to_absent_so_yaml_keeps_its_encoder() {
-        let parsed =
-            DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1"]).expect("parses");
+        let parsed = parse_args(["discover", "--target", "127.0.0.1"]).expect("parses");
         assert_eq!(parsed.format, None);
     }
 
     #[test]
     fn format_accepts_table_and_its_text_alias() {
         for value in ["table", "text"] {
-            let parsed = DiscoverArgs::try_parse_from([
-                "discover",
-                "--target",
-                "127.0.0.1",
-                "--format",
-                value,
-            ])
-            .expect("parses");
+            let parsed = parse_args(["discover", "--target", "127.0.0.1", "--format", value])
+                .expect("parses");
             assert_eq!(parsed.format, Some(OutputFormat::Table), "value: {value}");
         }
     }
@@ -3819,22 +3797,15 @@ scenarios:
     #[test]
     fn format_accepts_json_and_its_ndjson_alias() {
         for value in ["json", "ndjson"] {
-            let parsed = DiscoverArgs::try_parse_from([
-                "discover",
-                "--target",
-                "127.0.0.1",
-                "--format",
-                value,
-            ])
-            .expect("parses");
+            let parsed = parse_args(["discover", "--target", "127.0.0.1", "--format", value])
+                .expect("parses");
             assert_eq!(parsed.format, Some(OutputFormat::Json), "value: {value}");
         }
     }
 
     #[test]
     fn format_rejects_an_unknown_value() {
-        let result =
-            DiscoverArgs::try_parse_from(["discover", "--target", "127.0.0.1", "--format", "yaml"]);
+        let result = parse_args(["discover", "--target", "127.0.0.1", "--format", "yaml"]);
         assert!(result.is_err(), "unknown record format must be rejected");
     }
 

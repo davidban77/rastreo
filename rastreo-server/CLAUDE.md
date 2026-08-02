@@ -14,6 +14,7 @@ No business logic lives in this crate. All scenario validation and launch logic 
 src/
 ├── main.rs        ← entrypoint: clap arg parsing, tracing init, resolver
 │                    construction, tokio runtime, axum serve loop
+├── argv.rs        ← parse_without_env: the env-free clap parse the arg tests use (cfg(test))
 ├── lib.rs         ← build_app(state) -> Router; reusable from tests
 ├── state.rs       ← AppState { resolver, metrics, readiness, sink, sink_reachability, auth, max_body_bytes, max_result_bytes }
 │                    + HistogramShard + Metrics + ReadinessConfig + ReadinessState
@@ -98,6 +99,8 @@ A request holds the HTTP connection open for the duration of the scan. The pipel
 ## Tests
 
 Integration tests that spawn the binary build their command with `tests/common::rastreo_server()`, which spawns it with an **empty** environment, so the child sees only the flags and the variables the test set itself — never the developer's shell or the CI job's. `tests/env_isolation.rs` pins both halves of the rule: an exported `RUST_BACKTRACE` never reaches the child (startup refusals are `anyhow` errors, so it would otherwise print a backtrace no assertion accounts for), and no test file outside `tests/common/mod.rs` may name the binary-path macro, since a hand-built `Command` inherits the whole shell. Everything else under `tests/` drives `build_app` in-process and never spawns the binary.
+
+An in-process parse has no child for that empty environment to reach: clap resolves `--port`, `--bind`, `--request-timeout-ms`, and `--log-format` against the shell that started the test, so `RASTREO_SERVER_REQUEST_TIMEOUT_MS=30000 cargo test` failed the default-parse assertion. Every argument test parses through `argv::parse_without_env`, which resets each argument's env source through the command tree before parsing, and no test mutates the process environment to compensate. `xtask/tests/argv_parsing.rs` holds the rule for the whole workspace: it walks every crate's sources and fails on any clap entry point that takes an argv, outside the files that define the env-free parse. That an env-backed argument still reaches the binary is asserted the other way round, from `tests/log_format.rs`, against a spawned binary the test hands `RASTREO_LOG_FORMAT` itself.
 
 ## Known Limitations
 

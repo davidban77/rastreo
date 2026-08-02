@@ -1,12 +1,14 @@
 ---
-description: The DiscoverScenarioConfig JSON shape used by POST /scans and by library callers — every field, every variant, with defaults and validation rules.
+description: The scenario JSON shape used by POST /scans and by library callers — every field, every variant, with defaults and validation rules.
 ---
 
 # Scenario schema
 
 A scenario describes one discovery run: which targets to probe, which probers to use, how to encode the results, and where to send them. The `rastreo-server` HTTP API accepts a scenario as the JSON body of `POST /scans`; library callers construct the same shape in code. The `rastreo` CLI loads a `ScenarioFile` (one or more scenarios plus a top-level `version` / `kind` / `defaults` header) from disk via `rastreo discover --file <path>`.
 
-This page documents the JSON form. Field names match the wire shape exactly (the underlying Rust type is `rastreo_core::config::DiscoverScenarioConfig`).
+This page documents the JSON form. Field names match the wire shape exactly, so a YAML scenario file and a `POST /scans` body use the same names.
+
+The scenario offers several choices: a prober, an encoder, a sink, a fuser, a classifier. Each choice is an object carrying a `type` field. `type` names the alternative; the rest of the object holds that alternative's settings. The `targets` array is the one exception, and the [Targets](#targets) section below describes its shape.
 
 !!! tip "Loading from the CLI"
     `rastreo discover --file scan.yml` loads a YAML `ScenarioFile` and runs each `scenarios[]` entry sequentially. The file must set `version: 1` and `kind: discovery`. See the [CLI reference](../discover/cli.md#yaml-driven-mode) for the full mode surface, including CLI flag overrides on YAML values.
@@ -31,7 +33,7 @@ Any string scalar in the scenario may use `${VAR}` to interpolate an environment
 
 ## Targets
 
-The `targets` array contains externally-tagged enum values — each entry has a single key naming the variant and a value describing it. Four variants exist.
+Each entry in the `targets` array is an object with exactly one key. The key names the kind of target; the value describes it. Four kinds exist.
 
 A single IP address:
 
@@ -59,7 +61,7 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 
 ## Probers
 
-The `probers` array contains internally-tagged objects (each carries a `type` field). Thirteen probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp`. The `http`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, and `gnmi` variants are gated behind their matching Cargo features on `rastreo-core`, all bundled with the published binaries and Docker image. The `lldp` variant is gated behind the `lldp` feature (which turns on `snmp`), bundled with the published binaries and Docker image. The `tcp_connect`, `dns`, `reverse_dns`, and `udp` variants are always available.
+Each entry in the `probers` array is an object with a `type` field. Thirteen probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp`. `tcp_connect`, `dns`, `reverse_dns`, and `udp` are always available. The other nine each need their matching build feature. All nine are bundled with the published binaries and Docker image. The `lldp` feature turns on `snmp` as well.
 
 ### `tcp_connect`
 
@@ -68,7 +70,7 @@ Establishes a TCP connection to each listed port on each resolved target IP; an 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"tcp_connect"`. |
-| `ports` | array of u16 | yes | List of ports to probe. |
+| `ports` | array of port numbers | yes | List of ports to probe. |
 
 ```json
 {"type": "tcp_connect", "ports": [22, 80, 443]}
@@ -83,10 +85,10 @@ Issues a `GET` request against each configured port and emits the response `Serv
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"http"`. |
-| `ports` | array of u16 | yes | — | List of ports to probe. |
+| `ports` | array of port numbers | yes | — | List of ports to probe. |
 | `scheme` | string | no | `auto` | One of `auto`, `http`, `https`. Under `auto`, ports 443 and 8443 use HTTPS; all others use HTTP. |
 | `path` | string | no | `/` | Request path. Must start with `/`. |
-| `tls_verify` | bool | no | `false` | When `false`, accepts self-signed and expired certificates. |
+| `tls_verify` | boolean | no | `false` | When `false`, accepts self-signed and expired certificates. |
 | `user_agent` | string | no | `rastreo/<version>` | Sent as the `User-Agent` header on every probe. |
 
 ```json
@@ -100,11 +102,11 @@ Treats each resolved target as a DNS server, sends a query for each configured `
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"dns"`. |
-| `ports` | array of u16 | no | `[53]` | Ports to probe. |
+| `ports` | array of port numbers | no | `[53]` | Ports to probe. |
 | `query_names` | array of string | yes | — | DNS names to query. Each name is validated: non-empty labels, each label at most 63 bytes, total length at most 253 bytes. |
 | `query_type` | string | no | `a` | One of `a`, `aaaa`, `mx`, `txt`, `ptr`, `ns`, `cname`. |
 | `transport` | string | no | `udp` | One of `udp`, `tcp`. |
-| `recursion_desired` | bool | no | `true` | Sets the RD bit on the outgoing query. |
+| `recursion_desired` | boolean | no | `true` | Sets the RD bit on the outgoing query. |
 
 ```json
 {"type": "dns", "ports": [53], "query_names": ["example.com"], "query_type": "a"}
@@ -130,7 +132,7 @@ Speaks one of four UDP protocols against each configured port and emits a typed 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"udp"`. |
-| `ports` | array of u16 | yes | List of ports to probe. |
+| `ports` | array of port numbers | yes | List of ports to probe. |
 | `protocol` | string | yes | One of `ntp`, `sip_options`, `memcached_stats`, `stun_binding`. |
 
 ```json
@@ -144,7 +146,7 @@ Issues an SNMPv1, SNMPv2c, or SNMPv3 `GetRequest` against each configured port f
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"snmp"`. |
-| `ports` | array of u16 | no | `[161]` | Ports to probe. |
+| `ports` | array of port numbers | no | `[161]` | Ports to probe. |
 | `version` | string | no | `v2c` | One of `v1`, `v2c`, `v3`. |
 | `community` | string | no | `public` | SNMP community string. Transmitted in cleartext on v1 and v2c. Ignored on v3. |
 | `credentials` | object | no | `{}` | USM credentials. Required on `v3` (username must be non-empty). Ignored on v1 and v2c. See [SNMPv3 credentials](../probe/snmp.md#snmpv3-credentials). |
@@ -175,7 +177,7 @@ Walks the LLDP-MIB over SNMP to read a device's link-layer neighbors, then assem
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"lldp"`. |
-| `ports` | array of u16 | no | `[161]` | SNMP ports to read from. |
+| `ports` | array of port numbers | no | `[161]` | SNMP ports to read from. |
 | `version` | string | no | `v2c` | One of `v1`, `v2c`, `v3`. |
 | `community` | string | no | `public` | SNMP community string. Transmitted in cleartext on v1 and v2c. Ignored on v3. |
 | `credentials` | object | no | `{}` | USM credentials. Required on `v3` (username must be non-empty). Ignored on v1 and v2c. See [SNMPv3 credentials](../probe/snmp.md#snmpv3-credentials). |
@@ -243,7 +245,7 @@ Opens a TCP connection to each configured port, captures the pre-negotiation SSH
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"ssh"`. |
-| `ports` | array of u16 | no | `[22]` | Ports to probe. |
+| `ports` | array of port numbers | no | `[22]` | Ports to probe. |
 
 ```json
 {"type": "ssh", "ports": [22]}
@@ -256,8 +258,8 @@ Sends ICMP Echo Requests (IPv4 protocol 1, IPv6 protocol 58 — dispatched by ta
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"icmp"`. |
-| `count` | u32 | no | `3` | Number of Echo Requests to send. Minimum 1. |
-| `interval_ms` | u64 | no | `200` | Milliseconds between consecutive requests. Zero means send as fast as the kernel accepts. |
+| `count` | integer | no | `3` | Number of Echo Requests to send. Minimum 1. |
+| `interval_ms` | integer | no | `200` | Milliseconds between consecutive requests. Zero means send as fast as the kernel accepts. |
 
 ```json
 {"type": "icmp", "count": 3, "interval_ms": 200}
@@ -270,7 +272,7 @@ Opens a TCP connection to each configured port, performs a TLS handshake accepti
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"tls"`. |
-| `ports` | array of u16 | no | `[443]` | Ports to probe. Sorted and deduplicated at construction. |
+| `ports` | array of port numbers | no | `[443]` | Ports to probe. Sorted and deduplicated at construction. |
 
 ```json
 {"type": "tls", "ports": [443, 8443]}
@@ -283,12 +285,12 @@ Connects to a device's gRPC/gNMI endpoint on each configured port, issues a Capa
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"gnmi"`. |
-| `ports` | array of u16 | no | `[57400]` | Ports to probe. Sorted and deduplicated at construction. |
-| `plaintext` | bool | no | `false` | When `false`, connects over TLS accepting any certificate. When `true`, connects over cleartext gRPC. |
+| `ports` | array of port numbers | no | `[57400]` | Ports to probe. Sorted and deduplicated at construction. |
+| `plaintext` | boolean | no | `false` | When `false`, connects over TLS accepting any certificate. When `true`, connects over cleartext gRPC. |
 | `username` | string | no | `""` | gNMI username. Empty means an anonymous probe. |
 | `password` | string | no | `""` | gNMI password. Redacted in Debug output. Accepts `${VAR}` and `!file` secrets. |
 | `get_paths` | array of string | no | `["/system/state/hostname", "/system/state/software-version"]` | gNMI paths for the Get call. Supports path origins and keyed list elements. An empty list runs Capabilities only. |
-| `lldp` | bool | no | `false` | Also discover LLDP neighbors over the OpenConfig `/lldp` tree for [topology](../discover/topology.md). Runs alongside `get_paths`. See the [gNMI prober page](../probe/gnmi.md#lldp-topology). |
+| `lldp` | boolean | no | `false` | Also discover LLDP neighbors over the OpenConfig `/lldp` tree for [topology](../discover/topology.md). Runs alongside `get_paths`. See the [gNMI prober page](../probe/gnmi.md#lldp-topology). |
 
 ```json
 {"type": "gnmi", "ports": [57400], "username": "admin", "password": "${GNMI_PASSWORD}", "get_paths": ["/system/state/hostname"]}
@@ -296,7 +298,7 @@ Connects to a device's gRPC/gNMI endpoint on each configured port, issues a Capa
 
 ## Encoders
 
-The `encoder` field is an internally-tagged object. Two encoders are available: `ndjson` and `table`.
+The `encoder` field is an object with a `type` field. Two encoders are available: `ndjson` and `table`.
 
 When the field is omitted, the destination decides: a `stdout` sink renders the table, and every other sink renders NDJSON. Setting `encoder` pins the choice regardless of destination — subject to the `table`-against-a-broker rejection below. `rastreo discover --format` overrides the field on any scenario. The HTTP server ignores it entirely and pins NDJSON.
 
@@ -337,7 +339,7 @@ The `table` encoder is rejected against the `kafka` and `nats` sinks, whose cons
 
 ## Sinks
 
-The `sink` field is an internally-tagged object. Five variants exist; the `kafka` variant is only available when `rastreo-core` is built with the `kafka` Cargo feature and the `nats` variant is only available with the `nats` Cargo feature. The `memory` variant is reachable from the library API and is what the HTTP server uses internally to capture records for the response body. Clients can submit a `memory` sink on `POST /scans`, but the server strips and replaces any client-supplied sink either way.
+The `sink` field is an object with a `type` field. Five sinks exist. `kafka` needs the `kafka` build feature and `nats` needs the `nats` build feature. `memory` is available to library callers and is what the HTTP server uses to collect records for the response body. Clients can submit a `memory` sink on `POST /scans`, but the server strips and replaces any client-supplied sink either way.
 
 ### stdout
 
@@ -365,7 +367,7 @@ Buffer records in memory. Useful for library tests and for the HTTP server's int
 
 ### kafka
 
-Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `kafka` build feature on `rastreo-core` and on the consuming binary.
+Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `kafka` build feature.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -389,7 +391,7 @@ Publish each `DeviceRecord` to a Kafka topic encoded as NDJSON. Requires the `ka
 }
 ```
 
-The `flush_mode` field is itself an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each Kafka message. `per_record` sends each record immediately and prioritises freshness over throughput. `batched` buffers records and sends them in one produce request when the buffer reaches `threshold_bytes` (default 65536); each record is still its own message, so batching raises throughput without changing the wire framing. Inside `batched`, `threshold_bytes` is optional and defaults to 64 KiB.
+The `flush_mode` field is itself an object with a `type` field, and has two variants. Both put exactly one `DeviceRecord` in each Kafka message. `per_record` sends each record immediately and prioritises freshness over throughput. `batched` buffers records and sends them in one produce request when the buffer reaches `threshold_bytes` (default 65536); each record is still its own message, so batching raises throughput without changing the wire framing. Inside `batched`, `threshold_bytes` is optional and defaults to 64 KiB.
 
 The `dead_letter` field carries two properties: `topic` (required, the DLQ Kafka topic name) and `include_error_metadata` (optional, default `true`). When enabled, DLQ messages carry three headers: `x-rastreo-source-topic`, `x-rastreo-error-class` (currently always `produce_failure`), and `x-rastreo-dlq-timestamp` (RFC 3339 UTC). See [Sinks · Dead-letter queue](../discover/sinks.md#dead-letter-queue) for the failure model and consumer guidance.
 
@@ -423,7 +425,7 @@ The `tls` and `sasl` fields secure the broker connection. `tls` carries `verify`
 
 ### nats
 
-Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requires the `nats` build feature on `rastreo-core` and on the consuming binary. The JetStream stream that binds the subject must be created out of band (`nats stream add` or Terraform); construction fails fast if the stream is missing so records never silently drop.
+Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requires the `nats` build feature. The JetStream stream that binds the subject must be created out of band (`nats stream add` or Terraform); construction fails fast if the stream is missing so records never silently drop.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -448,7 +450,7 @@ Publish each `DeviceRecord` to a NATS JetStream subject encoded as NDJSON. Requi
 }
 ```
 
-The `credentials` field is an internally-tagged object with four variants distinguished by `type`. `anonymous` connects with no auth (lab / dev only). `user_pass` sends a username and password. `token` sends a bearer token. `creds` reads a NATS `.creds` file (JWT + nkey seed) from disk. Password and token values are redacted in Debug output and in `source_config_hash` — rotation still changes the hash, plaintext never leaks.
+The `credentials` field is an object with a `type` field, and has four variants. `anonymous` connects with no auth (lab / dev only). `user_pass` sends a username and password. `token` sends a bearer token. `creds` reads a NATS `.creds` file (JWT + nkey seed) from disk. Password and token values are redacted in log output and in `source_config_hash` — rotation still changes the hash, plaintext never leaks.
 
 ```json
 {"type": "anonymous"}
@@ -466,7 +468,7 @@ The `credentials` field is an internally-tagged object with four variants distin
 {"type": "creds", "creds_file": "/etc/rastreo/nats.creds"}
 ```
 
-The `flush_mode` field is an internally-tagged object with two variants. Both put exactly one `DeviceRecord` in each NATS message. `per_record` publishes each record and waits for its JetStream ack — the simplest at-least-once model. `batched` publishes each record as its own message too, but pipelines the acks: it buffers until `threshold_bytes` (default 65536), fires the publishes, and drains the pending acks once enough are outstanding and again on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch; a rejected ack can surface from a record write, not only from `flush()`. See [NATS · Delivery modes](../integrate/nats.md#delivery-modes).
+The `flush_mode` field is an object with a `type` field, and has two variants. Both put exactly one `DeviceRecord` in each NATS message. `per_record` publishes each record and waits for its JetStream ack — the simplest at-least-once model. `batched` publishes each record as its own message too, but pipelines the acks: it buffers until `threshold_bytes` (default 65536), fires the publishes, and drains the pending acks once enough are outstanding and again on `flush()`. Batched mode raises throughput at the cost of a wider failure window if the process is killed mid-batch; a rejected ack can surface from a record write, not only from `flush()`. See [NATS · Delivery modes](../integrate/nats.md#delivery-modes).
 
 ```json
 {"type": "per_record"}
@@ -486,7 +488,7 @@ The `retry` field has the same three integer fields and defaults as the `kafka` 
 
 ## Fusers
 
-The `fuser` field is an internally-tagged object. Three fusers are available: `direct` (always), `mib_enrichment` (with the `mib_enrichment` build feature), and `identity` (always). `mib_enrichment` and `identity` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
+The `fuser` field is an object with a `type` field. Three fusers are available: `direct` (always), `mib_enrichment` (with the `mib_enrichment` build feature), and `identity` (always). `mib_enrichment` and `identity` are wrapper fusers — they delegate to an inner fuser and add their own logic on top.
 
 ### direct
 
@@ -495,7 +497,7 @@ The `fuser` field is an internally-tagged object. Three fusers are available: `d
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"direct"`. |
-| `include_unreachable` | bool | no | `false` | Emit a record for every probed address, including addresses that no prober reached. See [Recording addresses that did not answer](#recording-addresses-that-did-not-answer). |
+| `include_unreachable` | boolean | no | `false` | Emit a record for every probed address, including addresses that no prober reached. See [Recording addresses that did not answer](#recording-addresses-that-did-not-answer). |
 | `confidence_baseline` | float | no | `0.1` | Starting confidence before any signals are counted. Must be finite and in `[0.0, 1.0]`. |
 | `confidence_per_signal` | float | no | `0.1` | Confidence added per observed signal. Must be finite and non-negative. |
 
@@ -589,7 +591,7 @@ The `identity_hints.vrrp_groups` array declares physical members of a shared vir
 
 ## Classifier
 
-The `classifier` field is an internally-tagged object. Two classifiers ship today: `rules` (a platform phase for `platform` + `os_version` and a role phase for `role`, each with a baked-in default table) and `noop` (pass-through). When the field is omitted, `rules` is used with `merge_mode: extend` and no user rules, which runs the baked-in tables on their own. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
+The `classifier` field is an object with a `type` field. Two classifiers are available: `rules` (a platform phase for `platform` + `os_version` and a role phase for `role`, each with a baked-in default table) and `noop` (pass-through). When the field is omitted, `rules` is used with `merge_mode: extend` and no user rules, which runs the baked-in tables on their own. See the [Classification page](../discover/classification.md) for what classification does and where in the pipeline it runs.
 
 ### noop
 
@@ -611,10 +613,10 @@ Rules classifier, and the default when `classifier` is omitted. Runs a platform 
 |---|---|---|---|
 | `type` | string | yes | Must be `"rules"`. |
 | `merge_mode` | string | no | `"extend"` (default) prepends user rules to the baked-in lists for both phases. `"replace"` runs only user rules. Applies uniformly to `platform_rules` and `role_rules`. |
-| `platform_rules` | array | no | User-supplied `PlatformRule` list. Empty array (or field omitted) is equivalent under `extend` to running the baked-in platform rules alone. |
+| `platform_rules` | array | no | User-supplied platform rules. Empty array (or field omitted) is equivalent under `extend` to running the baked-in platform rules alone. |
 | `role_rules` | array | no | User-supplied `RoleRule` list. Empty array (or field omitted) is equivalent under `extend` to running the baked-in role rules alone. |
 
-Each `PlatformRule` has:
+Each platform rule has:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -626,7 +628,7 @@ Each `PlatformRule` has:
 | `http_server_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_server`. Only meaningful for `signal: http_banner`. |
 | `http_version_capture` | string \| null | no | Named regex capture group whose match populates `DeviceRecord.http_version`. Requires `http_server_capture` — a rule capturing `http_version` without one is rejected when the classifier is built. Only meaningful for `signal: http_banner`. |
 
-Each `RoleRule` is an internally-tagged object. Three variants exist.
+Each role rule is an object with a `type` field. Three variants exist.
 
 `sys_object_id_prefix` matches when the record carries an `SnmpSysObjectId` signal equal to `prefix` or inside its subtree. Whole OID arcs are compared, so `1.3.6.1.4.1.9.1` matches `1.3.6.1.4.1.9.1.2050` but not `1.3.6.1.4.1.9.15.2`.
 
@@ -636,21 +638,21 @@ Each `RoleRule` is an internally-tagged object. Three variants exist.
 | `prefix` | string | yes | SNMP `sysObjectID` subtree (e.g. `"1.3.6.1.4.1.9.1"`). Must be dotted-decimal — two or more digit arcs, no leading dot, no whitespace — and is rejected when the classifier is built otherwise. |
 | `role` | string | yes | Role label assigned on match (e.g. `router`, `switch`). |
 
-`signal_match` matches when `pattern` matches the text of any signal of kind `signal` on the record. Same signal vocabulary and regex engine as a `PlatformRule`; capture groups are allowed but ignored.
+`signal_match` matches when `pattern` matches the text of any signal of kind `signal` on the record. Same signal vocabulary and regex engine as a platform rule; capture groups are allowed but ignored.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"signal_match"`. |
-| `signal` | string | yes | Which probe signal the pattern matches against. Same values as a `PlatformRule`'s `signal`. |
+| `signal` | string | yes | Which probe signal the pattern matches against. Same values as a platform rule's `signal`. |
 | `pattern` | string | yes | Regex pattern. Validated when the classifier is built; a bad pattern is rejected before the scan starts. |
 | `role` | string | yes | Role label assigned on match. |
 
-`ports_open` matches when the record carries a `Signal::OpenPort(p)` for every `p` in `ports`. Extra open ports do not cause a mismatch; only the listed ones must all be present.
+`ports_open` matches when the record carries an `OpenPort` signal for every port in `ports`. Extra open ports do not cause a mismatch; only the listed ones must all be present.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"ports_open"`. |
-| `ports` | array of u16 | yes | Ports that must all appear as `OpenPort` signals. Must be non-empty; an empty list is rejected when the classifier is built. |
+| `ports` | array of port numbers | yes | Ports that must all appear as `OpenPort` signals. Must be non-empty; an empty list is rejected when the classifier is built. |
 | `role` | string | yes | Role label assigned on match. |
 
 ```json

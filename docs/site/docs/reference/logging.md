@@ -34,7 +34,7 @@ Set `RASTREO_LOG_FORMAT=json` (or `text`) as an alternative to the flag. This is
 RASTREO_LOG_FORMAT=json rastreo-server --port 8080
 ```
 
-Precedence, from lowest to highest: built-in default (`text`), then `RASTREO_LOG_FORMAT`, then the `--log-format` flag. An explicit `--log-format text` overrides `RASTREO_LOG_FORMAT=json`. Unknown values (e.g. `RASTREO_LOG_FORMAT=yaml`) are rejected at startup with a clap validation error listing the accepted values.
+Precedence, from lowest to highest: built-in default (`text`), then `RASTREO_LOG_FORMAT`, then the `--log-format` flag. An explicit `--log-format text` overrides `RASTREO_LOG_FORMAT=json`. Unknown values (e.g. `RASTREO_LOG_FORMAT=yaml`) are rejected at startup with a validation error listing the accepted values.
 
 ## Text format
 
@@ -66,7 +66,7 @@ Field shape:
 | `fields`    | object | The event's `message` and any `key=value` structured fields.            |
 | `spans`     | array  | Present only when the event was emitted inside a tracing span. Each entry carries the span name and its fields. |
 
-The JSON serializer is the one provided by `tracing-subscriber`; no custom fields are added. Field order across lines is not guaranteed to be stable — parse the JSON, do not match on line prefixes.
+rastreo adds no fields beyond the five above. Field order across lines is not guaranteed to be stable — parse the JSON, do not match on line prefixes.
 
 ## Log levels
 

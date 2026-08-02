@@ -52,7 +52,7 @@ total probes: 1
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | Must be `"udp"`. |
-| `ports` | array of u16 | yes | Ports to probe. Must not be empty; sorted and deduplicated at construction. |
+| `ports` | array of port numbers | yes | Ports to probe. Must not be empty; sorted and deduplicated at construction. |
 | `protocol` | string | yes | One of `ntp`, `sip_options`, `memcached_stats`, `stun_binding`. See [Supported protocols](#supported-protocols). |
 
 The prober issues one datagram per port. It uses an ephemeral UDP socket per port, sends the protocol's request, waits for a response until the scenario-level `timeout_ms` expires, and parses whatever came back. Datagrams received from a peer that isn't the target address are ignored — the prober keeps waiting until the target answers or the timeout fires.
@@ -83,7 +83,7 @@ A target that answers on no configured port — every port times out, is refused
 
 ## Build feature
 
-The UDP prober is always available — no Cargo feature is required. It uses only `tokio::net::UdpSocket` and hand-rolled protocol parsers, so it is present in every build of `rastreo-core`, including builds with `--no-default-features`.
+The UDP prober is always available — no build feature is required. It needs nothing beyond a plain UDP socket, so it is present in every build, including one with all optional features turned off.
 
 ## Example scenarios
 
@@ -165,6 +165,6 @@ The parsed `XOR-MAPPED-ADDRESS` attribute lands as `StunMappedAddress`:
 
 ## See also
 
-- [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Scenario schema](../reference/scenario.md) — full prober configuration reference.
 - [Probe index](index.md) — pointers to every prober.
 - [Discover CLI](../discover/cli.md#choosing-probers) — `--probe udp --udp-protocol <protocol>` runs it from the command line.

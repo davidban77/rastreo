@@ -160,13 +160,13 @@ Each entry in `alt_ips` is an [`AltIp`](../reference/schema/device-record.md#alt
 
 ### `AltIpRole` values
 
-The role hint is one of `secondary`, `loopback`, `vrrp`, `hsrp`, `carp`, `anycast`, or `vip`. The [schema reference](../reference/schema/device-record.md#altiprole) has the full enum. What the identity fuser writes today:
+The role hint is one of `secondary`, `loopback`, `vrrp`, `hsrp`, `carp`, `anycast`, or `vip`. The [schema reference](../reference/schema/device-record.md#altiprole) has the full list. What the identity fuser writes today:
 
 - `secondary` — the default when an alternate IP merges in. Written whenever the MAC is not a known virtual-router prefix (or when there is no MAC at all).
 - `vrrp` — the alternate IP's MAC matches a VRRP prefix (`00:00:5e:00:01:XX` for VRRPv2, `00:00:5e:00:02:XX` for VRRPv3).
 - `hsrp` — the alternate IP's MAC matches the Cisco HSRP prefix (`00:00:0c:07:ac:XX`).
 
-The rest of the enum (`loopback`, `carp`, `anycast`, `vip`) is reserved. The identity fuser does not emit these today. They are part of the wire contract so future signals (SNMP `ifDescr`, load-balancer VIP hints) can populate them without a schema change.
+The remaining values (`loopback`, `carp`, `anycast`, `vip`) are reserved. The identity fuser does not emit these today. They are part of the wire contract so future signals (SNMP `ifDescr`, load-balancer VIP hints) can populate them without a schema change.
 
 !!! warning "CARP is not distinguishable from VRRP today"
     FreeBSD's CARP reuses the VRRPv2 MAC prefix `00:00:5e:00:01:XX`, so MAC-only inference reports a CARP virtual IP as `role: vrrp`. Do not expect `role: carp` on a CARP-configured device — the variant is reserved for a future signal-based detection path.

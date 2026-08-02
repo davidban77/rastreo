@@ -27,8 +27,8 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"icmp"`. |
-| `count` | u32 | no | `3` | Number of Echo Requests to send. Minimum 1, maximum 1024 — validated at construction. |
-| `interval_ms` | u64 | no | `200` | Milliseconds between consecutive requests. Zero means send as fast as the kernel accepts. |
+| `count` | integer | no | `3` | Number of Echo Requests to send. Minimum 1, maximum 1024 — validated at construction. |
+| `interval_ms` | integer | no | `200` | Milliseconds between consecutive requests. Zero means send as fast as the kernel accepts. |
 
 The prober does not take a `ports` field. ICMP has no port concept — the packet is delivered by IP protocol number (1 for ICMPv4, 58 for ICMPv6).
 
@@ -72,7 +72,7 @@ The release image raises [`CAP_NET_RAW`](../reference/glossary.md#cap-net-raw) i
 
 ## Build feature
 
-The ICMP prober is gated behind the `icmp` Cargo feature on `rastreo-core`. The published release binaries, the Docker image, and the Helm chart all bundle `--features icmp`, so no extra step is needed when using them. Consumers building from source must opt in:
+The ICMP prober is gated behind the `icmp` Cargo feature. The published release binaries, the Docker image, and the Helm chart all bundle `--features icmp`, so no extra step is needed when using them. Consumers building from source must opt in:
 
 ```bash
 cargo build -p rastreo --features icmp

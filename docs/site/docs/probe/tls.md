@@ -25,7 +25,7 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"tls"`. |
-| `ports` | array of u16 | no | `[443]` | Ports to probe. Sorted and deduplicated at construction. |
+| `ports` | array of port numbers | no | `[443]` | Ports to probe. Sorted and deduplicated at construction. |
 
 ## Signals emitted
 
@@ -97,7 +97,7 @@ Consumers that need to distinguish "the cert names a host" from "the cert names 
 
 ## Build feature
 
-The TLS prober is gated behind the `tls` Cargo feature on `rastreo-core`. The published release binaries, the Docker image, and the Helm chart all bundle `--features tls`, so no extra step is needed when using them. Building from source, opt in with:
+The TLS prober is gated behind the `tls` Cargo feature. The published release binaries, the Docker image, and the Helm chart all bundle `--features tls`, so no extra step is needed when using them. Building from source, opt in with:
 
 ```bash
 cargo build -p rastreo --features tls

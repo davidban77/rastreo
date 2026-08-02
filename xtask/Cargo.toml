@@ -5,9 +5,14 @@ edition = "2021"
 publish = false
 
 [dependencies]
+# This list is the published schema surface: a feature missing here is a prober, sink, or config
+# variant missing from `schemas/` and from the reference docs generated off them.
 rastreo-core = { path = "../rastreo-core", features = ["kafka", "http", "snmp", "lldp", "arp", "ndp", "nats", "ssh", "icmp", "tls", "gnmi"] }
 schemars = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tonic-prost-build = "0.14"
 tempfile = { workspace = true }
+
+[dev-dependencies]
+serde_yaml_ng = { workspace = true }

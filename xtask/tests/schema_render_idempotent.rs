@@ -104,58 +104,39 @@ fn committed_discovery_plan_render_matches_current_schema() {
     );
 }
 
+// Spawns the generator instead of calling `schema_for!` in-process: the committed files are what
+// `cargo run -p xtask -- generate` writes, and an outer `--all-features` build hands this binary's
+// derives feature-gated variants that generator never resolves.
 #[test]
-fn committed_schemas_match_derives() {
+fn committed_schemas_match_the_canonical_generator() {
     let root = workspace_root();
-    let device_committed =
-        fs::read_to_string(root.join("schemas/device-record-v1.json")).expect("read device schema");
-    let device_current = xtask::device_record_schema().expect("device schema");
-    assert_eq!(
-        device_committed, device_current,
-        "committed device-record-v1.json is out of sync with the DeviceRecord derives. Run `task schema:generate`."
-    );
+    let out = tempfile::tempdir().expect("tempdir");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = std::process::Command::new(cargo)
+        .args(["run", "--quiet", "-p", "xtask", "--", "generate", "--out"])
+        .arg(out.path())
+        .current_dir(&root)
+        .status()
+        .expect("run the schema generator");
+    assert!(status.success(), "the generator exited with {status:?}");
 
-    let link_committed =
-        fs::read_to_string(root.join("schemas/link-record-v1.json")).expect("read link schema");
-    let link_current = xtask::link_record_schema().expect("link schema");
-    assert_eq!(
-        link_committed, link_current,
-        "committed link-record-v1.json is out of sync with the LinkRecord derives. Run `task schema:generate`."
-    );
+    for (name, _) in xtask::SCHEMAS {
+        let generated = fs::read_to_string(out.path().join(name))
+            .unwrap_or_else(|e| panic!("read generated {name}: {e}"));
+        let committed = fs::read_to_string(root.join("schemas").join(name))
+            .unwrap_or_else(|e| panic!("read committed {name}: {e}"));
+        assert_eq!(
+            committed, generated,
+            "committed {name} is out of sync with the type derives. Run `task schema:all`."
+        );
 
-    let profile_committed =
-        fs::read_to_string(root.join("schemas/collection-profile-record-v1.json"))
-            .expect("read collection-profile schema");
-    let profile_current =
-        xtask::collection_profile_record_schema().expect("collection-profile schema");
-    assert_eq!(
-        profile_committed, profile_current,
-        "committed collection-profile-record-v1.json is out of sync with the CollectionProfileRecord derives. Run `task schema:generate`."
-    );
-
-    let scan_committed =
-        fs::read_to_string(root.join("schemas/scan-metadata-v1.json")).expect("read scan schema");
-    let scan_current = xtask::scan_metadata_schema().expect("scan schema");
-    assert_eq!(
-        scan_committed, scan_current,
-        "committed scan-metadata-v1.json is out of sync with the ScanMetadata derives. Run `task schema:generate`."
-    );
-
-    let scenario_committed =
-        fs::read_to_string(root.join("schemas/scenario-v1.json")).expect("read scenario schema");
-    let scenario_current = xtask::scenario_file_schema().expect("scenario schema");
-    assert_eq!(
-        scenario_committed, scenario_current,
-        "committed scenario-v1.json is out of sync with the ScenarioFile derives. Run `task schema:generate`."
-    );
-
-    let plan_committed = fs::read_to_string(root.join("schemas/discovery-plan-v1.json"))
-        .expect("read discovery-plan schema");
-    let plan_current = xtask::discovery_plan_schema().expect("discovery-plan schema");
-    assert_eq!(
-        plan_committed, plan_current,
-        "committed discovery-plan-v1.json is out of sync with the DiscoveryPlan derives. Run `task schema:generate`."
-    );
+        let served = fs::read_to_string(root.join("docs/site/docs/schemas").join(name))
+            .unwrap_or_else(|e| panic!("read served {name}: {e}"));
+        assert_eq!(
+            served, generated,
+            "docs/site/docs/schemas/{name} is out of sync with schemas/{name}. Run `task schema:all`."
+        );
+    }
 }
 
 #[test]

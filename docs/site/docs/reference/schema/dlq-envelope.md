@@ -41,7 +41,7 @@ The `x-rastreo-error-class` header names the actual failure that quarantined the
 | `flush_failure` | A buffered drain on flush failed. |
 | `other` | Any failure that does not map to a class above. |
 
-A dead-letter message today carries `produce_failure` (Kafka) or `publish_failure` / `ack_rejection` (NATS), because only the Kafka and NATS sinks have a dead-letter destination. The `write_failure`, `flush_failure`, and `other` classes appear on the `rastreo_server_sink_errors_total` metric instead. The enum is shared across both surfaces, so a consumer can match on the full set of labels.
+A dead-letter message today carries `produce_failure` (Kafka) or `publish_failure` / `ack_rejection` (NATS), because only the Kafka and NATS sinks have a dead-letter destination. The `write_failure`, `flush_failure`, and `other` classes appear on the `rastreo_server_sink_errors_total` metric instead. The same six classes are used on both surfaces, so a consumer can match on the full set of labels.
 
 ## Payload
 

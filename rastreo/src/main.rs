@@ -156,6 +156,14 @@ mod tests {
     use super::*;
     use clap::ValueEnum;
 
+    fn parse_cli<I, S>(argv: I) -> std::result::Result<cli::Cli, clap::Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString> + Clone,
+    {
+        cli::parse_without_env(argv)
+    }
+
     #[test]
     fn log_format_default_is_text() {
         assert_eq!(LogFormat::default(), LogFormat::Text);
@@ -180,21 +188,14 @@ mod tests {
 
     #[test]
     fn cli_defaults_log_format_to_text() {
-        // SAFETY: no other test in this binary reads or writes RASTREO_LOG_FORMAT concurrently;
-        // clearing an ambient value protects the default-parse assertion against a caller
-        // (e.g., `RASTREO_LOG_FORMAT=json cargo test`) that would otherwise flip the default.
-        unsafe {
-            std::env::remove_var("RASTREO_LOG_FORMAT");
-        }
-        let cli =
-            cli::Cli::try_parse_from(["rastreo", "discover", "--target", "127.0.0.1", "-p", "22"])
-                .expect("default parse");
+        let cli = parse_cli(["rastreo", "discover", "--target", "127.0.0.1", "-p", "22"])
+            .expect("default parse");
         assert_eq!(cli.log_format, LogFormat::Text);
     }
 
     #[test]
     fn cli_accepts_log_format_json() {
-        let cli = cli::Cli::try_parse_from([
+        let cli = parse_cli([
             "rastreo",
             "--log-format",
             "json",
@@ -270,7 +271,7 @@ mod tests {
 
     #[test]
     fn cli_rejects_unknown_log_format() {
-        let result = cli::Cli::try_parse_from([
+        let result = parse_cli([
             "rastreo",
             "--log-format",
             "yaml",

@@ -29,7 +29,7 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"lldp"`. |
-| `ports` | array of u16 | no | `[161]` | SNMP ports to read from. Sorted and deduplicated at construction. |
+| `ports` | array of port numbers | no | `[161]` | SNMP ports to read from. Sorted and deduplicated at construction. |
 | `version` | string | no | `v2c` | One of `v1`, `v2c`, `v3`. Same meaning as the [SNMP prober](snmp.md#versions-supported). |
 | `community` | string | no | `public` | SNMP community string. Used on `v1` and `v2c`. Ignored on `v3`. Redacted from debug output. |
 | `credentials` | object | no | `{}` | USM credentials. Used on `v3`. Ignored on `v1` and `v2c`. See [SNMPv3 credentials](snmp.md#snmpv3-credentials). |
@@ -59,7 +59,7 @@ The prober follows the same three-way result model as every prober — reachable
 
 ## Build feature
 
-The LLDP prober is behind the `lldp` Cargo feature on `rastreo-core`. Enabling `lldp` turns on `snmp` as well, because the prober reuses the SNMP transport. It is bundled in the published release binaries and Docker image; to build it yourself, enable the feature with:
+The LLDP prober is behind the `lldp` Cargo feature. Enabling `lldp` turns on `snmp` as well, because the prober reuses the SNMP transport. It is bundled in the published release binaries and Docker image; to build it yourself, enable the feature with:
 
 ```bash
 cargo build --features lldp
@@ -131,4 +131,4 @@ probers:
 - [SNMP prober](snmp.md) — the shared transport, versions, USM credentials, and security notes.
 - [LinkRecord schema](../reference/schema/link-record.md) — every field on the emitted link record.
 - [Discover CLI](../discover/cli.md#choosing-probers) — `--probe lldp` selects it, and `--snmp-community` / `--snmp-version` tune it exactly as they do the SNMP prober. SNMPv3 USM credentials need `--file`.
-- [Scenario schema](../reference/scenario.md#lldp) — the full `ProberConfig` reference.
+- [Scenario schema](../reference/scenario.md#lldp) — the full prober configuration reference.

@@ -24,7 +24,7 @@ probers:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `type` | string | yes | — | Must be `"snmp"`. |
-| `ports` | array of u16 | no | `[161]` | Ports to probe. Sorted and deduplicated at construction. |
+| `ports` | array of port numbers | no | `[161]` | Ports to probe. Sorted and deduplicated at construction. |
 | `version` | string | no | `v2c` | One of `v1`, `v2c`, `v3`. See [Versions supported](#versions-supported). |
 | `community` | string | no | `public` | The shared read password on `v1` and `v2c`; `public` is the common default. Ignored on `v3`. See [Security notes](#security-notes). |
 | `credentials` | object | no | `{}` | USM credentials — SNMPv3's per-user username and password. Used on `v3`. Ignored on `v1` and `v2c`. See [SNMPv3 credentials](#snmpv3-credentials). |
@@ -123,16 +123,16 @@ A target whose agent answers on no configured port — every port times out, is 
 
 ## Build feature
 
-The SNMP prober is gated behind the `snmp` Cargo feature on `rastreo-core`. Enable it explicitly when building from source:
+The SNMP prober is gated behind the `snmp` Cargo feature. Enable it explicitly when building from source:
 
 ```bash
 cargo build --features snmp
 cargo build --release --features snmp,http,kafka
 ```
 
-The published Docker image and release binaries bundle the `snmp` feature by default. When the feature is disabled the prober module is not compiled and the `snmp` variant of `ProberConfig` is not present — scenarios that reference `type: snmp` will fail to deserialize with an unknown-variant error.
+The published Docker image and release binaries bundle the `snmp` feature by default. A binary built without it does not know the name `snmp`. A scenario that uses `type: snmp` then fails to load with ``unknown variant `snmp` ``, and the CLI prints a hint naming the feature to rebuild with.
 
-The feature pulls in `rasn`, `rasn-smi`, and `rasn-snmp` — pure-Rust BER/SNMP implementations — plus the RustCrypto stack (`hmac`, `md-5`, `sha1`, `sha2`, `aes`, `cbc`, `cfb-mode`, `des`) for USM authentication and privacy. No C dependency, no OpenSSL, no `net-snmp` binding. Musl builds work out of the box.
+There is no C dependency, no OpenSSL, and no `net-snmp` binding, so static musl builds need no extra work.
 
 ## Example scenarios
 
@@ -228,7 +228,7 @@ probers:
 
 ## See also
 
-- [Scenario schema](../reference/scenario.md) — full `ProberConfig` reference.
+- [Scenario schema](../reference/scenario.md) — full prober configuration reference.
 - [Discover CLI](../discover/cli.md#choosing-probers) — `snmp` is in the default probe set, and `--snmp-community` / `--snmp-version` tune it. SNMPv3 credentials need `--file`.
 - [UDP prober](udp.md) — for non-SNMP UDP fingerprinting (NTP, SIP, memcached, STUN).
 - [Troubleshooting](../integrate/troubleshooting.md) — diagnosing probes that don't produce the expected signals.

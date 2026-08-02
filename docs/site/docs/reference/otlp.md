@@ -4,13 +4,13 @@ description: OpenTelemetry OTLP export for rastreo — build with the otlp featu
 
 # OpenTelemetry OTLP
 
-`rastreo-server` can push metrics, logs, and traces, and the `rastreo` CLI can push logs and traces, to any OTLP-speaking backend (Grafana Alloy, OpenTelemetry Collector, Grafana Cloud, Honeycomb, Tempo, or a self-hosted collector) via gRPC or HTTP+protobuf. The exporter is behind an opt-in Cargo feature — the default binaries do not include it because the OpenTelemetry Rust chain pulls in `tonic`, `prost`, `reqwest`, and a large slice of the async transport stack. OTLP is off by default even in feature-enabled builds; enable per binary with environment variables.
+`rastreo-server` can push metrics, logs, and traces, and the `rastreo` CLI can push logs and traces, to any OTLP-speaking backend (Grafana Alloy, OpenTelemetry Collector, Grafana Cloud, Honeycomb, Tempo, or a self-hosted collector) via gRPC or HTTP+protobuf. The exporter is opt-in, and the default binaries do not include it. The OpenTelemetry client and its gRPC transport add a large set of extra dependencies. OTLP stays off by default even in builds that include it; enable it per binary with environment variables.
 
 Metrics, logs, and traces are the three signal types. Metrics export is server-only — the CLI is short-running and does not export metrics; setting `RASTREO_OTLP_METRICS_ENABLED=true` on the CLI is rejected at startup with a clear error. Logs and traces work on both binaries. See [Traces exported via OTLP](#traces-exported-via-otlp) for what a trace contains.
 
 ## Building with OTLP support
 
-The OTLP dependencies are gated behind the `otlp` Cargo feature on both the CLI and the server crate.
+The OTLP exporter sits behind the `otlp` build feature on both binaries.
 
 ```bash
 cargo build --release -p rastreo-server --features otlp
@@ -89,17 +89,17 @@ Every metric enumerated on the [Observability page](observability.md#metrics) is
 
 | OpenTelemetry name | Instrument | Attributes |
 |---|---|---|
-| `rastreo_server_scans_total` | observable counter (u64) | `outcome=success\|error\|cancelled` |
-| `rastreo_server_probes_total` | observable counter (u64) | `outcome=success\|error` (see [what `outcome` means](observability.md#what-outcome-means)), `probe_kind` (bounded set — see [probe_kind taxonomy](observability.md#probe_kind-taxonomy)) |
-| `rastreo_server_records_emitted_total` | observable counter (u64) | — |
-| `rastreo_server_sink_errors_total` | observable counter (u64) | `error_class` (bounded set — see [error_class taxonomy](observability.md#error_class-taxonomy)) |
-| `rastreo_server_dlq_records_total` | observable counter (u64) | `sink_type` (`kafka\|nats`), `error_class` |
-| `rastreo_server_scan_duration_seconds` | histogram (f64, unit `s`) | `scenario` (see [scenario label](observability.md#scenario-label)) |
-| `rastreo_server_sink_reachability_probe_total` | observable counter (u64) | `outcome=success\|failure`, `sink_type` |
-| `rastreo_server_sink_probe_ticks_total` | observable counter (u64) | `sink_type` |
-| `rastreo_server_sink_reachable` | observable gauge (u64) | `sink_type` |
-| `rastreo_server_uptime_seconds` | observable gauge (f64) | — |
-| `rastreo_server_build_info` | observable gauge (u64, value always `1`) | `version` |
+| `rastreo_server_scans_total` | observable counter (int) | `outcome=success\|error\|cancelled` |
+| `rastreo_server_probes_total` | observable counter (int) | `outcome=success\|error` (see [what `outcome` means](observability.md#what-outcome-means)), `probe_kind` (bounded set — see [probe_kind taxonomy](observability.md#probe_kind-taxonomy)) |
+| `rastreo_server_records_emitted_total` | observable counter (int) | — |
+| `rastreo_server_sink_errors_total` | observable counter (int) | `error_class` (bounded set — see [error_class taxonomy](observability.md#error_class-taxonomy)) |
+| `rastreo_server_dlq_records_total` | observable counter (int) | `sink_type` (`kafka\|nats`), `error_class` |
+| `rastreo_server_scan_duration_seconds` | histogram (double, unit `s`) | `scenario` (see [scenario label](observability.md#scenario-label)) |
+| `rastreo_server_sink_reachability_probe_total` | observable counter (int) | `outcome=success\|failure`, `sink_type` |
+| `rastreo_server_sink_probe_ticks_total` | observable counter (int) | `sink_type` |
+| `rastreo_server_sink_reachable` | observable gauge (int) | `sink_type` |
+| `rastreo_server_uptime_seconds` | observable gauge (double) | — |
+| `rastreo_server_build_info` | observable gauge (int, value always `1`) | `version` |
 
 The three sink-probe instruments are registered only when `RASTREO_SINK_CONFIG_PATH` is set. Whether a sink is configured is fixed for the life of the process, so a server started without one exports nothing on those names rather than exporting zeros.
 
@@ -109,9 +109,9 @@ The `scan_duration_seconds` histogram is recorded once per scan with the `scenar
 
 ## Logs exported via OTLP
 
-When logs export is enabled, `tracing` events are bridged to OpenTelemetry log records via `opentelemetry-appender-tracing`. Both stderr formatting (`--log-format text` or `--log-format json`) and OTLP export run in parallel — the `--log-format` flag still controls the stderr layer independently, so a container can produce human-readable stderr for `kubectl logs` while shipping structured OTLP records to a collector.
+When logs export is enabled, every log line is also converted into an OpenTelemetry log record. Stderr output and OTLP export run side by side, and `--log-format text` or `--log-format json` still controls stderr on its own. A container can therefore print readable stderr for `kubectl logs` while sending structured OTLP records to a collector.
 
-Every `tracing::info!`, `tracing::warn!`, and `tracing::error!` call surfaces the same `target`, `severity`, `message`, and structured fields via OTLP that the JSON stderr layer already produces. The `RASTREO_LOG` env filter that governs the stderr layer also governs the OTLP layer — dropping the level to `warn` cuts both.
+An exported record carries the same `target`, `severity`, `message`, and structured fields as the JSON stderr line. `RASTREO_LOG` filters both at once — dropping the level to `warn` cuts stderr and OTLP together.
 
 ## Traces exported via OTLP
 
@@ -138,7 +138,7 @@ Traces do not depend on metrics or logs. Enabling `RASTREO_OTLP_TRACES_ENABLED` 
 
 ## Docker image with OTLP support
 
-The default `ghcr.io/davidban77/rastreo:X.Y.Z` image does not include `--features otlp` — the OpenTelemetry Rust stack pulls in `tonic`, `prost`, and `reqwest`, and shipping those to every operator would grow the image for the majority of users who scrape `/metrics` and ship logs off stdout. An OTLP-enabled companion image is published alongside every release under the same repository:
+The default `ghcr.io/davidban77/rastreo:X.Y.Z` image does not include `--features otlp`. The OpenTelemetry client and its gRPC transport add a large set of extra dependencies, and most users scrape `/metrics` and read logs from stdout instead. An OTLP-enabled companion image is published alongside every release under the same repository:
 
 ```
 ghcr.io/davidban77/rastreo:X.Y.Z-otlp

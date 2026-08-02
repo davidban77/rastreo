@@ -20,7 +20,7 @@ INFO rastreo_server: rastreo-server listening addr=0.0.0.0:8080
 
 The bind address and port come from `--bind` (default `0.0.0.0`, env `RASTREO_SERVER_BIND`) and `--port` (default `8080`, env `RASTREO_SERVER_PORT`).
 
-Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity per module, for example `RUST_LOG=debug` for the whole crate or `RUST_LOG=rastreo_server=debug,rastreo_core=info` for finer control.
+Logs go to stderr. Use `RUST_LOG` to raise or lower verbosity, for example `RUST_LOG=debug` for everything or `RUST_LOG=rastreo_server=debug,rastreo_core=info` for finer control per module.
 
 ## Configuration
 
@@ -288,7 +288,7 @@ Metrics exposed:
 | `rastreo_server_scans_total` | counter | `outcome="success"\|"error"\|"cancelled"` | `POST /scans` requests served, partitioned by outcome. Validation rejections (`400`) count as `error`. A scan dropped by the request timeout counts as `cancelled` (see the note below). |
 | `rastreo_server_probes_total` | counter | `outcome="success"\|"error"` | Probes executed across all scans. `success` is computed as `attempted - errored` and covers every probe that ran, including probes whose target stayed silent. `error` counts probe faults only. See [Observability · what `outcome` means](../reference/observability.md#what-outcome-means). |
 | `rastreo_server_records_emitted_total` | counter | — | `DeviceRecord` events emitted across all scans. |
-| `rastreo_server_sink_errors_total` | counter | — | Sink errors surfaced via `POST /scans` (the `RastreoError::Sink` variant). |
+| `rastreo_server_sink_errors_total` | counter | — | Failures of the configured output destination, surfaced via `POST /scans`. |
 | `rastreo_server_scan_duration_seconds` | histogram | — | `POST /scans` request handling duration. Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`. |
 | `rastreo_server_sink_reachability_probe_total` | counter | `outcome`, `sink_type` | Server-side sink reachability probes. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `rastreo_server_sink_probe_ticks_total` | counter | `sink_type` | Probe cycles the background task has started, counting cycles that skipped their probe. Emitted only when `RASTREO_SINK_CONFIG_PATH` is set. A flat counter is what the `sink_probe_stalled` readiness reason reports from the metrics side. |
@@ -491,9 +491,9 @@ Error surfaces:
 | `403`  | The target allow-list is set and a resolved target falls outside every allowed network. The whole request is rejected and nothing is probed. See [Restricting scan targets](#restricting-scan-targets). |
 | `413`  | The request body exceeded `RASTREO_MAX_BODY_BYTES`. Rejected before the JSON body is parsed. See [Restricting scan targets](#restricting-scan-targets). |
 | `429`  | `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running. The body is `{"error":"inflight scan limit reached; retry once running scans complete"}`. A dry-run never counts against the cap and is never rejected. Setting the cap to `0` disables it. See [POST /scans](#post-scans). |
-| `400`  | The scenario failed validation — empty `targets`, empty `probers`, a backwards or mixed-family target range, a prober rastreo cannot build, a malformed `fuser` block, a `classifier` rule rastreo cannot compile (an unbalanced regex in `platform_rules`, a `sys_object_id_prefix` that is not dotted-decimal), a retired field, or a `retries` value above 1024. Also a malformed JSON body, a request over `RASTREO_MAX_TOTAL_HOSTS`, or a client-side resolver error (`CidrTooLarge`, `RangeTooLarge`, `InvalidRange`, `MixedFamilyRange`, `DnsNoRecords`). A `sink` or an `encoder` never causes a `400`, because the server drops both before it validates anything. A dry-run is refused on the same terms as a real scan. |
+| `400`  | The scenario failed validation — empty `targets`, empty `probers`, a backwards or mixed-family target range, a prober rastreo cannot build, a malformed `fuser` block, a `classifier` rule rastreo cannot compile (an unbalanced regex in `platform_rules`, a `sys_object_id_prefix` that is not dotted-decimal), a retired field, or a `retries` value above 1024. Also a malformed JSON body, a request over `RASTREO_MAX_TOTAL_HOSTS`, or a target-resolution error the caller can fix — a CIDR or range that expands past the host limit, or a name that resolved to no records. A `sink` or an `encoder` never causes a `400`, because the server drops both before it validates anything. A dry-run is refused on the same terms as a real scan. |
 | `500`  | Internal probe / encoder / sink / runtime error. What the body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). |
-| `503`  | DNS infrastructure failure (`ResolverError::DnsLookupFailed`), or the request exceeded `--request-timeout-ms`. What a DNS-failure body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
+| `503`  | A DNS lookup for a target name failed, or the request exceeded `--request-timeout-ms`. What a DNS-failure body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
 
 Most errors carry a JSON body of the shape `{"error": "<message>"}`. Three are different:
 
