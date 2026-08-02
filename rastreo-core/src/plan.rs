@@ -11,7 +11,7 @@ use crate::fuser::{DirectFuser, FuserConfig};
 use crate::model::Target;
 use crate::prober::ProberConfig;
 use crate::resolver::ScenarioResolution;
-use crate::sink::SinkConfig;
+use crate::sink::{SinkConfig, SinkType};
 
 const IP_LIST_CUTOFF: usize = 6;
 
@@ -31,7 +31,7 @@ pub struct DiscoveryPlan {
     pub classifier: String,
     /// Wire format records leave in: `ndjson` or `table`.
     pub encoder: String,
-    /// Human-readable summary of the configured sink.
+    /// Human-readable summary of where records would go; several destinations, comma-separated, when the run fans out.
     pub sink: String,
     /// Effective in-flight probe cap for this run.
     pub max_concurrent: u32,
@@ -74,6 +74,11 @@ pub struct PlanKnobs {
     pub timeout_ms: u64,
 }
 
+enum PlannedSink<'a> {
+    Scenario,
+    Injected(&'a [SinkType]),
+}
+
 impl DiscoveryPlan {
     /// Plan the stages a scenario alone determines, leaving every resolution-derived field unset; a scenario [`DiscoverScenarioConfig::validate`] rejects has no plan.
     pub fn new(
@@ -81,7 +86,7 @@ impl DiscoveryPlan {
         config: &DiscoverScenarioConfig,
         knobs: PlanKnobs,
     ) -> Result<Self, RastreoError> {
-        Self::build(scenario, config, None, knobs)
+        Self::build(scenario, config, None, knobs, PlannedSink::Scenario)
     }
 
     /// Plan the scan a resolution would run, counting the addresses that resolution streams.
@@ -91,7 +96,30 @@ impl DiscoveryPlan {
         resolution: &ScenarioResolution,
         knobs: PlanKnobs,
     ) -> Result<Self, RastreoError> {
-        Self::build(scenario, config, Some(resolution), knobs)
+        Self::build(
+            scenario,
+            config,
+            Some(resolution),
+            knobs,
+            PlannedSink::Scenario,
+        )
+    }
+
+    /// Plan the scan a resolution would run for a caller that injects its own sink, rendering `destinations` in write order instead of the scenario's `sink:`.
+    pub fn resolved_into(
+        scenario: String,
+        config: &DiscoverScenarioConfig,
+        resolution: &ScenarioResolution,
+        knobs: PlanKnobs,
+        destinations: &[SinkType],
+    ) -> Result<Self, RastreoError> {
+        Self::build(
+            scenario,
+            config,
+            Some(resolution),
+            knobs,
+            PlannedSink::Injected(destinations),
+        )
     }
 
     fn build(
@@ -99,6 +127,7 @@ impl DiscoveryPlan {
         config: &DiscoverScenarioConfig,
         resolution: Option<&ScenarioResolution>,
         knobs: PlanKnobs,
+        planned_sink: PlannedSink<'_>,
     ) -> Result<Self, RastreoError> {
         config.validate()?;
         // Exhaustive, so a field added to the config cannot reach a run until the plan states whether it renders.
@@ -143,7 +172,10 @@ impl DiscoveryPlan {
             fuser: render_fuser(fuser.as_ref()),
             classifier: render_classifier(classifier.as_ref()),
             encoder: render_encoder(&config.effective_encoder_config()),
-            sink: render_sink(sink.as_ref()),
+            sink: match planned_sink {
+                PlannedSink::Scenario => render_sink(sink.as_ref()),
+                PlannedSink::Injected(destinations) => render_destinations(destinations),
+            },
             max_concurrent: knobs.max_concurrent,
             probe_rate: knobs.probe_rate,
             retries: knobs.retries,
@@ -370,6 +402,20 @@ fn render_sink(sink: Option<&SinkConfig>) -> String {
     }
 }
 
+fn render_destinations(destinations: &[SinkType]) -> String {
+    if destinations.is_empty() {
+        return "<none>".to_string();
+    }
+    let mut out = String::new();
+    for destination in destinations {
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str(destination.as_label());
+    }
+    out
+}
+
 fn format_prober_line(probers: &[String]) -> String {
     if probers.is_empty() {
         "<none>".to_string()
@@ -504,6 +550,48 @@ mod tests {
     #[test]
     fn render_sink_none_prints_default() {
         assert_eq!(render_sink(None), "stdout (default)");
+    }
+
+    #[test]
+    fn render_destinations_joins_every_fan_out_child_in_write_order() {
+        assert_eq!(render_destinations(&[SinkType::Memory]), "memory");
+        assert_eq!(
+            render_destinations(&[SinkType::Memory, SinkType::Kafka]),
+            "memory, kafka"
+        );
+        assert_eq!(render_destinations(&[]), "<none>");
+    }
+
+    #[test]
+    fn an_injected_destination_replaces_the_scenario_sink_in_the_plan() {
+        let mut config = tcp_scenario();
+        config.base.sink = Some(SinkConfig::File {
+            path: "/tmp/ignored.ndjson".into(),
+        });
+        let resolution = resolution_of(&config.targets);
+        let plan = DiscoveryPlan::resolved_into(
+            "discovery".to_string(),
+            &config,
+            &resolution,
+            default_knobs(),
+            &[SinkType::Memory, SinkType::Nats],
+        )
+        .expect("plan");
+        assert_eq!(
+            plan.sink, "memory, nats",
+            "a caller that injects its own sink must not have the scenario's rendered",
+        );
+    }
+
+    #[test]
+    fn a_scenario_planned_without_an_injected_destination_still_renders_its_own_sink() {
+        let mut config = tcp_scenario();
+        config.base.sink = Some(SinkConfig::File {
+            path: "/tmp/records.ndjson".into(),
+        });
+        let resolution = resolution_of(&config.targets);
+        let plan = resolved_plan_of(&config, &resolution, default_knobs());
+        assert_eq!(plan.sink, "file: /tmp/records.ndjson");
     }
 
     #[test]

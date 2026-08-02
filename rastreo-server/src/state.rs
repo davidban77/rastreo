@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
 use rastreo_core::observability::otlp_config::{parse_env_bool, parse_env_u64};
@@ -530,8 +530,8 @@ impl OtlpConfig {
 
 pub struct ReadinessState {
     pub inflight_scans: AtomicU64,
-    pub last_sink_error_epoch_ms: AtomicU64,
-    pub last_scan_error_epoch_ms: AtomicU64,
+    pub last_sink_error: MonotonicStamp,
+    pub last_scan_error: MonotonicStamp,
     pub config: ReadinessConfig,
 }
 
@@ -539,17 +539,16 @@ impl ReadinessState {
     pub fn new(config: ReadinessConfig) -> Self {
         Self {
             inflight_scans: AtomicU64::new(0),
-            last_sink_error_epoch_ms: AtomicU64::new(0),
-            last_scan_error_epoch_ms: AtomicU64::new(0),
+            last_sink_error: MonotonicStamp::unstamped(),
+            last_scan_error: MonotonicStamp::unstamped(),
             config,
         }
     }
 
     pub fn record_scan_error(&self, is_sink_error: bool) {
-        let now = current_epoch_ms();
-        self.last_scan_error_epoch_ms.store(now, Ordering::Relaxed);
+        self.last_scan_error.stamp();
         if is_sink_error {
-            self.last_sink_error_epoch_ms.store(now, Ordering::Relaxed);
+            self.last_sink_error.stamp();
         }
     }
 }
@@ -560,19 +559,76 @@ impl Default for ReadinessState {
     }
 }
 
-pub(crate) fn current_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+/// A "how long since" measurement taken on the monotonic clock, so a wall-clock step never moves it.
+pub struct MonotonicStamp {
+    // tokio's Instant, not std's: identical in production, but `start_paused` can advance it.
+    base: tokio::time::Instant,
+    since_base_ms: AtomicU64,
+}
+
+const UNSTAMPED: u64 = 0;
+
+impl MonotonicStamp {
+    pub fn unstamped() -> Self {
+        Self {
+            base: tokio::time::Instant::now(),
+            since_base_ms: AtomicU64::new(UNSTAMPED),
+        }
+    }
+
+    pub fn stamped() -> Self {
+        let stamp = Self::unstamped();
+        stamp.stamp();
+        stamp
+    }
+
+    pub fn stamp(&self) {
+        self.since_base_ms
+            .store(encode_stamp(self.base.elapsed()), Ordering::Relaxed);
+    }
+
+    pub fn age(&self) -> Option<Duration> {
+        decode_stamp(self.since_base_ms.load(Ordering::Relaxed))
+            .map(|since| self.base.elapsed().saturating_sub(since))
+    }
+
+    pub fn age_secs(&self) -> Option<f64> {
+        self.age().map(|age| age.as_secs_f64())
+    }
+}
+
+// Offset by one so a stamp taken in the base millisecond is still distinct from UNSTAMPED.
+fn encode_stamp(since_base: Duration) -> u64 {
+    u64::try_from(since_base.as_millis())
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(1)
+}
+
+fn decode_stamp(raw: u64) -> Option<Duration> {
+    match raw {
+        UNSTAMPED => None,
+        n => Some(Duration::from_millis(n - 1)),
+    }
+}
+
+impl Default for MonotonicStamp {
+    fn default() -> Self {
+        Self::unstamped()
+    }
+}
+
+impl std::fmt::Debug for MonotonicStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("MonotonicStamp").field(&self.age()).finish()
+    }
 }
 
 /// Cached result of the periodic server-side sink probe consumed by `/readyz` and `/metrics`.
 pub struct SinkReachability {
     pub reachable: AtomicBool,
-    pub last_probe_epoch_ms: AtomicU64,
+    pub last_probe: MonotonicStamp,
     /// When the probe task last began a cycle, whether or not that cycle produced a probe result.
-    pub last_tick_epoch_ms: AtomicU64,
+    pub last_tick: MonotonicStamp,
     /// Cycles the probe task has begun; its gap over the probe outcome counters is the skipped-probe count.
     pub ticks: AtomicU64,
     pub last_error: Mutex<Option<String>>,
@@ -588,8 +644,8 @@ impl SinkReachability {
     pub fn not_configured() -> Self {
         Self {
             reachable: AtomicBool::new(false),
-            last_probe_epoch_ms: AtomicU64::new(0),
-            last_tick_epoch_ms: AtomicU64::new(0),
+            last_probe: MonotonicStamp::unstamped(),
+            last_tick: MonotonicStamp::unstamped(),
             ticks: AtomicU64::new(0),
             last_error: Mutex::new(None),
             sink_type: Mutex::new(None),
@@ -607,8 +663,8 @@ impl SinkReachability {
     ) -> Self {
         Self {
             reachable: AtomicBool::new(false),
-            last_probe_epoch_ms: AtomicU64::new(0),
-            last_tick_epoch_ms: AtomicU64::new(0),
+            last_probe: MonotonicStamp::unstamped(),
+            last_tick: MonotonicStamp::unstamped(),
             ticks: AtomicU64::new(0),
             last_error: Mutex::new(None),
             sink_type: Mutex::new(Some(sink_type)),
@@ -627,8 +683,8 @@ impl SinkReachability {
     ) -> Self {
         Self {
             reachable: AtomicBool::new(false),
-            last_probe_epoch_ms: AtomicU64::new(current_epoch_ms()),
-            last_tick_epoch_ms: AtomicU64::new(0),
+            last_probe: MonotonicStamp::stamped(),
+            last_tick: MonotonicStamp::unstamped(),
             ticks: AtomicU64::new(0),
             last_error: Mutex::new(Some(error)),
             sink_type: Mutex::new(sink_type),
@@ -648,23 +704,20 @@ impl SinkReachability {
     }
 
     pub fn record_tick(&self) {
-        self.last_tick_epoch_ms
-            .store(current_epoch_ms(), Ordering::Relaxed);
+        self.last_tick.stamp();
         self.ticks.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_success(&self) {
         self.reachable.store(true, Ordering::Relaxed);
-        self.last_probe_epoch_ms
-            .store(current_epoch_ms(), Ordering::Relaxed);
+        self.last_probe.stamp();
         let mut guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
         *guard = None;
     }
 
     pub fn record_failure(&self, message: String) {
         self.reachable.store(false, Ordering::Relaxed);
-        self.last_probe_epoch_ms
-            .store(current_epoch_ms(), Ordering::Relaxed);
+        self.last_probe.stamp();
         let mut guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(message);
     }
@@ -691,14 +744,8 @@ impl std::fmt::Debug for SinkReachability {
             .field("configured", &self.configured)
             .field("sink_type", &self.sink_type())
             .field("reachable", &self.reachable.load(Ordering::Relaxed))
-            .field(
-                "last_probe_epoch_ms",
-                &self.last_probe_epoch_ms.load(Ordering::Relaxed),
-            )
-            .field(
-                "last_tick_epoch_ms",
-                &self.last_tick_epoch_ms.load(Ordering::Relaxed),
-            )
+            .field("last_probe", &self.last_probe)
+            .field("last_tick", &self.last_tick)
             .field("probe_interval", &self.probe_interval)
             .field("probe_timeout", &self.probe_timeout)
             .finish_non_exhaustive()
@@ -754,21 +801,31 @@ pub type SharedSink = Arc<tokio::sync::Mutex<Box<dyn Sink>>>;
 /// Empty until the sink builds, then attached for the process lifetime; shared by every clone of
 /// [`AppState`], so a sink that builds late is visible to requests already holding a state clone.
 #[derive(Clone, Default)]
-pub(crate) struct SinkSlot(Arc<OnceLock<SharedSink>>);
+pub(crate) struct SinkSlot(Arc<OnceLock<AttachedSink>>);
+
+// The kind travels with the handle, so a destination can never be attached without a name for it.
+struct AttachedSink {
+    sink: SharedSink,
+    kind: SinkType,
+}
 
 impl SinkSlot {
-    pub(crate) fn attached(sink: SharedSink) -> Self {
+    pub(crate) fn attached(sink: SharedSink, kind: SinkType) -> Self {
         let slot = Self::default();
-        slot.attach(sink);
+        slot.attach(sink, kind);
         slot
     }
 
     pub(crate) fn get(&self) -> Option<SharedSink> {
-        self.0.get().cloned()
+        self.0.get().map(|attached| Arc::clone(&attached.sink))
     }
 
-    pub(crate) fn attach(&self, sink: SharedSink) {
-        let _ = self.0.set(sink);
+    pub(crate) fn kind(&self) -> Option<SinkType> {
+        self.0.get().map(|attached| attached.kind)
+    }
+
+    pub(crate) fn attach(&self, sink: SharedSink, kind: SinkType) {
+        let _ = self.0.set(AttachedSink { sink, kind });
     }
 }
 
@@ -853,9 +910,18 @@ impl AppState {
         self.sink.get()
     }
 
-    pub fn with_sink(self, sink: Option<SharedSink>, reachability: Arc<SinkReachability>) -> Self {
+    /// Kind of the server-configured sink, or `None` while it has not built yet.
+    pub fn sink_kind(&self) -> Option<SinkType> {
+        self.sink.kind()
+    }
+
+    pub fn with_sink(
+        self,
+        sink: Option<(SharedSink, SinkType)>,
+        reachability: Arc<SinkReachability>,
+    ) -> Self {
         let slot = match sink {
-            Some(sink) => SinkSlot::attached(sink),
+            Some((sink, kind)) => SinkSlot::attached(sink, kind),
             None => SinkSlot::default(),
         };
         self.with_sink_slot(slot, reachability)
@@ -1397,6 +1463,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_unstamped_stamp_reports_no_age() {
+        assert!(MonotonicStamp::unstamped().age().is_none());
+        assert!(MonotonicStamp::unstamped().age_secs().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_taken_in_the_base_millisecond_still_reports_an_age() {
+        let stamp = MonotonicStamp::stamped();
+        assert_eq!(stamp.age(), Some(Duration::ZERO));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_ages_with_the_monotonic_clock_and_not_the_wall_clock() {
+        let stamp = MonotonicStamp::stamped();
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert_eq!(
+            stamp.age(),
+            Some(Duration::from_secs(3600)),
+            "the age must track elapsed monotonic time, which no wall-clock reading has seen",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn re_stamping_resets_the_age() {
+        let stamp = MonotonicStamp::stamped();
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        stamp.stamp();
+        assert_eq!(stamp.age(), Some(Duration::ZERO));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_quarantine_stamps_age_on_the_monotonic_clock() {
+        let state = ReadinessState::default();
+        state.record_scan_error(true);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert_eq!(state.last_scan_error.age(), Some(Duration::from_secs(31)));
+        assert_eq!(state.last_sink_error.age(), Some(Duration::from_secs(31)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sink_reachability_stamps_age_on_the_monotonic_clock() {
+        let reach = SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        );
+        reach.record_success();
+        reach.record_tick();
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert_eq!(reach.last_probe.age(), Some(Duration::from_secs(120)));
+        assert_eq!(reach.last_tick.age(), Some(Duration::from_secs(120)));
+    }
+
+    // No server-side surface publishes a wall-clock timestamp, so any reading here would be a duration.
+    #[test]
+    fn no_server_source_measures_elapsed_time_on_the_wall_clock() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let banned = [concat!("System", "Time"), concat!("UNIX_", "EPOCH")];
+        let mut offenders = Vec::new();
+        let mut seen = 0usize;
+        walk_rust_sources(&src, &mut |path, body| {
+            seen += 1;
+            for needle in banned {
+                if body.contains(needle) {
+                    offenders.push(format!("{} names {needle}", path.display()));
+                }
+            }
+        });
+        assert!(seen > 0, "the walk reached no source file");
+        assert!(
+            offenders.is_empty(),
+            "readiness ages must come from the monotonic clock: {offenders:?}",
+        );
+    }
+
+    fn walk_rust_sources(dir: &std::path::Path, visit: &mut impl FnMut(&std::path::Path, &str)) {
+        let entries = std::fs::read_dir(dir).expect("read crate source directory");
+        for entry in entries {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                walk_rust_sources(&path, visit);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let body = std::fs::read_to_string(&path).expect("read source file");
+                visit(&path, &body);
+            }
+        }
+    }
+
     // Serialise env-var reads so parallel tests do not race each other.
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         use std::sync::{Mutex, OnceLock};
@@ -1631,16 +1786,16 @@ mod tests {
     fn readiness_state_record_scan_error_non_sink_only_updates_scan_ts() {
         let state = ReadinessState::default();
         state.record_scan_error(false);
-        assert!(state.last_scan_error_epoch_ms.load(Ordering::Relaxed) > 0);
-        assert_eq!(state.last_sink_error_epoch_ms.load(Ordering::Relaxed), 0);
+        assert!(state.last_scan_error.age().is_some());
+        assert!(state.last_sink_error.age().is_none());
     }
 
     #[test]
     fn readiness_state_record_scan_error_sink_updates_both_timestamps() {
         let state = ReadinessState::default();
         state.record_scan_error(true);
-        assert!(state.last_scan_error_epoch_ms.load(Ordering::Relaxed) > 0);
-        assert!(state.last_sink_error_epoch_ms.load(Ordering::Relaxed) > 0);
+        assert!(state.last_scan_error.age().is_some());
+        assert!(state.last_sink_error.age().is_some());
     }
 
     #[test]
@@ -1689,7 +1844,7 @@ mod tests {
         assert!(r.configured);
         assert_eq!(r.sink_type(), Some(SinkType::Kafka));
         assert!(!r.reachable.load(Ordering::Relaxed));
-        assert_eq!(r.last_probe_epoch_ms.load(Ordering::Relaxed), 0);
+        assert!(r.last_probe.age().is_none());
         assert!(r.last_error_snapshot().is_none());
     }
 
@@ -1706,7 +1861,7 @@ mod tests {
         r.record_success();
         assert!(r.reachable.load(Ordering::Relaxed));
         assert!(r.last_error_snapshot().is_none());
-        assert!(r.last_probe_epoch_ms.load(Ordering::Relaxed) > 0);
+        assert!(r.last_probe.age().is_some());
     }
 
     #[test]
@@ -1746,7 +1901,7 @@ mod tests {
         );
         assert!(r.configured);
         assert!(!r.reachable.load(Ordering::Relaxed));
-        assert!(r.last_probe_epoch_ms.load(Ordering::Relaxed) > 0);
+        assert!(r.last_probe.age().is_some());
         assert_eq!(
             r.last_error_snapshot().as_deref(),
             Some("sink construction failed: no route to host"),
@@ -1783,7 +1938,10 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(5),
         ));
-        let state = base.with_sink(Some(Arc::clone(&sink)), Arc::clone(&reach));
+        let state = base.with_sink(
+            Some((Arc::clone(&sink), SinkType::Memory)),
+            Arc::clone(&reach),
+        );
         let stored = state.sink().expect("sink stored");
         assert!(Arc::ptr_eq(&stored, &sink));
         assert!(Arc::ptr_eq(&state.sink_reachability, &reach));
@@ -1811,7 +1969,7 @@ mod tests {
         let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(
             Box::new(MemorySink::new()) as Box<dyn Sink>
         ));
-        slot.attach(Arc::clone(&sink));
+        slot.attach(Arc::clone(&sink), SinkType::Memory);
 
         let seen = observer.get().expect("clone sees the late attach");
         assert!(Arc::ptr_eq(&seen, &sink));
@@ -1826,8 +1984,8 @@ mod tests {
         let second: SharedSink = Arc::new(tokio::sync::Mutex::new(
             Box::new(MemorySink::new()) as Box<dyn Sink>
         ));
-        let slot = SinkSlot::attached(Arc::clone(&first));
-        slot.attach(Arc::clone(&second));
+        let slot = SinkSlot::attached(Arc::clone(&first), SinkType::Memory);
+        slot.attach(Arc::clone(&second), SinkType::Memory);
         assert!(Arc::ptr_eq(&slot.get().expect("attached"), &first));
     }
 

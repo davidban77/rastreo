@@ -9,7 +9,7 @@ use rastreo_core::config::{parse_discover_scenario_json, DiscoverScenarioConfig}
 use rastreo_core::{
     hint_for_error_kind, resolve_scenario, run_discovery, DeviceRecord, DiscoveryPlan,
     DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink, PlanKnobs, RunOptions, Sink,
-    TeeChild, TeeSink,
+    SinkType, TeeChild, TeeSink,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -175,8 +175,15 @@ async fn dry_run_plan(
         retries: scenario.base.retries.unwrap_or(0),
         timeout_ms: scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
     };
-    DiscoveryPlan::resolved(label, scenario, &resolution, knobs)
+    DiscoveryPlan::resolved_into(label, scenario, &resolution, knobs, &destinations(state))
         .map_err(|err| AppError::from_rastreo(err, disclosure))
+}
+
+// The tee `run_scan` builds: the response-body capture first, then the server-configured sink when one is attached.
+fn destinations(state: &AppState) -> Vec<SinkType> {
+    let mut destinations = vec![SinkType::Memory];
+    destinations.extend(state.sink_kind());
+    destinations
 }
 
 async fn run_scan(
@@ -567,7 +574,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -644,7 +651,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -758,7 +765,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -1202,7 +1209,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
+        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -1340,8 +1347,99 @@ mod tests {
 
         let plan = dry_run_body(state, &s).await;
         assert_eq!(
-            plan["sink"], "stdout (default)",
+            plan["sink"], "memory",
             "the plan must not render a destination the server discards: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_scan_dry_run_plan_names_the_response_body_when_no_server_sink_is_attached() {
+        let state = state_with_system_resolver();
+        assert!(state.sink().is_none());
+        let s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+
+        let plan = dry_run_body(state, &s).await;
+        assert_eq!(
+            plan["sink"], "memory",
+            "the response-body capture is the whole destination when no sink is configured: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_scan_dry_run_plan_names_the_destinations_the_scan_writes_to() {
+        use crate::state::{SharedSink, SinkReachability};
+        use rastreo_core::error::RastreoError;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct Landed(StdMutex<Vec<Vec<u8>>>);
+
+        struct BrokerSink(Arc<Landed>);
+
+        #[async_trait::async_trait]
+        impl Sink for BrokerSink {
+            async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
+                self.0
+                     .0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(data.to_vec());
+                Ok(())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            fn last_write_delivered(&self) -> bool {
+                true
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::Kafka
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let landed = Arc::new(Landed::default());
+        let shared: SharedSink = Arc::new(tokio::sync::Mutex::new(Box::new(BrokerSink(Arc::clone(
+            &landed,
+        ))) as Box<dyn Sink>));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::Kafka,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        reach.record_success();
+        let state = state_with_system_resolver()
+            .with_sink(Some((Arc::clone(&shared), SinkType::Kafka)), reach);
+
+        let mut s = scenario(
+            vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
+            vec![ProberConfig::TcpConnect { ports: vec![port] }],
+        );
+        s.base.timeout_ms = Some(500);
+
+        let plan = dry_run_body(state.clone(), &s).await;
+        assert_eq!(
+            plan["sink"], "memory, kafka",
+            "the plan must name every destination the scan would write to: {plan}"
+        );
+
+        let Json(response) = run_real(state, s).await.expect("create_scan");
+        assert_eq!(
+            response.records.len(),
+            1,
+            "`memory` is the response-body capture the plan named first"
+        );
+        assert_eq!(
+            landed.0.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1,
+            "`kafka` is the server-configured sink the plan named second"
         );
     }
 

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
 use rastreo_core::{
-    resolve_scenario, run_discovery, DiscoveryPlan, DiscoverySummary, HickoryResolver, MemorySink,
-    MemorySinkHandle, PlanKnobs, ProberConfig, RastreoError, Resolver, RunOptions, Sink,
-    SinkConfig, Target,
+    resolve_scenario, run_discovery, DiscoveryPlan, DiscoverySummary, FuserConfig, HickoryResolver,
+    MemorySink, MemorySinkHandle, PlanKnobs, ProberConfig, RastreoError, Resolver, RunOptions,
+    Sink, SinkConfig, SinkType, Target,
 };
 
 const CLOSED_PORT: u16 = 9;
@@ -133,4 +133,50 @@ async fn a_target_the_scan_never_reaches_is_still_attributed() {
     let rendered = plan.to_string();
     assert!(rendered.contains("127.0.0.1 → 127.0.0.1"), "{rendered}");
     assert!(rendered.contains("127.0.0.0/24 → <error:"), "{rendered}");
+}
+
+#[tokio::test]
+async fn a_plan_for_an_injected_sink_names_the_destination_the_scan_writes_to() {
+    let mut scenario = scenario(vec![Target::Ip(ip(127, 0, 0, 1))]);
+    scenario.base.sink = Some(SinkConfig::File {
+        path: "/tmp/never-written.ndjson".into(),
+    });
+    // A closed port is still a record to emit, so the destination has something to receive.
+    scenario.base.fuser = Some(FuserConfig::Direct {
+        include_unreachable: Some(true),
+        confidence_baseline: None,
+        confidence_per_signal: None,
+    });
+    let resolver = system_resolver(None);
+    let resolution = resolve_scenario(resolver.as_ref(), &scenario.targets).await;
+
+    let plan = DiscoveryPlan::resolved_into(
+        "agreement".to_string(),
+        &scenario,
+        &resolution,
+        knobs(),
+        &[SinkType::Memory],
+    )
+    .expect("the scenario is valid, so it has a plan");
+
+    let sink = MemorySink::new();
+    let handle = sink.handle();
+    let summary = run_discovery(
+        RunOptions::new(&scenario)
+            .resolver(resolver)
+            .sink(Box::new(sink) as Box<dyn Sink>),
+    )
+    .await
+    .expect("the target resolves, so the scan runs");
+
+    assert_eq!(
+        plan.sink,
+        SinkType::Memory.as_label(),
+        "the plan must name the injected sink, not the scenario's discarded one",
+    );
+    assert_eq!(summary.sink_type, Some(SinkType::Memory));
+    assert!(
+        !handle.bytes().is_empty(),
+        "the destination the plan named is the one that received records",
+    );
 }

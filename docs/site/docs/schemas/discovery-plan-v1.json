@@ -106,7 +106,7 @@
       "type": "string"
     },
     "sink": {
-      "description": "Human-readable summary of the configured sink.",
+      "description": "Human-readable summary of where records would go; several destinations, comma-separated, when the run fans out.",
       "type": "string"
     },
     "targets": {

@@ -25,7 +25,7 @@ Structured plan of a single discovery scenario — what a dry-run would probe, w
 | `refusal` | string \| null | no | Error the scan would abort on before its first probe; absent when every target resolved. |
 | `retries` | uint32 | yes | Effective retransmit attempts for connectionless probers. |
 | `scenario` | string | yes | Name of the scenario this plan describes. |
-| `sink` | string | yes | Human-readable summary of the configured sink. |
+| `sink` | string | yes | Human-readable summary of where records would go; several destinations, comma-separated, when the run fans out. |
 | `targets` | array<[`PlannedTarget`](#plannedtarget)> | yes | Each configured target with the IPs it resolved to, or its resolution error. |
 | `timeout_ms` | uint64 | yes | Effective per-probe timeout in milliseconds. |
 | `total_probes` | uint | yes | Total probes the scan would run: every address it would probe times probers, `0` when it would abort first. |
