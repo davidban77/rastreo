@@ -88,6 +88,13 @@
       },
       "type": "array"
     },
+    "refusal": {
+      "description": "Error the scan would abort on before its first probe; absent when every target resolved.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "retries": {
       "description": "Effective retransmit attempts for connectionless probers.",
       "format": "uint32",
@@ -116,7 +123,7 @@
       "type": "integer"
     },
     "total_probes": {
-      "description": "Total probes the scan would run: unique resolved IPs times probers.",
+      "description": "Total probes the scan would run: every address it would probe times probers, `0` when it would abort first.",
       "format": "uint",
       "minimum": 0,
       "type": "integer"

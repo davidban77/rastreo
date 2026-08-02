@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rastreo_core::config::{parse_discover_scenario_json, DiscoverScenarioConfig};
 use rastreo_core::{
-    hint_for_error_kind, resolve_scenario_targets, run_discovery, DeviceRecord, DiscoveryPlan,
+    hint_for_error_kind, resolve_scenario, run_discovery, DeviceRecord, DiscoveryPlan,
     DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink, PlanKnobs, RunOptions, Sink,
     TeeChild, TeeSink,
 };
@@ -164,7 +164,7 @@ async fn dry_run_plan(
     label: String,
     disclosure: ErrorDisclosure,
 ) -> Result<DiscoveryPlan, AppError> {
-    let resolutions = resolve_scenario_targets(scenario, state.resolver.as_ref()).await;
+    let resolution = resolve_scenario(state.resolver.as_ref(), &scenario.targets).await;
     let knobs = PlanKnobs {
         max_concurrent: scenario
             .base
@@ -175,7 +175,7 @@ async fn dry_run_plan(
         retries: scenario.base.retries.unwrap_or(0),
         timeout_ms: scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
     };
-    DiscoveryPlan::new(label, scenario, &resolutions, knobs)
+    DiscoveryPlan::resolved(label, scenario, &resolution, knobs)
         .map_err(|err| AppError::from_rastreo(err, disclosure))
 }
 

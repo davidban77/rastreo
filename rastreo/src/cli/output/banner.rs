@@ -313,7 +313,6 @@ mod tests {
         DiscoveryPlan::new(
             name.to_string(),
             &config,
-            &[],
             PlanKnobs {
                 max_concurrent: 64,
                 probe_rate: None,
@@ -389,7 +388,6 @@ mod tests {
         let plan = DiscoveryPlan::new(
             "discover".into(),
             &config,
-            &[],
             PlanKnobs {
                 max_concurrent: 8,
                 probe_rate: None,
@@ -622,13 +620,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn start_line_ignores_the_resolution_dependent_plan_fields() {
+    #[tokio::test]
+    async fn start_line_ignores_the_resolution_dependent_plan_fields() {
         let mut base = BaseProbeConfig::new();
         base.sink = Some(SinkConfig::Stdout);
+        let targets = vec![Target::Cidr("10.0.0.0/30".parse().expect("cidr"))];
         let config = DiscoverScenarioConfig::new(
             base,
-            vec![Target::Cidr("10.0.0.0/30".parse().expect("cidr"))],
+            targets.clone(),
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
         let knobs = PlanKnobs {
@@ -637,18 +636,11 @@ mod tests {
             retries: 0,
             timeout_ms: 500,
         };
-        let resolution = rastreo_core::ResolvedScenarioTarget::new(
-            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
-            Ok(vec!["10.0.0.1".parse().expect("ip")]),
-        );
-        let unresolved = DiscoveryPlan::new("discover".into(), &config, &[], knobs).expect("plan");
-        let resolved = DiscoveryPlan::new(
-            "discover".into(),
-            &config,
-            std::slice::from_ref(&resolution),
-            knobs,
-        )
-        .expect("plan");
+        let resolver = rastreo_core::HickoryResolver::from_system().expect("resolver");
+        let resolution = rastreo_core::resolve_scenario(&resolver, &targets).await;
+        let unresolved = DiscoveryPlan::new("discover".into(), &config, knobs).expect("plan");
+        let resolved =
+            DiscoveryPlan::resolved("discover".into(), &config, &resolution, knobs).expect("plan");
         assert!(resolved.total_probes > unresolved.total_probes);
         assert_eq!(
             strip_ansi(&start_line(&unresolved, 1)),

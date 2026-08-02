@@ -570,7 +570,8 @@ The response is a `DiscoveryPlan`. Its fields are:
 - `probe_rate` — the probes-per-second pace, or `null` for unlimited.
 - `retries` — the retransmit count for connectionless probers.
 - `timeout_ms` — the per-probe timeout in milliseconds.
-- `total_probes` — unique resolved addresses across all targets, multiplied by the number of probers.
+- `total_probes` — the addresses the scan would probe, multiplied by the number of probers. `0` when the scan would be rejected before it probes anything.
+- `refusal` — the error the scan would be rejected with, absent when it would run. A plan carrying one always reports `total_probes: 0`.
 
 ```json
 {
@@ -596,7 +597,7 @@ A request that names no `fuser` and no `classifier` gets the pipeline defaults s
 !!! warning "The plan's `sink` and `encoder` lines do not name the server's destination"
     The plan's `sink` always reads `stdout (default)` and its `encoder` always reads `ndjson`, because the server has already dropped the one and pinned the other. A real scan returns its records in the response body. It also writes them to the server-configured sink when `RASTREO_SINK_CONFIG_PATH` is set.
 
-A real scan rejects an out-of-allow-list target with a hard `403` and probes nothing. A dry-run is more informative. It resolves what it can and reports the blocked target in the plan. The blocked target carries an `error` in its `resolution`, and it does not add to `total_probes`.
+A real scan rejects an out-of-allow-list target with a hard `403` and probes nothing. A dry-run is more informative. It resolves what it can and reports the blocked target in the plan: the blocked target carries an `error` in its `resolution`, the `refusal` names the rejection the scan would return, and `total_probes` reads `0` — one blocked target stops the whole scan, so nothing else is counted either.
 
 ```json
 {
@@ -613,9 +614,12 @@ A real scan rejects an out-of-allow-list target with a hard `403` and probes not
   "probe_rate": null,
   "retries": 0,
   "timeout_ms": 1000,
-  "total_probes": 0
+  "total_probes": 0,
+  "refusal": "target 192.168.1.1 is outside the configured allow-list"
 }
 ```
+
+`RASTREO_MAX_TOTAL_HOSTS` reaches the plan the same way, and it is the one rejection no single target can show you: several individually-small targets whose addresses add up past the cap each resolve fine on their own. The plan reports each of them `resolved`, then carries the aggregate refusal and `total_probes: 0` — the same `400` the real scan would return.
 
 The plan is described field by field in the [DiscoveryPlan schema reference](../reference/schema/discovery-plan.md).
 

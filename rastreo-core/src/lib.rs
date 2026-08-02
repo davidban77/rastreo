@@ -52,8 +52,7 @@ pub use model::{
     LINK_CURRENT_SCHEMA_VERSION, LINK_SCHEMA_ID, PROBE_KIND_COUNT,
 };
 pub use pipeline::{
-    resolve_scenario_targets, run_discovery, DiscoveryProgress, DiscoverySummary, ProbeKindSummary,
-    ResolvedScenarioTarget, RunOptions,
+    run_discovery, DiscoveryProgress, DiscoverySummary, ProbeKindSummary, RunOptions,
 };
 pub use plan::{DiscoveryPlan, PlanKnobs, PlannedTarget, TargetResolution};
 #[cfg(feature = "icmp")]
@@ -65,7 +64,9 @@ pub use prober::TlsProber;
 pub use prober::{
     ProbeSelection, ProbeSelectionOptions, Prober, ProberConfig, ReverseDnsProber, TcpConnectProber,
 };
-pub use resolver::{GuardedResolver, HickoryResolver, ResolvedPlan, Resolver};
+pub use resolver::{
+    resolve_scenario, GuardedResolver, HickoryResolver, ResolvedPlan, Resolver, ScenarioResolution,
+};
 pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{
     FileSink, MemorySink, MemorySinkHandle, RecordKind, Sink, SinkConfig, SinkError,

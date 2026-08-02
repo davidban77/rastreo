@@ -34,7 +34,7 @@ pub trait Resolver: Send + Sync {
                 original: target.clone(),
             });
         }
-        Ok(ResolvedPlan { specs, resolved_at })
+        Ok(ResolvedPlan::new(specs, resolved_at))
     }
 
     /// Lazy resolution: DNS resolved up front, then CIDR/range specs expanded one target per `next()`
@@ -52,13 +52,15 @@ pub trait Resolver: Send + Sync {
 }
 
 /// A resolved scan plan: DNS resolved eagerly, per-spec host counts known, ready to stream targets
-/// lazily in input order. Overlapping specs are surfaced by [`ResolvedPlan::find_overlaps`], never
+/// lazily in input order. Overlapping specs are warned about once at construction, never
 /// deduplicated — the stream yields the concatenation of each spec's expansion.
+#[derive(Debug)]
 pub struct ResolvedPlan {
     specs: Vec<PlannedSpec>,
     resolved_at: SystemTime,
 }
 
+#[derive(Debug)]
 enum PlannedSpec {
     /// A contiguous address block — a single IP, a CIDR's host range, or an explicit range.
     Block {
@@ -71,12 +73,26 @@ enum PlannedSpec {
 }
 
 impl ResolvedPlan {
+    fn new(specs: Vec<PlannedSpec>, resolved_at: SystemTime) -> Self {
+        let plan = Self { specs, resolved_at };
+        plan.warn_on_overlaps();
+        plan
+    }
+
     /// The number of targets the stream will yield: the arithmetic sum of per-spec host counts, with
     /// duplicates under overlapping specs included (resolution does not dedup).
     pub fn total_hosts(&self) -> usize {
         self.specs
             .iter()
             .fold(0usize, |sum, spec| sum.saturating_add(spec.hosts()))
+    }
+
+    /// Each input target paired with the addresses the stream yields for it, in input order.
+    pub(crate) fn per_target_addresses(&self) -> Vec<(Target, Vec<IpAddr>)> {
+        self.specs
+            .iter()
+            .map(|spec| (spec.original().clone(), spec.addresses()))
+            .collect()
     }
 
     /// The eager DNS resolutions a resume must replay verbatim: each `DnsName` target paired with the
@@ -142,7 +158,7 @@ impl ResolvedPlan {
             };
             specs.push(spec);
         }
-        Ok(ResolvedPlan { specs, resolved_at })
+        Ok(ResolvedPlan::new(specs, resolved_at))
     }
 
     pub fn into_stream(self) -> Box<dyn Iterator<Item = ResolvedTarget> + Send> {
@@ -161,9 +177,26 @@ impl ResolvedPlan {
         Ok(())
     }
 
+    // Overlapping specs yield duplicate probes and records — the accepted cost of lazy streaming with
+    // no cross-target dedup. Warning at construction is what makes a rehearsal say so, not just a scan.
+    fn warn_on_overlaps(&self) {
+        let overlaps = self.find_overlaps();
+        if overlaps.is_empty() {
+            return;
+        }
+        let pairs: Vec<String> = overlaps
+            .iter()
+            .map(|(a, b)| format!("{a:?} & {b:?}"))
+            .collect();
+        tracing::warn!(
+            overlaps = %pairs.join(", "),
+            "target specs overlap; overlapping addresses will be probed and emitted more than once"
+        );
+    }
+
     // Pairwise over contiguous blocks only — DNS point sets are excluded. No IP expansion; #specs is
     // small, so the quadratic scan is cheaper than sorting.
-    pub(crate) fn find_overlaps(&self) -> Vec<(Target, Target)> {
+    fn find_overlaps(&self) -> Vec<(Target, Target)> {
         let blocks: Vec<(bool, u128, u128, &Target)> = self
             .specs
             .iter()
@@ -188,6 +221,21 @@ impl PlannedSpec {
         match self {
             PlannedSpec::Block { first, last, .. } => block_span(*first, *last),
             PlannedSpec::Resolved { ips, .. } => ips.len(),
+        }
+    }
+
+    fn original(&self) -> &Target {
+        match self {
+            PlannedSpec::Block { original, .. } | PlannedSpec::Resolved { original, .. } => {
+                original
+            }
+        }
+    }
+
+    fn addresses(&self) -> Vec<IpAddr> {
+        match self {
+            PlannedSpec::Block { first, last, .. } => block_addresses(*first, *last).collect(),
+            PlannedSpec::Resolved { ips, .. } => ips.clone(),
         }
     }
 
@@ -334,30 +382,30 @@ fn block_span(first: IpAddr, last: IpAddr) -> usize {
     }
 }
 
+fn block_addresses(first: IpAddr, last: IpAddr) -> Box<dyn Iterator<Item = IpAddr> + Send> {
+    match (first, last) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            Box::new((a.to_bits()..=b.to_bits()).map(|bits| IpAddr::V4(Ipv4Addr::from_bits(bits))))
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            Box::new((u128::from(a)..=u128::from(b)).map(|bits| IpAddr::V6(Ipv6Addr::from(bits))))
+        }
+        // A mixed-family block is unreachable — planning validates family agreement.
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
 fn block_stream(
     first: IpAddr,
     last: IpAddr,
     original: Target,
     now: SystemTime,
 ) -> Box<dyn Iterator<Item = ResolvedTarget> + Send> {
-    match (first, last) {
-        (IpAddr::V4(a), IpAddr::V4(b)) => {
-            Box::new((a.to_bits()..=b.to_bits()).map(move |bits| ResolvedTarget {
-                ip: IpAddr::V4(Ipv4Addr::from_bits(bits)),
-                original: original.clone(),
-                resolved_at: now,
-            }))
-        }
-        (IpAddr::V6(a), IpAddr::V6(b)) => Box::new((u128::from(a)..=u128::from(b)).map(
-            move |bits| ResolvedTarget {
-                ip: IpAddr::V6(Ipv6Addr::from(bits)),
-                original: original.clone(),
-                resolved_at: now,
-            },
-        )),
-        // A mixed-family block is unreachable — planning validates family agreement.
-        _ => Box::new(std::iter::empty()),
-    }
+    Box::new(block_addresses(first, last).map(move |ip| ResolvedTarget {
+        ip,
+        original: original.clone(),
+        resolved_at: now,
+    }))
 }
 
 // The first address in `[first, last]` not covered by the allow-list union, or `None` when the whole
@@ -408,6 +456,60 @@ fn uncovered_point(lo: u128, hi: u128, ivals: &mut [(u128, u128)]) -> Option<u12
         }
     }
     Some(cursor).filter(|c| *c <= hi)
+}
+
+/// A scenario's targets put through [`Resolver::plan`] — the scan's own resolution — with each
+/// target's addresses kept alongside for reporting.
+#[derive(Debug)]
+pub struct ScenarioResolution {
+    entries: Vec<(Target, Result<Vec<IpAddr>, RastreoError>)>,
+    plan: Result<ResolvedPlan, RastreoError>,
+}
+
+impl ScenarioResolution {
+    /// Addresses the scan would probe; `0` when it would abort before its first probe.
+    pub fn total_hosts(&self) -> usize {
+        self.plan.as_ref().map_or(0, ResolvedPlan::total_hosts)
+    }
+
+    /// The error the scan would abort on before its first probe.
+    pub fn refusal(&self) -> Option<&RastreoError> {
+        self.plan.as_ref().err()
+    }
+
+    pub(crate) fn entries(&self) -> &[(Target, Result<Vec<IpAddr>, RastreoError>)] {
+        &self.entries
+    }
+}
+
+/// Resolve a scenario's targets through the planner a scan runs, so a rehearsal counts what the scan
+/// would probe and refuses what it would refuse. Only a refused set is re-planned per target, to say
+/// which one earned it.
+pub async fn resolve_scenario(resolver: &dyn Resolver, targets: &[Target]) -> ScenarioResolution {
+    match resolver.plan(targets).await {
+        Ok(plan) => ScenarioResolution {
+            entries: plan
+                .per_target_addresses()
+                .into_iter()
+                .map(|(target, ips)| (target, Ok(ips)))
+                .collect(),
+            plan: Ok(plan),
+        },
+        Err(refusal) => {
+            let mut entries = Vec::with_capacity(targets.len());
+            for target in targets {
+                let result = resolver
+                    .plan(std::slice::from_ref(target))
+                    .await
+                    .map(|planned| planned.into_stream().map(|rt| rt.ip).collect());
+                entries.push((target.clone(), result));
+            }
+            ScenarioResolution {
+                entries,
+                plan: Err(refusal),
+            }
+        }
+    }
 }
 
 pub struct HickoryResolver {
@@ -532,7 +634,7 @@ impl Resolver for HickoryResolver {
             };
             specs.push(spec);
         }
-        Ok(ResolvedPlan { specs, resolved_at })
+        Ok(ResolvedPlan::new(specs, resolved_at))
     }
 }
 
@@ -787,6 +889,155 @@ mod tests {
     }
 
     #[test]
+    fn per_target_addresses_concatenate_to_what_the_stream_yields() {
+        let r = resolver();
+        let targets = vec![
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+            Target::Ip(ipv4(192, 168, 1, 5)),
+            Target::Range {
+                start: ipv4(10, 0, 1, 1),
+                end: ipv4(10, 0, 1, 3),
+            },
+            Target::Cidr("2001:db8::/126".parse().expect("cidr")),
+        ];
+        let plan = rt().block_on(r.plan(&targets)).expect("plan");
+        let per_target = plan.per_target_addresses();
+        let attributed: Vec<IpAddr> = per_target
+            .iter()
+            .flat_map(|(_, ips)| ips.iter().copied())
+            .collect();
+        let streamed: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
+        assert_eq!(attributed, streamed);
+        let listed: Vec<Target> = per_target.into_iter().map(|(target, _)| target).collect();
+        assert_eq!(listed, targets);
+    }
+
+    #[test]
+    fn resolve_scenario_returns_one_entry_per_input_target() {
+        let r = resolver();
+        let targets = vec![
+            Target::Ip(ipv4(10, 0, 0, 1)),
+            Target::Ip(ipv4(10, 0, 0, 2)),
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+        ];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        let listed: Vec<&Target> = resolution
+            .entries()
+            .iter()
+            .map(|(target, _)| target)
+            .collect();
+        assert_eq!(listed, targets.iter().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn resolve_scenario_expands_each_target_to_the_addresses_it_yields() {
+        let r = resolver();
+        let targets = vec![
+            Target::Ip(ipv4(10, 0, 0, 42)),
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+        ];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        let expanded: Vec<&Vec<IpAddr>> = resolution
+            .entries()
+            .iter()
+            .map(|(_, result)| result.as_ref().expect("resolves"))
+            .collect();
+        assert_eq!(
+            expanded,
+            vec![
+                &vec![ipv4(10, 0, 0, 42)],
+                &vec![ipv4(10, 0, 0, 1), ipv4(10, 0, 0, 2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_scenario_preserves_input_order_and_duplicates() {
+        let r = resolver();
+        let ip = ipv4(10, 0, 0, 7);
+        let targets = vec![Target::Ip(ip), Target::Ip(ip), Target::Ip(ip)];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        assert_eq!(resolution.entries().len(), 3);
+        assert_eq!(resolution.total_hosts(), 3, "no cross-target dedup");
+    }
+
+    #[test]
+    fn resolve_scenario_counts_the_hosts_the_scan_would_stream() {
+        let r = resolver();
+        let targets = vec![
+            Target::Cidr("10.0.0.0/24".parse().expect("cidr")),
+            Target::Ip(ipv4(10, 0, 0, 1)),
+        ];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        let streamed = rt()
+            .block_on(r.plan(&targets))
+            .expect("plan")
+            .into_stream()
+            .count();
+        assert_eq!(resolution.total_hosts(), streamed);
+        assert!(resolution.refusal().is_none());
+    }
+
+    #[test]
+    fn resolve_scenario_counts_no_hosts_for_a_scan_that_would_abort() {
+        let r = resolver().with_limit(8);
+        let targets = vec![
+            Target::Ip(ipv4(10, 0, 0, 1)),
+            Target::Cidr("10.0.0.0/24".parse().expect("cidr")),
+        ];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        assert_eq!(resolution.total_hosts(), 0);
+    }
+
+    #[test]
+    fn resolve_scenario_refuses_with_the_error_the_scan_aborts_on() {
+        let r = resolver().with_limit(8);
+        let targets = vec![
+            Target::Ip(ipv4(10, 0, 0, 1)),
+            Target::Cidr("10.0.0.0/24".parse().expect("cidr")),
+        ];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        let scan_error = rt()
+            .block_on(r.plan(&targets))
+            .expect_err("the scan aborts");
+        assert_eq!(
+            resolution.refusal().map(ToString::to_string),
+            Some(scan_error.to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_scenario_attributes_a_refusal_to_the_target_that_earned_it() {
+        let r = resolver();
+        let targets = vec![
+            Target::Ip(ipv4(10, 0, 0, 1)),
+            Target::Range {
+                start: ipv4(10, 0, 0, 10),
+                end: ipv4(10, 0, 0, 1),
+            },
+            Target::Ip(ipv4(10, 0, 0, 2)),
+        ];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        let entries = resolution.entries();
+        assert!(entries[0].1.is_ok());
+        assert!(matches!(
+            &entries[1].1,
+            Err(RastreoError::Resolver(ResolverError::InvalidRange { .. }))
+        ));
+        assert!(
+            entries[2].1.is_ok(),
+            "a target after the refusing one is still resolved for the report"
+        );
+    }
+
+    #[test]
+    fn scenario_resolution_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ScenarioResolution>();
+        assert_send_sync::<ResolvedPlan>();
+    }
+
+    #[test]
     fn find_overlaps_reports_specs_that_share_addresses() {
         let r = resolver();
         let a = Target::Cidr("10.0.0.0/24".parse().expect("cidr"));
@@ -817,8 +1068,8 @@ mod tests {
     #[test]
     fn dns_pins_returns_only_dns_name_resolutions() {
         let dns = Target::DnsName("router-1.lab".to_string());
-        let plan = ResolvedPlan {
-            specs: vec![
+        let plan = ResolvedPlan::new(
+            vec![
                 PlannedSpec::Resolved {
                     ips: vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 6)],
                     original: dns.clone(),
@@ -834,8 +1085,8 @@ mod tests {
                     original: Target::Cidr("10.0.1.0/30".parse().expect("cidr")),
                 },
             ],
-            resolved_at: std::time::SystemTime::now(),
-        };
+            std::time::SystemTime::now(),
+        );
         let pins = plan.dns_pins();
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].0, dns);
@@ -844,14 +1095,14 @@ mod tests {
 
     #[test]
     fn dns_pins_empty_when_no_dns_targets() {
-        let plan = ResolvedPlan {
-            specs: vec![PlannedSpec::Block {
+        let plan = ResolvedPlan::new(
+            vec![PlannedSpec::Block {
                 first: ipv4(10, 0, 0, 1),
                 last: ipv4(10, 0, 0, 1),
                 original: Target::Ip(ipv4(10, 0, 0, 1)),
             }],
-            resolved_at: std::time::SystemTime::now(),
-        };
+            std::time::SystemTime::now(),
+        );
         assert!(plan.dns_pins().is_empty());
     }
 

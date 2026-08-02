@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +15,7 @@ use crate::error::{ProbeErrorKind, RastreoError};
 use crate::fuser::{create_fuser, Fuser};
 use crate::model::{
     DeviceRecord, ProbeCtx, ProbeFault, ProbeKind, ProbeOutcome, ResolvedTarget, ScanMetadata,
-    Target, PROBE_KIND_COUNT,
+    PROBE_KIND_COUNT,
 };
 use crate::prober::{create_prober, Prober};
 use crate::resolver::{HickoryResolver, ResolvedPlan, Resolver};
@@ -185,36 +184,6 @@ pub async fn run_discovery(opts: RunOptions<'_>) -> Result<DiscoverySummary, Ras
     .await
 }
 
-/// Per-target resolution outcome, preserving which input `Target` produced which IPs (or which error). Used by the `--dry-run` planner to attribute expansions back to the original YAML / CLI entry.
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct ResolvedScenarioTarget {
-    pub target: Target,
-    pub result: Result<Vec<IpAddr>, RastreoError>,
-}
-
-impl ResolvedScenarioTarget {
-    pub fn new(target: Target, result: Result<Vec<IpAddr>, RastreoError>) -> Self {
-        Self { target, result }
-    }
-}
-
-/// Resolve every target in a scenario without probing, preserving per-target attribution. Unlike [`Resolver::resolve_many`], failures on one target do not abort the run — each `Target` gets its own `Result`.
-pub async fn resolve_scenario_targets(
-    scenario: &DiscoverScenarioConfig,
-    resolver: &dyn Resolver,
-) -> Vec<ResolvedScenarioTarget> {
-    let mut out = Vec::with_capacity(scenario.targets.len());
-    for target in &scenario.targets {
-        let result = resolver
-            .resolve(target)
-            .await
-            .map(|rts| rts.into_iter().map(|rt| rt.ip).collect());
-        out.push(ResolvedScenarioTarget::new(target.clone(), result));
-    }
-    out
-}
-
 async fn run_discovery_core(
     scenario: &DiscoverScenarioConfig,
     resolver: Arc<dyn Resolver>,
@@ -255,7 +224,6 @@ async fn run_discovery_core(
     // real denominator without materializing the address space.
     let targets_resolved = plan.total_hosts();
     scan_span.record("targets", targets_resolved as u64);
-    warn_on_overlapping_specs(&plan);
 
     let max_concurrent = scenario
         .base
@@ -939,23 +907,6 @@ fn finalize_checkpoint(
         writer.delete()?;
     }
     Ok(())
-}
-
-// The mitigation for the dropped cross-target dedup: overlapping specs yield duplicate probes/records,
-// so name them once up front. O(#specs), no IP expansion.
-fn warn_on_overlapping_specs(plan: &ResolvedPlan) {
-    let overlaps = plan.find_overlaps();
-    if overlaps.is_empty() {
-        return;
-    }
-    let pairs: Vec<String> = overlaps
-        .iter()
-        .map(|(a, b)| format!("{a:?} & {b:?}"))
-        .collect();
-    tracing::warn!(
-        overlaps = %pairs.join(", "),
-        "target specs overlap; overlapping addresses will be probed and emitted more than once"
-    );
 }
 
 fn build_probes_by_kind(
@@ -2911,105 +2862,6 @@ mod tests {
             Arc::ptr_eq(&first.scan_metadata, &second.scan_metadata),
             "every record from one scan must share ONE Arc<ScanMetadata>, not a per-record clone"
         );
-    }
-
-    #[tokio::test]
-    async fn resolve_scenario_targets_returns_one_entry_per_input_target() {
-        let scenario = DiscoverScenarioConfig {
-            base: BaseProbeConfig::default(),
-            targets: vec![
-                Target::Ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-                Target::Ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
-                Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
-            ],
-            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
-        };
-
-        let resolver = HickoryResolver::from_system().expect("resolver init");
-        let out = resolve_scenario_targets(&scenario, &resolver).await;
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].target, scenario.targets[0]);
-        assert_eq!(out[1].target, scenario.targets[1]);
-        assert_eq!(out[2].target, scenario.targets[2]);
-    }
-
-    #[tokio::test]
-    async fn resolve_scenario_targets_expands_single_ip_to_one_address() {
-        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
-        let scenario = DiscoverScenarioConfig {
-            base: BaseProbeConfig::default(),
-            targets: vec![Target::Ip(ip)],
-            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
-        };
-
-        let resolver = HickoryResolver::from_system().expect("resolver init");
-        let out = resolve_scenario_targets(&scenario, &resolver).await;
-        assert_eq!(out.len(), 1);
-        let ips = out[0].result.as_ref().expect("resolves");
-        assert_eq!(ips, &vec![ip]);
-    }
-
-    #[tokio::test]
-    async fn resolve_scenario_targets_expands_cidr_to_all_host_addresses() {
-        let scenario = DiscoverScenarioConfig {
-            base: BaseProbeConfig::default(),
-            targets: vec![Target::Cidr("10.0.0.0/30".parse().expect("cidr"))],
-            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
-        };
-
-        let resolver = HickoryResolver::from_system().expect("resolver init");
-        let out = resolve_scenario_targets(&scenario, &resolver).await;
-        let ips = out[0].result.as_ref().expect("resolves");
-        assert_eq!(ips.len(), 2);
-        assert_eq!(ips[0], IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
-        assert_eq!(ips[1], IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
-    }
-
-    #[tokio::test]
-    async fn resolve_scenario_targets_isolates_failure_to_offending_target() {
-        let good = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let scenario = DiscoverScenarioConfig {
-            base: BaseProbeConfig::default(),
-            targets: vec![
-                Target::Ip(good),
-                Target::Range {
-                    start: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
-                    end: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                },
-                Target::Ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
-            ],
-            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
-        };
-
-        let resolver = HickoryResolver::from_system().expect("resolver init");
-        let out = resolve_scenario_targets(&scenario, &resolver).await;
-        assert_eq!(out.len(), 3);
-        assert!(out[0].result.is_ok());
-        assert!(matches!(
-            &out[1].result,
-            Err(RastreoError::Resolver(
-                crate::error::ResolverError::InvalidRange { .. }
-            ))
-        ));
-        assert!(out[2].result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn resolve_scenario_targets_preserves_input_order_and_duplicates() {
-        let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
-        let scenario = DiscoverScenarioConfig {
-            base: BaseProbeConfig::default(),
-            targets: vec![Target::Ip(ip), Target::Ip(ip), Target::Ip(ip)],
-            probers: vec![ProberConfig::TcpConnect { ports: vec![22] }],
-        };
-
-        let resolver = HickoryResolver::from_system().expect("resolver init");
-        let out = resolve_scenario_targets(&scenario, &resolver).await;
-        assert_eq!(out.len(), 3, "no de-dup — one entry per input target");
-        for entry in &out {
-            let ips = entry.result.as_ref().expect("resolves");
-            assert_eq!(ips, &vec![ip]);
-        }
     }
 
     struct MutualLldpProber {

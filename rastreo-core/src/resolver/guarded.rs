@@ -250,6 +250,47 @@ mod tests {
     }
 
     #[test]
+    fn resolve_scenario_refuses_a_cap_no_single_spec_exceeds() {
+        let guard = GuardedResolver::new(bare(), None, Some(100));
+        let targets = vec![
+            Target::Cidr(net("10.0.0.0/25")),
+            Target::Cidr(net("10.0.1.0/25")),
+        ];
+        let resolution = rt().block_on(crate::resolver::resolve_scenario(&guard, &targets));
+        assert!(
+            matches!(
+                resolution.refusal(),
+                Some(RastreoError::Resolver(ResolverError::AggregateHostCapExceeded { hosts, limit }))
+                    if *hosts == 252 && *limit == 100
+            ),
+            "a sum over the cap must refuse the rehearsal, not only the scan: {:?}",
+            resolution.refusal()
+        );
+        assert_eq!(resolution.total_hosts(), 0);
+    }
+
+    #[test]
+    fn resolve_scenario_under_the_cap_counts_what_the_scan_streams() {
+        let guard = GuardedResolver::new(bare(), None, Some(252));
+        let targets = vec![
+            Target::Cidr(net("10.0.0.0/25")),
+            Target::Cidr(net("10.0.1.0/25")),
+        ];
+        let resolution = rt().block_on(crate::resolver::resolve_scenario(&guard, &targets));
+        assert!(resolution.refusal().is_none());
+        assert_eq!(resolution.total_hosts(), 252);
+    }
+
+    #[test]
+    fn resolve_scenario_attributes_an_out_of_allowlist_target() {
+        let guard = GuardedResolver::new(bare(), Some(vec![net("10.0.0.0/8")]), None);
+        let targets = vec![Target::Ip(ip(10, 0, 0, 1)), Target::Ip(ip(192, 168, 1, 1))];
+        let resolution = rt().block_on(crate::resolver::resolve_scenario(&guard, &targets));
+        assert!(resolution.refusal().is_some());
+        assert_eq!(resolution.total_hosts(), 0);
+    }
+
+    #[test]
     fn both_none_streams_identically_to_the_inner() {
         let inner = bare();
         let guard = GuardedResolver::new(inner.clone(), None, None);
