@@ -2145,6 +2145,31 @@ const RESOLVER_REFUSALS: &[(&str, &str, &str)] = &[
 ];
 
 #[tokio::test]
+async fn the_dry_run_and_the_scan_both_name_overlapping_target_specs() {
+    let args = vec![
+        "discover".to_string(),
+        "--target".to_string(),
+        "127.0.0.0/30".to_string(),
+        "--target".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        "22222".to_string(),
+        "--timeout-ms".to_string(),
+        "200".to_string(),
+    ];
+    for (label, (code, stderr)) in ["dry-run", "scan"]
+        .iter()
+        .zip(&dry_run_then_scan(args).await)
+    {
+        assert_eq!(*code, Some(0), "{label}: {stderr}");
+        assert!(
+            stderr.contains("target specs overlap"),
+            "the {label} must name specs whose addresses are probed twice: {stderr}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_flag_driven_dry_run_and_scan_agree_on_every_resolver_refusal() {
     for (target, _, needle) in RESOLVER_REFUSALS {
         let args = vec![

@@ -20,10 +20,9 @@ use rastreo_core::KafkaFlushMode;
 #[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
-    preflight_checkpoint_request, resolve_scenario_targets, run_discovery, CheckpointConfig,
-    ConfigError, DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig,
-    HickoryResolver, PlanKnobs, ProbeKind, RastreoError, ResolvedScenarioTarget, ResumeError,
-    RunOptions, SinkConfig, Target,
+    preflight_checkpoint_request, resolve_scenario, run_discovery, CheckpointConfig, ConfigError,
+    DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig, HickoryResolver, PlanKnobs,
+    ProbeKind, RastreoError, ResumeError, RunOptions, ScenarioResolution, SinkConfig, Target,
 };
 use tokio::sync::watch;
 
@@ -439,11 +438,11 @@ async fn run_dry_run(args: &DiscoverArgs, mode: OutputMode) -> Result<()> {
     }
 
     let scenario = scenario_from_flags(args, mode)?;
-    let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
-    let plan = build_scenario_plan("discovery", &scenario, &resolutions, args)?;
+    let resolution = resolve_scenario(&resolver, &scenario.targets).await;
+    let plan = build_resolved_plan("discovery", &scenario, &resolution, args)?;
     dry_run_checkpoint_preflight(&scenario, args).map_err(|err| refuse(err, mode))?;
     render_dry_run(&[plan], dry_run_plan_format(args))?;
-    refuse_on_resolution_error(&resolutions, mode)
+    refuse_on_resolution_error(&resolution, mode)
 }
 
 fn dry_run_checkpoint_preflight(
@@ -517,12 +516,12 @@ async fn run_dry_run_from_file(
             report_scenario_failure(&label, &err, mode);
             continue;
         }
-        let resolutions = resolve_scenario_targets(&cfg, resolver).await;
-        match build_scenario_plan(&label, &cfg, &resolutions, args) {
+        let resolution = resolve_scenario(resolver, &cfg.targets).await;
+        match build_resolved_plan(&label, &cfg, &resolution, args) {
             Ok(plan) => {
                 plans.push(plan);
                 // Planned so the render names which target refused, then counted as the run counts it.
-                if let Some(err) = first_resolution_error(&resolutions) {
+                if let Some(err) = resolution.refusal() {
                     failed += 1;
                     report_scenario_failure(&label, err, mode);
                 }
@@ -638,13 +637,21 @@ fn effective_knobs(scenario: &DiscoverScenarioConfig, args: &DiscoverArgs) -> Pl
 fn build_scenario_plan(
     label: &str,
     scenario: &DiscoverScenarioConfig,
-    resolutions: &[ResolvedScenarioTarget],
     args: &DiscoverArgs,
 ) -> Result<DiscoveryPlan, RastreoError> {
-    DiscoveryPlan::new(
+    DiscoveryPlan::new(label.to_string(), scenario, effective_knobs(scenario, args))
+}
+
+fn build_resolved_plan(
+    label: &str,
+    scenario: &DiscoverScenarioConfig,
+    resolution: &ScenarioResolution,
+    args: &DiscoverArgs,
+) -> Result<DiscoveryPlan, RastreoError> {
+    DiscoveryPlan::resolved(
         label.to_string(),
         scenario,
-        resolutions,
+        resolution,
         effective_knobs(scenario, args),
     )
 }
@@ -680,11 +687,11 @@ fn write_scenario_plan(
     out: &mut String,
     label: &str,
     scenario: &DiscoverScenarioConfig,
-    resolutions: &[ResolvedScenarioTarget],
+    resolution: &ScenarioResolution,
     args: &DiscoverArgs,
 ) -> usize {
     use std::fmt::Write as _;
-    let plan = build_scenario_plan(label, scenario, resolutions, args).expect("plan");
+    let plan = build_resolved_plan(label, scenario, resolution, args).expect("plan");
     write!(out, "{plan}").expect("write to String");
     plan.total_probes
 }
@@ -694,18 +701,8 @@ fn write_totals(out: &mut String, _scenario_count: usize, total_probes: usize) {
     writeln!(out, "total probes: {total_probes}").expect("write to String");
 }
 
-// Any error here is one `Resolver::plan` folds with `?`, aborting the scan before its first probe.
-fn first_resolution_error(resolutions: &[ResolvedScenarioTarget]) -> Option<&RastreoError> {
-    resolutions
-        .iter()
-        .find_map(|entry| entry.result.as_ref().err())
-}
-
-fn refuse_on_resolution_error(
-    resolutions: &[ResolvedScenarioTarget],
-    mode: OutputMode,
-) -> Result<()> {
-    let Some(err) = first_resolution_error(resolutions) else {
+fn refuse_on_resolution_error(resolution: &ScenarioResolution, mode: OutputMode) -> Result<()> {
+    let Some(err) = resolution.refusal() else {
         return Ok(());
     };
     let rendered = render_error_chain(err);
@@ -772,8 +769,8 @@ async fn run_legacy(
 ) -> Result<()> {
     let scenario = scenario_from_flags(args, mode)?;
     let mode = mode_for_sink(mode, scenario.base.sink.as_ref());
-    // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
-    let plan = build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, &[], args)?;
+    // Unresolved: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
+    let plan = build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, args)?;
     print_start(&plan, scenario.targets.len(), mode);
     match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args), mode).await {
         Ok(summary) => {
@@ -855,8 +852,8 @@ async fn run_from_file(
             continue;
         }
 
-        // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
-        let plan = match build_scenario_plan(&label, &cfg, &[], args) {
+        // Unresolved: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
+        let plan = match build_scenario_plan(&label, &cfg, args) {
             Ok(plan) => plan,
             Err(err) => {
                 tally.failed += 1;
@@ -2437,14 +2434,14 @@ mod tests {
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
 
         let mut legacy = String::new();
         write_dry_run_header(&mut legacy, 1);
-        let probes = write_scenario_plan(&mut legacy, "discovery", &scenario, &resolutions, &a);
+        let probes = write_scenario_plan(&mut legacy, "discovery", &scenario, &resolution, &a);
         write_totals(&mut legacy, 1, probes);
 
-        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a).expect("plan");
+        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a).expect("plan");
         assert_eq!(render_dry_run_text(&[plan]), legacy);
     }
 
@@ -2454,8 +2451,8 @@ mod tests {
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
-        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a).expect("plan");
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
+        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a).expect("plan");
 
         let json = render_dry_run_json(&[plan]).expect("json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -2467,16 +2464,13 @@ mod tests {
         assert_eq!(arr[0]["probers"][0], "tcp_connect (ports 22)");
     }
 
-    #[test]
-    fn render_dry_run_json_multi_plan_is_array_in_order() {
+    #[tokio::test]
+    async fn render_dry_run_json_multi_plan_is_array_in_order() {
         let a = args(&["127.0.0.1"], &[22]);
         let scenario = build_scenario(&a).expect("scenario");
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip("127.0.0.1".parse().expect("ip")),
-            Ok(vec!["127.0.0.1".parse().expect("ip")]),
-        )];
-        let first = build_scenario_plan("one", &scenario, &resolutions, &a).expect("plan");
-        let second = build_scenario_plan("two", &scenario, &resolutions, &a).expect("plan");
+        let resolution = resolution_of(&scenario).await;
+        let first = build_resolved_plan("one", &scenario, &resolution, &a).expect("plan");
+        let second = build_resolved_plan("two", &scenario, &resolution, &a).expect("plan");
 
         let json = render_dry_run_json(&[first, second]).expect("json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -2486,15 +2480,12 @@ mod tests {
         assert_eq!(arr[1]["scenario"], "two");
     }
 
-    #[test]
-    fn render_dry_run_json_contains_no_text_prose() {
+    #[tokio::test]
+    async fn render_dry_run_json_contains_no_text_prose() {
         let a = args(&["127.0.0.1"], &[22]);
         let scenario = build_scenario(&a).expect("scenario");
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip("127.0.0.1".parse().expect("ip")),
-            Ok(vec!["127.0.0.1".parse().expect("ip")]),
-        )];
-        let plan = build_scenario_plan("discovery", &scenario, &resolutions, &a).expect("plan");
+        let resolution = resolution_of(&scenario).await;
+        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a).expect("plan");
         let json = render_dry_run_json(&[plan]).expect("json");
         assert!(!json.contains("[dry-run]"), "{json}");
         assert!(!json.contains("total probes:"), "{json}");
@@ -2506,10 +2497,10 @@ mod tests {
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
         write_dry_run_header(&mut out, 1);
-        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolutions, &a);
+        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolution, &a);
         write_totals(&mut out, 1, probes);
         assert_eq!(probes, 1, "1 IP × 1 prober = 1 probe");
         assert!(out.contains("[dry-run] would run 1 scenario"), "{out}");
@@ -2525,7 +2516,7 @@ mod tests {
             out.contains("total probes: 1"),
             "single-scenario prints total: {out}"
         );
-        assert!(first_resolution_error(&resolutions).is_none());
+        assert!(resolution.refusal().is_none());
     }
 
     #[tokio::test]
@@ -2535,9 +2526,9 @@ mod tests {
         a.rate = Some(25);
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
         assert!(out.contains("rate: 25/sec"), "{out}");
     }
 
@@ -2547,9 +2538,9 @@ mod tests {
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
         assert!(out.contains("10.0.0.1"), "{out}");
         assert!(out.contains("10.0.0.6"), "{out}");
         assert!(!out.contains("..."), "no ellipsis under cutoff: {out}");
@@ -2561,9 +2552,9 @@ mod tests {
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
         assert_eq!(probes, 254, "1 prober × 254 hosts in /24");
         assert!(out.contains("..."), "ellipsis expected: {out}");
         assert!(out.contains("(254 addresses)"), "count expected: {out}");
@@ -2575,61 +2566,76 @@ mod tests {
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
         assert!(
             out.contains("<error:"),
             "expected inline error for failing DNS target: {out}"
         );
         assert!(out.contains("127.0.0.1 → 127.0.0.1"), "{out}");
         assert!(
-            first_resolution_error(&resolutions).is_some(),
+            resolution.refusal().is_some(),
             "a target the scan would abort on must refuse the rehearsal too"
         );
     }
 
-    fn resolution_failing_with(err: RastreoError) -> Vec<ResolvedScenarioTarget> {
-        vec![
-            ResolvedScenarioTarget::new(
-                Target::Ip("127.0.0.1".parse().expect("ip")),
-                Ok(vec!["127.0.0.1".parse().expect("ip")]),
-            ),
-            ResolvedScenarioTarget::new(Target::DnsName("second".into()), Err(err)),
-        ]
+    async fn resolution_of(scenario: &DiscoverScenarioConfig) -> ScenarioResolution {
+        let resolver = HickoryResolver::from_system().expect("resolver");
+        resolve_scenario(&resolver, &scenario.targets).await
     }
 
-    #[test]
-    fn a_resolution_error_refuses_the_dry_run_whatever_variant_raised_it() {
-        use rastreo_core::ResolverError;
-        let refusals = [
-            RastreoError::Resolver(ResolverError::CidrTooLarge {
-                cidr: "10.0.0.0/8".into(),
-                hosts: 16_777_214,
-                limit: 65_536,
-            }),
-            RastreoError::Resolver(ResolverError::RangeTooLarge {
-                start: "10.0.0.1".into(),
-                end: "10.9.0.1".into(),
-                hosts: 589_825,
-                limit: 65_536,
-            }),
-            RastreoError::Resolver(ResolverError::DnsNoRecords {
-                name: "x.invalid".into(),
-            }),
-            RastreoError::Resolver(ResolverError::TargetNotAllowed {
-                ip: "203.0.113.1".parse().expect("ip"),
-            }),
-            RastreoError::Resolver(ResolverError::AggregateHostCapExceeded {
-                hosts: 300_000,
-                limit: 262_144,
-            }),
+    // Each arm is a resolver refusing for its own reason: the rehearsal reads the refusal off the
+    // resolution and never matches on which one.
+    #[tokio::test]
+    async fn a_resolution_error_refuses_the_dry_run_whatever_variant_raised_it() {
+        let bare: std::sync::Arc<dyn rastreo_core::Resolver> = std::sync::Arc::new(
+            HickoryResolver::from_system()
+                .expect("resolver")
+                .with_limit(8),
+        );
+        let over_limit: Box<dyn rastreo_core::Resolver> = Box::new(
+            HickoryResolver::from_system()
+                .expect("resolver")
+                .with_limit(8),
+        );
+        let capped: Box<dyn rastreo_core::Resolver> = Box::new(rastreo_core::GuardedResolver::new(
+            bare.clone(),
+            None,
+            Some(4),
+        ));
+        let allowlisted: Box<dyn rastreo_core::Resolver> =
+            Box::new(rastreo_core::GuardedResolver::new(
+                bare,
+                Some(vec!["10.0.0.0/8".parse().expect("cidr")]),
+                None,
+            ));
+        let cases: Vec<(Box<dyn rastreo_core::Resolver>, Vec<Target>)> = vec![
+            (
+                over_limit,
+                vec![Target::Cidr("10.0.0.0/24".parse().expect("cidr"))],
+            ),
+            (
+                capped,
+                vec![
+                    Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+                    Target::Cidr("10.0.1.0/30".parse().expect("cidr")),
+                    Target::Cidr("10.0.2.0/30".parse().expect("cidr")),
+                ],
+            ),
+            (
+                allowlisted,
+                vec![Target::Ip("203.0.113.1".parse().expect("ip"))],
+            ),
         ];
-        for err in refusals {
-            let expected = err.to_string();
-            let resolutions = resolution_failing_with(err);
+        for (resolver, targets) in cases {
+            let resolution = resolve_scenario(resolver.as_ref(), &targets).await;
+            let expected = resolution
+                .refusal()
+                .expect("the resolver refused")
+                .to_string();
             let refusal =
-                refuse_on_resolution_error(&resolutions, OutputMode::from(Verbosity::Quiet))
+                refuse_on_resolution_error(&resolution, OutputMode::from(Verbosity::Quiet))
                     .expect_err("a resolution error the scan aborts on must refuse the rehearsal");
             assert!(
                 refusal.to_string().contains(&expected),
@@ -2638,13 +2644,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_fully_resolved_scenario_has_nothing_to_refuse() {
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip("127.0.0.1".parse().expect("ip")),
-            Ok(vec!["127.0.0.1".parse().expect("ip")]),
-        )];
-        refuse_on_resolution_error(&resolutions, OutputMode::from(Verbosity::Quiet))
+    #[tokio::test]
+    async fn a_fully_resolved_scenario_has_nothing_to_refuse() {
+        let a = args(&["127.0.0.1"], &[22]);
+        let scenario = build_scenario(&a).expect("scenario");
+        let resolution = resolution_of(&scenario).await;
+        refuse_on_resolution_error(&resolution, OutputMode::from(Verbosity::Quiet))
             .expect("every target resolved");
     }
 
@@ -2662,9 +2667,9 @@ mod tests {
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
         let start = std::time::Instant::now();
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
         let elapsed = start.elapsed();
         assert!(
             elapsed.as_secs() < 2,
@@ -2742,10 +2747,10 @@ mod tests {
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
         write_dry_run_header(&mut out, 1);
-        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolutions, &a);
+        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolution, &a);
         write_totals(&mut out, 1, probes);
         assert!(
             out.contains("total probes: 1"),
@@ -2824,17 +2829,19 @@ scenarios:
     }
 
     #[tokio::test]
-    async fn dry_run_probe_count_deduplicates_overlapping_ips() {
+    async fn dry_run_probe_count_counts_an_overlapping_address_once_per_spec() {
         let mut a = tcp_args(&["10.0.0.1", "10.0.0.0/29"], &[22]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
-        let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
+        let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolutions, &a);
-        // /29 usable hosts: 10.0.0.1..10.0.0.6 (6). Explicit 10.0.0.1 overlaps → still 6 unique.
-        assert_eq!(probes, 6, "expected deduped unique-IP count, got {probes}");
-        // Per-target lines still show duplicates verbatim — dedup is only for the total.
+        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
+        // /29 usable hosts: 10.0.0.1..10.0.0.6 (6), plus the explicit 10.0.0.1 the scan probes again.
+        assert_eq!(
+            probes, 7,
+            "expected the count the scan performs, got {probes}"
+        );
         assert!(out.contains("10.0.0.1 → 10.0.0.1"), "{out}");
     }
 
@@ -2858,7 +2865,6 @@ scenarios:
         let plan = DiscoveryPlan::new(
             "s".to_string(),
             scenario,
-            &[],
             PlanKnobs {
                 max_concurrent: 1,
                 probe_rate: None,

@@ -67,7 +67,7 @@ Two common ways a target list overlaps:
 - A CIDR block and a host address inside it, for example `10.0.0.0/24` and `10.0.0.5`.
 - Two CIDR blocks or ranges that share addresses, for example `10.0.0.0/24` and `10.0.0.128/25`.
 
-At the start of a scan, rastreo logs a warning when it finds overlapping IP, CIDR, or range targets. The warning names the overlapping targets, so you can see which ones to change.
+rastreo logs a warning when it finds overlapping IP, CIDR, or range targets, naming the pair so you can see which ones to change. A `--dry-run` logs the same warning, so you can catch the overlap before the scan runs.
 
 !!! note "DNS names are not checked for overlap"
     rastreo checks IP, CIDR, and range targets for overlap, but not DNS names. Two names that resolve to the same address are still probed once each, with no warning.

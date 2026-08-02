@@ -25,6 +25,24 @@ async fn spawn_guarded_server(allowlist: Option<Vec<IpNet>>, max_body_bytes: usi
     addr
 }
 
+async fn spawn_capped_server(max_total_hosts: usize) -> SocketAddr {
+    let base: Arc<dyn Resolver> =
+        Arc::new(HickoryResolver::from_system().expect("system resolver"));
+    let resolver: Arc<dyn Resolver> =
+        Arc::new(GuardedResolver::new(base, None, Some(max_total_hosts)));
+    let app = build_app(AppState::new(resolver));
+
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind server");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    addr
+}
+
 async fn spawn_target_listener() -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -112,6 +130,68 @@ async fn post_scans_dry_run_out_of_allowlist_target_surfaces_per_target_error() 
         payload.get("records").is_none(),
         "a dry-run returns a plan, not a scan response: {payload}"
     );
+}
+
+// No single spec is over the cap, so no amount of per-target resolution can see it: only the plan
+// the scan itself builds can.
+#[tokio::test]
+async fn post_scans_dry_run_reports_the_aggregate_host_cap_the_scan_would_reject() {
+    let addr = spawn_capped_server(100).await;
+    let body = json!({
+        "targets": [{"Cidr": "10.0.0.0/25"}, {"Cidr": "10.0.1.0/25"}],
+        "probers": [{"type": "tcp_connect", "ports": [22]}],
+        "timeout_ms": 500,
+    });
+
+    let plan = reqwest::Client::new()
+        .post(format!("http://{addr}/scans?dry_run=true"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(plan.status(), reqwest::StatusCode::OK);
+    let plan: serde_json::Value = plan.json().await.expect("body json");
+    assert_eq!(
+        plan["total_probes"], 0,
+        "a scan the server would reject probes nothing: {plan}"
+    );
+    let refusal = plan["refusal"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the plan names the refusal: {plan}"));
+    assert!(refusal.contains("252") && refusal.contains("100"), "{plan}");
+
+    let scan = reqwest::Client::new()
+        .post(format!("http://{addr}/scans"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        scan.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "the scan rejects what the plan refused"
+    );
+}
+
+#[tokio::test]
+async fn post_scans_dry_run_under_the_aggregate_cap_counts_every_host() {
+    let addr = spawn_capped_server(300).await;
+    let body = json!({
+        "targets": [{"Cidr": "10.0.0.0/25"}, {"Cidr": "10.0.1.0/25"}],
+        "probers": [{"type": "tcp_connect", "ports": [22]}],
+        "timeout_ms": 500,
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/scans?dry_run=true"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let plan: serde_json::Value = resp.json().await.expect("body json");
+    assert_eq!(plan["total_probes"], 252);
+    assert!(plan.get("refusal").is_none(), "{plan}");
 }
 
 #[tokio::test]

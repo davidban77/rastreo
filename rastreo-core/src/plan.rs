@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fmt;
 use std::net::IpAddr;
 
@@ -10,8 +9,8 @@ use crate::encoder::EncoderConfig;
 use crate::error::RastreoError;
 use crate::fuser::{DirectFuser, FuserConfig};
 use crate::model::Target;
-use crate::pipeline::ResolvedScenarioTarget;
 use crate::prober::ProberConfig;
+use crate::resolver::ScenarioResolution;
 use crate::sink::SinkConfig;
 
 const IP_LIST_CUTOFF: usize = 6;
@@ -42,8 +41,11 @@ pub struct DiscoveryPlan {
     pub retries: u32,
     /// Effective per-probe timeout in milliseconds.
     pub timeout_ms: u64,
-    /// Total probes the scan would run: unique resolved IPs times probers.
+    /// Total probes the scan would run: every address it would probe times probers, `0` when it would abort first.
     pub total_probes: usize,
+    /// Error the scan would abort on before its first probe; absent when every target resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, JsonSchema)]
@@ -73,11 +75,29 @@ pub struct PlanKnobs {
 }
 
 impl DiscoveryPlan {
-    /// Plan a scenario a run would accept; a scenario [`DiscoverScenarioConfig::validate`] rejects has no plan.
+    /// Plan the stages a scenario alone determines, leaving every resolution-derived field unset; a scenario [`DiscoverScenarioConfig::validate`] rejects has no plan.
     pub fn new(
         scenario: String,
         config: &DiscoverScenarioConfig,
-        resolutions: &[ResolvedScenarioTarget],
+        knobs: PlanKnobs,
+    ) -> Result<Self, RastreoError> {
+        Self::build(scenario, config, None, knobs)
+    }
+
+    /// Plan the scan a resolution would run, counting the addresses that resolution streams.
+    pub fn resolved(
+        scenario: String,
+        config: &DiscoverScenarioConfig,
+        resolution: &ScenarioResolution,
+        knobs: PlanKnobs,
+    ) -> Result<Self, RastreoError> {
+        Self::build(scenario, config, Some(resolution), knobs)
+    }
+
+    fn build(
+        scenario: String,
+        config: &DiscoverScenarioConfig,
+        resolution: Option<&ScenarioResolution>,
         knobs: PlanKnobs,
     ) -> Result<Self, RastreoError> {
         config.validate()?;
@@ -99,21 +119,23 @@ impl DiscoveryPlan {
             targets: _,
             probers: prober_configs,
         } = config;
-        let mut unique_ips: HashSet<IpAddr> = HashSet::new();
-        let mut targets = Vec::with_capacity(resolutions.len());
-        for entry in resolutions {
-            let target = render_target(&entry.target);
-            let resolution = match &entry.result {
-                Ok(ips) => {
-                    unique_ips.extend(ips.iter().copied());
-                    TargetResolution::Resolved(ips.clone())
-                }
-                Err(err) => TargetResolution::Error(err.to_string()),
-            };
-            targets.push(PlannedTarget { target, resolution });
-        }
+        let targets = resolution.map_or_else(Vec::new, |resolution| {
+            resolution
+                .entries()
+                .iter()
+                .map(|(target, result)| PlannedTarget {
+                    target: render_target(target),
+                    resolution: match result {
+                        Ok(ips) => TargetResolution::Resolved(ips.clone()),
+                        Err(err) => TargetResolution::Error(err.to_string()),
+                    },
+                })
+                .collect()
+        });
         let probers: Vec<String> = prober_configs.iter().map(render_prober).collect();
-        let total_probes = unique_ips.len().saturating_mul(prober_configs.len());
+        let total_probes = resolution
+            .map_or(0, ScenarioResolution::total_hosts)
+            .saturating_mul(prober_configs.len());
         Ok(Self {
             scenario,
             targets,
@@ -127,6 +149,9 @@ impl DiscoveryPlan {
             retries: knobs.retries,
             timeout_ms: knobs.timeout_ms,
             total_probes,
+            refusal: resolution
+                .and_then(ScenarioResolution::refusal)
+                .map(ToString::to_string),
         })
     }
 }
@@ -395,19 +420,44 @@ fn format_ip_list(ips: &[IpAddr]) -> String {
 mod tests {
     use super::*;
     use crate::config::BaseProbeConfig;
-    use crate::error::{ConfigError, ResolverError};
+    use crate::error::ConfigError;
     use std::net::Ipv4Addr;
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
 
-    fn plan_of(
+    fn cidr(s: &str) -> Target {
+        Target::Cidr(s.parse().expect("cidr"))
+    }
+
+    fn plan_of(config: &DiscoverScenarioConfig, knobs: PlanKnobs) -> DiscoveryPlan {
+        DiscoveryPlan::new("discovery".to_string(), config, knobs).expect("plan")
+    }
+
+    fn resolved_plan_of(
         config: &DiscoverScenarioConfig,
-        resolutions: &[ResolvedScenarioTarget],
+        resolution: &ScenarioResolution,
         knobs: PlanKnobs,
     ) -> DiscoveryPlan {
-        DiscoveryPlan::new("discovery".to_string(), config, resolutions, knobs).expect("plan")
+        DiscoveryPlan::resolved("discovery".to_string(), config, resolution, knobs).expect("plan")
+    }
+
+    // Every resolution a plan test reads comes from the resolver a scan would use, on targets that
+    // need no network: the plan cannot be counted off anything the scan would not resolve.
+    fn resolution_of(targets: &[Target]) -> ScenarioResolution {
+        resolution_under_limit(targets, crate::resolver::DEFAULT_HOST_LIMIT)
+    }
+
+    fn resolution_under_limit(targets: &[Target], limit: usize) -> ScenarioResolution {
+        let resolver = crate::resolver::HickoryResolver::from_system()
+            .expect("system resolver")
+            .with_limit(limit);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(crate::resolver::resolve_scenario(&resolver, targets))
     }
 
     fn default_knobs() -> PlanKnobs {
@@ -724,7 +774,7 @@ mod tests {
         ] {
             let mut config = tcp_scenario();
             config.base.encoder = encoder;
-            assert_eq!(plan_of(&config, &[], default_knobs()).encoder, expected);
+            assert_eq!(plan_of(&config, default_knobs()).encoder, expected);
         }
     }
 
@@ -784,7 +834,7 @@ mod tests {
             vec![Target::Ip(ip(127, 0, 0, 1))],
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let plan = plan_of(&config, &[], default_knobs());
+        let plan = plan_of(&config, default_knobs());
         assert!(plan.fuser.contains("include_unreachable true"), "{plan:?}");
         assert_eq!(plan.classifier, "noop");
     }
@@ -836,11 +886,8 @@ mod tests {
     #[test]
     fn display_renders_exact_dry_run_block() {
         let config = tcp_scenario();
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip(ip(127, 0, 0, 1)),
-            Ok(vec![ip(127, 0, 0, 1)]),
-        )];
-        let plan = plan_of(&config, &resolutions, default_knobs());
+        let resolution = resolution_of(&[Target::Ip(ip(127, 0, 0, 1))]);
+        let plan = resolved_plan_of(&config, &resolution, default_knobs());
         insta::assert_snapshot!(plan.to_string());
     }
 
@@ -864,11 +911,8 @@ mod tests {
                 ports: vec![22, 80],
             }],
         );
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip(ip(127, 0, 0, 1)),
-            Ok(vec![ip(127, 0, 0, 1)]),
-        )];
-        let plan = plan_of(&config, &resolutions, default_knobs());
+        let resolution = resolution_of(&[Target::Ip(ip(127, 0, 0, 1))]);
+        let plan = resolved_plan_of(&config, &resolution, default_knobs());
         insta::assert_snapshot!(plan.to_string());
     }
 
@@ -878,25 +922,19 @@ mod tests {
         base.sink = Some(SinkConfig::Stdout);
         let config = DiscoverScenarioConfig::new(
             base,
-            vec![Target::DnsName("x.invalid".into())],
+            vec![cidr("10.0.0.0/24")],
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::DnsName("x.invalid".into()),
-            Err(RastreoError::Resolver(ResolverError::DnsNoRecords {
-                name: "x.invalid".into(),
-            })),
-        )];
-        let plan = plan_of(&config, &resolutions, default_knobs());
-        let out = plan.to_string();
-        assert!(out.contains("x.invalid → <error:"), "{out}");
+        let resolution = resolution_under_limit(&[cidr("10.0.0.0/24")], 8);
+        let out = resolved_plan_of(&config, &resolution, default_knobs()).to_string();
+        assert!(out.contains("10.0.0.0/24 → <error:"), "{out}");
     }
 
     #[test]
     fn display_names_the_encoder_records_would_leave_in() {
         let mut config = tcp_scenario();
         config.base.encoder = Some(EncoderConfig::Table { width: 120 });
-        assert!(plan_of(&config, &[], default_knobs())
+        assert!(plan_of(&config, default_knobs())
             .to_string()
             .contains("    encoder: table\n"));
     }
@@ -904,15 +942,12 @@ mod tests {
     #[test]
     fn display_shows_rate_per_second_when_set() {
         let config = tcp_scenario();
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip(ip(127, 0, 0, 1)),
-            Ok(vec![ip(127, 0, 0, 1)]),
-        )];
+        let resolution = resolution_of(&[Target::Ip(ip(127, 0, 0, 1))]);
         let knobs = PlanKnobs {
             probe_rate: Some(25),
             ..default_knobs()
         };
-        assert!(plan_of(&config, &resolutions, knobs)
+        assert!(resolved_plan_of(&config, &resolution, knobs)
             .to_string()
             .contains("    rate: 25/sec\n"));
     }
@@ -920,11 +955,8 @@ mod tests {
     #[test]
     fn display_of_a_plan_whose_probers_were_cleared_prints_none() {
         let config = tcp_scenario();
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip(ip(127, 0, 0, 1)),
-            Ok(vec![ip(127, 0, 0, 1)]),
-        )];
-        let mut plan = plan_of(&config, &resolutions, default_knobs());
+        let resolution = resolution_of(&[Target::Ip(ip(127, 0, 0, 1))]);
+        let mut plan = resolved_plan_of(&config, &resolution, default_knobs());
         plan.probers.clear();
         assert!(plan.to_string().contains("    probers: <none>\n"));
     }
@@ -935,7 +967,7 @@ mod tests {
         base.sink = Some(SinkConfig::Stdout);
         let config =
             DiscoverScenarioConfig::new(base, vec![Target::Ip(ip(10, 0, 0, 1))], Vec::new());
-        let err = DiscoveryPlan::new("discovery".into(), &config, &[], default_knobs())
+        let err = DiscoveryPlan::new("discovery".into(), &config, default_knobs())
             .expect_err("a scenario the run refuses must have no plan");
         assert!(
             matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("probers")),
@@ -952,7 +984,7 @@ mod tests {
             vec![Target::Ip(ip(10, 0, 0, 1))],
             vec![ProberConfig::TcpConnect { ports: Vec::new() }],
         );
-        let err = DiscoveryPlan::new("discovery".into(), &config, &[], default_knobs())
+        let err = DiscoveryPlan::new("discovery".into(), &config, default_knobs())
             .expect_err("a scenario the run refuses must have no plan");
         assert!(
             matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("at least one port")),
@@ -974,7 +1006,7 @@ mod tests {
             vec![Target::Ip(ip(10, 0, 0, 1))],
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let err = DiscoveryPlan::new("discovery".into(), &config, &[], default_knobs())
+        let err = DiscoveryPlan::new("discovery".into(), &config, default_knobs())
             .expect_err("a scenario the run refuses must have no plan");
         assert!(
             matches!(&err, RastreoError::Config(ConfigError::InvalidValue(msg)) if msg.contains("confidence_baseline")),
@@ -982,50 +1014,99 @@ mod tests {
         );
     }
 
-    #[test]
-    fn total_probes_dedups_unique_ips_times_probers() {
+    fn two_prober_scenario(targets: Vec<Target>) -> DiscoverScenarioConfig {
         let mut base = BaseProbeConfig::new();
         base.sink = Some(SinkConfig::Stdout);
-        let config = DiscoverScenarioConfig::new(
+        DiscoverScenarioConfig::new(
             base,
-            vec![
-                Target::Ip(ip(10, 0, 0, 1)),
-                Target::Cidr("10.0.0.0/29".parse().expect("cidr")),
-            ],
+            targets,
             vec![
                 ProberConfig::TcpConnect { ports: vec![22] },
                 ProberConfig::ReverseDns {
                     resolvers: Vec::new(),
                 },
             ],
-        );
-        let resolutions = vec![
-            ResolvedScenarioTarget::new(Target::Ip(ip(10, 0, 0, 1)), Ok(vec![ip(10, 0, 0, 1)])),
-            ResolvedScenarioTarget::new(
-                Target::Cidr("10.0.0.0/29".parse().expect("cidr")),
-                Ok(vec![ip(10, 0, 0, 1), ip(10, 0, 0, 2)]),
-            ),
-        ];
-        // unique IPs {.1, .2} = 2, probers = 2 → 4.
+        )
+    }
+
+    #[test]
+    fn total_probes_counts_an_address_once_per_spec_that_yields_it() {
+        let targets = vec![cidr("10.0.0.0/30"), Target::Ip(ip(10, 0, 0, 1))];
+        let config = two_prober_scenario(targets.clone());
+        // The scan streams .1, .2, .1 — the overlapping spec is probed, not deduplicated.
         assert_eq!(
-            plan_of(&config, &resolutions, default_knobs()).total_probes,
-            4
+            resolved_plan_of(&config, &resolution_of(&targets), default_knobs()).total_probes,
+            6
         );
     }
 
     #[test]
-    fn total_probes_zero_when_all_targets_error() {
-        let config = tcp_scenario();
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::DnsName("x.invalid".into()),
-            Err(RastreoError::Resolver(ResolverError::DnsNoRecords {
-                name: "x.invalid".into(),
-            })),
-        )];
+    fn a_scenario_that_would_abort_on_a_target_plans_no_probes() {
+        let targets = vec![Target::Ip(ip(10, 0, 0, 1)), cidr("10.0.0.0/24")];
+        let config = two_prober_scenario(targets.clone());
+        let plan = resolved_plan_of(
+            &config,
+            &resolution_under_limit(&targets, 8),
+            default_knobs(),
+        );
+        assert_eq!(plan.total_probes, 0);
+        assert!(
+            matches!(&plan.targets[0].resolution, TargetResolution::Resolved(ips) if ips == &[ip(10, 0, 0, 1)]),
+            "the resolvable target is still attributed: {:?}",
+            plan.targets
+        );
+    }
+
+    #[test]
+    fn total_probes_zero_when_every_target_fails_to_resolve() {
+        let targets = vec![cidr("10.0.0.0/24")];
+        let config = two_prober_scenario(targets.clone());
         assert_eq!(
-            plan_of(&config, &resolutions, default_knobs()).total_probes,
+            resolved_plan_of(
+                &config,
+                &resolution_under_limit(&targets, 8),
+                default_knobs()
+            )
+            .total_probes,
             0
         );
+    }
+
+    #[test]
+    fn the_plan_names_the_error_the_scan_would_abort_on() {
+        let targets = vec![Target::Ip(ip(10, 0, 0, 1)), cidr("10.0.0.0/24")];
+        let config = two_prober_scenario(targets.clone());
+        let plan = resolved_plan_of(
+            &config,
+            &resolution_under_limit(&targets, 8),
+            default_knobs(),
+        );
+        let refusal = plan.refusal.expect("a scan that would abort names why");
+        assert!(
+            refusal.contains("exceeds the configured limit"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_plan_every_target_resolved_for_names_no_refusal() {
+        let targets = vec![cidr("10.0.0.0/30")];
+        let config = two_prober_scenario(targets.clone());
+        assert_eq!(
+            resolved_plan_of(&config, &resolution_of(&targets), default_knobs()).refusal,
+            None
+        );
+    }
+
+    #[test]
+    fn an_unresolved_plan_counts_no_probes_and_lists_no_targets() {
+        let plan = plan_of(
+            &two_prober_scenario(vec![cidr("10.0.0.0/30")]),
+            default_knobs(),
+        );
+        assert_eq!(plan.total_probes, 0);
+        assert!(plan.targets.is_empty());
+        assert_eq!(plan.refusal, None);
     }
 
     #[test]
@@ -1040,11 +1121,8 @@ mod tests {
     #[test]
     fn discovery_plan_serializes_to_json() {
         let config = tcp_scenario();
-        let resolutions = vec![ResolvedScenarioTarget::new(
-            Target::Ip(ip(127, 0, 0, 1)),
-            Ok(vec![ip(127, 0, 0, 1)]),
-        )];
-        let plan = plan_of(&config, &resolutions, default_knobs());
+        let resolution = resolution_of(&[Target::Ip(ip(127, 0, 0, 1))]);
+        let plan = resolved_plan_of(&config, &resolution, default_knobs());
         let json = serde_json::to_value(&plan).expect("serialize");
         assert_eq!(json["scenario"], "discovery");
         assert_eq!(json["total_probes"], 1);

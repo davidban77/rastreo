@@ -435,11 +435,11 @@ The output shows one block per scenario. Each block lists:
 - the sink kind and destination
 - the effective concurrency, probe rate, and per-probe timeout
 
-The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count: unique IPs × probers, counting an address once even when several targets cover it. This matches the real scan for targets that do not overlap. When targets overlap, the real scan probes each shared address once per target, so it runs more probes than this count shows. See [Overlapping targets](targets.md#overlapping-targets).
+The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count — the addresses the scan would probe, multiplied by the probers. It is the number of probes the scan performs, including an address covered by two targets, which is probed once for each of them. See [Overlapping targets](targets.md#overlapping-targets).
 
 CIDRs and ranges that expand to more than six addresses are truncated with an ellipsis and a count. A target that does not resolve is listed with its reason in place of the addresses. The plan covers every target you configured, resolved or not.
 
-The exit code is `1` when any target fails to resolve, and `0` when they all resolve. A real scan stops at the first target it cannot resolve. A plan with a failing target therefore describes a scan that would not start. The dry-run lists every failing target; a real scan reports only the first.
+The exit code is `1` when any target fails to resolve, and `0` when they all resolve. A real scan stops at the first target it cannot resolve, so a plan with a failing target describes a scan that would not start: its total probe count reads `0`, even where other targets resolved. The dry-run lists every failing target; a real scan reports only the first.
 
 Kafka, NATS, and file sinks are described from the configured values only. `--dry-run` never opens a network connection to the sink or writes to the output file, so a bogus broker address in `--brokers` completes in milliseconds instead of hanging.
 
@@ -579,7 +579,8 @@ The output is a JSON array with one object per scenario. Each object carries the
 - `probe_rate` — probes started per second, or `null` when no pacing is set.
 - `retries` — retransmit attempts for the connectionless probers.
 - `timeout_ms` — per-probe timeout in milliseconds.
-- `total_probes` — unique IPs × probers, deduplicated across overlapping targets.
+- `total_probes` — the addresses the scan would probe × probers. `0` when the scan would abort before probing, which is any plan carrying a `refusal`.
+- `refusal` — the error the scan would abort on before its first probe. Absent when every target resolved.
 
 The `lab` scenario behind the plan below declares `sink: {type: stdout}`, one `/30` target, and one TCP-connect prober on port 22:
 
