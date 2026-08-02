@@ -273,7 +273,7 @@ pub enum ResumeError {
     FingerprintMismatch,
 
     #[error(
-        "no checkpoint to resume at {}; --resume requires an existing checkpoint at this path",
+        "no checkpoint to resume at {}; resuming continues a checkpoint an earlier run wrote to this path",
         .path.display()
     )]
     NoCheckpointToResume { path: PathBuf },
@@ -680,20 +680,41 @@ mod tests {
     // only for the `{source}` spelling; a `{0}` over a `#[source]` field needs a corpus sample.
     #[test]
     fn no_error_display_in_the_crate_interpolates_its_source() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let attributes = error_attributes(&src);
-        assert!(
-            attributes.len() > 30,
-            "expected to sweep every `#[error(...)]` under rastreo-core/src, found {}",
-            attributes.len()
-        );
-        for (file, attribute) in attributes {
+        for (file, attribute) in every_error_attribute() {
             assert!(
                 !attribute.contains("{source"),
                 "{}: `{attribute}` prints the source the error chain already carries",
                 file.display()
             );
         }
+    }
+
+    // Core names the missing concept; the CLI maps that concept back to the flag that expresses it,
+    // because the server and the YAML path raise the same error and neither has flags.
+    #[test]
+    fn no_error_display_in_the_crate_names_a_cli_flag() {
+        for (file, attribute) in every_error_attribute() {
+            assert!(
+                !attribute.contains("--"),
+                "{}: `{attribute}` spells a CLI flag; name the concept instead",
+                file.display()
+            );
+        }
+    }
+
+    // error.rs alone meets any floor on the count, so the file count is what proves the walk recursed.
+    fn every_error_attribute() -> Vec<(std::path::PathBuf, String)> {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let attributes = error_attributes(&src);
+        let files: std::collections::BTreeSet<&std::path::Path> =
+            attributes.iter().map(|(file, _)| file.as_path()).collect();
+        assert!(
+            attributes.len() > 30 && files.len() > 3,
+            "expected to sweep every `#[error(...)]` under rastreo-core/src, found {} across {:?}",
+            attributes.len(),
+            files
+        );
+        attributes
     }
 
     fn error_attributes(dir: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {

@@ -100,7 +100,9 @@ Logs always go to **stderr**, in both text and JSON formats. Stdout is reserved 
 - the live progress line,
 - `⚠ hint:` notices.
 
-Those stay human-readable even under `--log-format json`. Two flags keep them out of a log pipeline. `--format json` drops all of them except the hints. `-q` drops every one. `rastreo-server` writes only log lines, so its stderr is uniformly JSON when the flag is set.
+Those stay human-readable even under `--log-format json`. Two flags keep them out of a log pipeline. `--format json` drops all of them except the hints — and drops the hints too when stderr and stdout were merged onto one destination, since a hint there would land in the record stream. The hint that explains a refusal is the exception: it prints wherever the error prints, so a merged capture that exits 1 carries both. `-q` drops every one. `rastreo-server` writes only log lines, so its stderr is uniformly JSON when the flag is set.
+
+Log lines themselves are not gated that way. `RUST_LOG=debug rastreo discover --format json 2>&1 | jq` puts log lines in the pipe, because you asked for them by name. Redirect stderr somewhere of its own when the record stream has a consumer.
 
 ## Aggregator ingestion
 

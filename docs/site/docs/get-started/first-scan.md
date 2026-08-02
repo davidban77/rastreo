@@ -49,7 +49,7 @@ The table is a triage view of four columns. Everything the scan learned is in th
 rastreo discover --target 1.1.1.1 --format json
 ```
 
-`--format json` writes one `DeviceRecord` per line as JSON, and drops the banners so stdout is a clean stream for `jq` and friends. Hints still print on stderr, where they cannot corrupt the stream.
+`--format json` writes one `DeviceRecord` per line as JSON, and drops the banners so stdout is a clean stream for `jq` and friends. Hints still print on stderr, which is a stream of its own.
 
 Stdout (one line, formatted here across multiple lines for reading):
 
@@ -168,6 +168,8 @@ Add `--format json` and stdout becomes a clean NDJSON stream. The banners and th
 rastreo discover --target 1.1.1.1 --format json | jq .
 rastreo discover --target 1.1.1.1 --format json | jq -r '.signals[].OpenPort | select(. != null)'
 ```
+
+That stays true if you fold stderr into the same pipe or file — `2>&1 | jq`, `> scan.json 2>&1`. Under `--format json` a merged destination carries records and nothing else for as long as the scan is producing them, because a hint written there is a line `jq` would have to parse. A run that refuses is the exception: the error and the hint that explains it go into the capture together, since an error whose remedy was suppressed is worse than a line to skip. The exit code tells you which capture you have — `0` for nothing but records, `1` for one that carries the diagnosis. Keep stderr separate (`2> scan.log`) when you want the hints from a successful run too.
 
 Set `RASTREO_FORMAT=json` in your shell profile or your CI environment to make that the default for every run.
 

@@ -31,15 +31,20 @@ Everything in this table goes to **stderr**. Records always go to the sink (stdo
 
 A successful `-q` run writes nothing at all to stderr, which makes it the right choice for a cron job or a pipeline step. Errors still print — `-q` suppresses status output, not failures.
 
-`--format json` cuts the same rows as `-q` except hints, which stay: they cannot reach stdout and they are the most useful thing to read when a scan comes back empty. `-v` brings the banners back.
+`--format json` cuts the same rows as `-q` except hints, which stay: they go to stderr, and they are the most useful thing to read when a scan comes back empty. `-v` brings the banners back.
 
 | | start banner | progress line | completion banner | detail lines | hints |
 |---|---|---|---|---|---|
 | `--format json` | no | no | no | no | yes |
 | `--format json -v` | yes | yes | yes | yes | yes |
 | `--format json -q` | no | no | no | no | no |
+| `--format json` with stderr merged into stdout | no | no | no | no | only on a refusal |
 
-The progress line has a second condition on top of these. It is dropped whenever the records share your terminal, which is the case on the default stdout sink. Redirect stdout, redirect stderr, or use `--sink file` and it comes back. See [Progress](../discover/cli.md#progress).
+The last row is the case where a hint *could* reach the record stream: `> scan.json 2>&1` and `2>&1 | jq` give both streams one destination, and a `hint:` line there is a line the consumer has to parse. Records win while the scan is producing them, on `-v` too. They stop winning the moment the run refuses: the error prints, and so does the hint that explains it, because an error whose remedy was suppressed leaves you an exit code and nothing to act on. **A merged capture that exits 0 is nothing but records; one that exits 1 carries the diagnosis.** Give stderr a destination of its own (`2> scan.log`) and every row above applies again.
+
+Which records land on stdout is read per scenario. `--file scan.yml` with a `sink: {type: file}` writes no records to stdout, so a merged capture there keeps every row above even under `--format json` — the merge rule only fires where the records actually are.
+
+The progress line has a second condition on top of these. It is dropped whenever the records land where it would paint — your terminal on the default stdout sink, or the file or pipe both streams were merged into. Redirect stdout on its own, redirect stderr on its own, or use `--sink file` and it comes back. See [Progress](../discover/cli.md#progress).
 
 ### Log-level precedence
 

@@ -2080,6 +2080,33 @@ async fn the_flag_driven_dry_run_and_scan_agree_a_checkpoint_path_is_occupied() 
     );
 }
 
+#[tokio::test]
+async fn a_resume_with_nothing_to_resume_names_the_concept_and_hints_the_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checkpoint = dir.path().join("absent.checkpoint");
+
+    let args = vec![
+        "discover".to_string(),
+        "--target".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        "22222".to_string(),
+        "--timeout-ms".to_string(),
+        "200".to_string(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+        "--resume".to_string(),
+    ];
+    let outcomes = dry_run_then_scan(args).await;
+    assert_both_refuse(&outcomes, "no checkpoint to resume");
+    for (label, (_, stderr)) in ["dry-run", "scan"].iter().zip(&outcomes) {
+        assert!(
+            stderr.contains("hint: --resume continues a checkpoint"),
+            "the {label} must map the refusal back to the flag that caused it: {stderr}"
+        );
+    }
+}
+
 #[cfg(feature = "config")]
 #[tokio::test]
 async fn the_dry_run_and_the_scan_agree_a_resume_needs_a_single_scenario() {

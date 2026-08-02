@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use rastreo_core::DiscoveryProgress;
 use tokio::sync::watch;
 
+use super::destination::RecordDestination;
 use super::humanize;
 use super::theme;
 use super::OutputMode;
@@ -21,21 +22,14 @@ pub(crate) enum ProgressStyle {
     Silent,
 }
 
-pub(crate) fn progress_style(records_on_stdout: bool) -> ProgressStyle {
-    style_for(
-        std::io::stderr().is_terminal(),
-        std::io::stdout().is_terminal(),
-        records_on_stdout,
-    )
+pub(crate) fn progress_style(destination: RecordDestination) -> ProgressStyle {
+    style_for(std::io::stderr().is_terminal(), destination)
 }
 
-// An in-place redraw owns the row it paints, and it cannot own one that records are landing on.
-fn style_for(
-    stderr_is_terminal: bool,
-    stdout_is_terminal: bool,
-    records_on_stdout: bool,
-) -> ProgressStyle {
-    if records_on_stdout && stdout_is_terminal && stderr_is_terminal {
+// A redraw owns the row it paints and a plain line owns the line it takes; neither may own one on a
+// destination records are landing on, whether that is a terminal row or a line of a capture.
+fn style_for(stderr_is_terminal: bool, destination: RecordDestination) -> ProgressStyle {
+    if destination.is_shared() {
         ProgressStyle::Silent
     } else if stderr_is_terminal {
         ProgressStyle::InPlace
@@ -192,27 +186,34 @@ mod tests {
 
     #[test]
     fn records_streaming_to_the_same_terminal_silence_the_progress_line() {
-        assert_eq!(style_for(true, true, true), ProgressStyle::Silent);
+        assert_eq!(
+            style_for(true, RecordDestination::SharedTerminal),
+            ProgressStyle::Silent
+        );
+    }
+
+    #[test]
+    fn records_merged_into_the_same_capture_silence_the_progress_line() {
+        assert_eq!(
+            style_for(false, RecordDestination::SharedCapture),
+            ProgressStyle::Silent
+        );
     }
 
     #[test]
     fn a_terminal_stderr_redraws_in_place_when_records_go_elsewhere() {
-        assert_eq!(style_for(true, true, false), ProgressStyle::InPlace);
-        assert_eq!(style_for(true, false, true), ProgressStyle::InPlace);
-        assert_eq!(style_for(true, false, false), ProgressStyle::InPlace);
+        assert_eq!(
+            style_for(true, RecordDestination::Separate),
+            ProgressStyle::InPlace
+        );
     }
 
     #[test]
-    fn a_redirected_stderr_always_gets_whole_lines() {
-        for stdout_is_terminal in [false, true] {
-            for records_on_stdout in [false, true] {
-                assert_eq!(
-                    style_for(false, stdout_is_terminal, records_on_stdout),
-                    ProgressStyle::Lines,
-                    "stdout_is_terminal: {stdout_is_terminal}, records_on_stdout: {records_on_stdout}"
-                );
-            }
-        }
+    fn a_redirected_stderr_of_its_own_gets_whole_lines() {
+        assert_eq!(
+            style_for(false, RecordDestination::Separate),
+            ProgressStyle::Lines
+        );
     }
 
     #[test]
