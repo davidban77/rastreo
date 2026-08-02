@@ -156,6 +156,13 @@ async fn child_requires_structured_records(child: &TeeChild) -> bool {
     }
 }
 
+async fn child_destinations(child: &TeeChild) -> Vec<SinkType> {
+    match child {
+        TeeChild::Owned(sink) => sink.destinations().await,
+        TeeChild::Shared(sink) => sink.lock().await.destinations().await,
+    }
+}
+
 #[async_trait]
 impl Sink for TeeSink {
     async fn write(&mut self, data: &[u8]) -> Result<(), RastreoError> {
@@ -189,6 +196,14 @@ impl Sink for TeeSink {
             }
         }
         false
+    }
+
+    async fn destinations(&self) -> Vec<SinkType> {
+        let mut out = Vec::with_capacity(self.children.len());
+        for child in &self.children {
+            out.extend(child_destinations(child).await);
+        }
+        out
     }
 
     fn dlq_records_delivered(&self) -> u64 {
@@ -398,6 +413,35 @@ mod tests {
     async fn tee_sink_kind_returns_tee() {
         let tee = TeeSink::new(Vec::new());
         assert_eq!(tee.kind(), SinkType::Tee);
+    }
+
+    #[tokio::test]
+    async fn tee_destinations_name_every_child_in_write_order() {
+        let mut kafka = RecordingSink::new();
+        kafka.kind = SinkType::Kafka;
+        let shared: Arc<Mutex<Box<dyn Sink>>> = Arc::new(Mutex::new(Box::new(kafka)));
+        let tee = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(MemorySink::new())),
+            TeeChild::Shared(shared),
+        ]);
+        assert_eq!(
+            tee.destinations().await,
+            vec![SinkType::Memory, SinkType::Kafka]
+        );
+    }
+
+    #[tokio::test]
+    async fn tee_destinations_flatten_a_nested_fan_out() {
+        let inner = TeeSink::new(vec![
+            TeeChild::Owned(Box::new(MemorySink::new())),
+            TeeChild::Owned(Box::new(MemorySink::new())),
+        ]);
+        let tee = TeeSink::new(vec![TeeChild::Owned(Box::new(inner))]);
+        assert_eq!(
+            tee.destinations().await,
+            vec![SinkType::Memory, SinkType::Memory],
+            "a plan names the destinations records land on, never the fan-out that routes them"
+        );
     }
 
     #[tokio::test]

@@ -439,7 +439,7 @@ async fn run_dry_run(args: &DiscoverArgs, mode: OutputMode) -> Result<()> {
 
     let scenario = scenario_from_flags(args, mode)?;
     let resolution = resolve_scenario(&resolver, &scenario.targets).await;
-    let plan = build_resolved_plan("discovery", &scenario, &resolution, args)?;
+    let plan = build_resolved_plan("discovery", &scenario, &resolution, args).await?;
     dry_run_checkpoint_preflight(&scenario, args).map_err(|err| refuse(err, mode))?;
     render_dry_run(&[plan], dry_run_plan_format(args))?;
     refuse_on_resolution_error(&resolution, mode)
@@ -517,7 +517,7 @@ async fn run_dry_run_from_file(
             continue;
         }
         let resolution = resolve_scenario(resolver, &cfg.targets).await;
-        match build_resolved_plan(&label, &cfg, &resolution, args) {
+        match build_resolved_plan(&label, &cfg, &resolution, args).await {
             Ok(plan) => {
                 plans.push(plan);
                 // Planned so the render names which target refused, then counted as the run counts it.
@@ -634,26 +634,25 @@ fn effective_knobs(scenario: &DiscoverScenarioConfig, args: &DiscoverArgs) -> Pl
     }
 }
 
-fn build_scenario_plan(
-    label: &str,
-    scenario: &DiscoverScenarioConfig,
-    args: &DiscoverArgs,
-) -> Result<DiscoveryPlan, RastreoError> {
-    DiscoveryPlan::new(label.to_string(), scenario, effective_knobs(scenario, args))
+// One place decides what a run is given, so a rehearsal and the run it rehearses read one set of options.
+fn run_options<'a>(scenario: &'a DiscoverScenarioConfig, args: &DiscoverArgs) -> RunOptions<'a> {
+    let opts = RunOptions::new(scenario);
+    match checkpoint_config(args) {
+        Some(checkpoint) => opts.checkpoint(checkpoint),
+        None => opts,
+    }
 }
 
-fn build_resolved_plan(
+async fn build_resolved_plan(
     label: &str,
     scenario: &DiscoverScenarioConfig,
     resolution: &ScenarioResolution,
     args: &DiscoverArgs,
 ) -> Result<DiscoveryPlan, RastreoError> {
-    DiscoveryPlan::resolved(
-        label.to_string(),
-        scenario,
-        resolution,
-        effective_knobs(scenario, args),
-    )
+    Ok(run_options(scenario, args)
+        .plan(label.to_string(), effective_knobs(scenario, args))
+        .await?
+        .resolve(resolution))
 }
 
 fn render_dry_run(plans: &[DiscoveryPlan], format: OutputFormat) -> Result<()> {
@@ -683,7 +682,7 @@ fn render_dry_run_json(plans: &[DiscoveryPlan]) -> Result<String> {
 }
 
 #[cfg(test)]
-fn write_scenario_plan(
+async fn write_scenario_plan(
     out: &mut String,
     label: &str,
     scenario: &DiscoverScenarioConfig,
@@ -691,7 +690,9 @@ fn write_scenario_plan(
     args: &DiscoverArgs,
 ) -> usize {
     use std::fmt::Write as _;
-    let plan = build_resolved_plan(label, scenario, resolution, args).expect("plan");
+    let plan = build_resolved_plan(label, scenario, resolution, args)
+        .await
+        .expect("plan");
     write!(out, "{plan}").expect("write to String");
     plan.total_probes
 }
@@ -713,21 +714,14 @@ fn refuse_on_resolution_error(resolution: &ScenarioResolution, mode: OutputMode)
 }
 
 async fn run_discovery_reporting_progress(
-    scenario: &DiscoverScenarioConfig,
+    opts: RunOptions<'_>,
     cancel: watch::Receiver<bool>,
-    checkpoint: Option<CheckpointConfig>,
     mode: OutputMode,
 ) -> std::result::Result<DiscoverySummary, RastreoError> {
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
     let style = progress_style(mode.record_destination());
     let display = tokio::spawn(progress_display_loop(progress_rx, style, mode));
-    let mut opts = RunOptions::new(scenario)
-        .cancel(cancel)
-        .progress(progress_tx);
-    if let Some(cp) = checkpoint {
-        opts = opts.checkpoint(cp);
-    }
-    let result = run_discovery(opts).await;
+    let result = run_discovery(opts.cancel(cancel).progress(progress_tx)).await;
     let _ = display.await;
     result
 }
@@ -769,10 +763,15 @@ async fn run_legacy(
 ) -> Result<()> {
     let scenario = scenario_from_flags(args, mode)?;
     let mode = mode_for_sink(mode, scenario.base.sink.as_ref());
-    // Unresolved: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
-    let plan = build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, args)?;
+    let opts = run_options(&scenario, args);
+    let plan = opts
+        .plan(
+            FLAG_DRIVEN_LABEL.to_string(),
+            effective_knobs(&scenario, args),
+        )
+        .await?;
     print_start(&plan, scenario.targets.len(), mode);
-    match run_discovery_reporting_progress(&scenario, cancel, checkpoint_config(args), mode).await {
+    match run_discovery_reporting_progress(opts, cancel, mode).await {
         Ok(summary) => {
             print_complete(FLAG_DRIVEN_LABEL, &summary, mode);
             print_runtime_hints(&summary, mode);
@@ -852,8 +851,8 @@ async fn run_from_file(
             continue;
         }
 
-        // Unresolved: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
-        let plan = match build_scenario_plan(&label, &cfg, args) {
+        let opts = run_options(&cfg, args);
+        let plan = match opts.plan(label.clone(), effective_knobs(&cfg, args)).await {
             Ok(plan) => plan,
             Err(err) => {
                 tally.failed += 1;
@@ -864,9 +863,7 @@ async fn run_from_file(
         print_start(&plan, cfg.targets.len(), mode);
         any_scenario_wrote_to_stdout |= writes_to_stdout(cfg.base.sink.as_ref());
 
-        match run_discovery_reporting_progress(&cfg, cancel.clone(), checkpoint_config(args), mode)
-            .await
-        {
+        match run_discovery_reporting_progress(opts, cancel.clone(), mode).await {
             Ok(summary) => {
                 print_complete(&label, &summary, mode);
                 print_runtime_hints(&summary, mode);
@@ -2435,10 +2432,13 @@ mod tests {
 
         let mut legacy = String::new();
         write_dry_run_header(&mut legacy, 1);
-        let probes = write_scenario_plan(&mut legacy, "discovery", &scenario, &resolution, &a);
+        let probes =
+            write_scenario_plan(&mut legacy, "discovery", &scenario, &resolution, &a).await;
         write_totals(&mut legacy, 1, probes);
 
-        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a).expect("plan");
+        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a)
+            .await
+            .expect("plan");
         assert_eq!(render_dry_run_text(&[plan]), legacy);
     }
 
@@ -2449,7 +2449,9 @@ mod tests {
         let scenario = build_scenario(&a).expect("scenario");
         let resolver = HickoryResolver::from_system().expect("resolver");
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
-        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a).expect("plan");
+        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a)
+            .await
+            .expect("plan");
 
         let json = render_dry_run_json(&[plan]).expect("json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -2466,8 +2468,12 @@ mod tests {
         let a = args(&["127.0.0.1"], &[22]);
         let scenario = build_scenario(&a).expect("scenario");
         let resolution = resolution_of(&scenario).await;
-        let first = build_resolved_plan("one", &scenario, &resolution, &a).expect("plan");
-        let second = build_resolved_plan("two", &scenario, &resolution, &a).expect("plan");
+        let first = build_resolved_plan("one", &scenario, &resolution, &a)
+            .await
+            .expect("plan");
+        let second = build_resolved_plan("two", &scenario, &resolution, &a)
+            .await
+            .expect("plan");
 
         let json = render_dry_run_json(&[first, second]).expect("json");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -2482,7 +2488,9 @@ mod tests {
         let a = args(&["127.0.0.1"], &[22]);
         let scenario = build_scenario(&a).expect("scenario");
         let resolution = resolution_of(&scenario).await;
-        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a).expect("plan");
+        let plan = build_resolved_plan("discovery", &scenario, &resolution, &a)
+            .await
+            .expect("plan");
         let json = render_dry_run_json(&[plan]).expect("json");
         assert!(!json.contains("[dry-run]"), "{json}");
         assert!(!json.contains("total probes:"), "{json}");
@@ -2497,7 +2505,7 @@ mod tests {
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
         write_dry_run_header(&mut out, 1);
-        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolution, &a);
+        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolution, &a).await;
         write_totals(&mut out, 1, probes);
         assert_eq!(probes, 1, "1 IP × 1 prober = 1 probe");
         assert!(out.contains("[dry-run] would run 1 scenario"), "{out}");
@@ -2525,7 +2533,7 @@ mod tests {
         let resolver = HickoryResolver::from_system().expect("resolver");
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a).await;
         assert!(out.contains("rate: 25/sec"), "{out}");
     }
 
@@ -2537,7 +2545,7 @@ mod tests {
         let resolver = HickoryResolver::from_system().expect("resolver");
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a).await;
         assert!(out.contains("10.0.0.1"), "{out}");
         assert!(out.contains("10.0.0.6"), "{out}");
         assert!(!out.contains("..."), "no ellipsis under cutoff: {out}");
@@ -2551,7 +2559,7 @@ mod tests {
         let resolver = HickoryResolver::from_system().expect("resolver");
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
+        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolution, &a).await;
         assert_eq!(probes, 254, "1 prober × 254 hosts in /24");
         assert!(out.contains("..."), "ellipsis expected: {out}");
         assert!(out.contains("(254 addresses)"), "count expected: {out}");
@@ -2565,7 +2573,7 @@ mod tests {
         let resolver = HickoryResolver::from_system().expect("resolver");
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a).await;
         assert!(
             out.contains("<error:"),
             "expected inline error for failing DNS target: {out}"
@@ -2666,7 +2674,7 @@ mod tests {
         let start = std::time::Instant::now();
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
+        write_scenario_plan(&mut out, "s", &scenario, &resolution, &a).await;
         let elapsed = start.elapsed();
         assert!(
             elapsed.as_secs() < 2,
@@ -2747,7 +2755,7 @@ mod tests {
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
         write_dry_run_header(&mut out, 1);
-        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolution, &a);
+        let probes = write_scenario_plan(&mut out, "discovery", &scenario, &resolution, &a).await;
         write_totals(&mut out, 1, probes);
         assert!(
             out.contains("total probes: 1"),
@@ -2833,7 +2841,7 @@ scenarios:
         let resolver = HickoryResolver::from_system().expect("resolver");
         let resolution = resolve_scenario(&resolver, &scenario.targets).await;
         let mut out = String::new();
-        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolution, &a);
+        let probes = write_scenario_plan(&mut out, "s", &scenario, &resolution, &a).await;
         // /29 usable hosts: 10.0.0.1..10.0.0.6 (6), plus the explicit 10.0.0.1 the scan probes again.
         assert_eq!(
             probes, 7,
@@ -2859,17 +2867,20 @@ scenarios:
     }
 
     fn ports_of(scenario: &DiscoverScenarioConfig, wanted: ProbeKind) -> Vec<u16> {
-        let plan = DiscoveryPlan::new(
-            "s".to_string(),
-            scenario,
-            PlanKnobs {
-                max_concurrent: 1,
-                probe_rate: None,
-                retries: 0,
-                timeout_ms: 1,
-            },
-        )
-        .expect("plan");
+        let plan = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(RunOptions::new(scenario).plan(
+                "s".to_string(),
+                PlanKnobs {
+                    max_concurrent: 1,
+                    probe_rate: None,
+                    retries: 0,
+                    timeout_ms: 1,
+                },
+            ))
+            .expect("plan");
         let rendered = plan
             .probers
             .iter()

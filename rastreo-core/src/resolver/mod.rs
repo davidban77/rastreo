@@ -12,6 +12,19 @@ pub use guarded::GuardedResolver;
 
 pub const DEFAULT_HOST_LIMIT: usize = 65_536;
 
+/// Addresses kept per target for reporting. A plan holds this many at most, whatever the spec covers.
+pub const SAMPLED_ADDRESSES: usize = 6;
+
+/// What a target contributes to the scan: how many addresses the stream yields for it, and the first few of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[non_exhaustive]
+pub struct ResolvedAddresses {
+    /// Addresses the scan would probe for this target.
+    pub total: usize,
+    /// The first of those addresses, at most six of them — a plan never carries a target's whole address space.
+    pub sample: Vec<IpAddr>,
+}
+
 #[async_trait::async_trait]
 pub trait Resolver: Send + Sync {
     async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError>;
@@ -87,11 +100,12 @@ impl ResolvedPlan {
             .fold(0usize, |sum, spec| sum.saturating_add(spec.hosts()))
     }
 
-    /// Each input target paired with the addresses the stream yields for it, in input order.
-    pub(crate) fn per_target_addresses(&self) -> Vec<(Target, Vec<IpAddr>)> {
+    /// Each input target paired with what it contributes to the scan, in input order. Bounded by
+    /// the spec count: a plan is built for a `/8` at the same cost as for a single address.
+    pub(crate) fn per_target_samples(&self) -> Vec<(Target, ResolvedAddresses)> {
         self.specs
             .iter()
-            .map(|spec| (spec.original().clone(), spec.addresses()))
+            .map(|spec| (spec.original().clone(), spec.sample()))
             .collect()
     }
 
@@ -232,10 +246,18 @@ impl PlannedSpec {
         }
     }
 
-    fn addresses(&self) -> Vec<IpAddr> {
+    fn sample(&self) -> ResolvedAddresses {
         match self {
-            PlannedSpec::Block { first, last, .. } => block_addresses(*first, *last).collect(),
-            PlannedSpec::Resolved { ips, .. } => ips.clone(),
+            PlannedSpec::Block { first, last, .. } => ResolvedAddresses {
+                total: block_span(*first, *last),
+                sample: block_addresses(*first, *last)
+                    .take(SAMPLED_ADDRESSES)
+                    .collect(),
+            },
+            PlannedSpec::Resolved { ips, .. } => ResolvedAddresses {
+                total: ips.len(),
+                sample: ips.iter().take(SAMPLED_ADDRESSES).copied().collect(),
+            },
         }
     }
 
@@ -458,11 +480,11 @@ fn uncovered_point(lo: u128, hi: u128, ivals: &mut [(u128, u128)]) -> Option<u12
     Some(cursor).filter(|c| *c <= hi)
 }
 
-/// A scenario's targets put through [`Resolver::plan`] — the scan's own resolution — with each
-/// target's addresses kept alongside for reporting.
+/// A scenario's targets put through [`Resolver::plan`] — the scan's own resolution — with a bounded
+/// per-target sample kept alongside for reporting.
 #[derive(Debug)]
 pub struct ScenarioResolution {
-    entries: Vec<(Target, Result<Vec<IpAddr>, RastreoError>)>,
+    entries: Vec<(Target, Result<ResolvedAddresses, RastreoError>)>,
     plan: Result<ResolvedPlan, RastreoError>,
 }
 
@@ -477,7 +499,7 @@ impl ScenarioResolution {
         self.plan.as_ref().err()
     }
 
-    pub(crate) fn entries(&self) -> &[(Target, Result<Vec<IpAddr>, RastreoError>)] {
+    pub(crate) fn entries(&self) -> &[(Target, Result<ResolvedAddresses, RastreoError>)] {
         &self.entries
     }
 }
@@ -489,9 +511,9 @@ pub async fn resolve_scenario(resolver: &dyn Resolver, targets: &[Target]) -> Sc
     match resolver.plan(targets).await {
         Ok(plan) => ScenarioResolution {
             entries: plan
-                .per_target_addresses()
+                .per_target_samples()
                 .into_iter()
-                .map(|(target, ips)| (target, Ok(ips)))
+                .map(|(target, sample)| (target, Ok(sample)))
                 .collect(),
             plan: Ok(plan),
         },
@@ -501,7 +523,13 @@ pub async fn resolve_scenario(resolver: &dyn Resolver, targets: &[Target]) -> Sc
                 let result = resolver
                     .plan(std::slice::from_ref(target))
                     .await
-                    .map(|planned| planned.into_stream().map(|rt| rt.ip).collect());
+                    .map(|planned| {
+                        planned
+                            .per_target_samples()
+                            .into_iter()
+                            .next()
+                            .map_or_else(ResolvedAddresses::default, |(_, sample)| sample)
+                    });
                 entries.push((target.clone(), result));
             }
             ScenarioResolution {
@@ -889,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn per_target_addresses_concatenate_to_what_the_stream_yields() {
+    fn per_target_samples_concatenate_to_what_the_stream_yields() {
         let r = resolver();
         let targets = vec![
             Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
@@ -901,15 +929,42 @@ mod tests {
             Target::Cidr("2001:db8::/126".parse().expect("cidr")),
         ];
         let plan = rt().block_on(r.plan(&targets)).expect("plan");
-        let per_target = plan.per_target_addresses();
+        let per_target = plan.per_target_samples();
         let attributed: Vec<IpAddr> = per_target
             .iter()
-            .flat_map(|(_, ips)| ips.iter().copied())
+            .flat_map(|(_, addresses)| addresses.sample.iter().copied())
             .collect();
         let streamed: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
-        assert_eq!(attributed, streamed);
+        assert_eq!(
+            attributed, streamed,
+            "every spec here is under the sample cap"
+        );
         let listed: Vec<Target> = per_target.into_iter().map(|(target, _)| target).collect();
         assert_eq!(listed, targets);
+    }
+
+    #[test]
+    fn a_sample_counts_every_address_the_spec_yields_and_holds_only_the_first_few() {
+        let r = resolver();
+        let targets = vec![Target::Cidr("10.0.0.0/24".parse().expect("cidr"))];
+        let plan = rt().block_on(r.plan(&targets)).expect("plan");
+        let (_, addresses) = plan
+            .per_target_samples()
+            .pop()
+            .expect("one spec, one sample");
+        assert_eq!(addresses.total, 254);
+        assert_eq!(addresses.sample.len(), SAMPLED_ADDRESSES);
+        assert_eq!(addresses.sample[0], ipv4(10, 0, 0, 1));
+        assert_eq!(addresses.sample[SAMPLED_ADDRESSES - 1], ipv4(10, 0, 0, 6));
+    }
+
+    #[test]
+    fn the_sample_size_is_the_count_the_published_schema_and_the_docs_spell_out() {
+        assert_eq!(
+            SAMPLED_ADDRESSES, 6,
+            "`sample`'s doc comment ships in discovery-plan-v2.json and reads `at most six`; \
+             cli.md and deploy/server.md say six too"
+        );
     }
 
     #[test]
@@ -937,16 +992,16 @@ mod tests {
             Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
         ];
         let resolution = rt().block_on(resolve_scenario(&r, &targets));
-        let expanded: Vec<&Vec<IpAddr>> = resolution
+        let expanded: Vec<&[IpAddr]> = resolution
             .entries()
             .iter()
-            .map(|(_, result)| result.as_ref().expect("resolves"))
+            .map(|(_, result)| result.as_ref().expect("resolves").sample.as_slice())
             .collect();
         assert_eq!(
             expanded,
             vec![
-                &vec![ipv4(10, 0, 0, 42)],
-                &vec![ipv4(10, 0, 0, 1), ipv4(10, 0, 0, 2)],
+                [ipv4(10, 0, 0, 42)].as_slice(),
+                [ipv4(10, 0, 0, 1), ipv4(10, 0, 0, 2)].as_slice(),
             ]
         );
     }
@@ -1035,6 +1090,24 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ScenarioResolution>();
         assert_send_sync::<ResolvedPlan>();
+        assert_send_sync::<ResolvedAddresses>();
+    }
+
+    #[test]
+    fn a_refused_set_samples_the_targets_it_attributes_rather_than_expanding_them() {
+        let r = resolver().with_limit(1024);
+        let targets = vec![
+            Target::Cidr("10.0.0.0/22".parse().expect("cidr")),
+            Target::Cidr("10.1.0.0/16".parse().expect("cidr")),
+        ];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        assert!(resolution.refusal().is_some());
+        let attributed = resolution.entries()[0]
+            .1
+            .as_ref()
+            .expect("a target under the limit is attributed");
+        assert_eq!(attributed.total, 1022);
+        assert_eq!(attributed.sample.len(), SAMPLED_ADDRESSES);
     }
 
     #[test]

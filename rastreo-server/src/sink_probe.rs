@@ -38,7 +38,7 @@ pub async fn spawn_sink_probe(
                 config.probe_timeout,
             ));
             let sink: SharedSink = Arc::new(Mutex::new(sink));
-            slot.attach(Arc::clone(&sink), sink_type);
+            slot.attach(Arc::clone(&sink));
             log_sink_attached(path, sink_type, failures.attempts);
             run_probe(&sink, &reachability, &state.metrics, config.probe_timeout).await;
             reachability
@@ -233,8 +233,8 @@ async fn probe_tick(
     let sink = match slot.get() {
         Some(sink) => sink,
         None => match retry_construction(config, reachability, metrics, failures).await {
-            Some((sink, kind)) => {
-                slot.attach(Arc::clone(&sink), kind);
+            Some(sink) => {
+                slot.attach(Arc::clone(&sink));
                 sink
             }
             None => return,
@@ -266,14 +266,14 @@ async fn retry_construction(
     reachability: &Arc<SinkReachability>,
     metrics: &Arc<Metrics>,
     failures: &mut ConstructionFailures,
-) -> Option<(SharedSink, SinkType)> {
+) -> Option<SharedSink> {
     let path = config.config_path.as_ref()?;
     match load_and_construct_sink(path, config.probe_timeout).await {
         Ok(sink) => {
             let sink_type = sink.kind();
             reachability.set_sink_type(sink_type);
             log_sink_attached(path, sink_type, failures.attempts);
-            Some((Arc::new(Mutex::new(sink)), sink_type))
+            Some(Arc::new(Mutex::new(sink)))
         }
         Err(ConstructError { hint, err }) => {
             let detail = format!("{err:#}");
@@ -531,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn probe_tick_stamps_the_liveness_tick_when_the_sink_lock_is_held() {
         let sink = shared(Box::new(AlwaysOk));
-        let slot = SinkSlot::attached(Arc::clone(&sink), SinkType::Stdout);
+        let slot = SinkSlot::attached(Arc::clone(&sink));
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Stdout,
             Duration::from_millis(50),
@@ -591,7 +591,7 @@ mod tests {
         let sink = shared(Box::new(HangingProbe {
             started: Arc::clone(&started),
         }));
-        let slot = SinkSlot::attached(Arc::clone(&sink), SinkType::Nats);
+        let slot = SinkSlot::attached(Arc::clone(&sink));
         let reach = Arc::new(SinkReachability::configured(
             SinkType::Nats,
             probe_interval,

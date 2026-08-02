@@ -569,7 +569,7 @@ rastreo discover --file @lab --dry-run --format json
 The output is a JSON array with one object per scenario. Each object carries these fields:
 
 - `scenario` — the scenario name. This is the plain name, the same value the HTTP server reports for a dry-run scan.
-- `targets` — one entry per configured target. Each has the original `target` string and a `resolution` that is either `{"resolved": [ip, ...]}` or `{"error": "..."}`.
+- `targets` — one entry per configured target. Each has the original `target` string and a `resolution` that is either `{"resolved": {"total": N, "sample": [ip, ...]}}` or `{"error": "..."}`. `total` is every address the scan would probe for that target; `sample` holds the first six of them, so a plan for a `/16` is the same size as a plan for a single host.
 - `probers` — the probers that would run, with their ports.
 - `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
 - `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the scenario added.
@@ -592,10 +592,13 @@ The `lab` scenario behind the plan below declares `sink: {type: stdout}`, one `/
       {
         "target": "10.0.0.0/30",
         "resolution": {
-          "resolved": [
-            "10.0.0.1",
-            "10.0.0.2"
-          ]
+          "resolved": {
+            "total": 2,
+            "sample": [
+              "10.0.0.1",
+              "10.0.0.2"
+            ]
+          }
         }
       }
     ],
@@ -616,6 +619,8 @@ The `lab` scenario behind the plan below declares `sink: {type: stdout}`, one `/
 ```
 
 A `--file` with several scenarios produces one array element per scenario, in file order. When a target fails to resolve, its `resolution` holds an `error` string instead of the address list. Every other target still appears. The exit code follows the text plan's rule: `1` when any target fails to resolve, `0` when they all resolve. The plan goes to stdout and the error message to stderr, so `jq` still reads a plan that exits `1`.
+
+The plan validates against [`discovery-plan-v2.json`](../reference/schema/discovery-plan.md). Before `v2`, `resolution.resolved` was a bare array of addresses, so a `jq` expression written against the old shape — `.[].targets[].resolution.resolved[]` — now reads `.[].targets[].resolution.resolved.sample[]`.
 
 ## Override precedence in YAML-driven mode
 

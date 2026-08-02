@@ -1,0 +1,167 @@
+{
+  "$defs": {
+    "PlannedTarget": {
+      "properties": {
+        "resolution": {
+          "$ref": "#/$defs/TargetResolution",
+          "description": "What the target contributes to the scan, or the resolution error."
+        },
+        "target": {
+          "description": "The target as written in the scenario.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "resolution"
+      ],
+      "type": "object"
+    },
+    "ResolvedAddresses": {
+      "description": "What a target contributes to the scan: how many addresses the stream yields for it, and the first few of them.",
+      "properties": {
+        "sample": {
+          "description": "The first of those addresses, at most six of them — a plan never carries a target's whole address space.",
+          "items": {
+            "format": "ip",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "total": {
+          "description": "Addresses the scan would probe for this target.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "sample"
+      ],
+      "type": "object"
+    },
+    "TargetResolution": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "resolved": {
+              "$ref": "#/$defs/ResolvedAddresses"
+            }
+          },
+          "required": [
+            "resolved"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://davidban77.github.io/rastreo/schemas/discovery-plan-v2.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Structured plan of a single discovery scenario — what a dry-run would probe, without executing it.",
+  "properties": {
+    "classifier": {
+      "description": "Human-readable summary of the resolved classifier.",
+      "type": "string"
+    },
+    "encoder": {
+      "description": "Wire format records leave in: `ndjson` or `table`.",
+      "type": "string"
+    },
+    "fuser": {
+      "description": "Human-readable summary of the resolved fuser chain, outermost layer first.",
+      "type": "string"
+    },
+    "max_concurrent": {
+      "description": "Effective in-flight probe cap for this run.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "probe_rate": {
+      "description": "Effective probes-per-second cap; `null` when unlimited.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "probers": {
+      "description": "Human-readable summary of each configured prober.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "refusal": {
+      "description": "Error the scan would abort on before its first probe; absent when every target resolved.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "retries": {
+      "description": "Effective retransmit attempts for connectionless probers.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "scenario": {
+      "description": "Name of the scenario this plan describes.",
+      "type": "string"
+    },
+    "sink": {
+      "description": "Human-readable summary of where records would go; several destinations, comma-separated, when the run fans out.",
+      "type": "string"
+    },
+    "targets": {
+      "description": "Each configured target with what it contributes to the scan, or its resolution error.",
+      "items": {
+        "$ref": "#/$defs/PlannedTarget"
+      },
+      "type": "array"
+    },
+    "timeout_ms": {
+      "description": "Effective per-probe timeout in milliseconds.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "total_probes": {
+      "description": "Total probes the scan would run: every address it would probe times probers, `0` when it would abort first.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "scenario",
+    "targets",
+    "probers",
+    "fuser",
+    "classifier",
+    "encoder",
+    "sink",
+    "max_concurrent",
+    "retries",
+    "timeout_ms",
+    "total_probes"
+  ],
+  "title": "DiscoveryPlan",
+  "type": "object"
+}

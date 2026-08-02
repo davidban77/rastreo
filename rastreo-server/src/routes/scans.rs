@@ -8,8 +8,8 @@ use axum::Json;
 use rastreo_core::config::{parse_discover_scenario_json, DiscoverScenarioConfig};
 use rastreo_core::{
     hint_for_error_kind, resolve_scenario, run_discovery, DeviceRecord, DiscoveryPlan,
-    DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink, PlanKnobs, RunOptions, Sink,
-    SinkType, TeeChild, TeeSink,
+    DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink, MemorySinkHandle, PlanKnobs,
+    RunOptions, Sink, TeeChild, TeeSink,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -165,7 +165,15 @@ async fn dry_run_plan(
     disclosure: ErrorDisclosure,
 ) -> Result<DiscoveryPlan, AppError> {
     let resolution = resolve_scenario(state.resolver.as_ref(), &scenario.targets).await;
-    let knobs = PlanKnobs {
+    let stages = scan_options(state, scenario, ScanSink::build(state).sink)
+        .plan(label, knobs_for(scenario))
+        .await
+        .map_err(|err| AppError::from_rastreo(err, disclosure))?;
+    Ok(stages.resolve(&resolution))
+}
+
+fn knobs_for(scenario: &DiscoverScenarioConfig) -> PlanKnobs {
+    PlanKnobs {
         max_concurrent: scenario
             .base
             .max_concurrent
@@ -174,16 +182,38 @@ async fn dry_run_plan(
         probe_rate: scenario.base.probe_rate,
         retries: scenario.base.retries.unwrap_or(0),
         timeout_ms: scenario.base.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
-    };
-    DiscoveryPlan::resolved_into(label, scenario, &resolution, knobs, &destinations(state))
-        .map_err(|err| AppError::from_rastreo(err, disclosure))
+    }
 }
 
-// The tee `run_scan` builds: the response-body capture first, then the server-configured sink when one is attached.
-fn destinations(state: &AppState) -> Vec<SinkType> {
-    let mut destinations = vec![SinkType::Memory];
-    destinations.extend(state.sink_kind());
-    destinations
+fn scan_options<'a>(
+    state: &AppState,
+    scenario: &'a DiscoverScenarioConfig,
+    sink: Box<dyn Sink>,
+) -> RunOptions<'a> {
+    RunOptions::new(scenario)
+        .resolver(state.resolver.clone())
+        .sink(sink)
+}
+
+struct ScanSink {
+    sink: Box<dyn Sink>,
+    records: MemorySinkHandle,
+}
+
+impl ScanSink {
+    /// The response-body capture first, so it holds every record even if a later destination aborts mid-scan.
+    fn build(state: &AppState) -> Self {
+        let memory = MemorySink::with_max_bytes(state.max_result_bytes);
+        let records = memory.handle();
+        let mut children: Vec<TeeChild> = vec![TeeChild::Owned(Box::new(memory))];
+        if let Some(server_sink) = state.sink() {
+            children.push(TeeChild::Shared(server_sink));
+        }
+        Self {
+            sink: Box::new(TeeSink::new(children)),
+            records,
+        }
+    }
 }
 
 async fn run_scan(
@@ -202,27 +232,17 @@ async fn run_scan(
         ));
     };
 
-    let memory_sink = MemorySink::with_max_bytes(state.max_result_bytes);
-    let handle = memory_sink.handle();
-
-    // Memory child first so the response body captures every record even if the shared sink aborts mid-scan.
-    let mut children: Vec<TeeChild> = vec![TeeChild::Owned(Box::new(memory_sink))];
-    if let Some(server_sink) = state.sink() {
-        children.push(TeeChild::Shared(server_sink));
-    }
-    let pipeline_sink: Box<dyn Sink> = Box::new(TeeSink::new(children));
+    let ScanSink {
+        sink: pipeline_sink,
+        records: handle,
+    } = ScanSink::build(&state);
 
     let mut outcome_guard =
         ScanOutcomeGuard::new(Arc::clone(&state.metrics), start, scenario_label.clone());
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
     let progress_task = spawn_progress_logger(progress_rx, scenario_label.clone());
-    let summary_result = run_discovery(
-        RunOptions::new(&scenario)
-            .resolver(state.resolver.clone())
-            .sink(pipeline_sink)
-            .progress(progress_tx),
-    )
-    .await;
+    let summary_result =
+        run_discovery(scan_options(&state, &scenario, pipeline_sink).progress(progress_tx)).await;
     progress_task.abort();
 
     match summary_result {
@@ -574,7 +594,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -651,7 +671,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -765,7 +785,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -1184,7 +1204,8 @@ mod tests {
         assert_eq!(plan.total_probes, 1);
         assert!(matches!(
             &plan.targets[0].resolution,
-            TargetResolution::Resolved(ips) if ips.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST))
+            TargetResolution::Resolved(addresses)
+                if addresses.sample.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST))
         ));
     }
 
@@ -1209,7 +1230,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = base.with_sink(Some((Arc::clone(&shared), SinkType::File)), reach);
+        let state = base.with_sink(Some(Arc::clone(&shared)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -1237,7 +1258,7 @@ mod tests {
         );
         assert!(value["probers"].is_array());
         assert_eq!(
-            value["targets"][0]["resolution"]["resolved"][0],
+            value["targets"][0]["resolution"]["resolved"]["sample"][0],
             "127.0.0.1"
         );
         assert!(
@@ -1372,6 +1393,7 @@ mod tests {
     async fn create_scan_dry_run_plan_names_the_destinations_the_scan_writes_to() {
         use crate::state::{SharedSink, SinkReachability};
         use rastreo_core::error::RastreoError;
+        use rastreo_core::SinkType;
         use std::sync::Mutex as StdMutex;
 
         #[derive(Default)]
@@ -1415,8 +1437,7 @@ mod tests {
             Duration::from_secs(5),
         ));
         reach.record_success();
-        let state = state_with_system_resolver()
-            .with_sink(Some((Arc::clone(&shared), SinkType::Kafka)), reach);
+        let state = state_with_system_resolver().with_sink(Some(Arc::clone(&shared)), reach);
 
         let mut s = scenario(
             vec![Target::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))],
@@ -1440,6 +1461,54 @@ mod tests {
             landed.0.lock().unwrap_or_else(|e| e.into_inner()).len(),
             1,
             "`kafka` is the server-configured sink the plan named second"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_response_body_capture_is_written_before_a_destination_that_can_fail() {
+        use crate::state::{SharedSink, SinkReachability};
+        use rastreo_core::error::RastreoError;
+        use rastreo_core::{SinkErrorClass, SinkType};
+
+        struct RefusingSink;
+
+        #[async_trait::async_trait]
+        impl Sink for RefusingSink {
+            async fn write(&mut self, _data: &[u8]) -> Result<(), RastreoError> {
+                Err(rastreo_core::SinkError::new(
+                    SinkErrorClass::WriteFailure,
+                    std::io::Error::other("configured sink refuses every write"),
+                )
+                .into())
+            }
+            async fn flush(&mut self) -> Result<(), RastreoError> {
+                Ok(())
+            }
+            fn last_write_delivered(&self) -> bool {
+                false
+            }
+            fn kind(&self) -> SinkType {
+                SinkType::File
+            }
+        }
+
+        let shared: SharedSink = Arc::new(tokio::sync::Mutex::new(Box::new(RefusingSink)));
+        let reach = Arc::new(SinkReachability::configured(
+            SinkType::File,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        ));
+        let state = state_with_system_resolver().with_sink(Some(shared), reach);
+
+        let scan = ScanSink::build(&state);
+        let mut sink = scan.sink;
+        sink.write(b"{\"device\":1}\n")
+            .await
+            .expect_err("the configured sink refuses, so the tee reports the failure");
+        assert_eq!(
+            scan.records.bytes(),
+            b"{\"device\":1}\n",
+            "a destination that can fail must never be written ahead of the response-body capture"
         );
     }
 

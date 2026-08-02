@@ -60,16 +60,17 @@ async fn rehearse_then_scan(
 ) {
     let scenario = scenario(targets);
     let resolution = resolve_scenario(resolver.as_ref(), &scenario.targets).await;
-    let plan = DiscoveryPlan::resolved("agreement".to_string(), &scenario, &resolution, knobs())
-        .expect("the scenario is valid, so it has a plan");
     let sink = MemorySink::new();
     let handle = sink.handle();
-    let summary = run_discovery(
-        RunOptions::new(&scenario)
-            .resolver(resolver)
-            .sink(Box::new(sink) as Box<dyn Sink>),
-    )
-    .await;
+    let opts = RunOptions::new(&scenario)
+        .resolver(resolver)
+        .sink(Box::new(sink) as Box<dyn Sink>);
+    let plan = opts
+        .plan("agreement".to_string(), knobs())
+        .await
+        .expect("the scenario is valid, so it has a plan")
+        .resolve(&resolution);
+    let summary = run_discovery(opts).await;
     (plan, summary, handle)
 }
 
@@ -150,24 +151,19 @@ async fn a_plan_for_an_injected_sink_names_the_destination_the_scan_writes_to() 
     let resolver = system_resolver(None);
     let resolution = resolve_scenario(resolver.as_ref(), &scenario.targets).await;
 
-    let plan = DiscoveryPlan::resolved_into(
-        "agreement".to_string(),
-        &scenario,
-        &resolution,
-        knobs(),
-        &[SinkType::Memory],
-    )
-    .expect("the scenario is valid, so it has a plan");
-
     let sink = MemorySink::new();
     let handle = sink.handle();
-    let summary = run_discovery(
-        RunOptions::new(&scenario)
-            .resolver(resolver)
-            .sink(Box::new(sink) as Box<dyn Sink>),
-    )
-    .await
-    .expect("the target resolves, so the scan runs");
+    let opts = RunOptions::new(&scenario)
+        .resolver(resolver)
+        .sink(Box::new(sink) as Box<dyn Sink>);
+    let plan = opts
+        .plan("agreement".to_string(), knobs())
+        .await
+        .expect("the scenario is valid, so it has a plan")
+        .resolve(&resolution);
+    let summary = run_discovery(opts)
+        .await
+        .expect("the target resolves, so the scan runs");
 
     assert_eq!(
         plan.sink,

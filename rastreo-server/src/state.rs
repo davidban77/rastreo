@@ -801,31 +801,21 @@ pub type SharedSink = Arc<tokio::sync::Mutex<Box<dyn Sink>>>;
 /// Empty until the sink builds, then attached for the process lifetime; shared by every clone of
 /// [`AppState`], so a sink that builds late is visible to requests already holding a state clone.
 #[derive(Clone, Default)]
-pub(crate) struct SinkSlot(Arc<OnceLock<AttachedSink>>);
-
-// The kind travels with the handle, so a destination can never be attached without a name for it.
-struct AttachedSink {
-    sink: SharedSink,
-    kind: SinkType,
-}
+pub(crate) struct SinkSlot(Arc<OnceLock<SharedSink>>);
 
 impl SinkSlot {
-    pub(crate) fn attached(sink: SharedSink, kind: SinkType) -> Self {
+    pub(crate) fn attached(sink: SharedSink) -> Self {
         let slot = Self::default();
-        slot.attach(sink, kind);
+        slot.attach(sink);
         slot
     }
 
     pub(crate) fn get(&self) -> Option<SharedSink> {
-        self.0.get().map(|attached| Arc::clone(&attached.sink))
+        self.0.get().map(Arc::clone)
     }
 
-    pub(crate) fn kind(&self) -> Option<SinkType> {
-        self.0.get().map(|attached| attached.kind)
-    }
-
-    pub(crate) fn attach(&self, sink: SharedSink, kind: SinkType) {
-        let _ = self.0.set(AttachedSink { sink, kind });
+    pub(crate) fn attach(&self, sink: SharedSink) {
+        let _ = self.0.set(sink);
     }
 }
 
@@ -910,18 +900,9 @@ impl AppState {
         self.sink.get()
     }
 
-    /// Kind of the server-configured sink, or `None` while it has not built yet.
-    pub fn sink_kind(&self) -> Option<SinkType> {
-        self.sink.kind()
-    }
-
-    pub fn with_sink(
-        self,
-        sink: Option<(SharedSink, SinkType)>,
-        reachability: Arc<SinkReachability>,
-    ) -> Self {
+    pub fn with_sink(self, sink: Option<SharedSink>, reachability: Arc<SinkReachability>) -> Self {
         let slot = match sink {
-            Some((sink, kind)) => SinkSlot::attached(sink, kind),
+            Some(sink) => SinkSlot::attached(sink),
             None => SinkSlot::default(),
         };
         self.with_sink_slot(slot, reachability)
@@ -1938,10 +1919,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(5),
         ));
-        let state = base.with_sink(
-            Some((Arc::clone(&sink), SinkType::Memory)),
-            Arc::clone(&reach),
-        );
+        let state = base.with_sink(Some(Arc::clone(&sink)), Arc::clone(&reach));
         let stored = state.sink().expect("sink stored");
         assert!(Arc::ptr_eq(&stored, &sink));
         assert!(Arc::ptr_eq(&state.sink_reachability, &reach));
@@ -1969,7 +1947,7 @@ mod tests {
         let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(
             Box::new(MemorySink::new()) as Box<dyn Sink>
         ));
-        slot.attach(Arc::clone(&sink), SinkType::Memory);
+        slot.attach(Arc::clone(&sink));
 
         let seen = observer.get().expect("clone sees the late attach");
         assert!(Arc::ptr_eq(&seen, &sink));
@@ -1984,8 +1962,8 @@ mod tests {
         let second: SharedSink = Arc::new(tokio::sync::Mutex::new(
             Box::new(MemorySink::new()) as Box<dyn Sink>
         ));
-        let slot = SinkSlot::attached(Arc::clone(&first), SinkType::Memory);
-        slot.attach(Arc::clone(&second), SinkType::Memory);
+        let slot = SinkSlot::attached(Arc::clone(&first));
+        slot.attach(Arc::clone(&second));
         assert!(Arc::ptr_eq(&slot.get().expect("attached"), &first));
     }
 

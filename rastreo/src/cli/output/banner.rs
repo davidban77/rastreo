@@ -1,4 +1,4 @@
-use rastreo_core::{DiscoveryPlan, DiscoverySummary};
+use rastreo_core::{DiscoverySummary, ScenarioPlan};
 
 use super::humanize;
 use super::theme::{self, glyphs};
@@ -6,7 +6,7 @@ use super::OutputMode;
 
 const DETAIL_LABEL_WIDTH: usize = 14;
 
-pub(crate) fn print_start(plan: &DiscoveryPlan, target_specs: usize, mode: OutputMode) {
+pub(crate) fn print_start(plan: &ScenarioPlan, target_specs: usize, mode: OutputMode) {
     if !mode.prints_chrome() {
         return;
     }
@@ -130,7 +130,7 @@ fn segment(label: &str, value: impl std::fmt::Display) -> String {
     format!("{} {}", theme::label(label), theme::value(value))
 }
 
-fn start_line(plan: &DiscoveryPlan, target_specs: usize) -> String {
+fn start_line(plan: &ScenarioPlan, target_specs: usize) -> String {
     let probers = if plan.probers.is_empty() {
         "<none>".to_string()
     } else {
@@ -296,13 +296,22 @@ mod tests {
     use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
     use rastreo_core::{
         PlanKnobs, ProbeErrorKind, ProbeFault, ProbeKind, ProbeKindSummary, ProberConfig,
-        SinkConfig, SinkErrorClass, SinkType, Target,
+        RunOptions, SinkConfig, SinkErrorClass, SinkType, Target,
     };
     use std::time::Duration;
 
     use super::super::theme::strip_ansi;
 
-    fn plan(name: &str, ports: Vec<u16>, targets: usize) -> DiscoveryPlan {
+    fn stage_plan(name: &str, config: &DiscoverScenarioConfig, knobs: PlanKnobs) -> ScenarioPlan {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(RunOptions::new(config).plan(name.to_string(), knobs))
+            .expect("plan")
+    }
+
+    fn plan(name: &str, ports: Vec<u16>, targets: usize) -> ScenarioPlan {
         let mut base = BaseProbeConfig::new();
         base.sink = Some(SinkConfig::Stdout);
         let targets = (0..targets)
@@ -310,8 +319,8 @@ mod tests {
             .collect();
         let config =
             DiscoverScenarioConfig::new(base, targets, vec![ProberConfig::TcpConnect { ports }]);
-        DiscoveryPlan::new(
-            name.to_string(),
+        stage_plan(
+            name,
             &config,
             PlanKnobs {
                 max_concurrent: 64,
@@ -320,7 +329,6 @@ mod tests {
                 timeout_ms: 1000,
             },
         )
-        .expect("plan")
     }
 
     fn summary() -> DiscoverySummary {
@@ -388,8 +396,8 @@ mod tests {
             vec![Target::Cidr("10.0.0.0/24".parse().expect("cidr"))],
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let plan = DiscoveryPlan::new(
-            "discover".into(),
+        let plan = stage_plan(
+            "discover",
             &config,
             PlanKnobs {
                 max_concurrent: 8,
@@ -397,8 +405,7 @@ mod tests {
                 retries: 0,
                 timeout_ms: 500,
             },
-        )
-        .expect("plan");
+        );
         let line = strip_ansi(&start_line(&plan, 1));
         assert!(line.contains("targets: 1"), "{line}");
     }
@@ -626,32 +633,29 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn start_line_ignores_the_resolution_dependent_plan_fields() {
+    #[test]
+    fn the_start_banner_names_the_destination_the_run_writes_to() {
         let mut base = BaseProbeConfig::new();
-        base.sink = Some(SinkConfig::Stdout);
-        let targets = vec![Target::Cidr("10.0.0.0/30".parse().expect("cidr"))];
+        base.sink = Some(SinkConfig::File {
+            path: "/tmp/records.ndjson".into(),
+        });
         let config = DiscoverScenarioConfig::new(
             base,
-            targets.clone(),
+            vec![Target::Ip("10.0.0.1".parse().expect("ip"))],
             vec![ProberConfig::TcpConnect { ports: vec![22] }],
         );
-        let knobs = PlanKnobs {
-            max_concurrent: 8,
-            probe_rate: None,
-            retries: 0,
-            timeout_ms: 500,
-        };
-        let resolver = rastreo_core::HickoryResolver::from_system().expect("resolver");
-        let resolution = rastreo_core::resolve_scenario(&resolver, &targets).await;
-        let unresolved = DiscoveryPlan::new("discover".into(), &config, knobs).expect("plan");
-        let resolved =
-            DiscoveryPlan::resolved("discover".into(), &config, &resolution, knobs).expect("plan");
-        assert!(resolved.total_probes > unresolved.total_probes);
-        assert_eq!(
-            strip_ansi(&start_line(&unresolved, 1)),
-            strip_ansi(&start_line(&resolved, 1))
+        let plan = stage_plan(
+            "discover",
+            &config,
+            PlanKnobs {
+                max_concurrent: 8,
+                probe_rate: None,
+                retries: 0,
+                timeout_ms: 500,
+            },
         );
+        let line = strip_ansi(&start_line(&plan, 1));
+        assert!(line.contains("sink: file: /tmp/records.ndjson"), "{line}");
     }
 
     #[test]

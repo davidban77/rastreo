@@ -560,7 +560,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 
 - `scenario` — the scenario name, or `unnamed` when the request omits `name`.
 - `targets` — one entry per target you sent, each with the original `target` spec and a `resolution`.
-- `resolution` — `resolved` with the list of IP addresses when the target resolves, or `error` with the reason when it fails to resolve or is blocked.
+- `resolution` — `resolved` with the address count and the first few addresses when the target resolves, or `error` with the reason when it fails to resolve or is blocked. `resolved.total` is every address the scan would probe for that target; `resolved.sample` holds the first six, so planning a `/16` costs no more than planning one host.
 - `probers` — a readable summary of each prober the scan would run.
 - `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
 - `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the request added.
@@ -577,7 +577,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 {
   "scenario": "mgmt-sweep",
   "targets": [
-    { "target": "10.50.0.10", "resolution": { "resolved": ["10.50.0.10"] } }
+    { "target": "10.50.0.10", "resolution": { "resolved": { "total": 1, "sample": ["10.50.0.10"] } } }
   ],
   "probers": ["tcp_connect (ports 22, 443)"],
   "fuser": "direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)",
@@ -621,7 +621,10 @@ A real scan rejects an out-of-allow-list target with a hard `403` and probes not
 
 `RASTREO_MAX_TOTAL_HOSTS` reaches the plan the same way, and it is the one rejection no single target can show you: several individually-small targets whose addresses add up past the cap each resolve fine on their own. The plan reports each of them `resolved`, then carries the aggregate refusal and `total_probes: 0` — the same `400` the real scan would return.
 
-The plan is described field by field in the [DiscoveryPlan schema reference](../reference/schema/discovery-plan.md).
+The plan is described field by field in the [DiscoveryPlan schema reference](../reference/schema/discovery-plan.md), published at `https://davidban77.github.io/rastreo/schemas/discovery-plan-v2.json`.
+
+!!! warning "`resolution.resolved` is an object as of `v2`"
+    Through `discovery-plan-v1.json` a resolved target carried a bare array of addresses. It now carries `{"total": N, "sample": [...]}`, so a reader written against `v1` reads `null` rather than failing. Rewrite `.targets[].resolution.resolved[]` as `.targets[].resolution.resolved.sample[]`, and `length` on that array as `.total`. The old schema stays fetchable at `https://davidban77.github.io/rastreo/schemas/discovery-plan-v1.json`.
 
 ## Server vs CLI
 
