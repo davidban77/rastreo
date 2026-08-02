@@ -1,4 +1,5 @@
 mod banner;
+mod destination;
 mod hints;
 mod humanize;
 mod progress;
@@ -12,10 +13,11 @@ pub(crate) use banner::ScenarioTally;
 #[cfg(feature = "config")]
 pub(crate) use banner::{accumulate, print_aggregate, print_blank, print_failed, print_notice};
 pub(crate) use banner::{print_complete, print_start};
+pub(crate) use destination::{record_destination, RecordDestination};
 #[cfg(feature = "config")]
 pub(crate) use hints::enrich_feature_hint;
 pub(crate) use hints::{
-    enrich_scan_error_hint, print_hint, print_note, print_runtime_hints, rebuild_hint,
+    enrich_scan_error_hint, print_note, print_refusal_hint, print_runtime_hints, rebuild_hint,
 };
 pub(crate) use progress::{progress_display_loop, progress_style};
 #[cfg(feature = "config")]
@@ -49,11 +51,13 @@ impl Verbosity {
     }
 }
 
-/// What stderr carries, given the verbosity flags and whether the user asked for machine output.
+/// What stderr carries, given the verbosity flags, whether the user asked for machine output, and
+/// where the record stream lands relative to stderr.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OutputMode {
     verbosity: Verbosity,
     machine_output: bool,
+    destination: RecordDestination,
 }
 
 impl OutputMode {
@@ -61,22 +65,45 @@ impl OutputMode {
         Self {
             verbosity,
             machine_output,
+            destination: RecordDestination::Separate,
         }
+    }
+
+    pub(crate) fn with_record_destination(self, destination: RecordDestination) -> Self {
+        Self {
+            destination,
+            ..self
+        }
+    }
+
+    pub(crate) fn record_destination(self) -> RecordDestination {
+        self.destination
     }
 
     /// Banners and the progress line.
     pub(crate) fn prints_chrome(self) -> bool {
         self.verbosity.prints_chrome()
+            && !self.would_land_in_the_record_stream()
             && (!self.machine_output || self.verbosity == Verbosity::Verbose)
     }
 
-    /// Hints, notes, and notices.
+    /// Hints, notes, and notices printed while the run is still producing records.
     pub(crate) fn prints_advisories(self) -> bool {
+        self.verbosity.prints_chrome() && !self.would_land_in_the_record_stream()
+    }
+
+    /// Hints that travel with a refusal, which ends the record stream wherever it lands.
+    pub(crate) fn prints_refusal_hints(self) -> bool {
         self.verbosity.prints_chrome()
     }
 
     pub(crate) fn prints_detail(self) -> bool {
         self.verbosity.prints_detail()
+    }
+
+    // Machine records merged into one capture make every stderr line a line the consumer must parse.
+    fn would_land_in_the_record_stream(self) -> bool {
+        self.machine_output && self.destination == RecordDestination::SharedCapture
     }
 }
 
@@ -226,6 +253,7 @@ mod tests {
             assert!(!mode.prints_chrome());
             assert!(!mode.prints_advisories());
             assert!(!mode.prints_detail());
+            assert!(!mode.prints_refusal_hints());
         }
     }
 
@@ -235,5 +263,98 @@ mod tests {
             OutputMode::from(Verbosity::Normal),
             OutputMode::new(Verbosity::Normal, false)
         );
+    }
+
+    #[test]
+    fn a_bare_verbosity_assumes_the_streams_are_separate() {
+        assert!(OutputMode::from(Verbosity::Normal).prints_advisories());
+    }
+
+    #[test]
+    fn machine_records_merged_into_one_capture_silence_the_chrome_and_the_advisories() {
+        let mode = OutputMode::new(Verbosity::Normal, true)
+            .with_record_destination(RecordDestination::SharedCapture);
+        assert!(!mode.prints_advisories());
+        assert!(!mode.prints_chrome());
+    }
+
+    #[test]
+    fn verbose_does_not_restore_chrome_into_a_merged_machine_capture() {
+        let mode = OutputMode::new(Verbosity::Verbose, true)
+            .with_record_destination(RecordDestination::SharedCapture);
+        assert!(!mode.prints_chrome());
+        assert!(!mode.prints_advisories());
+    }
+
+    #[test]
+    fn a_refusal_hint_reaches_the_merged_capture_the_advisories_are_kept_out_of() {
+        for verbosity in [Verbosity::Normal, Verbosity::Verbose] {
+            let mode = OutputMode::new(verbosity, true)
+                .with_record_destination(RecordDestination::SharedCapture);
+            assert!(!mode.prints_advisories());
+            assert!(mode.prints_refusal_hints());
+        }
+    }
+
+    #[test]
+    fn every_destination_keeps_its_refusal_hints() {
+        for destination in [
+            RecordDestination::Separate,
+            RecordDestination::SharedTerminal,
+            RecordDestination::SharedCapture,
+        ] {
+            for machine_output in [false, true] {
+                let mode = OutputMode::new(Verbosity::Normal, machine_output)
+                    .with_record_destination(destination);
+                assert!(
+                    mode.prints_refusal_hints(),
+                    "{destination:?}, machine_output: {machine_output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bare_verbosity_assumes_the_streams_are_separate_until_told_otherwise() {
+        assert_eq!(
+            OutputMode::from(Verbosity::Normal).record_destination(),
+            RecordDestination::Separate
+        );
+    }
+
+    #[test]
+    fn the_record_destination_is_read_back_as_it_was_set() {
+        let mode = OutputMode::from(Verbosity::Normal)
+            .with_record_destination(RecordDestination::SharedTerminal);
+        assert_eq!(mode.record_destination(), RecordDestination::SharedTerminal);
+    }
+
+    #[test]
+    fn human_records_merged_into_one_capture_keep_their_advisories() {
+        let mode = OutputMode::new(Verbosity::Normal, false)
+            .with_record_destination(RecordDestination::SharedCapture);
+        assert!(mode.prints_advisories());
+        assert!(mode.prints_chrome());
+    }
+
+    #[test]
+    fn machine_records_on_a_shared_terminal_keep_their_advisories() {
+        let mode = OutputMode::new(Verbosity::Normal, true)
+            .with_record_destination(RecordDestination::SharedTerminal);
+        assert!(mode.prints_advisories());
+    }
+
+    #[test]
+    fn verbose_restores_chrome_on_a_terminal_that_also_carries_json() {
+        let mode = OutputMode::new(Verbosity::Verbose, true)
+            .with_record_destination(RecordDestination::SharedTerminal);
+        assert!(mode.prints_chrome());
+    }
+
+    #[test]
+    fn machine_records_on_their_own_stream_keep_every_stderr_printer() {
+        let mode = OutputMode::new(Verbosity::Normal, true)
+            .with_record_destination(RecordDestination::Separate);
+        assert!(mode.prints_advisories());
     }
 }

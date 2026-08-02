@@ -208,9 +208,9 @@ pub(crate) fn checkpoint_preflight(
     Ok(())
 }
 
-/// Load and validate the checkpoint at `path` for a resume: a missing checkpoint refuses (`--resume`
-/// needs one), the scenario is re-vetted resume-safe, and the hard fingerprint must match the target
-/// sequence and sink destination. A changed perf/prober knob only warns — at-least-once tolerates it.
+/// Load and validate the checkpoint at `path` for a resume: a missing checkpoint refuses, the
+/// scenario is re-vetted resume-safe, and the hard fingerprint must match the target sequence and
+/// sink destination. A changed perf/prober knob only warns — at-least-once tolerates it.
 pub(crate) fn resume_preflight(
     scenario: &DiscoverScenarioConfig,
     path: &Path,

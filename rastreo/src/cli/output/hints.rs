@@ -59,8 +59,16 @@ fn runtime_hint_line(summary: &rastreo_core::DiscoverySummary) -> Option<String>
     None
 }
 
-pub(crate) fn print_hint(hint: &str, mode: OutputMode) {
+fn print_hint(hint: &str, mode: OutputMode) {
     if !mode.prints_advisories() {
+        return;
+    }
+    eprintln!("{}", hint_line(hint));
+}
+
+/// The one hint printer a refusal site can reach: the diagnosis travels with the error or not at all.
+pub(crate) fn print_refusal_hint(hint: &str, mode: OutputMode) {
+    if !mode.prints_refusal_hints() {
         return;
     }
     eprintln!("{}", hint_line(hint));
@@ -118,7 +126,7 @@ pub(crate) fn enrich_feature_hint(error_msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Verbosity;
+    use super::super::{RecordDestination, Verbosity};
     use super::*;
 
     #[cfg(feature = "config")]
@@ -352,6 +360,21 @@ mod tests {
     #[test]
     fn print_note_is_silent_under_quiet() {
         print_note("suppressed", OutputMode::from(Verbosity::Quiet));
+    }
+
+    #[test]
+    fn a_refusal_hint_survives_a_merged_capture_that_silences_the_advisories() {
+        let mode = OutputMode::new(Verbosity::Normal, true)
+            .with_record_destination(RecordDestination::SharedCapture);
+        assert!(!mode.prints_advisories());
+        print_refusal_hint("the diagnosis travels with the error", mode);
+    }
+
+    #[test]
+    fn print_refusal_hint_is_silent_under_quiet() {
+        let mode = OutputMode::from(Verbosity::Quiet);
+        assert!(!mode.prints_refusal_hints());
+        print_refusal_hint("suppressed", mode);
     }
 
     #[test]

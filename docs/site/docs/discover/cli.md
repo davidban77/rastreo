@@ -262,7 +262,14 @@ Four columns of triage, not the whole record: the management address (or the ide
 rastreo discover --target 10.0.0.0/24 --format json | jq -r '.mgmt_ip'
 ```
 
-`json` also drops the banners and the progress line, so stdout is a clean stream and stderr is quiet. Hints survive on stderr, where they cannot corrupt the stream and where they are the most useful thing to read when a scan comes back empty. `-v` brings the banners back alongside the JSON.
+`json` also drops the banners and the progress line, so stdout is a clean stream and stderr is quiet. Hints survive on stderr, where they cannot corrupt the record stream and where they are the most useful thing to read when a scan comes back empty. `-v` brings the banners back alongside the JSON.
+
+That holds while the two streams stay apart. Merge them — `> scan.json 2>&1`, or `2>&1 | jq` — and one destination carries both, so a `hint:` line lands between the records and `jq` stops on it. Under `--format json` rastreo detects the merge and prints nothing but records there for as long as the scan is producing them; the hints and banners come back the moment stderr has a destination of its own. A run that refuses is the exception: the error and the hint that explains it go into the capture together, because an error whose remedy was suppressed is worse than a line to skip. So `exit 0` means the capture is nothing but records, and `exit 1` means it carries the diagnosis. Send the two somewhere useful instead:
+
+```bash
+rastreo discover --target 10.0.0.0/24 --format json > scan.json 2> scan.log
+rastreo discover --target 10.0.0.0/24 --format json 2> scan.log | jq -r '.mgmt_ip'
+```
 
 Each value accepts a second spelling: `text` for `table`, and `ndjson` for `json`. Both spellings do the same thing.
 
@@ -635,11 +642,11 @@ On a terminal the line redraws in place four times a second and clears when the 
 
 When stderr is not a terminal, each update prints as a new line every five seconds instead. Piping stderr to another program or redirecting it to a file keeps the full history in order.
 
-Progress goes to stderr, never stdout. An in-place redraw owns the terminal row it paints, so rastreo only draws one when nothing else writes to that terminal. **On the default stdout sink the records go to the same screen, so the progress line is dropped.** Otherwise a table row and a redraw would end up on the same row and overwrite each other.
+Progress goes to stderr, never stdout. An in-place redraw owns the terminal row it paints, and a periodic update owns the line it takes, so rastreo only draws one when the records are landing somewhere else. **On the default stdout sink the records go to the same screen, so the progress line is dropped.** Otherwise a table row and a redraw would end up on the same row and overwrite each other. Merging the two streams into one file or one pipe — `> scan.txt 2>&1`, `2>&1 | jq` — gives the records and the line one destination again, so a run writing records to stdout drops the line there too. A run whose sink is a file or a broker puts nothing on stdout, and the line draws whatever the streams are wired to.
 
-Three ways to get it back. Each one takes a stream off the terminal:
+Three ways to get it back. Each one gives the records a destination of their own:
 
-- Redirect stdout: `> scan.txt`, `| jq`, `| tee`. Records leave the terminal and the line redraws in place.
+- Redirect stdout: `> scan.txt`, `| jq`, `| tee`, with stderr left where it is. Records leave the terminal and the line redraws in place.
 - Use `--sink file`. Same result, and the records are kept.
 - Redirect stderr: `2> scan.log`. The line is written to the file as whole lines every five seconds.
 
@@ -719,7 +726,8 @@ Changing only a performance knob is allowed. `--concurrency`, `--rate`, `--timeo
 **A missing checkpoint is an error.** `--resume` needs an existing checkpoint to continue from. When the file is absent, rastreo refuses rather than start over from zero:
 
 ```text
-Error: no checkpoint to resume at /var/log/scan.checkpoint; --resume requires an existing checkpoint at this path
+⚠ hint: --resume continues a checkpoint an earlier --checkpoint run wrote. Drop --resume to scan from zero.
+Error: no checkpoint to resume at /var/log/scan.checkpoint; resuming continues a checkpoint an earlier run wrote to this path
 ```
 
 !!! info "One target may be scanned twice"

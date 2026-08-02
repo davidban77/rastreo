@@ -23,8 +23,8 @@ use rastreo_core::Resolver;
 use rastreo_core::{
     preflight_checkpoint_request, resolve_scenario_targets, run_discovery, CheckpointConfig,
     ConfigError, DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig,
-    HickoryResolver, PlanKnobs, ProbeKind, RastreoError, ResolvedScenarioTarget, RunOptions,
-    SinkConfig, Target,
+    HickoryResolver, PlanKnobs, ProbeKind, RastreoError, ResolvedScenarioTarget, ResumeError,
+    RunOptions, SinkConfig, Target,
 };
 use tokio::sync::watch;
 
@@ -34,9 +34,9 @@ use super::output::{
     ScenarioTally,
 };
 use super::output::{
-    enrich_scan_error_hint, print_complete, print_hint, print_note, print_runtime_hints,
-    print_start, progress_display_loop, progress_style, rebuild_hint, stdout_table_width,
-    OutputMode, Verbosity,
+    enrich_scan_error_hint, print_complete, print_note, print_refusal_hint, print_runtime_hints,
+    print_start, progress_display_loop, progress_style, rebuild_hint, record_destination,
+    stdout_table_width, OutputMode, Verbosity,
 };
 #[cfg(feature = "snmp")]
 use super::probe_args::SnmpVersionArg;
@@ -267,6 +267,17 @@ fn writes_to_stdout(sink: Option<&SinkConfig>) -> bool {
     matches!(sink, None | Some(SinkConfig::Stdout))
 }
 
+// A dry run puts the plan on stdout in place of the records. A `--file` run has no sink to read
+// until its scenario loads, so it counts as stdout: the cheaper of the two wrong answers.
+fn stdout_carries_the_payload(args: &DiscoverArgs) -> bool {
+    args.dry_run || matches!(effective_sink_kind(args), None | Some(SinkKind::Stdout))
+}
+
+// The scenario's own sink is the final answer, and the only one a scenario that runs is judged by.
+fn mode_for_sink(mode: OutputMode, sink: Option<&SinkConfig>) -> OutputMode {
+    mode.with_record_destination(record_destination(writes_to_stdout(sink)))
+}
+
 // The plan itself always goes to stdout, so it reads as text unless the caller asked for machine output.
 fn dry_run_plan_format(args: &DiscoverArgs) -> OutputFormat {
     args.format.unwrap_or(OutputFormat::Table)
@@ -405,7 +416,8 @@ pub async fn run(
     cancel: watch::Receiver<bool>,
     verbosity: Verbosity,
 ) -> Result<()> {
-    let mode = OutputMode::new(verbosity, args.format == Some(OutputFormat::Json));
+    let mode = OutputMode::new(verbosity, args.format == Some(OutputFormat::Json))
+        .with_record_destination(record_destination(stdout_carries_the_payload(&args)));
     ensure_no_retired_flags(&args)?;
     ensure_sink_flags_reach_their_sink(&args)?;
     if args.dry_run {
@@ -430,7 +442,7 @@ async fn run_dry_run(args: &DiscoverArgs, mode: OutputMode) -> Result<()> {
     let scenario = scenario_from_flags(args, mode)?;
     let resolutions = resolve_scenario_targets(&scenario, &resolver).await;
     let plan = build_scenario_plan("discovery", &scenario, &resolutions, args)?;
-    dry_run_checkpoint_preflight(&scenario, args)?;
+    dry_run_checkpoint_preflight(&scenario, args).map_err(|err| refuse(err, mode))?;
     render_dry_run(&[plan], dry_run_plan_format(args))?;
     refuse_on_resolution_error(&resolutions, mode)
 }
@@ -698,8 +710,8 @@ fn refuse_on_resolution_error(
         return Ok(());
     };
     let rendered = render_error_chain(err);
-    if let Some(hint) = enrich_scan_error_hint(&rendered) {
-        print_hint(&hint, mode);
+    if let Some(hint) = scan_error_hint(err) {
+        print_refusal_hint(&hint, mode);
     }
     Err(anyhow!("{rendered}"))
 }
@@ -711,7 +723,7 @@ async fn run_discovery_reporting_progress(
     mode: OutputMode,
 ) -> std::result::Result<DiscoverySummary, RastreoError> {
     let (progress_tx, progress_rx) = watch::channel(DiscoveryProgress::default());
-    let style = progress_style(writes_to_stdout(scenario.base.sink.as_ref()));
+    let style = progress_style(mode.record_destination());
     let display = tokio::spawn(progress_display_loop(progress_rx, style, mode));
     let mut opts = RunOptions::new(scenario)
         .cancel(cancel)
@@ -726,10 +738,9 @@ async fn run_discovery_reporting_progress(
 
 #[cfg(feature = "config")]
 fn report_scenario_failure(label: &str, err: &RastreoError, mode: OutputMode) {
-    let rendered = render_error_chain(err);
-    print_failed(label, &rendered);
-    if let Some(hint) = enrich_scan_error_hint(&rendered) {
-        print_hint(&hint, mode);
+    print_failed(label, &render_error_chain(err));
+    if let Some(hint) = scan_error_hint(err) {
+        print_refusal_hint(&hint, mode);
     }
 }
 
@@ -761,6 +772,7 @@ async fn run_legacy(
     mode: OutputMode,
 ) -> Result<()> {
     let scenario = scenario_from_flags(args, mode)?;
+    let mode = mode_for_sink(mode, scenario.base.sink.as_ref());
     // Empty resolutions: no DNS here, so plan.targets and plan.total_probes are unset and the start banner reads neither.
     let plan = build_scenario_plan(FLAG_DRIVEN_LABEL, &scenario, &[], args)?;
     print_start(&plan, scenario.targets.len(), mode);
@@ -770,12 +782,7 @@ async fn run_legacy(
             print_runtime_hints(&summary, mode);
             Ok(())
         }
-        Err(err) => {
-            if let Some(hint) = enrich_scan_error_hint(&render_error_chain(&err)) {
-                print_hint(&hint, mode);
-            }
-            Err(err.into())
-        }
+        Err(err) => Err(refuse(err, mode)),
     }
 }
 
@@ -818,6 +825,8 @@ async fn run_from_file(
     };
     let mut aggregate = DiscoverySummary::default();
     let mut skipped = 0usize;
+    // The aggregate is written after every scenario, so one of them claiming the destination claims it.
+    let mut any_scenario_wrote_to_stdout = false;
 
     for (idx, entry) in file.scenarios.into_iter().enumerate() {
         if *cancel.borrow() {
@@ -835,6 +844,7 @@ async fn run_from_file(
         };
         merge_defaults(&mut cfg.base, &file.defaults);
         apply_cli_overrides(&mut cfg.base, args, cli_sink.as_ref(), cli_encoder.as_ref());
+        let mode = mode_for_sink(mode, cfg.base.sink.as_ref());
 
         let label = scenario_label(&cfg.base, idx, total);
         if idx > 0 {
@@ -856,6 +866,7 @@ async fn run_from_file(
             }
         };
         print_start(&plan, cfg.targets.len(), mode);
+        any_scenario_wrote_to_stdout |= writes_to_stdout(cfg.base.sink.as_ref());
 
         match run_discovery_reporting_progress(&cfg, cancel.clone(), checkpoint_config(args), mode)
             .await
@@ -874,6 +885,7 @@ async fn run_from_file(
     }
 
     if total > 1 {
+        let mode = mode.with_record_destination(record_destination(any_scenario_wrote_to_stdout));
         print_blank(mode);
         print_aggregate(tally, &aggregate, mode);
     }
@@ -907,7 +919,7 @@ pub(crate) struct ScenarioLoadError {
 impl ScenarioLoadError {
     pub(crate) fn report(self, mode: OutputMode) -> anyhow::Error {
         if let Some(hint) = &self.hint {
-            print_hint(hint, mode);
+            print_refusal_hint(hint, mode);
         }
         self.source
     }
@@ -1067,7 +1079,7 @@ fn scenario_from_flags(args: &DiscoverArgs, mode: OutputMode) -> Result<Discover
         }
         Err(err) => {
             if let Some(hint) = probe_selection_hint(&err) {
-                print_hint(&hint, mode);
+                print_refusal_hint(&hint, mode);
             }
             Err(err)
         }
@@ -1200,6 +1212,29 @@ fn missing_param_flag(kind: &str) -> Option<&'static str> {
         "dns" => Some("--dns-query <NAME>"),
         _ => None,
     }
+}
+
+fn scan_error_hint(err: &RastreoError) -> Option<String> {
+    resume_hint(err)
+        .map(str::to_string)
+        .or_else(|| enrich_scan_error_hint(&render_error_chain(err)))
+}
+
+// Core names the concept it is missing; the flag that expresses it is the CLI's to name.
+fn resume_hint(err: &RastreoError) -> Option<&'static str> {
+    match err {
+        RastreoError::Resume(ResumeError::NoCheckpointToResume { .. }) => Some(
+            "--resume continues a checkpoint an earlier --checkpoint run wrote. Drop --resume to scan from zero.",
+        ),
+        _ => None,
+    }
+}
+
+fn refuse(err: RastreoError, mode: OutputMode) -> anyhow::Error {
+    if let Some(hint) = scan_error_hint(&err) {
+        print_refusal_hint(&hint, mode);
+    }
+    err.into()
 }
 
 /// A flag whose only job is to parameterise specific probe kinds; inert when none of them run.
@@ -1459,6 +1494,7 @@ pub(crate) fn parse_target(input: &str) -> Result<Target, ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::output::RecordDestination;
     use super::*;
     use clap::Parser;
     use rastreo_core::ProberConfig;
@@ -3027,6 +3063,97 @@ scenarios:
     #[test]
     fn a_non_selection_error_gets_no_selection_hint() {
         assert!(probe_selection_hint(&anyhow!("--sink file requires --output <path>")).is_none());
+    }
+
+    fn missing_checkpoint() -> RastreoError {
+        RastreoError::Resume(ResumeError::NoCheckpointToResume {
+            path: PathBuf::from("/var/lib/rastreo/scan.checkpoint"),
+        })
+    }
+
+    #[test]
+    fn the_missing_checkpoint_hint_names_the_flag_core_deliberately_does_not() {
+        let err = missing_checkpoint();
+        assert!(
+            !render_error_chain(&err).contains("--resume"),
+            "core must stay flag-agnostic: {err}"
+        );
+        let hint = scan_error_hint(&err).expect("hint");
+        assert!(hint.contains("--resume"), "hint: {hint}");
+    }
+
+    #[test]
+    fn the_missing_checkpoint_error_still_names_the_path_it_looked_at() {
+        assert!(
+            render_error_chain(&missing_checkpoint()).contains("/var/lib/rastreo/scan.checkpoint")
+        );
+    }
+
+    #[test]
+    fn a_resume_refusal_the_cli_cannot_improve_on_gets_no_hint() {
+        assert!(scan_error_hint(&RastreoError::Resume(ResumeError::FingerprintMismatch)).is_none());
+    }
+
+    #[test]
+    fn scan_error_hint_still_reaches_the_string_matched_resolver_hints() {
+        let err = RastreoError::Resolver(rastreo_core::ResolverError::DnsNoRecords {
+            name: "missing.lab".into(),
+        });
+        let hint = scan_error_hint(&err).expect("hint");
+        assert!(hint.contains("DNS resolution failed"), "hint: {hint}");
+    }
+
+    #[test]
+    fn a_dry_run_puts_its_plan_on_stdout_whatever_the_sink() {
+        let mut a = args(&["10.0.0.1"], &[80]);
+        a.dry_run = true;
+        a.sink = Some(SinkKind::File);
+        a.output = Some(PathBuf::from("/tmp/records.ndjson"));
+        assert!(stdout_carries_the_payload(&a));
+    }
+
+    #[test]
+    fn a_file_sink_run_leaves_stdout_empty() {
+        let mut a = args(&["10.0.0.1"], &[80]);
+        a.sink = Some(SinkKind::File);
+        a.output = Some(PathBuf::from("/tmp/records.ndjson"));
+        assert!(!stdout_carries_the_payload(&a));
+    }
+
+    #[test]
+    fn a_flag_driven_run_defaults_its_records_onto_stdout() {
+        assert!(stdout_carries_the_payload(&args(&["10.0.0.1"], &[80])));
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_file_run_counts_as_stdout_until_the_scenario_names_its_sink() {
+        let mut a = args(&[], &[]);
+        a.file = Some(PathBuf::from("scan.yml"));
+        assert!(stdout_carries_the_payload(&a));
+    }
+
+    #[test]
+    fn a_scenario_naming_a_file_sink_takes_its_advisories_off_the_record_stream() {
+        let merged = OutputMode::new(Verbosity::Normal, true)
+            .with_record_destination(RecordDestination::SharedCapture);
+        let refined = mode_for_sink(
+            merged,
+            Some(&SinkConfig::File {
+                path: PathBuf::from("/tmp/records.ndjson"),
+            }),
+        );
+        assert!(!merged.prints_advisories());
+        assert!(refined.prints_advisories());
+    }
+
+    #[test]
+    fn a_scenario_naming_no_sink_is_judged_as_the_stdout_sink_core_defaults_to() {
+        let mode = OutputMode::from(Verbosity::Normal);
+        assert_eq!(
+            mode_for_sink(mode, None),
+            mode_for_sink(mode, Some(&SinkConfig::Stdout))
+        );
     }
 
     #[test]
