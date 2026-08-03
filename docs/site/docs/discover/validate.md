@@ -478,6 +478,8 @@ Here is the notice from a two-scenario file whose second scenario, `placeholder`
 • 'placeholder' (2 of 2): no probers configured, skipping
 ```
 
+The two answers are the two questions. `validate` asks whether the file is correct, so anything malformed in it is a failure. `discover` asks what can be probed right now, so it probes what it can and reports what it could not: the notice names the skipped scenario, and the run's aggregate banner counts it as `skipped: N` and turns yellow, so an exit `0` there never means the whole file ran.
+
 The two surfaces converge once *every* scenario in the file is prober-less. Then the run probes nothing, and both `validate` and `discover` — with or without `--dry-run` — exit `1`.
 
 **Targets.** `validate` never resolves targets. A name that does not resolve passes, and so does a CIDR that expands past the host limit. `--dry-run` resolves for real and exits `1` when any target fails. See [What validate does not check](#what-validate-does-not-check).

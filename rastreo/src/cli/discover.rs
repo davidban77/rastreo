@@ -879,7 +879,6 @@ async fn run_from_file(
         ..ScenarioTally::default()
     };
     let mut aggregate = DiscoverySummary::default();
-    let mut skipped = 0usize;
     // The aggregate is written after every scenario, so one of them claiming the destination claims it.
     let mut any_scenario_wrote_to_stdout = false;
 
@@ -907,7 +906,7 @@ async fn run_from_file(
         }
 
         if skip_prober_less_scenario(&cfg, &label, mode) {
-            skipped += 1;
+            tally.skipped += 1;
             continue;
         }
 
@@ -959,7 +958,7 @@ async fn run_from_file(
             tally.failed
         ));
     }
-    ensure_not_every_scenario_was_skipped(skipped, total, &path)?;
+    ensure_not_every_scenario_was_skipped(tally.skipped, total, &path)?;
     Ok((tally, aggregate))
 }
 

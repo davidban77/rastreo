@@ -56,7 +56,7 @@ Colour is enabled when stderr is a terminal that reports colour support, and dis
 
 Banners use the Unicode glyphs `▶`, `■`, `⚠`, `•`, and `→`. They fall back to the ASCII `>`, `#`, `!`, `*`, and `->` when `LC_ALL` / `LC_CTYPE` / `LANG` names a non-UTF-8 locale, or when you set `RASTREO_ASCII` to any non-empty value other than `0`.
 
-The completion glyph is blue on a clean run and turns yellow when the scan needs attention — it was cancelled, records were quarantined to a dead-letter destination, or a scenario in a multi-scenario file failed. Probe faults alone do not tint it; they are expected on any real scan and are counted in the `faults:` field.
+The completion glyph is blue on a clean run and turns yellow when the run covered less ground than you asked for — it was cancelled, records were quarantined to a dead-letter destination, a target resolved to no addresses, or a scenario in a multi-scenario file failed or was skipped. Probe faults alone do not tint it; they are expected on any real scan and are counted in the `faults:` field.
 
 | Env var | Effect |
 |---|---|
@@ -167,6 +167,8 @@ Some flags and flag values only exist when the matching Cargo feature was enable
 Both binaries exit `0` on success and `1` on any error. Errors are written to stderr as a single line. Validation errors — missing required flags, mutually-exclusive flags set together, file-sink without `--output` — fail before any probe runs or any HTTP request is accepted.
 
 A target that resolved to no addresses is not an error while any other target was probed: the run exits `0`, the completion banner counts it as `unresolvable: N`, and `-v` names which targets. Like every other fact the completion banner carries — probe faults, quarantined records, a cancelled run — `-q` silences it, so pair `-q` with `--dry-run --format json` if you need the answer without the banner: each target carries its own `"resolution"`, and `unresolvable` is one of the three states. It becomes exit `1` only when **every** target resolved to no addresses, because then the scan probed nothing at all. See [Names with no addresses](../discover/targets.md#names-with-no-addresses).
+
+A scenario with no probers reads the same way one level up. `rastreo discover --file` skips it, probes the rest of the file, and exits `0`, and the aggregate banner reports the shortfall twice over: the label counts only the scenarios that ran (`1 of 2 scenarios`), a `skipped: N` field counts the ones that did not, and the `■` turns yellow. A notice on stderr names each skipped scenario as the run reaches it. `-q` silences all of it, as it does for an unresolvable target. It becomes exit `1` only when **every** scenario in the file was skipped. See [Discover · a scenario with no probers](../discover/cli.md#a-scenario-rastreo-cannot-build-gets-no-plan).
 
 ## See also
 
