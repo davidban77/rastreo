@@ -1,5 +1,6 @@
 mod common;
 
+use rastreo_core::{Env, SystemEnv};
 use std::path::{Path, PathBuf};
 
 const RERUN_MARKER: &str = "RASTREO_ENV_ISOLATION_RERUN";
@@ -7,11 +8,11 @@ const POLLUTED_TEST: &str = "a_backtrace_exported_into_the_suite_never_reaches_t
 
 #[test]
 fn a_backtrace_exported_into_the_suite_never_reaches_the_binary() {
-    if std::env::var_os(RERUN_MARKER).is_none() {
+    if SystemEnv.var(RERUN_MARKER).is_err() {
         return rerun_with_a_backtrace_exported();
     }
     assert_eq!(
-        std::env::var("RUST_BACKTRACE").ok().as_deref(),
+        SystemEnv.var("RUST_BACKTRACE").ok().as_deref(),
         Some("1"),
         "the re-run must export the pollutant this test exists to catch"
     );
@@ -37,8 +38,8 @@ fn a_backtrace_exported_into_the_suite_never_reaches_the_binary() {
 }
 
 // The variable has to be in *this* process's environment for the assertion to mean anything, and
-// setting it here would realloc the environ array under every other thread's getenv. A child owns
-// its own environment from the moment it starts.
+// setting it here would realloc the environ array under every other thread's read of it. A child
+// owns its own environment from the moment it starts.
 fn rerun_with_a_backtrace_exported() {
     let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
         .args(["--exact", POLLUTED_TEST])

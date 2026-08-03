@@ -74,7 +74,7 @@ fn a_call_that_only_contains_the_name_is_not_matched() {
         concat!("std::env::set", "_variable(k, v)"),
         concat!("self.remove", "_vars();"),
         "let env = MapEnv::new().set(\"K\", \"v\");",
-        "// a thread inside getenv reads freed memory",
+        concat!("// a thread inside get", "env reads freed memory"),
         concat!("let set", "env_calls = 0;"),
     ] {
         assert!(!names_an_env_mutation(call), "{call}");
