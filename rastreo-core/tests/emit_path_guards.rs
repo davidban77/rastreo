@@ -6,10 +6,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
+use rastreo_core::classifier::default_classifier_config;
 use rastreo_core::pipeline::write_encoded;
 use rastreo_core::{
-    DeviceRecord, Encoder, NdjsonEncoder, RastreoError, RecordKind, Sink, SinkType, TeeChild,
-    TeeSink,
+    create_classifier, ClassifierConfig, DeviceRecord, Encoder, NdjsonEncoder, RastreoError,
+    RecordKind, Sink, SinkType, TeeChild, TeeSink,
 };
 use tokio::runtime::Runtime;
 
@@ -352,6 +353,122 @@ fn ndjson_encoding_a_record_into_a_sized_buffer_allocates_nothing() {
         }
     });
     assert_eq!(metadata_only, Allocations { count: 0, bytes: 0 });
+}
+
+fn unclassify(record: &mut DeviceRecord) {
+    record.platform = None;
+    record.os_version = None;
+    record.ssh_version = None;
+    record.http_server = None;
+    record.http_version = None;
+    record.role = None;
+}
+
+fn unclassified_record() -> DeviceRecord {
+    let mut record = fixture_record();
+    unclassify(&mut record);
+    record
+}
+
+fn classify_cost(config: &ClassifierConfig, record: &mut DeviceRecord) -> Allocations {
+    let classifier = create_classifier(config).expect("the classifier builds");
+    per_record(|n| {
+        for _ in 0..n {
+            unclassify(record);
+            classifier.classify(record).expect("classify");
+        }
+    })
+}
+
+/// `PlatformRule` is `#[non_exhaustive]`, so rules reach an integration test through the wire form.
+fn rules_matching_nothing(count: usize) -> ClassifierConfig {
+    let platform_rules: Vec<serde_json::Value> = (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "signal": "ssh_banner",
+                "pattern": format!(r"^absent-{i}-(?P<v>[\d\.]+)"),
+                "ssh_version_capture": "v",
+            })
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "type": "rules",
+        "merge_mode": "replace",
+        "platform_rules": platform_rules,
+    }))
+    .expect("classifier config")
+}
+
+#[test]
+fn classifying_costs_nothing_per_rule_that_writes_nothing() {
+    let mut record = unclassified_record();
+
+    let one = classify_cost(&rules_matching_nothing(1), &mut record);
+    let many = classify_cost(&rules_matching_nothing(64), &mut record);
+
+    assert_eq!(one, Allocations { count: 0, bytes: 0 });
+    assert_eq!(many, one, "a rule that matches nothing costs nothing");
+}
+
+#[test]
+fn classifying_a_record_allocates_only_the_values_it_writes() {
+    let mut record = unclassified_record();
+
+    let cost = classify_cost(&default_classifier_config(), &mut record);
+
+    assert_eq!(record.platform.as_deref(), Some("cisco_ios"));
+    assert_eq!(record.os_version.as_deref(), Some("15.7"));
+    assert_eq!(record.role.as_deref(), Some("router"));
+    assert_eq!(
+        (record.ssh_version.as_deref(), record.http_server.as_deref()),
+        (None, None),
+        "the fixture's banners match no baked rule that writes them, so the count below is three"
+    );
+    assert_eq!(
+        cost,
+        Allocations {
+            count: 3,
+            bytes: "cisco_ios".len() as u64 + "15.7".len() as u64 + "router".len() as u64,
+        }
+    );
+}
+
+#[test]
+fn a_capture_the_record_no_longer_wants_costs_nothing() {
+    let config: ClassifierConfig = serde_json::from_value(serde_json::json!({
+        "type": "rules",
+        "merge_mode": "replace",
+        "platform_rules": [{
+            "signal": "ssh_banner",
+            "pattern": r"^SSH-(?P<osv>2\.0)-(?P<sshv>Cisco-[\d\.]+)",
+            "platform": "linux",
+            "os_version_capture": "osv",
+            "ssh_version_capture": "sshv",
+        }],
+    }))
+    .expect("classifier config");
+    let classifier = create_classifier(&config).expect("the classifier builds");
+    let mut record = unclassified_record();
+    record.ssh_version = Some("already known".to_string());
+
+    let cost = per_record(|n| {
+        for _ in 0..n {
+            record.platform = None;
+            record.os_version = None;
+            classifier.classify(&mut record).expect("classify");
+        }
+    });
+
+    assert_eq!(record.platform.as_deref(), Some("linux"));
+    assert_eq!(record.os_version.as_deref(), Some("2.0"));
+    assert_eq!(record.ssh_version.as_deref(), Some("already known"));
+    assert_eq!(
+        cost,
+        Allocations {
+            count: 2,
+            bytes: "linux".len() as u64 + "2.0".len() as u64,
+        }
+    );
 }
 
 #[test]
