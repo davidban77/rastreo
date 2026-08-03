@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.0](https://github.com/davidban77/rastreo/compare/v0.11.0...v0.12.0) (2026-08-03)
+
+
+### Features
+
+* **cli:** a run that skipped a scenario no longer reads as clean ([#272](https://github.com/davidban77/rastreo/issues/272)) ([3c6e347](https://github.com/davidban77/rastreo/commit/3c6e347c53231381710f5622629e3e2451b8dfcc))
+* **cli:** show the encoder in the plan and refuse runs that probe nothing ([#261](https://github.com/davidban77/rastreo/issues/261)) ([62964b2](https://github.com/davidban77/rastreo/commit/62964b27b0ee40997fb4cf1dd16cb28cef8b3f0f))
+* **core:** select fuser and classifier by name ([#259](https://github.com/davidban77/rastreo/issues/259)) ([1d53942](https://github.com/davidban77/rastreo/commit/1d539427917b83e77871b251a67b1953c6974609))
+* **helm:** let a sink credential come from a Kubernetes Secret ([#244](https://github.com/davidban77/rastreo/issues/244)) ([2b4a023](https://github.com/davidban77/rastreo/commit/2b4a023ab1d128515ec17211afd9a6a4b6be6947))
+* scan the targets that resolve instead of abandoning the run ([#270](https://github.com/davidban77/rastreo/issues/270)) ([e898137](https://github.com/davidban77/rastreo/commit/e8981372315c0db0dbaea06ba5ce47f8bc000ab6))
+* **server:** make /readyz answer what it actually knows ([#252](https://github.com/davidban77/rastreo/issues/252)) ([96345a1](https://github.com/davidban77/rastreo/commit/96345a1440c3d6fbb6f9a0094b89679639374bcf))
+* **server:** tell an authenticated caller why a scan failed ([#250](https://github.com/davidban77/rastreo/issues/250)) ([652414f](https://github.com/davidban77/rastreo/commit/652414f827d8b721e1d9e6bdc689394fff2b45da))
+
+
+### Bug Fixes
+
+* **ci:** gate every compose service and make UAT failures self-diagnosing ([#241](https://github.com/davidban77/rastreo/issues/241)) ([ba8d5a4](https://github.com/davidban77/rastreo/commit/ba8d5a476aa28967c324d2f9e27d10383ca97a7f))
+* **cli:** keep chrome out of a record stream the shell has merged ([#262](https://github.com/davidban77/rastreo/issues/262)) ([73c5711](https://github.com/davidban77/rastreo/commit/73c5711eaf0055d8a2710039963c9185f3559132))
+* **core:** a failing destination no longer starves a healthy one ([#247](https://github.com/davidban77/rastreo/issues/247)) ([1392de3](https://github.com/davidban77/rastreo/commit/1392de31f38a369fd1eef7d77eb404c182d7116b))
+* **core:** bound the acks the NATS sink defers in batched mode ([#246](https://github.com/davidban77/rastreo/issues/246)) ([ea9dab6](https://github.com/davidban77/rastreo/commit/ea9dab626f53c035bc8932615fd545541b6e8ece))
+* **core:** close the sink on every exit from a scan ([#249](https://github.com/davidban77/rastreo/issues/249)) ([f2d4f18](https://github.com/davidban77/rastreo/commit/f2d4f18e7f52a6907ed60e1e32c109c52e6cf899))
+* **core:** keep every record a failed publish could not deliver ([#242](https://github.com/davidban77/rastreo/issues/242)) ([51a64fe](https://github.com/davidban77/rastreo/commit/51a64fecf11783dcc5c73974eb8d03c0b1f0a56e))
+* **server:** measure readiness on a clock that cannot jump, and plan the destination the scan uses ([#265](https://github.com/davidban77/rastreo/issues/265)) ([fc3e5e2](https://github.com/davidban77/rastreo/commit/fc3e5e28f8322b1a3856908280c27d08aa2ecb99))
+* **server:** retry a sink that failed to build instead of giving up ([#251](https://github.com/davidban77/rastreo/issues/251)) ([4e6fd07](https://github.com/davidban77/rastreo/commit/4e6fd072ef3eed7f7d2ef75b9009cfde3adfa2ff))
+
+
+### Performance
+
+* **core:** stop allocating per rule while classifying a record ([#271](https://github.com/davidban77/rastreo/issues/271)) ([2da7028](https://github.com/davidban77/rastreo/commit/2da70282bdfdc5f4fb76b22c7de0add93e549f5f))
+* **core:** stop recompiling the baked classifier rules on every plan ([#267](https://github.com/davidban77/rastreo/issues/267)) ([c162193](https://github.com/davidban77/rastreo/commit/c162193113e047d80a366d755b026c72d7b79f59))
+
+
+### Documentation
+
+* record how a breaking change reaches the release notes ([#239](https://github.com/davidban77/rastreo/issues/239)) ([8ebb8f8](https://github.com/davidban77/rastreo/commit/8ebb8f8379c0711d0188ce7ca4b794ccb2015ab0))
+
+
+### Miscellaneous
+
+* make the tooling report what it actually checked ([#264](https://github.com/davidban77/rastreo/issues/264)) ([34679fb](https://github.com/davidban77/rastreo/commit/34679fbeb097f2388807977c6d8c96c3e23bee49))
+
+
+### CI/CD
+
+* assert the chart renders before publishing it ([#245](https://github.com/davidban77/rastreo/issues/245)) ([bb1f117](https://github.com/davidban77/rastreo/commit/bb1f1174dfcdec6dc4232d75e29922ba88ab0768))
+* bump taiki-e/install-action from 2 to 2.85.4 ([#254](https://github.com/davidban77/rastreo/issues/254)) ([3d1e71d](https://github.com/davidban77/rastreo/commit/3d1e71dbf30ce237322283ca822b2e24a832f8fe))
+* lint every crate with each feature in isolation ([#243](https://github.com/davidban77/rastreo/issues/243)) ([16a4ddc](https://github.com/davidban77/rastreo/commit/16a4ddc36ddc66e3f6e813886ab528871b950c0d))
+
+
+### Refactoring
+
+* **core:** derive kind vocabularies from one list ([#260](https://github.com/davidban77/rastreo/issues/260)) ([ccd02bf](https://github.com/davidban77/rastreo/commit/ccd02bf0ba658897e140ccbf6150cc09a8250e9e))
+* **core:** give the plan one entry point and a bounded cost ([#266](https://github.com/davidban77/rastreo/issues/266)) ([515b031](https://github.com/davidban77/rastreo/commit/515b031d5cebb699945aa05444b2beed47d80e04))
+* **core:** give the sink buffers a type that keeps their own discipline ([#248](https://github.com/davidban77/rastreo/issues/248)) ([bde3d92](https://github.com/davidban77/rastreo/commit/bde3d92cd766bf29c0d14e5d0f2e06790aec7d46))
+* **core:** plan a scan from the resolution the scan will use ([#263](https://github.com/davidban77/rastreo/issues/263)) ([f75edd2](https://github.com/davidban77/rastreo/commit/f75edd283a15c45a81d119040ad9b5ce367312f5))
+* read configuration through an injected environment ([#268](https://github.com/davidban77/rastreo/issues/268)) ([db4a855](https://github.com/davidban77/rastreo/commit/db4a855cc4f54dcc008a4defd091e775312715fc))
+
 ## [0.11.0](https://github.com/davidban77/rastreo/compare/v0.10.0...v0.11.0) (2026-07-30)
 
 
