@@ -25,7 +25,7 @@ pub struct ScanMetadata {
 impl ScanMetadata {
     /// Builds fresh scan metadata for a scan of the given scenario.
     pub fn new(scenario: &DiscoverScenarioConfig) -> Self {
-        let scan_id = Ulid::new().to_string();
+        let scan_id = Ulid::generate().to_string();
         let scenario_name = scenario.base.name.clone();
         let initiated_at = SystemTime::now();
         let source_config_hash = hash_scenario(scenario);
@@ -115,6 +115,22 @@ mod tests {
         let meta = ScanMetadata::new(&scenario_with_name(None));
         assert_eq!(meta.scan_id.len(), 26, "ULID is 26 chars");
         Ulid::from_string(&meta.scan_id).expect("scan_id parses as ULID");
+    }
+
+    #[test]
+    fn scan_id_encodes_the_time_the_scan_started() {
+        let meta = ScanMetadata::new(&scenario_with_name(None));
+        let encoded_at = Ulid::from_string(&meta.scan_id)
+            .expect("scan_id parses as ULID")
+            .datetime();
+        let lag = meta
+            .initiated_at
+            .duration_since(encoded_at)
+            .expect("ULID timestamp is sampled before initiated_at and truncates downward");
+        assert!(
+            lag <= std::time::Duration::from_secs(1),
+            "scan_id timestamp lags initiated_at by {lag:?}"
+        );
     }
 
     #[test]
