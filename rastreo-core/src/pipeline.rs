@@ -39,6 +39,10 @@ pub struct DiscoverySummary {
     /// Collection profiles emitted on the second stream; `0` when no gNMI capability data was collected.
     #[serde(default)]
     pub profiles_emitted: usize,
+    /// Targets the network answered for with no addresses, as written in the scenario and in input
+    /// order; each was probed zero times. Empty when every target resolved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolvable_targets: Vec<String>,
     /// Faulted probes tallied by [`ProbeErrorKind`]; empty when no probe faulted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub error_counts: BTreeMap<ProbeErrorKind, usize>,
@@ -271,6 +275,14 @@ async fn run_discovery_core(
         probers.push(Arc::from(create_prober(prober_config)?));
     }
 
+    // Read alongside the pins, before `into_stream` consumes the plan; these contribute nothing to it,
+    // so `resume_base`'s skip arithmetic counts the same targets with or without them.
+    let unresolvable_targets: Vec<String> = plan
+        .unresolvable_targets()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
     // Built before `into_stream` consumes the plan: the DNS pins a resume replays are read off it here.
     // `resume_base` offsets recorded checkpoint indices to the global position of the continued scan.
     let checkpoint_writer = checkpoint.map(|config| {
@@ -293,7 +305,7 @@ async fn run_discovery_core(
     };
 
     let reorder_peak = AtomicUsize::new(0);
-    stream_discovery(
+    let mut summary = stream_discovery(
         &scheduler,
         probers,
         stream,
@@ -312,7 +324,9 @@ async fn run_discovery_core(
         progress.as_ref(),
         checkpoint_writer,
     )
-    .await
+    .await?;
+    summary.unresolvable_targets = unresolvable_targets;
+    Ok(summary)
 }
 
 #[derive(Default)]
@@ -703,6 +717,7 @@ async fn stream_discovery(
         records_emitted,
         links_emitted,
         profiles_emitted,
+        unresolvable_targets: Vec::new(),
         error_counts: acc.error_counts,
         probes_by_kind,
         dlq_records,
@@ -890,6 +905,7 @@ async fn finish_discovery_ref(
         records_emitted,
         links_emitted,
         profiles_emitted,
+        unresolvable_targets: Vec::new(),
         error_counts: acc.error_counts,
         probes_by_kind,
         dlq_records,

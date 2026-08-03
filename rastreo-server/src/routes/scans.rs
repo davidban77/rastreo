@@ -6,10 +6,11 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rastreo_core::config::{parse_discover_scenario_json, DiscoverScenarioConfig};
+use rastreo_core::error::ResolverError;
 use rastreo_core::{
     hint_for_error_kind, resolve_scenario, run_discovery, DeviceRecord, DiscoveryPlan,
     DiscoveryProgress, DiscoverySummary, EncoderConfig, MemorySink, MemorySinkHandle, PlanKnobs,
-    RunOptions, Sink, TeeChild, TeeSink,
+    RastreoError, RunOptions, Sink, TeeChild, TeeSink,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -169,7 +170,19 @@ async fn dry_run_plan(
         .plan(label, knobs_for(scenario))
         .await
         .map_err(|err| AppError::from_rastreo(err, disclosure))?;
-    Ok(stages.resolve(&resolution))
+    let plan = stages.resolve(&resolution);
+    match resolution.into_refusal().and_then(refusal_earning_a_status) {
+        Some(err) => Err(AppError::from_rastreo(err, disclosure)),
+        None => Ok(plan),
+    }
+}
+
+// An out-of-allow-list target is answered in the plan body, per target, rather than as a status.
+fn refusal_earning_a_status(err: RastreoError) -> Option<RastreoError> {
+    match &err {
+        RastreoError::Resolver(ResolverError::TargetNotAllowed { .. }) => None,
+        _ => Some(err),
+    }
 }
 
 fn knobs_for(scenario: &DiscoverScenarioConfig) -> PlanKnobs {

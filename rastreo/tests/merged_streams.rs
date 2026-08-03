@@ -197,7 +197,7 @@ fn a_selection_refusal_puts_its_hint_in_the_merged_capture_beside_the_error() {
 }
 
 #[test]
-fn a_dry_run_that_cannot_resolve_puts_its_hint_in_the_merged_capture() {
+fn a_dry_run_with_nothing_to_probe_puts_its_hint_in_the_merged_capture() {
     let mut cmd = common::rastreo();
     cmd.args([
         "discover",
@@ -213,7 +213,7 @@ fn a_dry_run_that_cannot_resolve_puts_its_hint_in_the_merged_capture() {
     let (status, captured) = merged_redirect(cmd);
     assert_refused(status, &captured);
     assert!(
-        captured.contains("hint: DNS resolution failed"),
+        captured.contains("hint: Every name the scan was given answered with no addresses"),
         "the diagnosis travels with the error it explains: {captured:?}"
     );
 }
@@ -271,7 +271,7 @@ scenarios:
         "the run produced records before it refused: {captured:?}"
     );
     assert!(
-        captured.contains("hint: DNS resolution failed"),
+        captured.contains("hint: Every name the scan was given answered with no addresses"),
         "the diagnosis travels with the error it explains: {captured:?}"
     );
     assert!(

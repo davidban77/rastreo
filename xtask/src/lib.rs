@@ -938,7 +938,7 @@ mod tests {
         let variants = target_resolution["oneOf"]
             .as_array()
             .expect("TargetResolution is a oneOf");
-        assert_eq!(variants.len(), 2, "resolved and error arms");
+        assert_eq!(variants.len(), 3, "resolved, unresolvable, and error arms");
         let keys: Vec<String> = variants
             .iter()
             .filter_map(|v| v["properties"].as_object())
@@ -946,6 +946,12 @@ mod tests {
             .collect();
         assert!(keys.contains(&"resolved".to_string()), "got {keys:?}");
         assert!(keys.contains(&"error".to_string()), "got {keys:?}");
+        assert!(
+            variants
+                .iter()
+                .any(|v| v["const"].as_str() == Some("unresolvable")),
+            "the unresolvable arm carries no payload: {variants:?}"
+        );
     }
 
     #[test]

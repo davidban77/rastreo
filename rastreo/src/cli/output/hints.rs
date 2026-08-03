@@ -212,8 +212,7 @@ mod tests {
         assert!(enrich_feature_hint("missing field `targets`").is_none());
     }
 
-    // The chain a failed `A`/`AAAA` lookup renders, verbatim from a live run.
-    const DNS_LOOKUP_FAILED_CHAIN: &str = "DNS lookup failed for does-not-exist.invalid: no records found for Query { name: Name(\"does-not-exist.invalid.\"), query_type: AAAA, query_class: IN }";
+    const DNS_LOOKUP_FAILED_CHAIN: &str = "DNS lookup failed for does-not-exist.invalid: no records found for Query { name: Name(\"does-not-exist.invalid.\"), query_type: A, query_class: IN }";
 
     #[test]
     fn enrich_scan_error_hint_matches_a_failed_dns_lookup_chain() {

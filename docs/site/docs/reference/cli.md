@@ -166,6 +166,8 @@ Some flags and flag values only exist when the matching Cargo feature was enable
 
 Both binaries exit `0` on success and `1` on any error. Errors are written to stderr as a single line. Validation errors — missing required flags, mutually-exclusive flags set together, file-sink without `--output` — fail before any probe runs or any HTTP request is accepted.
 
+A target that resolved to no addresses is not an error while any other target was probed: the run exits `0`, the completion banner counts it as `unresolvable: N`, and `-v` names which targets. Like every other fact the completion banner carries — probe faults, quarantined records, a cancelled run — `-q` silences it, so pair `-q` with `--dry-run --format json` if you need the answer without the banner: each target carries its own `"resolution"`, and `unresolvable` is one of the three states. It becomes exit `1` only when **every** target resolved to no addresses, because then the scan probed nothing at all. See [Names with no addresses](../discover/targets.md#names-with-no-addresses).
+
 ## See also
 
 - [Discover · CLI](../discover/cli.md) — walkthrough with worked examples.

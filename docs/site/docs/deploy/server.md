@@ -367,6 +367,7 @@ The summary fields:
 | Field | Meaning |
 |---|---|
 | `targets_resolved` | Addresses the scan probed after CIDR, range, and DNS expansion. |
+| `unresolvable_targets` | Targets the network answered for with no addresses, as written in the request and in the order you sent them. Each was probed zero times and the rest of the scan ran as asked. Omitted when every target resolved. |
 | `probe_attempts` | Probes started: `targets_resolved` × number of probers. |
 | `error_counts` | Faulted probes tallied by fault kind, as a JSON object — for example `{"decode_failed": 1}`. A kind appears only when it happened at least once, so a scan with no faults omits the field. A target that stays silent is a normal result, not a fault. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). |
 | `records_emitted` | `DeviceRecord` events produced. By default only targets that at least one prober reached produce a record. |
@@ -530,11 +531,13 @@ Redaction is the default for every other error the API builds. The scan endpoint
 
 Before a scan probes anything, you can preview exactly what it would do. Add `?dry_run=true` to the request. The server resolves every target and returns a discovery plan with HTTP 200. A dry-run runs no probers and writes to no sink.
 
-A scenario the scan would refuse has no plan either. The server applies the same check on both paths. An invalid scenario returns `400` with the reason instead of a plan:
+A scenario the scan would refuse has no plan either. The server applies the same check on both paths, and answers a refusal with the status the scan would answer — `400` for an invalid scenario or unresolvable client input, `503` when the server's own DNS failed. An out-of-allow-list target is the one exception, and it is deliberate: the dry-run comes back `200` with a plan naming the blocked target, where the scan answers `403`. That case is worked through at the end of this section.
 
 ```json
 {"error":"scenario.probers must not be empty"}
 ```
+
+A target the network says has no addresses is not a refusal, so it answers `200` with the plan; the target carries `"resolution": "unresolvable"` and the rest of the scan is counted normally. Submit the same body without `?dry_run=true` and the completed scan names that target again in `summary.unresolvable_targets` — same string, same order, so a caller holding a plan and a summary reconciles them by the target as written.
 
 Use a dry-run to validate a scenario before it probes the network:
 
@@ -560,7 +563,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 
 - `scenario` — the scenario name, or `unnamed` when the request omits `name`.
 - `targets` — one entry per target you sent, each with the original `target` spec and a `resolution`.
-- `resolution` — `resolved` with the address count and the first few addresses when the target resolves, or `error` with the reason when it fails to resolve or is blocked. `resolved.total` is every address the scan would probe for that target; `resolved.sample` holds the first six, so planning a `/16` costs no more than planning one host.
+- `resolution` — one of three states. `resolved` carries the address count and the first few addresses; `resolved.total` is every address the scan would probe for that target, and `resolved.sample` holds the first six, so planning a `/16` costs no more than planning one host. The bare string `unresolvable` means the network answered that the target has no addresses — the scan skips it and probes the rest. `error` carries the reason the scan would abort rather than run without this target.
 - `probers` — a readable summary of each prober the scan would run.
 - `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
 - `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the request added.
@@ -571,7 +574,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 - `retries` — the retransmit count for connectionless probers.
 - `timeout_ms` — the per-probe timeout in milliseconds.
 - `total_probes` — the addresses the scan would probe, multiplied by the number of probers. `0` when the scan would be rejected before it probes anything.
-- `refusal` — the error the scan would be rejected with, absent when it would run. A plan carrying one always reports `total_probes: 0`.
+- `refusal` — the error the scan would be rejected with, absent when it would run. A plan carrying one always reports `total_probes: 0`. A target marked `unresolvable` never puts one here: skipping it is not a refusal.
 
 ```json
 {

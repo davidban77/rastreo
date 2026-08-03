@@ -22,13 +22,13 @@ Structured plan of a single discovery scenario — what a dry-run would probe, w
 | `max_concurrent` | uint32 | yes | Effective in-flight probe cap for this run. |
 | `probe_rate` | uint32 \| null | no | Effective probes-per-second cap; `null` when unlimited. |
 | `probers` | array<string> | yes | Human-readable summary of each configured prober. |
-| `refusal` | string \| null | no | Error the scan would abort on before its first probe; absent when every target resolved. |
+| `refusal` | string \| null | no | Error the scan would abort on before its first probe; absent when the scan would start, which a target with no addresses does not prevent. |
 | `retries` | uint32 | yes | Effective retransmit attempts for connectionless probers. |
 | `scenario` | string | yes | Name of the scenario this plan describes. |
 | `sink` | string | yes | Human-readable summary of where records would go; several destinations, comma-separated, when the run fans out. |
-| `targets` | array<[`PlannedTarget`](#plannedtarget)> | yes | Each configured target with what it contributes to the scan, or its resolution error. |
+| `targets` | array<[`PlannedTarget`](#plannedtarget)> | yes | Each configured target with what it contributes to the scan, whether it has no addresses, or the error the scan would abort on. |
 | `timeout_ms` | uint64 | yes | Effective per-probe timeout in milliseconds. |
-| `total_probes` | uint | yes | Total probes the scan would run: every address it would probe times probers, `0` when it would abort first. |
+| `total_probes` | uint | yes | Total probes the scan would run: every address it would probe times probers, `0` when it would abort first. A resumed plan counts only what the checkpoint left, so it sits below the sum of the per-target totals. |
 
 ## Definitions
 
@@ -36,7 +36,7 @@ Structured plan of a single discovery scenario — what a dry-run would probe, w
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `resolution` | [`TargetResolution`](#targetresolution) | yes | What the target contributes to the scan, or the resolution error. |
+| `resolution` | [`TargetResolution`](#targetresolution) | yes | What the target contributes to the scan, whether it has no addresses, or the error the scan would abort on. |
 | `target` | string | yes | The target as written in the scenario. |
 
 ### `ResolvedAddresses` {#resolvedaddresses}
@@ -53,5 +53,6 @@ What a target contributes to the scan: how many addresses the stream yields for 
 One of:
 
 - { `resolved`: [`ResolvedAddresses`](#resolvedaddresses) }
+- `unresolvable`
 - { `error`: string }
 
