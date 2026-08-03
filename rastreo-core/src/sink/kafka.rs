@@ -1575,18 +1575,13 @@ mod tests {
         ca_file.write_all(ca.as_bytes()).expect("write ca");
         let ca_path = ca_file.path().to_str().expect("utf-8 path").to_string();
 
-        // SAFETY: env var mutation is process-global; this test uses a unique name.
-        unsafe { std::env::set_var("RASTREO_TEST_KAFKA_SASL_PW", "topsecret-scram") };
-
+        let env = crate::env::MapEnv::new().set("SASL_PW", "topsecret-scram");
         let yaml = format!(
-            "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\ntls:\n  verify: true\n  ca_cert: !file {ca_path}\nsasl:\n  mechanism: scram_sha_256\n  username: svc\n  password: ${{RASTREO_TEST_KAFKA_SASL_PW}}\n"
+            "type: kafka\nbrokers: [\"k:9092\"]\ntopic: t\ntls:\n  verify: true\n  ca_cert: !file {ca_path}\nsasl:\n  mechanism: scram_sha_256\n  username: svc\n  password: ${{SASL_PW}}\n"
         );
         let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).expect("parse");
-        let expanded = expand(raw, SecretSource::SinkConfig).expect("expand secrets");
+        let expanded = expand(raw, SecretSource::SinkConfig, &env).expect("expand secrets");
         let config: SinkConfig = serde_yaml_ng::from_value(expanded).expect("deserialize");
-
-        // SAFETY: see set_var above.
-        unsafe { std::env::remove_var("RASTREO_TEST_KAFKA_SASL_PW") };
 
         match config {
             SinkConfig::Kafka { tls, sasl, .. } => {

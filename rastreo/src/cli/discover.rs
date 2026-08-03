@@ -21,8 +21,9 @@ use rastreo_core::KafkaFlushMode;
 use rastreo_core::Resolver;
 use rastreo_core::{
     preflight_checkpoint_request, resolve_scenario, run_discovery, CheckpointConfig, ConfigError,
-    DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig, HickoryResolver, PlanKnobs,
-    ProbeKind, RastreoError, ResumeError, RunOptions, ScenarioResolution, SinkConfig, Target,
+    DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig, Env, HickoryResolver,
+    PlanKnobs, ProbeKind, RastreoError, ResumeError, RunOptions, ScenarioResolution, SinkConfig,
+    SystemEnv, Target,
 };
 use tokio::sync::watch;
 
@@ -927,7 +928,7 @@ pub(crate) fn load_scenario_file(
             .context(format!("failed to read scenario file '{}'", path.display())),
         hint: None,
     })?;
-    parse_scenario_file(&contents).map_err(|err| ScenarioLoadError {
+    parse_scenario_file(&contents, &SystemEnv).map_err(|err| ScenarioLoadError {
         hint: enrich_feature_hint(&err.to_string()),
         source: anyhow::Error::new(err).context(format!(
             "failed to parse scenario file '{}'",
@@ -1044,7 +1045,7 @@ fn build_scenario_with_notes(args: &DiscoverArgs) -> Result<(DiscoverScenarioCon
 
     let selected = select_probe_kinds(args)?;
     reject_uncompiled_probe_ports(args)?;
-    let probers = expand_probe_selection(&selected.kinds, &probe_options(args))?;
+    let probers = expand_probe_selection(&selected.kinds, &probe_options(args, &SystemEnv))?;
     let notes = selection_notes(args, &selected);
 
     let mut base = BaseProbeConfig::new();
@@ -1140,7 +1141,9 @@ fn reject_uncompiled_probe_ports(args: &DiscoverArgs) -> Result<(), RastreoError
     }
 }
 
-fn probe_options(args: &DiscoverArgs) -> ProbeSelectionOptions {
+fn probe_options(args: &DiscoverArgs, env: &dyn Env) -> ProbeSelectionOptions {
+    #[cfg(not(feature = "snmp"))]
+    let _ = env;
     let mut options = ProbeSelectionOptions::default();
     options.ports.clone_from(&args.port);
     options.ports_by_kind = args.probe_ports.iter().cloned().collect();
@@ -1151,7 +1154,7 @@ fn probe_options(args: &DiscoverArgs) -> ProbeSelectionOptions {
     }
     #[cfg(feature = "snmp")]
     {
-        if let Some(community) = snmp_community(args) {
+        if let Some(community) = snmp_community(args, env) {
             options.snmp_community = community;
         }
         if let Some(version) = args.snmp_version {
@@ -1179,10 +1182,10 @@ const SNMP_COMMUNITY_ENV: &str = "RASTREO_SNMP_COMMUNITY";
 // Read here rather than through clap's `env`, because clap counts an env-sourced value as
 // present and would reject every --file run made from a shell that exports the variable.
 #[cfg(feature = "snmp")]
-fn snmp_community(args: &DiscoverArgs) -> Option<Community> {
+fn snmp_community(args: &DiscoverArgs, env: &dyn Env) -> Option<Community> {
     args.snmp_community
         .clone()
-        .or_else(|| std::env::var(SNMP_COMMUNITY_ENV).ok().map(Community))
+        .or_else(|| env.var(SNMP_COMMUNITY_ENV).ok().map(Community))
         .filter(|community| !community.is_empty())
 }
 
@@ -1489,7 +1492,7 @@ pub(crate) fn parse_target(input: &str) -> Result<Target, ConfigError> {
 mod tests {
     use super::super::output::RecordDestination;
     use super::*;
-    use rastreo_core::ProberConfig;
+    use rastreo_core::{MapEnv, ProberConfig};
     use std::net::Ipv4Addr;
 
     fn parse_args<I, S>(argv: I) -> std::result::Result<DiscoverArgs, clap::Error>
@@ -1846,7 +1849,7 @@ mod tests {
         for i in 0..scenarios {
             yaml.push_str(&format!("  - signal_type: discover\n    name: s{i}\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n"));
         }
-        parse_scenario_file(&yaml).expect("parse scenario file")
+        parse_scenario_file(&yaml, &MapEnv::new()).expect("parse scenario file")
     }
 
     #[cfg(feature = "config")]
@@ -3516,7 +3519,7 @@ scenarios:
     fn probe_options_carry_the_shared_and_per_kind_ports() {
         let mut a = args(&["10.0.0.1"], &[9100, 9200]);
         a.probe_ports = vec![(ProbeKind::Dns, vec![5353])];
-        let options = probe_options(&a);
+        let options = probe_options(&a, &MapEnv::new());
         assert_eq!(options.ports, vec![9100, 9200]);
         assert_eq!(
             options.ports_by_kind.get(&ProbeKind::Dns),
@@ -3529,7 +3532,7 @@ scenarios:
         let mut a = args(&["10.0.0.1"], &[]);
         a.dns_query = vec!["example.com.".to_string()];
         a.dns_query_type = Some(DnsQueryTypeArg::Mx);
-        let options = probe_options(&a);
+        let options = probe_options(&a, &MapEnv::new());
         assert_eq!(options.dns_query_names, vec!["example.com.".to_string()]);
         assert_eq!(
             options.dns_query_type,
@@ -3539,7 +3542,7 @@ scenarios:
 
     #[test]
     fn probe_options_leave_unset_flags_on_the_core_defaults() {
-        let options = probe_options(&args(&["10.0.0.1"], &[]));
+        let options = probe_options(&args(&["10.0.0.1"], &[]), &MapEnv::new());
         let defaults = ProbeSelectionOptions::default();
         assert!(options.ports.is_empty());
         assert!(options.ports_by_kind.is_empty());
@@ -3554,29 +3557,17 @@ scenarios:
         let mut a = args(&["10.0.0.1"], &[]);
         a.udp_protocol = Some(UdpProtocolArg::MemcachedStats);
         assert_eq!(
-            probe_options(&a).udp_protocol,
+            probe_options(&a, &MapEnv::new()).udp_protocol,
             Some(rastreo_core::prober::UdpProtocol::MemcachedStats)
         );
     }
 
     #[cfg(feature = "snmp")]
-    fn with_snmp_community_env<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // SAFETY: the guard above serialises every mutation of this variable across tests.
-        unsafe {
-            match value {
-                Some(value) => std::env::set_var(SNMP_COMMUNITY_ENV, value),
-                None => std::env::remove_var(SNMP_COMMUNITY_ENV),
-            }
+    fn snmp_community_env(value: Option<&str>) -> MapEnv {
+        match value {
+            Some(value) => MapEnv::new().set(SNMP_COMMUNITY_ENV, value),
+            None => MapEnv::new(),
         }
-        let out = body();
-        unsafe { std::env::remove_var(SNMP_COMMUNITY_ENV) };
-        out
     }
 
     #[cfg(feature = "snmp")]
@@ -3585,7 +3576,7 @@ scenarios:
         let mut a = args(&["10.0.0.1"], &[]);
         a.snmp_community = Some(Community("lab-ro".to_string()));
         a.snmp_version = Some(SnmpVersionArg::V1);
-        let options = with_snmp_community_env(None, || probe_options(&a));
+        let options = probe_options(&a, &snmp_community_env(None));
         assert_eq!(&*options.snmp_community, "lab-ro");
         assert_eq!(options.snmp_version, rastreo_core::prober::SnmpVersion::V1);
     }
@@ -3594,7 +3585,7 @@ scenarios:
     #[test]
     fn the_snmp_community_falls_back_to_the_environment() {
         let a = args(&["10.0.0.1"], &[]);
-        let options = with_snmp_community_env(Some("from-env"), || probe_options(&a));
+        let options = probe_options(&a, &snmp_community_env(Some("from-env")));
         assert_eq!(&*options.snmp_community, "from-env");
     }
 
@@ -3603,7 +3594,7 @@ scenarios:
     fn the_snmp_community_flag_beats_the_environment() {
         let mut a = args(&["10.0.0.1"], &[]);
         a.snmp_community = Some(Community("from-flag".to_string()));
-        let options = with_snmp_community_env(Some("from-env"), || probe_options(&a));
+        let options = probe_options(&a, &snmp_community_env(Some("from-env")));
         assert_eq!(&*options.snmp_community, "from-flag");
     }
 
@@ -3611,7 +3602,7 @@ scenarios:
     #[test]
     fn an_empty_snmp_community_environment_variable_leaves_the_default() {
         let a = args(&["10.0.0.1"], &[]);
-        let options = with_snmp_community_env(Some(""), || probe_options(&a));
+        let options = probe_options(&a, &snmp_community_env(Some("")));
         assert_eq!(
             &*options.snmp_community,
             &*ProbeSelectionOptions::default().snmp_community
@@ -3623,7 +3614,7 @@ scenarios:
     fn an_empty_snmp_community_flag_leaves_the_default_like_an_empty_environment_variable() {
         let mut a = args(&["10.0.0.1"], &[]);
         a.snmp_community = Some(Community(String::new()));
-        let options = with_snmp_community_env(None, || probe_options(&a));
+        let options = probe_options(&a, &snmp_community_env(None));
         assert_eq!(
             &*options.snmp_community,
             &*ProbeSelectionOptions::default().snmp_community
@@ -3650,7 +3641,7 @@ scenarios:
     fn probe_options_carry_the_http_path() {
         let mut a = args(&["10.0.0.1"], &[]);
         a.http_path = Some("/health".to_string());
-        assert_eq!(probe_options(&a).http_path, "/health");
+        assert_eq!(probe_options(&a, &MapEnv::new()).http_path, "/health");
     }
 
     #[cfg(feature = "icmp")]
@@ -3658,7 +3649,7 @@ scenarios:
     fn probe_options_carry_the_icmp_count() {
         let mut a = args(&["10.0.0.1"], &[]);
         a.icmp_count = Some(7);
-        assert_eq!(probe_options(&a).icmp_count, 7);
+        assert_eq!(probe_options(&a, &MapEnv::new()).icmp_count, 7);
     }
 
     #[cfg(any(feature = "arp", feature = "ndp"))]
@@ -3666,7 +3657,7 @@ scenarios:
     fn probe_options_carry_the_interface() {
         let mut a = args(&["10.0.0.1"], &[]);
         a.interface = Some("eth0".to_string());
-        assert_eq!(probe_options(&a).interface, "eth0");
+        assert_eq!(probe_options(&a, &MapEnv::new()).interface, "eth0");
     }
 
     #[test]

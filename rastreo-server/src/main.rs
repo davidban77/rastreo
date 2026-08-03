@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use rastreo_core::{GuardedResolver, HickoryResolver, Resolver};
+use rastreo_core::{GuardedResolver, HickoryResolver, Resolver, SystemEnv};
 use rastreo_server::{
     build_app_with_timeout, spawn_sink_probe,
     state::{
@@ -62,12 +62,13 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let env = SystemEnv;
 
     let otlp_config =
-        OtlpConfig::from_env("rastreo-server", true).context("failed to load OTLP config")?;
+        OtlpConfig::from_env(&env, "rastreo-server", true).context("failed to load OTLP config")?;
     init_tracing(cli.log_format, otlp_config.as_ref())?;
 
-    let guard = TargetGuardConfig::from_env().context("failed to load target-guard config")?;
+    let guard = TargetGuardConfig::from_env(&env).context("failed to load target-guard config")?;
     let base_resolver =
         HickoryResolver::from_system().context("failed to initialize system resolver")?;
     let resolver: Arc<dyn Resolver> = Arc::new(GuardedResolver::new(
@@ -75,12 +76,12 @@ async fn main() -> anyhow::Result<()> {
         guard.allowlist.clone(),
         guard.max_total_hosts,
     ));
-    let readiness = ReadinessConfig::from_env().context("failed to load readiness config")?;
-    let metrics_config = MetricsConfig::from_env().context("failed to load metrics config")?;
-    let auth = AuthConfig::from_env().context("failed to load auth config")?;
-    let sink_probe = SinkProbeConfig::from_env().context("failed to load sink-probe config")?;
-    let shutdown = ShutdownConfig::from_env().context("failed to load shutdown config")?;
-    let max_result_bytes = rastreo_server::state::max_result_bytes_from_env()
+    let readiness = ReadinessConfig::from_env(&env).context("failed to load readiness config")?;
+    let metrics_config = MetricsConfig::from_env(&env).context("failed to load metrics config")?;
+    let auth = AuthConfig::from_env(&env).context("failed to load auth config")?;
+    let sink_probe = SinkProbeConfig::from_env(&env).context("failed to load sink-probe config")?;
+    let shutdown = ShutdownConfig::from_env(&env).context("failed to load shutdown config")?;
+    let max_result_bytes = rastreo_server::state::max_result_bytes_from_env(&env)
         .context("failed to load result-capture limit")?;
     let state = AppState::with_config(resolver, readiness, metrics_config)
         .with_auth(auth)
@@ -88,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
         .with_result_limit(max_result_bytes);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (state, probe_handle) = spawn_sink_probe(state, &sink_probe, shutdown_rx.clone()).await;
+    let (state, probe_handle) =
+        spawn_sink_probe(state, &sink_probe, Arc::new(env), shutdown_rx.clone()).await;
 
     // Guard must outlive the axum serve loop so pending OTLP exports flush on shutdown.
     let _otlp_guard = init_otlp(

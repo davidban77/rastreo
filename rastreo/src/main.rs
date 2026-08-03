@@ -9,7 +9,8 @@ pub use cli::LogFormat;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let parsed = cli::Cli::parse();
-    let otlp_config = otlp::config_from_env().context("failed to load OTLP config")?;
+    let otlp_config =
+        otlp::config_from_env(&rastreo_core::SystemEnv).context("failed to load OTLP config")?;
     init_tracing(
         parsed.verbose,
         parsed.quiet,

@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
+use rastreo_core::{Env, SystemEnv};
 
 const CATALOG_DIR_ENV: &str = "RASTREO_CATALOG_DIR";
 const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
@@ -14,30 +15,18 @@ const MAX_LISTED_NAMES_PER_DIR: usize = 20;
 
 /// Resolve a catalog `@name` to a scenario path: search `RASTREO_CATALOG_DIR` if set, else the user config dir then `/etc/rastreo/catalog`; first directory wins, `.yml` before `.yaml`.
 pub fn resolve_catalog_name(name: &str) -> Result<PathBuf> {
-    resolve_catalog_name_with_env(name, &StdEnv)
-}
-
-trait Env {
-    fn var(&self, key: &str) -> Option<String>;
-}
-
-struct StdEnv;
-
-impl Env for StdEnv {
-    fn var(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
-    }
+    resolve_catalog_name_with_env(name, &SystemEnv)
 }
 
 /// List every catalog `@name` across the search path with the exact scenario path a run would load, sorted and deduped by name.
 pub fn list_catalog() -> Vec<(String, PathBuf)> {
-    list_catalog_with_env(&StdEnv)
+    list_catalog_with_env(&SystemEnv)
 }
 
 pub fn run_list() -> Result<()> {
     let entries = list_catalog();
     if entries.is_empty() {
-        super::output::print_catalog_empty(&none_found_message(&search_dirs(&StdEnv)));
+        super::output::print_catalog_empty(&none_found_message(&search_dirs(&SystemEnv)));
         return Ok(());
     }
     print!("{}", format_listing(&entries));
@@ -115,7 +104,7 @@ fn strip_yaml_suffix(name: &str) -> &str {
 }
 
 fn search_dirs(env: &dyn Env) -> Vec<PathBuf> {
-    if let Some(raw) = env.var(CATALOG_DIR_ENV) {
+    if let Ok(raw) = env.var(CATALOG_DIR_ENV) {
         return raw
             .split(':')
             .filter(|s| !s.is_empty())
@@ -123,9 +112,9 @@ fn search_dirs(env: &dyn Env) -> Vec<PathBuf> {
             .collect();
     }
     let mut dirs = Vec::new();
-    let user_dir = if let Some(xdg) = env.var(XDG_CONFIG_HOME_ENV).filter(|s| !s.is_empty()) {
+    let user_dir = if let Some(xdg) = env.var(XDG_CONFIG_HOME_ENV).ok().filter(|s| !s.is_empty()) {
         PathBuf::from(xdg).join("rastreo").join("catalog")
-    } else if let Some(home) = env.var(HOME_ENV).filter(|s| !s.is_empty()) {
+    } else if let Some(home) = env.var(HOME_ENV).ok().filter(|s| !s.is_empty()) {
         PathBuf::from(home)
             .join(".config")
             .join("rastreo")
@@ -210,27 +199,9 @@ fn list_catalog_names(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use rastreo_core::MapEnv;
     use std::fs;
     use tempfile::TempDir;
-
-    struct FakeEnv(HashMap<String, String>);
-
-    impl FakeEnv {
-        fn new() -> Self {
-            Self(HashMap::new())
-        }
-        fn set(mut self, key: &str, val: impl Into<String>) -> Self {
-            self.0.insert(key.into(), val.into());
-            self
-        }
-    }
-
-    impl Env for FakeEnv {
-        fn var(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-    }
 
     fn touch(dir: &Path, rel: &str) -> PathBuf {
         let p = dir.join(rel);
@@ -245,7 +216,7 @@ mod tests {
     fn resolve_catalog_name_finds_yml_in_user_dir() {
         let home = TempDir::new().expect("tempdir");
         let expected = touch(home.path(), ".config/rastreo/catalog/foo.yml");
-        let env = FakeEnv::new().set(HOME_ENV, home.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(HOME_ENV, home.path().to_string_lossy().into_owned());
         let got = resolve_catalog_name_with_env("foo", &env).expect("resolves");
         assert_eq!(got, expected);
     }
@@ -255,7 +226,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let yml = touch(dir.path(), "foo.yml");
         let _yaml = touch(dir.path(), "foo.yaml");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let got = resolve_catalog_name_with_env("foo", &env).expect("resolves");
         assert_eq!(got, yml);
     }
@@ -264,7 +235,7 @@ mod tests {
     fn resolve_catalog_name_falls_back_to_yaml_when_yml_missing() {
         let dir = TempDir::new().expect("tempdir");
         let yaml = touch(dir.path(), "foo.yaml");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let got = resolve_catalog_name_with_env("foo", &env).expect("resolves");
         assert_eq!(got, yaml);
     }
@@ -280,7 +251,7 @@ mod tests {
             a.path().to_string_lossy(),
             b.path().to_string_lossy()
         );
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, joined);
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, joined);
         let got = resolve_catalog_name_with_env("foo", &env).expect("resolves");
         assert_eq!(got, a_file);
     }
@@ -289,7 +260,7 @@ mod tests {
     fn resolve_catalog_name_prefers_user_dir_over_etc() {
         let home = TempDir::new().expect("tempdir");
         let user_file = touch(home.path(), ".config/rastreo/catalog/foo.yml");
-        let env = FakeEnv::new().set(HOME_ENV, home.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(HOME_ENV, home.path().to_string_lossy().into_owned());
         let got = resolve_catalog_name_with_env("foo", &env).expect("resolves");
         assert_eq!(got, user_file);
     }
@@ -298,7 +269,7 @@ mod tests {
     fn resolve_catalog_name_strips_yml_suffix_from_input() {
         let dir = TempDir::new().expect("tempdir");
         let file = touch(dir.path(), "foo.yml");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let got = resolve_catalog_name_with_env("foo.yml", &env).expect("resolves");
         assert_eq!(got, file);
     }
@@ -307,14 +278,14 @@ mod tests {
     fn resolve_catalog_name_strips_yaml_suffix_from_input() {
         let dir = TempDir::new().expect("tempdir");
         let file = touch(dir.path(), "foo.yaml");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let got = resolve_catalog_name_with_env("foo.yaml", &env).expect("resolves");
         assert_eq!(got, file);
     }
 
     #[test]
     fn resolve_catalog_name_rejects_path_separators() {
-        let env = FakeEnv::new();
+        let env = MapEnv::new();
         let err = resolve_catalog_name_with_env("foo/bar", &env).expect_err("slash");
         assert!(format!("{err}").contains("path separators"));
         let err = resolve_catalog_name_with_env("foo\\bar", &env).expect_err("backslash");
@@ -323,7 +294,7 @@ mod tests {
 
     #[test]
     fn resolve_catalog_name_rejects_empty_string() {
-        let env = FakeEnv::new();
+        let env = MapEnv::new();
         let err = resolve_catalog_name_with_env("", &env).expect_err("empty");
         assert!(format!("{err}").contains("empty"));
     }
@@ -333,7 +304,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         touch(dir.path(), "alpha.yml");
         touch(dir.path(), "beta.yaml");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let err = resolve_catalog_name_with_env("missing", &env).expect_err("miss");
         let msg = format!("{err}");
         assert!(msg.contains("@missing"), "{msg}");
@@ -346,7 +317,7 @@ mod tests {
     fn resolve_catalog_name_reports_no_dirs_when_none_exist() {
         let placeholder = TempDir::new().expect("tempdir");
         let missing = placeholder.path().join("nonexistent");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, missing.to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, missing.to_string_lossy().into_owned());
         let err = resolve_catalog_name_with_env("anything", &env).expect_err("miss");
         let msg = format!("{err}");
         assert!(msg.contains("no catalog directories exist"), "{msg}");
@@ -356,7 +327,7 @@ mod tests {
     #[test]
     fn search_dirs_uses_xdg_when_set() {
         let xdg = TempDir::new().expect("tempdir");
-        let env = FakeEnv::new().set(
+        let env = MapEnv::new().set(
             XDG_CONFIG_HOME_ENV,
             xdg.path().to_string_lossy().into_owned(),
         );
@@ -377,7 +348,7 @@ mod tests {
     fn search_dirs_skips_empty_entries_in_catalog_env() {
         let dir = TempDir::new().expect("tempdir");
         let joined = format!("::{}::", dir.path().to_string_lossy());
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, joined);
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, joined);
         let dirs = search_dirs(&env);
         assert_eq!(dirs.len(), 1);
         assert_eq!(dirs[0], dir.path());
@@ -398,7 +369,7 @@ mod tests {
         for i in 1..=total {
             touch(dir.path(), &format!("name-{i:02}.yml"));
         }
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let err = resolve_catalog_name_with_env("missing", &env).expect_err("miss");
         let msg = format!("{err}");
         assert!(msg.contains("@name-01"), "{msg}");
@@ -428,7 +399,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let foo = touch(dir.path(), "foo.yml");
         let bar = touch(dir.path(), "bar.yaml");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let got = list_catalog_with_env(&env);
         assert_eq!(
             got,
@@ -447,7 +418,7 @@ mod tests {
             a.path().to_string_lossy(),
             b.path().to_string_lossy()
         );
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, joined);
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, joined);
         let listed = list_catalog_with_env(&env);
         let shared = listed
             .iter()
@@ -463,7 +434,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let yml = touch(dir.path(), "office.yml");
         let _yaml = touch(dir.path(), "office.yaml");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         let office: Vec<_> = list_catalog_with_env(&env)
             .into_iter()
             .filter(|(name, _)| name == "office")
@@ -475,7 +446,7 @@ mod tests {
     #[test]
     fn list_catalog_is_empty_when_no_catalog_files_present() {
         let dir = TempDir::new().expect("tempdir");
-        let env = FakeEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
+        let env = MapEnv::new().set(CATALOG_DIR_ENV, dir.path().to_string_lossy().into_owned());
         assert!(list_catalog_with_env(&env).is_empty());
     }
 

@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rastreo_core::{HickoryResolver, Resolver};
+use rastreo_core::{HickoryResolver, MapEnv, Resolver};
 use rastreo_server::routes::health::probe_stale_after_secs;
 use rastreo_server::state::{AppState, SinkProbeConfig};
 use rastreo_server::{build_app, spawn_sink_probe};
@@ -78,8 +78,13 @@ async fn a_sink_configured_after_startup_serves_readyz_and_the_next_scan() {
         probe_timeout: Duration::from_secs(5),
     };
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let (state, _probe_task) =
-        spawn_sink_probe(AppState::new(resolver()), &config, shutdown_rx).await;
+    let (state, _probe_task) = spawn_sink_probe(
+        AppState::new(resolver()),
+        &config,
+        Arc::new(MapEnv::new()),
+        shutdown_rx,
+    )
+    .await;
     let addr = serve(state.clone()).await;
 
     let (status, body) = readyz(addr).await;
@@ -156,8 +161,13 @@ async fn a_sink_operation_outlasting_the_probe_timeout_ages_the_result_but_keeps
     };
     let stale_after = probe_stale_after_secs(config.probe_interval, config.probe_timeout);
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let (state, _probe_task) =
-        spawn_sink_probe(AppState::new(resolver()), &config, shutdown_rx).await;
+    let (state, _probe_task) = spawn_sink_probe(
+        AppState::new(resolver()),
+        &config,
+        Arc::new(MapEnv::new()),
+        shutdown_rx,
+    )
+    .await;
     let addr = serve(state.clone()).await;
 
     // Stands in for a single broker round-trip, flush, or close that runs longer than one probe.

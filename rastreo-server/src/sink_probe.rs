@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
+use rastreo_core::env::Env;
 use rastreo_core::{Sink, SinkType};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
@@ -21,6 +22,7 @@ struct ConstructError {
 pub async fn spawn_sink_probe(
     state: AppState,
     config: &SinkProbeConfig,
+    env: Arc<dyn Env>,
     shutdown: watch::Receiver<bool>,
 ) -> (AppState, Option<JoinHandle<()>>) {
     let Some(path) = config.config_path.as_ref() else {
@@ -29,7 +31,7 @@ pub async fn spawn_sink_probe(
 
     let slot = SinkSlot::default();
     let mut failures = ConstructionFailures::default();
-    let reachability = match load_and_construct_sink(path, config.probe_timeout).await {
+    let reachability = match load_and_construct_sink(path, config.probe_timeout, &*env).await {
         Ok(sink) => {
             let sink_type = sink.kind();
             let reachability = Arc::new(SinkReachability::configured(
@@ -64,6 +66,7 @@ pub async fn spawn_sink_probe(
         Arc::clone(&reachability),
         Arc::clone(&state.metrics),
         config.clone(),
+        env,
         failures,
         shutdown,
     );
@@ -148,6 +151,7 @@ fn construction_timed_out(
 async fn load_and_construct_sink(
     path: &std::path::Path,
     construction_timeout: Duration,
+    env: &dyn Env,
 ) -> Result<Box<dyn Sink>, ConstructError> {
     #[cfg(feature = "config")]
     {
@@ -163,7 +167,7 @@ async fn load_and_construct_sink(
                 .map_err(|err| ConstructError { hint: None, err })?,
             Err(_) => return Err(construction_timed_out(construction_timeout, None)),
         };
-        let config = parse_sink_config(&raw)
+        let config = parse_sink_config(&raw, env)
             .with_context(|| format!("failed to parse sink config at {}", path.display()))
             .map_err(|err| ConstructError { hint: None, err })?;
         // A parsed config names its kind even when it cannot be built: `unknown` means unreadable.
@@ -180,7 +184,7 @@ async fn load_and_construct_sink(
     }
     #[cfg(not(feature = "config"))]
     {
-        let _ = (path, construction_timeout);
+        let _ = (path, construction_timeout, env);
         Err(ConstructError {
             hint: None,
             err: anyhow::anyhow!(
@@ -195,6 +199,7 @@ fn spawn_probe_task(
     reachability: Arc<SinkReachability>,
     metrics: Arc<Metrics>,
     config: SinkProbeConfig,
+    env: Arc<dyn Env>,
     mut failures: ConstructionFailures,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
@@ -210,6 +215,7 @@ fn spawn_probe_task(
                     guard_panics(probe_tick(
                         &slot,
                         &config,
+                        &*env,
                         &reachability,
                         &metrics,
                         &mut failures,
@@ -224,6 +230,7 @@ fn spawn_probe_task(
 async fn probe_tick(
     slot: &SinkSlot,
     config: &SinkProbeConfig,
+    env: &dyn Env,
     reachability: &Arc<SinkReachability>,
     metrics: &Arc<Metrics>,
     failures: &mut ConstructionFailures,
@@ -232,7 +239,7 @@ async fn probe_tick(
     reachability.record_tick();
     let sink = match slot.get() {
         Some(sink) => sink,
-        None => match retry_construction(config, reachability, metrics, failures).await {
+        None => match retry_construction(config, env, reachability, metrics, failures).await {
             Some(sink) => {
                 slot.attach(Arc::clone(&sink));
                 sink
@@ -263,12 +270,13 @@ fn panic_detail(payload: &(dyn std::any::Any + Send)) -> &str {
 
 async fn retry_construction(
     config: &SinkProbeConfig,
+    env: &dyn Env,
     reachability: &Arc<SinkReachability>,
     metrics: &Arc<Metrics>,
     failures: &mut ConstructionFailures,
 ) -> Option<SharedSink> {
     let path = config.config_path.as_ref()?;
-    match load_and_construct_sink(path, config.probe_timeout).await {
+    match load_and_construct_sink(path, config.probe_timeout, env).await {
         Ok(sink) => {
             let sink_type = sink.kind();
             reachability.set_sink_type(sink_type);
@@ -429,6 +437,10 @@ mod tests {
         Arc::new(Mutex::new(sink))
     }
 
+    fn no_env() -> rastreo_core::MapEnv {
+        rastreo_core::MapEnv::new()
+    }
+
     #[tokio::test]
     async fn run_probe_success_updates_reachability_and_counter() {
         let sink = shared(Box::new(AlwaysOk));
@@ -557,7 +569,7 @@ mod tests {
         hold_ready.notified().await;
 
         let mut failures = ConstructionFailures::default();
-        probe_tick(&slot, &config, &reach, &metrics, &mut failures).await;
+        probe_tick(&slot, &config, &no_env(), &reach, &metrics, &mut failures).await;
 
         assert!(
             reach.last_tick.age().is_some(),
@@ -617,7 +629,7 @@ mod tests {
 
         let mut failures = ConstructionFailures::default();
         let start = tokio::time::Instant::now();
-        probe_tick(&slot, &config, &reach, &metrics, &mut failures).await;
+        probe_tick(&slot, &config, &no_env(), &reach, &metrics, &mut failures).await;
         let elapsed = start.elapsed();
         hold_handle.await.expect("holder task");
 
@@ -673,7 +685,7 @@ mod tests {
         let state = AppState::new(resolver);
         let cfg = SinkProbeConfig::default();
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         assert!(after.sink().is_none());
         assert!(!after.sink_reachability.configured);
         assert!(
@@ -704,7 +716,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         assert!(after.sink().is_some());
         assert!(after.sink_reachability.configured);
         assert_eq!(after.sink_reachability.sink_type(), Some(SinkType::Stdout));
@@ -735,7 +747,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         assert!(
             after.sink_reachability.last_probe.age().is_some(),
             "first probe must complete before spawn_sink_probe returns",
@@ -772,7 +784,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         assert!(
             after.sink_reachability.last_tick.age().is_some(),
             "the startup cycle counts as a tick, so /readyz is never gated on it",
@@ -800,7 +812,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         assert!(after.sink_reachability.last_tick.age().is_some());
         handle.expect("retry task spawned").abort();
     }
@@ -835,7 +847,7 @@ mod tests {
             probe_timeout: Duration::from_secs(60),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         let handle = handle.expect("retry task spawned on parse failure");
         let startup_ticks = after.sink_reachability.ticks.load(Ordering::Relaxed);
 
@@ -878,7 +890,7 @@ mod tests {
         let probe_timeout = Duration::from_millis(200);
         let bounded = tokio::time::timeout(
             Duration::from_secs(5),
-            load_and_construct_sink(&path, probe_timeout),
+            load_and_construct_sink(&path, probe_timeout, &no_env()),
         )
         .await;
 
@@ -921,7 +933,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         assert!(after.sink().is_none());
         assert!(after.sink_reachability.configured);
         assert!(after.sink_reachability.last_error_snapshot().is_some());
@@ -955,7 +967,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         assert!(after.sink().is_none());
         assert!(after.sink_reachability.configured);
         assert!(after.sink_reachability.last_error_snapshot().is_some());
@@ -986,7 +998,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
 
         assert!(after.sink().is_none());
         assert_eq!(after.sink_reachability.sink_type(), Some(SinkType::File));
@@ -1022,7 +1034,7 @@ mod tests {
 
         let start = Instant::now();
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -1070,7 +1082,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (tx, rx) = make_shutdown();
-        let (_after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (_after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         let handle = handle.expect("task spawned");
 
         tx.send(true).expect("send shutdown");
@@ -1112,7 +1124,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         let handle = handle.expect("retry task spawned on parse failure");
         assert!(after.sink().is_none());
 
@@ -1191,7 +1203,7 @@ mod tests {
             probe_timeout: Duration::from_secs(5),
         };
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         let handle = handle.expect("retry task spawned");
         assert!(after.sink().is_none());
         assert_eq!(after.sink_reachability.sink_type_label(), Some("unknown"));
@@ -1243,7 +1255,7 @@ mod tests {
         };
         let (_tx, rx) = make_shutdown();
         let start = Instant::now();
-        let (after, handle) = spawn_sink_probe(state, &cfg, rx).await;
+        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         let handle = handle.expect("retry task spawned");
 
         let metrics = StdArc::clone(&after.metrics);
