@@ -7,9 +7,9 @@ pub use selection::{
     ClassifierKind, ClassifierSelectionOptions, CLASSIFIER_KIND_COUNT, DEFAULT_CLASSIFIER_KIND,
 };
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
-use regex::Regex;
+use regex::{CaptureLocations, Regex};
 use schemars::JsonSchema;
 
 use crate::error::{ClassifierError, RastreoError};
@@ -175,15 +175,113 @@ pub fn create_classifier(config: &ClassifierConfig) -> Result<Box<dyn Classifier
     }
 }
 
-#[derive(Clone)]
+/// Which regex group a rule's capture field reads. A rule that names a group its pattern does not
+/// have is `Missing`, not `Undeclared`: it still runs and still spends its slot, writing nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureGroup {
+    Undeclared,
+    Missing,
+    Index(usize),
+}
+
+impl CaptureGroup {
+    fn resolve(regex: &Regex, name: Option<&str>) -> Self {
+        let Some(name) = name else {
+            return CaptureGroup::Undeclared;
+        };
+        match regex.capture_names().position(|group| group == Some(name)) {
+            Some(index) => CaptureGroup::Index(index),
+            None => CaptureGroup::Missing,
+        }
+    }
+
+    fn is_declared(self) -> bool {
+        self != CaptureGroup::Undeclared
+    }
+
+    fn index(self) -> Option<usize> {
+        match self {
+            CaptureGroup::Index(index) => Some(index),
+            CaptureGroup::Undeclared | CaptureGroup::Missing => None,
+        }
+    }
+}
+
+/// Which of the record's still-empty fields the rule under consideration may fill.
+#[derive(Clone, Copy)]
+struct Claims {
+    platform: bool,
+    ssh_version: bool,
+    http_server: bool,
+}
+
+impl Claims {
+    fn any(self) -> bool {
+        self.platform || self.ssh_version || self.http_server
+    }
+}
+
 struct CompiledRule {
     signal: SignalKind,
     regex: Regex,
+    // Reused across records so a search writes group offsets instead of allocating a `Captures`.
+    // A clone gets its own, for the same reason the regex itself is cloned rather than shared.
+    scratch: Mutex<CaptureLocations>,
     platform: Option<String>,
-    os_version_capture: Option<String>,
-    ssh_version_capture: Option<String>,
-    http_server_capture: Option<String>,
-    http_version_capture: Option<String>,
+    os_version_group: CaptureGroup,
+    ssh_version_group: CaptureGroup,
+    http_server_group: CaptureGroup,
+    http_version_group: CaptureGroup,
+}
+
+impl Clone for CompiledRule {
+    fn clone(&self) -> Self {
+        let regex = self.regex.clone();
+        Self {
+            signal: self.signal,
+            scratch: Mutex::new(regex.capture_locations()),
+            regex,
+            platform: self.platform.clone(),
+            os_version_group: self.os_version_group,
+            ssh_version_group: self.ssh_version_group,
+            http_server_group: self.http_server_group,
+            http_version_group: self.http_version_group,
+        }
+    }
+}
+
+impl CompiledRule {
+    fn search(&self, text: &str, claims: Claims) -> Option<PlatformMatch> {
+        match self.scratch.try_lock() {
+            Ok(mut locs) => self.read_groups(text, &mut locs, claims),
+            // Held or poisoned: this search buys its own buffer rather than block or panic.
+            Err(_) => self.read_groups(text, &mut self.regex.capture_locations(), claims),
+        }
+    }
+
+    fn read_groups(
+        &self,
+        text: &str,
+        locs: &mut CaptureLocations,
+        claims: Claims,
+    ) -> Option<PlatformMatch> {
+        self.regex.captures_read(locs, text)?;
+        let captured = |wanted: bool, group: CaptureGroup| -> Option<String> {
+            if !wanted {
+                return None;
+            }
+            group
+                .index()
+                .and_then(|index| locs.get(index))
+                .map(|(start, end)| text[start..end].to_string())
+        };
+        Some(PlatformMatch {
+            os_version: captured(claims.platform, self.os_version_group),
+            ssh_version: captured(claims.ssh_version, self.ssh_version_group),
+            http_server: captured(claims.http_server, self.http_server_group),
+            http_version: captured(claims.http_server, self.http_version_group),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -286,13 +384,14 @@ fn compile_platform_rule(rule: PlatformRule) -> Result<CompiledRule, ClassifierE
         source,
     })?;
     Ok(CompiledRule {
+        os_version_group: CaptureGroup::resolve(&regex, rule.os_version_capture.as_deref()),
+        ssh_version_group: CaptureGroup::resolve(&regex, rule.ssh_version_capture.as_deref()),
+        http_server_group: CaptureGroup::resolve(&regex, rule.http_server_capture.as_deref()),
+        http_version_group: CaptureGroup::resolve(&regex, rule.http_version_capture.as_deref()),
+        scratch: Mutex::new(regex.capture_locations()),
         signal: rule.signal,
         regex,
         platform: rule.platform,
-        os_version_capture: rule.os_version_capture,
-        ssh_version_capture: rule.ssh_version_capture,
-        http_server_capture: rule.http_server_capture,
-        http_version_capture: rule.http_version_capture,
     })
 }
 
@@ -353,29 +452,31 @@ impl RulesClassifier {
             if !(want_platform || want_ssh_version || want_http_server) {
                 return;
             }
-            let claims_platform = want_platform && rule.platform.is_some();
-            let claims_ssh_version = want_ssh_version && rule.ssh_version_capture.is_some();
-            let claims_http_server = want_http_server && rule.http_server_capture.is_some();
-            if !(claims_platform || claims_ssh_version || claims_http_server) {
+            let claims = Claims {
+                platform: want_platform && rule.platform.is_some(),
+                ssh_version: want_ssh_version && rule.ssh_version_group.is_declared(),
+                http_server: want_http_server && rule.http_server_group.is_declared(),
+            };
+            if !claims.any() {
                 continue;
             }
-            let Some(matched) = platform_rule_match(rule, record) else {
+            let Some(matched) = platform_rule_match(rule, record, claims) else {
                 continue;
             };
-            if claims_platform {
+            if claims.platform {
                 record.platform = rule.platform.clone();
                 if let Some(v) = matched.os_version {
                     record.os_version = Some(v);
                 }
                 want_platform = false;
             }
-            if claims_ssh_version {
+            if claims.ssh_version {
                 if let Some(v) = matched.ssh_version {
                     record.ssh_version = Some(v);
                 }
                 want_ssh_version = false;
             }
-            if claims_http_server {
+            if claims.http_server {
                 if let Some(server) = matched.http_server {
                     record.http_server = Some(server);
                     if let Some(version) = matched.http_version {
@@ -408,25 +509,16 @@ impl Classifier for RulesClassifier {
     }
 }
 
-fn platform_rule_match(rule: &CompiledRule, record: &DeviceRecord) -> Option<PlatformMatch> {
-    for signal in &record.signals {
-        let Some(text) = signal_text_for(signal, rule.signal) else {
-            continue;
-        };
-        if let Some(caps) = rule.regex.captures(text) {
-            let capture_by = |name: Option<&str>| -> Option<String> {
-                name.and_then(|n| caps.name(n))
-                    .map(|m| m.as_str().to_string())
-            };
-            return Some(PlatformMatch {
-                os_version: capture_by(rule.os_version_capture.as_deref()),
-                ssh_version: capture_by(rule.ssh_version_capture.as_deref()),
-                http_server: capture_by(rule.http_server_capture.as_deref()),
-                http_version: capture_by(rule.http_version_capture.as_deref()),
-            });
-        }
-    }
-    None
+fn platform_rule_match(
+    rule: &CompiledRule,
+    record: &DeviceRecord,
+    claims: Claims,
+) -> Option<PlatformMatch> {
+    record
+        .signals
+        .iter()
+        .filter_map(|signal| signal_text_for(signal, rule.signal))
+        .find_map(|text| rule.search(text, claims))
 }
 
 fn role_rule_matches(rule: &CompiledRoleRule, record: &DeviceRecord) -> bool {
@@ -1048,6 +1140,124 @@ mod tests {
             .push(Signal::SshBanner("SSH-2.0-Cisco-1.25".into()));
         c.classify(&mut record).expect("classify ok");
         assert!(record.ssh_version.is_none());
+    }
+
+    #[test]
+    fn a_matching_rule_spends_its_slot_even_when_its_pattern_has_no_such_group() {
+        let user = vec![
+            PlatformRule {
+                signal: SignalKind::SshBanner,
+                pattern: r"^SSH-2\.0".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: Some("absent".to_string()),
+                http_server_capture: None,
+                http_version_capture: None,
+            },
+            PlatformRule {
+                signal: SignalKind::SshBanner,
+                pattern: r"-(?P<v>OpenSSH_[\d\.p]+)".to_string(),
+                platform: None,
+                os_version_capture: None,
+                ssh_version_capture: Some("v".to_string()),
+                http_server_capture: None,
+                http_version_capture: None,
+            },
+        ];
+        let c = create_classifier(&replace_rules(user)).expect("create");
+        let mut record = empty_record();
+        record
+            .signals
+            .push(Signal::SshBanner("SSH-2.0-OpenSSH_9.2p1 Debian-1".into()));
+        c.classify(&mut record).expect("classify ok");
+        assert!(record.ssh_version.is_none());
+    }
+
+    #[test]
+    fn a_search_that_cannot_take_the_scratch_reads_the_same_groups() {
+        let rule = compile_platform_rule(PlatformRule {
+            signal: SignalKind::HttpBanner,
+            pattern: r"^(?P<server>nginx)/(?P<version>[\d\.]+)".to_string(),
+            platform: None,
+            os_version_capture: None,
+            ssh_version_capture: None,
+            http_server_capture: Some("server".to_string()),
+            http_version_capture: Some("version".to_string()),
+        })
+        .expect("the pattern compiles");
+        let claims = Claims {
+            platform: false,
+            ssh_version: false,
+            http_server: true,
+        };
+
+        let uncontended = rule
+            .search("nginx/1.24.0", claims)
+            .expect("the banner matches");
+        let held = rule.scratch.try_lock().expect("the scratch starts free");
+        let contended = rule
+            .search("nginx/1.24.0", claims)
+            .expect("the banner matches");
+        drop(held);
+
+        assert_eq!(contended.http_server, uncontended.http_server);
+        assert_eq!(contended.http_version, uncontended.http_version);
+        assert_eq!(contended.http_server.as_deref(), Some("nginx"));
+        assert_eq!(contended.http_version.as_deref(), Some("1.24.0"));
+    }
+
+    #[test]
+    fn threads_that_all_find_the_scratch_held_classify_every_record_the_same() {
+        let classifier = Arc::new(
+            RulesClassifier::new(MergeMode::Extend, Vec::new(), Vec::new()).expect("create"),
+        );
+        let held: Vec<_> = classifier
+            .platform_rules
+            .iter()
+            .map(|rule| rule.scratch.try_lock().expect("the scratch starts free"))
+            .collect();
+
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let classifier = Arc::clone(&classifier);
+                std::thread::spawn(move || {
+                    (0..64)
+                        .map(|_| {
+                            let mut record = empty_record();
+                            record.signals.push(cisco_ios_sys_descr());
+                            record
+                                .signals
+                                .push(Signal::SshBanner("SSH-2.0-OpenSSH_9.2p1 Debian-1".into()));
+                            record
+                                .signals
+                                .push(Signal::HttpBanner("nginx/1.24.0".into()));
+                            classifier.classify(&mut record).expect("classify ok");
+                            (
+                                record.platform,
+                                record.os_version,
+                                record.ssh_version,
+                                record.http_server,
+                                record.http_version,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let expected = (
+            Some("cisco_ios".to_string()),
+            Some("15.7".to_string()),
+            Some("OpenSSH_9.2p1".to_string()),
+            Some("nginx".to_string()),
+            Some("1.24.0".to_string()),
+        );
+        for worker in workers {
+            for classified in worker.join().expect("worker thread") {
+                assert_eq!(classified, expected);
+            }
+        }
+        drop(held);
     }
 
     #[test]

@@ -1,9 +1,11 @@
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use rastreo_core::classifier::default_classifier_config;
 use rastreo_core::pipeline::write_encoded;
 use rastreo_core::{
-    DeviceRecord, Encoder, NdjsonEncoder, RastreoError, RecordKind, Sink, SinkType, TableEncoder,
+    create_classifier, Classifier, DeviceRecord, Encoder, NdjsonEncoder, NoopClassifier,
+    RastreoError, RecordKind, Sink, SinkType, TableEncoder,
 };
 
 // A /16 swept at a 1% answer rate lands on the middle size; the smallest carries visible fixed harness cost, so quote 6500.
@@ -111,6 +113,23 @@ fn device_record(index: usize) -> DeviceRecord {
 
 fn device_records(count: usize) -> Vec<DeviceRecord> {
     (0..count).map(device_record).collect()
+}
+
+fn unclassify(record: &mut DeviceRecord) {
+    record.platform = None;
+    record.os_version = None;
+    record.ssh_version = None;
+    record.http_server = None;
+    record.http_version = None;
+    record.role = None;
+}
+
+fn unclassified_records(count: usize) -> Vec<DeviceRecord> {
+    let mut records = device_records(count);
+    for record in &mut records {
+        unclassify(record);
+    }
+    records
 }
 
 fn ndjson_lines(records: &[DeviceRecord]) -> Vec<Vec<u8>> {
@@ -236,5 +255,40 @@ fn encode_record(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, emit_dispatch, encode_record);
+fn classify_record(c: &mut Criterion) {
+    let mut group = c.benchmark_group("classify_record");
+    for count in RECORD_COUNTS {
+        group.throughput(Throughput::Elements(count as u64));
+
+        group.bench_function(BenchmarkId::new("rules", count), |b| {
+            let classifier = black_box(
+                create_classifier(&default_classifier_config())
+                    .expect("the pipeline default classifier builds"),
+            );
+            let mut records = unclassified_records(count);
+            b.iter(|| {
+                for record in &mut records {
+                    unclassify(record);
+                    classifier.classify(record).expect("classify");
+                }
+                black_box(&records);
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("noop", count), |b| {
+            let classifier: Box<dyn Classifier> = black_box(Box::new(NoopClassifier));
+            let mut records = unclassified_records(count);
+            b.iter(|| {
+                for record in &mut records {
+                    unclassify(record);
+                    classifier.classify(record).expect("classify");
+                }
+                black_box(&records);
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, emit_dispatch, encode_record, classify_record);
 criterion_main!(benches);
