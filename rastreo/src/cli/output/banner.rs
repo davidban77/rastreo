@@ -68,6 +68,7 @@ pub(crate) struct ScenarioTally {
     pub total: usize,
     pub completed: usize,
     pub failed: usize,
+    pub skipped: usize,
 }
 
 #[cfg(feature = "config")]
@@ -84,7 +85,8 @@ fn aggregate_line(tally: ScenarioTally, summary: &DiscoverySummary) -> String {
     completion_line(
         &aggregate_label(tally),
         summary,
-        needs_attention(summary) || tally.failed > 0,
+        tally.skipped,
+        needs_attention(summary) || tally.failed > 0 || tally.skipped > 0,
     )
 }
 
@@ -160,10 +162,16 @@ fn needs_attention(summary: &DiscoverySummary) -> bool {
 }
 
 pub(super) fn complete_line(label: &str, summary: &DiscoverySummary) -> String {
-    completion_line(label, summary, needs_attention(summary))
+    completion_line(label, summary, 0, needs_attention(summary))
 }
 
-fn completion_line(label: &str, summary: &DiscoverySummary, attention: bool) -> String {
+// A skipped scenario has no completion line of its own, so the count is only ever non-zero on the aggregate.
+fn completion_line(
+    label: &str,
+    summary: &DiscoverySummary,
+    skipped_scenarios: usize,
+    attention: bool,
+) -> String {
     let glyph = if attention {
         theme::warn(glyphs().done)
     } else {
@@ -183,6 +191,9 @@ fn completion_line(label: &str, summary: &DiscoverySummary, attention: bool) -> 
         segment("probes:", humanize::count(summary.probe_attempts)),
         segment("faults:", humanize::count(faults)),
     ];
+    if skipped_scenarios > 0 {
+        segments.push(segment("skipped:", humanize::count(skipped_scenarios)));
+    }
     if !summary.unresolvable_targets.is_empty() {
         segments.push(segment(
             "unresolvable:",
@@ -768,18 +779,19 @@ mod tests {
     }
 
     #[cfg(feature = "config")]
-    fn tally(total: usize, completed: usize, failed: usize) -> ScenarioTally {
+    fn tally(total: usize, completed: usize, failed: usize, skipped: usize) -> ScenarioTally {
         ScenarioTally {
             total,
             completed,
             failed,
+            skipped,
         }
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn the_aggregate_label_counts_every_scenario_when_all_of_them_ran() {
-        let line = strip_ansi(&aggregate_line(tally(3, 3, 0), &summary()));
+        let line = strip_ansi(&aggregate_line(tally(3, 3, 0, 0), &summary()));
         let expected = format!("{} 3 scenarios  completed in", glyphs().done);
         assert!(line.starts_with(&expected), "{line}");
     }
@@ -787,7 +799,7 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn the_aggregate_label_names_the_shortfall_when_a_scenario_did_not_complete() {
-        let line = strip_ansi(&aggregate_line(tally(3, 1, 1), &summary()));
+        let line = strip_ansi(&aggregate_line(tally(3, 1, 1, 0), &summary()));
         let expected = format!("{} 1 of 3 scenarios", glyphs().done);
         assert!(line.starts_with(&expected), "{line}");
     }
@@ -796,7 +808,7 @@ mod tests {
     #[test]
     fn a_failed_scenario_paints_the_aggregate_glyph_with_the_warn_role() {
         theme::with_colour(|| {
-            let line = aggregate_line(tally(3, 2, 1), &summary());
+            let line = aggregate_line(tally(3, 2, 1, 0), &summary());
             assert_glyph_role(
                 &line,
                 &theme::warn(glyphs().done),
@@ -809,7 +821,7 @@ mod tests {
     #[test]
     fn an_all_clean_aggregate_paints_the_glyph_with_the_done_role() {
         theme::with_colour(|| {
-            let line = aggregate_line(tally(3, 3, 0), &summary());
+            let line = aggregate_line(tally(3, 3, 0, 0), &summary());
             assert_glyph_role(
                 &line,
                 &theme::done(glyphs().done),
@@ -820,12 +832,64 @@ mod tests {
 
     #[cfg(feature = "config")]
     #[test]
+    fn the_aggregate_line_counts_the_scenarios_that_were_skipped() {
+        let line = strip_ansi(&aggregate_line(tally(2, 1, 0, 1), &summary()));
+        assert!(line.contains("skipped: 1"), "{line}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn an_aggregate_that_skipped_nothing_shows_no_skipped_segment() {
+        let line = strip_ansi(&aggregate_line(tally(2, 2, 0, 0), &summary()));
+        assert!(!line.contains("skipped"), "{line}");
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_skipped_scenario_paints_the_aggregate_glyph_with_the_warn_role() {
+        theme::with_colour(|| {
+            let line = aggregate_line(tally(2, 1, 0, 1), &summary());
+            assert_glyph_role(
+                &line,
+                &theme::warn(glyphs().done),
+                &theme::done(glyphs().done),
+            );
+        });
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn every_tally_field_reaches_the_aggregate_banner() {
+        let ScenarioTally {
+            total,
+            completed,
+            failed,
+            skipped,
+        } = tally(4, 2, 1, 1);
+        let line = strip_ansi(&aggregate_line(
+            tally(total, completed, failed, skipped),
+            &summary(),
+        ));
+        assert!(line.contains("2 of 4 scenarios"), "{line}");
+        assert!(line.contains("skipped: 1"), "{line}");
+        theme::with_colour(|| {
+            let only_failed = aggregate_line(tally(total, completed, failed, 0), &summary());
+            assert_glyph_role(
+                &only_failed,
+                &theme::warn(glyphs().done),
+                &theme::done(glyphs().done),
+            );
+        });
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
     fn a_cancelled_aggregate_says_cancelled_after_and_paints_the_warn_role() {
         let mut s = summary();
         s.cancelled = true;
-        assert!(strip_ansi(&aggregate_line(tally(3, 0, 0), &s)).contains("cancelled after"));
+        assert!(strip_ansi(&aggregate_line(tally(3, 0, 0, 0), &s)).contains("cancelled after"));
         theme::with_colour(|| {
-            let line = aggregate_line(tally(3, 0, 0), &s);
+            let line = aggregate_line(tally(3, 0, 0, 0), &s);
             assert_glyph_role(
                 &line,
                 &theme::warn(glyphs().done),

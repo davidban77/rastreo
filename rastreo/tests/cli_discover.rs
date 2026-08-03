@@ -2055,6 +2055,44 @@ async fn one_probed_scenario_is_enough_for_a_file_that_also_skips_one() {
     drop(listener);
 }
 
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn a_file_that_skipped_a_scenario_does_not_report_a_clean_run() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let yaml = format!("version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 500\n  sink:\n    type: stdout\nscenarios:\n  - signal_type: discover\n    name: real\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [{port}]\n  - signal_type: discover\n    name: parked\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers: []\n");
+    let path = write_yaml(&dir, "one-parked.yml", &yaml);
+
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args(["discover", "--file"])
+            .arg(&path)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+    drop(listener);
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the scenario that could run did run; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("skipped: 1"),
+        "the aggregate banner counts the scenario the run passed over: {stderr}"
+    );
+    assert!(
+        stderr.contains("1 of 2 scenarios"),
+        "the aggregate names the shortfall: {stderr}"
+    );
+}
+
 async fn dry_run_then_scan(args: Vec<String>) -> Vec<(Option<i32>, String)> {
     let mut outcomes = Vec::new();
     for extra in [vec!["--dry-run".to_string()], Vec::new()] {

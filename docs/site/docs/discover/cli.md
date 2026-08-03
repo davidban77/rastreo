@@ -519,6 +519,18 @@ A scenario with an empty `probers:` list is not refused on its own, because a re
 • 'placeholder' (2 of 2): no probers configured, skipping
 ```
 
+**A skipped scenario is not a clean run, even though it exits `0`.** The real run says so on its aggregate banner: the label counts only the scenarios that ran, a `skipped:` field counts the ones that did not, and the `■` turns yellow.
+
+```text
+■ scenario 'edge' (1 of 2)  completed in 2ms | hosts: 1 | records: 0 | probes: 1 | faults: 0 | sink: stdout
+
+• scenario 'placeholder' (2 of 2): no probers configured, skipping
+
+■ 1 of 2 scenarios  completed in 2ms | hosts: 1 | records: 0 | probes: 1 | faults: 0 | skipped: 1
+```
+
+The exit code stays `0` because everything that could be probed was probed — the same reading a [target that resolved to no addresses](targets.md#names-with-no-addresses) gets one level down. `-q` silences the notice and the banner alike.
+
 **A file whose every scenario is skipped probes nothing, and exits `1`.** A run that reported success there would be indistinguishable from a scan that found nothing, which is the one result you most need to tell apart. The dry-run refuses it on the same terms:
 
 ```text
@@ -672,7 +684,7 @@ The `2> scan.log` above redirects stderr, so the progress updates are written to
 ■ discover  completed in 31.8s | hosts: 254 | records: 0 | probes: 254 | faults: 0 | sink: stdout
 ```
 
-The last line is the completion banner; [Runtime hints](#runtime-hints) explains its fields. In YAML-driven mode each scenario gets its own start and completion banner, followed by one aggregate banner for the whole file. The aggregate counts only the scenarios that ran to completion — a file where one of three scenarios failed reads `1 of 3 scenarios`, and its `■` turns yellow.
+The last line is the completion banner; [Runtime hints](#runtime-hints) explains its fields. In YAML-driven mode each scenario gets its own start and completion banner, followed by one aggregate banner for the whole file. The aggregate counts only the scenarios that ran to completion — a file where one of three scenarios failed reads `1 of 3 scenarios`, and its `■` turns yellow. A scenario [skipped for having no probers](#a-scenario-rastreo-cannot-build-gets-no-plan) counts the same way, and adds a `skipped: N` field, so a file that only partly ran never looks like one that ran clean.
 
 !!! note "A fast scan may show no progress line"
     On a terminal the line redraws in place four times a second. When stderr is redirected to a file or a pipe it is written as a whole line every five seconds instead, so a scan that finishes sooner shows only the two banners. Progress is for the long scans where it helps — a wide CIDR, a slow link, or a low concurrency setting.

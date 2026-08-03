@@ -50,7 +50,7 @@ When a name resolves to more than one A or AAAA record, every address is probed.
 A name the network answers for with no addresses — a stale entry the zone has dropped, or a name that exists with no A or AAAA record — is **skipped**, not fatal. It contributes nothing to the scan, every other target is probed as asked, and the run reports it so you know which host to investigate:
 
 ```text
-✔ discover  completed in 2.1s · hosts: 254 · records: 31 · probes: 508 · faults: 0 · unresolvable: 1 · sink: stdout
+■ discover  completed in 2.1s | hosts: 254 | records: 31 | probes: 508 | faults: 0 | unresolvable: 1 | sink: stdout
 ```
 
 Add `-v` and the completion detail names them:

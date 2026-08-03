@@ -29,7 +29,7 @@ Any string scalar in the scenario may use `${VAR}` to interpolate an environment
 | `classifier` | object \| null | `null` (Rules, baked-in tables, merge_mode extend) | Platform / os_version / role classifier applied after fusion. See [Classifier](#classifier). |
 | `sink` | object \| null | `null` | Output destination. See [Sinks](#sinks). `POST /scans` drops it before validating anything, so it is never checked and never used. Records come back in the response body instead, and a dry-run plan names the server's own destinations. |
 | `targets` | array | — (required) | List of targets to probe. An empty list is rejected on every surface. See [Targets](#targets). |
-| `probers` | array | `[]` | List of probers to run against each target. An empty list is rejected by `POST /scans` and by `rastreo validate`. `rastreo discover` skips the scenario instead. See [Probers](#probers). |
+| `probers` | array | `[]` | List of probers to run against each target. An empty list is rejected by `POST /scans` and by `rastreo validate`. `rastreo discover` skips the scenario instead, counts it as `skipped:` on the aggregate banner, and exits `1` only when every scenario in the file was skipped. See [Probers](#probers). |
 
 ## Targets
 
