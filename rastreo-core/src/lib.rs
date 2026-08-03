@@ -67,8 +67,8 @@ pub use prober::{
     ProbeSelection, ProbeSelectionOptions, Prober, ProberConfig, ReverseDnsProber, TcpConnectProber,
 };
 pub use resolver::{
-    resolve_scenario, GuardedResolver, HickoryResolver, ResolvedAddresses, ResolvedPlan, Resolver,
-    ScenarioResolution, SAMPLED_ADDRESSES,
+    resolve_pinned_scenario, resolve_scenario, GuardedResolver, HickoryResolver, ResolvedAddresses,
+    ResolvedPlan, Resolver, ScenarioResolution, SAMPLED_ADDRESSES,
 };
 pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{

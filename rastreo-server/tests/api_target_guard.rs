@@ -135,7 +135,7 @@ async fn post_scans_dry_run_out_of_allowlist_target_surfaces_per_target_error() 
 // No single spec is over the cap, so no amount of per-target resolution can see it: only the plan
 // the scan itself builds can.
 #[tokio::test]
-async fn post_scans_dry_run_reports_the_aggregate_host_cap_the_scan_would_reject() {
+async fn post_scans_dry_run_rejects_the_aggregate_host_cap_with_the_status_the_scan_would() {
     let addr = spawn_capped_server(100).await;
     let body = json!({
         "targets": [{"Cidr": "10.0.0.0/25"}, {"Cidr": "10.0.1.0/25"}],
@@ -149,16 +149,12 @@ async fn post_scans_dry_run_reports_the_aggregate_host_cap_the_scan_would_reject
         .send()
         .await
         .expect("send");
-    assert_eq!(plan.status(), reqwest::StatusCode::OK);
+    assert_eq!(plan.status(), reqwest::StatusCode::BAD_REQUEST);
     let plan: serde_json::Value = plan.json().await.expect("body json");
-    assert_eq!(
-        plan["total_probes"], 0,
-        "a scan the server would reject probes nothing: {plan}"
-    );
-    let refusal = plan["refusal"]
+    let error = plan["error"]
         .as_str()
-        .unwrap_or_else(|| panic!("the plan names the refusal: {plan}"));
-    assert!(refusal.contains("252") && refusal.contains("100"), "{plan}");
+        .unwrap_or_else(|| panic!("the rejection names the refusal: {plan}"));
+    assert!(error.contains("252") && error.contains("100"), "{plan}");
 
     let scan = reqwest::Client::new()
         .post(format!("http://{addr}/scans"))

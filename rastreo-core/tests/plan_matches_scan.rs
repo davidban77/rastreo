@@ -3,12 +3,13 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
 use rastreo_core::{
     resolve_scenario, run_discovery, DiscoveryPlan, DiscoverySummary, FuserConfig, HickoryResolver,
-    MemorySink, MemorySinkHandle, PlanKnobs, ProberConfig, RastreoError, Resolver, RunOptions,
-    Sink, SinkConfig, SinkType, Target,
+    MemorySink, MemorySinkHandle, PlanKnobs, ProberConfig, RastreoError, ResolvedTarget, Resolver,
+    RunOptions, Sink, SinkConfig, SinkType, Target, TargetResolution,
 };
 
 const CLOSED_PORT: u16 = 9;
@@ -80,6 +81,93 @@ fn system_resolver(limit: Option<usize>) -> Arc<dyn Resolver> {
         Some(limit) => resolver.with_limit(limit),
         None => resolver,
     })
+}
+
+// The rehearsal and the run resolve independently, so a live name would make this family flaky here.
+struct StaleNames {
+    stale: Vec<Target>,
+}
+
+#[async_trait::async_trait]
+impl Resolver for StaleNames {
+    async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError> {
+        if self.stale.contains(target) {
+            return Ok(Vec::new());
+        }
+        let Target::Ip(addr) = target else {
+            panic!("this fixture answers single addresses and stale names only: {target:?}");
+        };
+        Ok(vec![ResolvedTarget {
+            ip: *addr,
+            original: target.clone(),
+            resolved_at: SystemTime::now(),
+        }])
+    }
+}
+
+fn stale_name_resolver(stale: Vec<Target>) -> Arc<dyn Resolver> {
+    Arc::new(StaleNames { stale })
+}
+
+fn dns(name: &str) -> Target {
+    Target::DnsName(name.to_string())
+}
+
+#[tokio::test]
+async fn a_target_with_no_addresses_is_named_by_the_plan_and_by_the_summary_alike() {
+    let stale = dns("stale.lab");
+    let targets = vec![Target::Ip(ip(127, 0, 0, 1)), stale.clone()];
+    let (plan, summary, _) = rehearse_then_scan(stale_name_resolver(vec![stale]), targets).await;
+    let summary = summary.expect("one nameless target does not abandon the scan");
+
+    assert_eq!(summary.unresolvable_targets, vec!["stale.lab".to_string()]);
+    let planned: Vec<&str> = plan
+        .targets
+        .iter()
+        .filter(|planned| matches!(planned.resolution, TargetResolution::Unresolvable))
+        .map(|planned| planned.target.as_str())
+        .collect();
+    assert_eq!(
+        planned, summary.unresolvable_targets,
+        "a caller holding a plan and a summary reconciles them by the target as written"
+    );
+    assert!(plan.refusal.is_none(), "a skipped target is not a refusal");
+}
+
+#[tokio::test]
+async fn the_plan_counts_the_probes_the_scan_performs_beside_a_target_with_no_addresses() {
+    let stale = dns("stale.lab");
+    let targets = vec![
+        Target::Ip(ip(127, 0, 0, 1)),
+        stale.clone(),
+        Target::Ip(ip(127, 0, 0, 2)),
+    ];
+    let (plan, summary, _) = rehearse_then_scan(stale_name_resolver(vec![stale]), targets).await;
+    let summary = summary.expect("the resolvable targets are still probed");
+
+    assert_eq!(summary.targets_resolved, 2);
+    assert_eq!(plan.total_probes, 4, "2 addresses × 2 prober passes");
+    assert_eq!(plan.total_probes, summary.probe_attempts);
+}
+
+#[tokio::test]
+async fn a_scan_whose_every_target_has_no_addresses_completes_having_probed_nothing() {
+    let targets = vec![dns("stale.lab"), dns("gone.lab")];
+    let (plan, summary, handle) =
+        rehearse_then_scan(stale_name_resolver(targets.clone()), targets).await;
+    let summary = summary.expect("a scan with nothing to probe is not a failed scan");
+
+    assert_eq!(plan.total_probes, 0);
+    assert!(
+        plan.refusal.is_none(),
+        "nothing to probe is not something the resolver refused: {plan:?}"
+    );
+    assert_eq!(summary.probe_attempts, 0);
+    assert_eq!(
+        summary.unresolvable_targets,
+        vec!["stale.lab".to_string(), "gone.lab".to_string()]
+    );
+    assert!(handle.bytes().is_empty());
 }
 
 #[tokio::test]

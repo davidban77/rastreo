@@ -17,13 +17,12 @@ use rastreo_core::prober::{
 };
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
-#[cfg(feature = "config")]
 use rastreo_core::Resolver;
 use rastreo_core::{
-    preflight_checkpoint_request, resolve_scenario, run_discovery, CheckpointConfig, ConfigError,
-    DiscoveryPlan, DiscoveryProgress, DiscoverySummary, EncoderConfig, Env, HickoryResolver,
-    PlanKnobs, ProbeKind, RastreoError, ResumeError, RunOptions, ScenarioResolution, SinkConfig,
-    SystemEnv, Target,
+    preflight_checkpoint_request, resolve_pinned_scenario, resolve_scenario, run_discovery,
+    Checkpoint, CheckpointConfig, ConfigError, DiscoveryPlan, DiscoveryProgress, DiscoverySummary,
+    EncoderConfig, Env, HickoryResolver, PlanKnobs, ProbeKind, RastreoError, ResumeError,
+    RunOptions, ScenarioResolution, SinkConfig, SystemEnv, Target,
 };
 use tokio::sync::watch;
 
@@ -42,6 +41,8 @@ use super::probe_args::SnmpVersionArg;
 use super::probe_args::{parse_probe_ports, DnsQueryTypeArg, UdpProtocolArg, PROBE_LONG_HELP};
 
 const FLAG_DRIVEN_LABEL: &str = "discover";
+const NOTHING_TO_PROBE_HINT: &str =
+    "Every name the scan was given answered with no addresses. Check the names and the resolver configuration, or drop the stale ones from the target list.";
 const DEFAULT_CONCURRENCY: u32 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CHECKPOINT_INTERVAL: usize = 5000;
@@ -439,22 +440,71 @@ async fn run_dry_run(args: &DiscoverArgs, mode: OutputMode) -> Result<()> {
     }
 
     let scenario = scenario_from_flags(args, mode)?;
-    let resolution = resolve_scenario(&resolver, &scenario.targets).await;
+    let resolution = rehearsed_resolution(&scenario, args, &resolver)
+        .await
+        .map_err(|err| refuse(err, mode))?;
     let plan = build_resolved_plan("discovery", &scenario, &resolution, args).await?;
-    dry_run_checkpoint_preflight(&scenario, args).map_err(|err| refuse(err, mode))?;
     render_dry_run(&[plan], dry_run_plan_format(args))?;
-    refuse_on_resolution_error(&resolution, mode)
+    refuse_on_resolution_error(&resolution, mode)?;
+    ensure_a_target_resolved(&resolution, scenario.targets.len(), mode)
+}
+
+// A resume replays the checkpoint's pins rather than re-resolving names the run will never ask about again.
+async fn rehearsed_resolution(
+    scenario: &DiscoverScenarioConfig,
+    args: &DiscoverArgs,
+    resolver: &dyn Resolver,
+) -> Result<ScenarioResolution, RastreoError> {
+    match dry_run_checkpoint_preflight(scenario, args)? {
+        Some(checkpoint) => resolve_pinned_scenario(
+            &scenario.targets,
+            &checkpoint.dns_pins,
+            checkpoint.highest_flushed_index,
+        ),
+        None => Ok(resolve_scenario(resolver, &scenario.targets).await),
+    }
 }
 
 fn dry_run_checkpoint_preflight(
     scenario: &DiscoverScenarioConfig,
     args: &DiscoverArgs,
-) -> Result<(), RastreoError> {
+) -> Result<Option<Checkpoint>, RastreoError> {
     let Some(config) = checkpoint_config(args) else {
-        return Ok(());
+        return Ok(None);
     };
-    preflight_checkpoint_request(scenario, &config)?;
-    Ok(())
+    Ok(preflight_checkpoint_request(scenario, &config)?)
+}
+
+fn ensure_a_target_resolved(
+    resolution: &ScenarioResolution,
+    targets: usize,
+    mode: OutputMode,
+) -> Result<()> {
+    if resolution.refusal().is_some() {
+        return Ok(());
+    }
+    let unresolvable: Vec<String> = resolution
+        .unresolvable_targets()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    refuse_nothing_to_probe(targets, &unresolvable, mode)
+}
+
+// Over the target set, not a host count: a resume leaves zero hosts to probe on targets that resolved.
+fn refuse_nothing_to_probe(
+    targets: usize,
+    unresolvable: &[String],
+    mode: OutputMode,
+) -> Result<()> {
+    if unresolvable.is_empty() || unresolvable.len() < targets {
+        return Ok(());
+    }
+    print_refusal_hint(NOTHING_TO_PROBE_HINT, mode);
+    Err(anyhow!(
+        "every target resolved to no addresses ({}); there is nothing to probe",
+        unresolvable.join(", ")
+    ))
 }
 
 #[cfg(feature = "config")]
@@ -509,15 +559,19 @@ async fn run_dry_run_from_file(
             continue;
         }
         // Ahead of resolution, so a scenario the run would refuse costs no DNS lookup.
-        if let Err(err) = cfg
-            .validate()
-            .and_then(|()| dry_run_checkpoint_preflight(&cfg, args))
-        {
+        if let Err(err) = cfg.validate() {
             failed += 1;
             report_scenario_failure(&label, &err, mode);
             continue;
         }
-        let resolution = resolve_scenario(resolver, &cfg.targets).await;
+        let resolution = match rehearsed_resolution(&cfg, args, resolver).await {
+            Ok(resolution) => resolution,
+            Err(err) => {
+                failed += 1;
+                report_scenario_failure(&label, &err, mode);
+                continue;
+            }
+        };
         match build_resolved_plan(&label, &cfg, &resolution, args).await {
             Ok(plan) => {
                 plans.push(plan);
@@ -525,6 +579,11 @@ async fn run_dry_run_from_file(
                 if let Some(err) = resolution.refusal() {
                     failed += 1;
                     report_scenario_failure(&label, err, mode);
+                } else if let Err(err) =
+                    ensure_a_target_resolved(&resolution, cfg.targets.len(), mode)
+                {
+                    failed += 1;
+                    print_failed(&label, &err.to_string());
                 }
             }
             Err(err) => {
@@ -776,7 +835,7 @@ async fn run_legacy(
         Ok(summary) => {
             print_complete(FLAG_DRIVEN_LABEL, &summary, mode);
             print_runtime_hints(&summary, mode);
-            Ok(())
+            refuse_nothing_to_probe(scenario.targets.len(), &summary.unresolvable_targets, mode)
         }
         Err(err) => Err(refuse(err, mode)),
     }
@@ -869,7 +928,17 @@ async fn run_from_file(
                 print_complete(&label, &summary, mode);
                 print_runtime_hints(&summary, mode);
                 accumulate(&mut aggregate, &summary);
-                tally.completed += 1;
+                match refuse_nothing_to_probe(
+                    cfg.targets.len(),
+                    &summary.unresolvable_targets,
+                    mode,
+                ) {
+                    Ok(()) => tally.completed += 1,
+                    Err(err) => {
+                        tally.failed += 1;
+                        print_failed(&label, &err.to_string());
+                    }
+                }
             }
             Err(err) => {
                 tally.failed += 1;
@@ -2569,7 +2638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dry_run_renders_every_target_though_one_failed_to_resolve() {
+    async fn dry_run_renders_every_target_though_one_did_not_resolve() {
         let mut a = args(&["invalid.nx.does-not-exist.example", "127.0.0.1"], &[22]);
         a.dry_run = true;
         let scenario = build_scenario(&a).expect("scenario");
@@ -2578,13 +2647,14 @@ mod tests {
         let mut out = String::new();
         write_scenario_plan(&mut out, "s", &scenario, &resolution, &a).await;
         assert!(
-            out.contains("<error:"),
-            "expected inline error for failing DNS target: {out}"
+            out.contains("invalid.nx.does-not-exist.example → <"),
+            "the target that did not resolve is still listed: {out}"
         );
         assert!(out.contains("127.0.0.1 → 127.0.0.1"), "{out}");
-        assert!(
+        assert_eq!(
             resolution.refusal().is_some(),
-            "a target the scan would abort on must refuse the rehearsal too"
+            out.contains("<error:"),
+            "a per-target error and a whole-set refusal travel together: {out}"
         );
     }
 
@@ -3170,6 +3240,38 @@ scenarios:
             mode_for_sink(mode, None),
             mode_for_sink(mode, Some(&SinkConfig::Stdout))
         );
+    }
+
+    fn quiet() -> OutputMode {
+        OutputMode::from(Verbosity::Quiet)
+    }
+
+    #[test]
+    fn a_target_set_with_one_address_between_them_is_not_refused() {
+        assert!(refuse_nothing_to_probe(2, &["stale.lab".to_string()], quiet()).is_ok());
+    }
+
+    #[test]
+    fn a_target_set_whose_every_member_has_no_addresses_is_refused_by_name() {
+        let err = refuse_nothing_to_probe(
+            2,
+            &["stale.lab".to_string(), "gone.lab".to_string()],
+            quiet(),
+        )
+        .expect_err("a scan that probed nothing did not succeed");
+        assert!(err.to_string().contains("stale.lab, gone.lab"), "{err}");
+    }
+
+    #[test]
+    fn a_target_set_that_wholly_resolved_is_never_refused() {
+        assert!(refuse_nothing_to_probe(2, &[], quiet()).is_ok());
+    }
+
+    #[test]
+    fn the_refusal_reads_the_target_set_rather_than_a_host_count() {
+        let unresolvable = ["stale.lab".to_string()];
+        assert!(refuse_nothing_to_probe(1, &unresolvable, quiet()).is_err());
+        assert!(refuse_nothing_to_probe(2, &unresolvable, quiet()).is_ok());
     }
 
     #[test]

@@ -430,6 +430,39 @@ mod tests {
         );
     }
 
+    // A resume replays the original resolution verbatim, so an empty pin is how a name skipped then stays skipped.
+    #[test]
+    fn an_empty_dns_pin_survives_the_on_disk_round_trip_and_replays_as_unresolvable() {
+        let stale = Target::DnsName("stale.lab".to_string());
+        let live = Target::DnsName("router-1.lab".to_string());
+        let mut cp = sample_checkpoint();
+        cp.dns_pins = vec![
+            (stale.clone(), Vec::new()),
+            (live.clone(), vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))]),
+        ];
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scan.checkpoint");
+        cp.write(&path).expect("write");
+        let back = Checkpoint::load(&path).expect("load");
+        assert_eq!(back.dns_pins, cp.dns_pins);
+
+        let plan =
+            crate::resolver::ResolvedPlan::from_pinned(&[stale.clone(), live], &back.dns_pins)
+                .expect("the pins line up with the targets");
+        assert_eq!(plan.unresolvable_targets(), vec![&stale]);
+        assert_eq!(plan.total_hosts(), 1);
+    }
+
+    #[test]
+    fn an_empty_dns_pin_does_not_change_the_on_disk_schema_version() {
+        let mut cp = sample_checkpoint();
+        cp.dns_pins = vec![(Target::DnsName("stale.lab".to_string()), Vec::new())];
+        let json = serde_json::to_value(&cp).expect("serialize");
+        assert_eq!(json["checkpoint_version"], CHECKPOINT_VERSION);
+        assert_eq!(json["dns_pins"][0][1], serde_json::json!([]));
+    }
+
     #[test]
     fn write_then_load_recovers_the_checkpoint() {
         let dir = tempfile::tempdir().expect("tempdir");

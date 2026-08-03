@@ -45,6 +45,41 @@ rastreo discover --target router-1.lab.local
 
 When a name resolves to more than one A or AAAA record, every address is probed.
 
+### Names with no addresses
+
+A name the network answers for with no addresses — a stale entry the zone has dropped, or a name that exists with no A or AAAA record — is **skipped**, not fatal. It contributes nothing to the scan, every other target is probed as asked, and the run reports it so you know which host to investigate:
+
+```text
+✔ discover  completed in 2.1s · hosts: 254 · records: 31 · probes: 508 · faults: 0 · unresolvable: 1 · sink: stdout
+```
+
+Add `-v` and the completion detail names them:
+
+```text
+  • unresolvable   stale-switch.lab
+```
+
+The `--dry-run` plan marks the same target inline, and the JSON plan carries `"resolution": "unresolvable"` for it:
+
+```text
+    targets:
+      10.0.0.0/24 → 10.0.0.1, 10.0.0.2, 10.0.0.3, ... (254 addresses)
+      stale-switch.lab → <unresolvable: no addresses>
+```
+
+The rule is about what the network said, not about which lookup failed. **Only an answer means "this name has no addresses" is skippable.** A lookup that timed out, a server that returned SERVFAIL or REFUSED, or a resolver rastreo could not reach at all are facts about the nameserver rather than about the target, and every one of them still refuses the whole scan — otherwise a broken resolver would silently skip every name and report success.
+
+Two things stay fatal for the same reason a stale name does not: an over-cap CIDR or range discards enumerable work you asked for, so it is refused rather than skipped.
+
+The one case where nothing is left to do is still an error. A scan whose targets **all** answered with no addresses probed nothing and exits `1`:
+
+```text
+Error: every target resolved to no addresses (stale-switch.lab, gone.lab); there is nothing to probe
+```
+
+!!! note "A resumed scan replays the original answer"
+    `--resume` never re-resolves a name; it replays the addresses the interrupted run pinned in the checkpoint. A name that was skipped then stays skipped on resume, and a resumed run reports how many targets were skipped, not why.
+
 ## Mixing forms
 
 `--target` is repeatable, and the four forms can be mixed freely. Each target is resolved on its own before scheduling. See [Overlapping targets](#overlapping-targets) when two targets cover the same address.

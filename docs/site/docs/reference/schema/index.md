@@ -60,11 +60,12 @@ Both patterns validate against the same schema. Pick whichever fits the workflow
 
 ## Versioning policy
 
-Additive changes stay on `v1` and remain backward-compatible. Three kinds of change qualify:
+Additive changes stay on `v1` and remain backward-compatible. Four kinds of change qualify:
 
 - a new optional field on `DeviceRecord`
 - a new signal kind inside the `signals` array
 - a new optional field on `ScanMetadata`
+- a new arm on a union — a `oneOf` gains a case, like `TargetResolution` gaining `unresolvable` alongside `resolved` and `error`. A consumer that matches the arms it knows and treats the rest as unrecognised keeps working; one that assumes the arm list is closed does not, which is the same obligation the `signals` array already carries.
 
 The `signals` array is open-ended on purpose. A consumer that meets an entry whose key it does not recognise must skip that entry, not reject the record. Consumers that ignore unknown fields — the default for most JSON libraries — keep working across an additive bump.
 

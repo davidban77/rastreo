@@ -97,6 +97,8 @@ pub(crate) fn accumulate(agg: &mut DiscoverySummary, scenario: &DiscoverySummary
     agg.links_emitted += scenario.links_emitted;
     agg.profiles_emitted += scenario.profiles_emitted;
     agg.dlq_records += scenario.dlq_records;
+    agg.unresolvable_targets
+        .extend(scenario.unresolvable_targets.iter().cloned());
     agg.cancelled |= scenario.cancelled;
     agg.elapsed += scenario.elapsed;
     for (kind, n) in &scenario.error_counts {
@@ -151,9 +153,10 @@ fn start_line(plan: &ScenarioPlan, target_specs: usize) -> String {
     )
 }
 
-// Probe faults are expected data on a real scan; only a scan-level problem tints the banner.
+// Probe faults are expected data on a real scan; only a scan-level problem tints the banner, and a
+// target that resolved to nothing is one — the run covered less ground than it was asked to.
 fn needs_attention(summary: &DiscoverySummary) -> bool {
-    summary.cancelled || summary.dlq_records > 0
+    summary.cancelled || summary.dlq_records > 0 || !summary.unresolvable_targets.is_empty()
 }
 
 pub(super) fn complete_line(label: &str, summary: &DiscoverySummary) -> String {
@@ -180,6 +183,12 @@ fn completion_line(label: &str, summary: &DiscoverySummary, attention: bool) -> 
         segment("probes:", humanize::count(summary.probe_attempts)),
         segment("faults:", humanize::count(faults)),
     ];
+    if !summary.unresolvable_targets.is_empty() {
+        segments.push(segment(
+            "unresolvable:",
+            humanize::count(summary.unresolvable_targets.len()),
+        ));
+    }
     if summary.links_emitted > 0 {
         segments.push(segment("links:", humanize::count(summary.links_emitted)));
     }
@@ -257,6 +266,16 @@ fn detail_lines(summary: &DiscoverySummary) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(&theme::sep());
         lines.push(detail_line("faults by kind", body));
+    }
+
+    if !summary.unresolvable_targets.is_empty() {
+        let body = summary
+            .unresolvable_targets
+            .iter()
+            .map(|target| theme::value(target).to_string())
+            .collect::<Vec<_>>()
+            .join(&theme::sep());
+        lines.push(detail_line("unresolvable", body));
     }
 
     if let Some(fault) = &summary.first_probe_error {
@@ -354,6 +373,7 @@ mod tests {
         s.links_emitted = 4;
         s.profiles_emitted = 2;
         s.dlq_records = 6;
+        s.unresolvable_targets = vec!["stale.lab".to_string()];
         s.cancelled = true;
         s.error_counts.insert(ProbeErrorKind::PermissionDenied, 2);
         s.probes_by_kind = vec![kind_summary(ProbeKind::TcpConnect, 1778, 2)];
@@ -516,6 +536,7 @@ mod tests {
         ("probes_by_kind", "tcp_connect 1,778 (2 err)"),
         ("dlq_records", "dlq: 6"),
         ("dlq_records_by_type_and_class", "file/write_failure 6"),
+        ("unresolvable_targets", "stale.lab"),
         ("sink_type", "sink: stdout"),
         ("cancelled", "cancelled after"),
         ("first_probe_error", "raw socket requires CAP_NET_RAW"),
@@ -912,6 +933,63 @@ mod tests {
         let mut agg = DiscoverySummary::default();
         accumulate(&mut agg, &fully_populated());
         assert!(agg.sink_type.is_none());
+    }
+
+    #[test]
+    fn the_completion_line_counts_the_targets_that_had_no_addresses() {
+        let mut s = summary();
+        s.unresolvable_targets = vec!["stale.lab".to_string(), "gone.lab".to_string()];
+        let line = strip_ansi(&complete_line("discover", &s));
+        assert!(line.contains("unresolvable: 2"), "{line}");
+    }
+
+    #[test]
+    fn a_clean_scan_shows_no_unresolvable_segment() {
+        let line = strip_ansi(&complete_line("discover", &summary()));
+        assert!(!line.contains("unresolvable"), "{line}");
+    }
+
+    #[test]
+    fn a_target_with_no_addresses_paints_the_completion_glyph_with_the_warn_role() {
+        let mut s = summary();
+        s.unresolvable_targets = vec!["stale.lab".to_string()];
+        theme::with_colour(|| {
+            let line = complete_line("discover", &s);
+            assert_glyph_role(
+                &line,
+                &theme::warn(glyphs().done),
+                &theme::done(glyphs().done),
+            );
+        });
+    }
+
+    #[test]
+    fn the_detail_lines_name_the_targets_that_had_no_addresses() {
+        let mut s = summary();
+        s.unresolvable_targets = vec!["stale.lab".to_string(), "gone.lab".to_string()];
+        let lines: Vec<String> = detail_lines(&s).iter().map(|l| strip_ansi(l)).collect();
+        assert!(
+            lines.iter().any(|l| l.contains("unresolvable")
+                && l.contains("stale.lab")
+                && l.contains("gone.lab")),
+            "{lines:#?}"
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn accumulate_concatenates_the_unresolvable_targets_of_every_scenario() {
+        let mut agg = DiscoverySummary::default();
+        let mut a = DiscoverySummary::default();
+        a.unresolvable_targets = vec!["stale.lab".to_string()];
+        let mut b = DiscoverySummary::default();
+        b.unresolvable_targets = vec!["gone.lab".to_string()];
+        accumulate(&mut agg, &a);
+        accumulate(&mut agg, &b);
+        assert_eq!(
+            agg.unresolvable_targets,
+            vec!["stale.lab".to_string(), "gone.lab".to_string()]
+        );
     }
 
     #[cfg(feature = "config")]

@@ -1096,8 +1096,66 @@ async fn dry_run_yaml_mode_prints_per_scenario_blocks_and_total_probes() {
     );
 }
 
+async fn dry_run_targets(targets: &[&str]) -> (Option<i32>, String, String) {
+    let mut argv = vec!["discover".to_string()];
+    for target in targets {
+        argv.push("--target".to_string());
+        argv.push((*target).to_string());
+    }
+    argv.extend([
+        "--probe".to_string(),
+        "tcp_connect".to_string(),
+        "--port".to_string(),
+        "22".to_string(),
+        "--dry-run".to_string(),
+    ]);
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args(&argv)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+    (
+        output.status.code(),
+        String::from_utf8(output.stdout).expect("utf-8 stdout"),
+        String::from_utf8(output.stderr).expect("utf-8 stderr"),
+    )
+}
+
 #[tokio::test]
-async fn dry_run_dns_failure_prints_inline_error_and_refuses() {
+async fn dry_run_plans_the_targets_that_resolve_beside_one_that_has_no_addresses() {
+    let (code, stdout, stderr) =
+        dry_run_targets(&["127.0.0.1", "nx-does-not-exist-99e2c31b.example.invalid"]).await;
+
+    assert_eq!(
+        code,
+        Some(0),
+        "one nameless target must not abandon the rehearsal; stderr: {stderr}"
+    );
+    assert!(
+        stdout
+            .contains("nx-does-not-exist-99e2c31b.example.invalid → <unresolvable: no addresses>"),
+        "the target with no addresses is named as such: {stdout}"
+    );
+    assert!(
+        stdout.contains("127.0.0.1 → 127.0.0.1"),
+        "resolved target still listed: {stdout}"
+    );
+    assert!(
+        stdout.contains("total probes: 1"),
+        "only the resolved target is counted: {stdout}"
+    );
+}
+
+#[tokio::test]
+async fn a_scan_probes_the_targets_that_resolve_beside_one_that_has_no_addresses() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let port = listener.local_addr().expect("local_addr").port();
+
     let output = tokio::task::spawn_blocking(move || {
         common::rastreo()
             .args([
@@ -1105,10 +1163,51 @@ async fn dry_run_dns_failure_prints_inline_error_and_refuses() {
                 "--target",
                 "127.0.0.1",
                 "--target",
-                "nx-does-not-exist-99e2c31b.example.invalid",
+                "nx-does-not-exist-11d4e07a.example.invalid",
+                "--probe",
+                "tcp_connect",
+                "--port",
+                &port.to_string(),
+                "--timeout-ms",
+                "500",
+            ])
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+    drop(listener);
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "one stale name must not abort a scan that reached its other target; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("unresolvable: 1"),
+        "the completion banner counts it: {stderr}"
+    );
+    assert!(
+        stderr.contains("hosts: 1"),
+        "the resolvable target was still probed: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn a_scan_whose_every_target_has_no_addresses_exits_one() {
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args([
+                "discover",
+                "--target",
+                "nx-does-not-exist-11d4e07a.example.invalid",
+                "--probe",
+                "tcp_connect",
                 "--port",
                 "22",
-                "--dry-run",
+                "--timeout-ms",
+                "500",
             ])
             .output()
             .expect("spawn rastreo")
@@ -1116,20 +1215,34 @@ async fn dry_run_dns_failure_prints_inline_error_and_refuses() {
     .await
     .expect("join");
 
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     assert_eq!(
         output.status.code(),
         Some(1),
-        "a target the scan aborts on must fail the rehearsal; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(
-        stdout.contains("<error:"),
-        "expected inline error: {stdout}"
+        "a scan that probed nothing did not succeed; stderr: {stderr}"
     );
     assert!(
-        stdout.contains("127.0.0.1 → 127.0.0.1"),
-        "resolved target still listed: {stdout}"
+        stderr.contains("there is nothing to probe"),
+        "the refusal says why: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_refuses_when_every_target_has_no_addresses() {
+    let (code, _, stderr) = dry_run_targets(&["nx-does-not-exist-99e2c31b.example.invalid"]).await;
+
+    assert_eq!(
+        code,
+        Some(1),
+        "a rehearsal that would probe nothing is not a runnable plan; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("there is nothing to probe"),
+        "the refusal says why: {stderr}"
+    );
+    assert!(
+        stderr.contains("nx-does-not-exist-99e2c31b.example.invalid"),
+        "the refusal names the target to investigate: {stderr}"
     );
 }
 
@@ -1969,6 +2082,137 @@ fn assert_both_refuse(outcomes: &[(Option<i32>, String)], needle: &str) {
         assert!(
             stderr.contains(needle),
             "the {label} must name '{needle}': {stderr}"
+        );
+    }
+}
+
+// The run never re-resolves a resumed scan's names, so a rehearsal that looked them up live would rehearse a different scan.
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn a_resumed_dry_run_replays_the_checkpoint_rather_than_resolving_again() {
+    use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
+    use rastreo_core::{resume_fingerprint, ProberConfig, SinkConfig, Target};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let records = dir.path().join("records.ndjson");
+    let yaml = format!(
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: resumed\n    timeout_ms: 200\n    targets:\n      - DnsName: \"pinned.lab\"\n      - Cidr: \"10.0.0.0/30\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n    sink:\n      type: file\n      path: \"{}\"\n",
+        records.display()
+    );
+    let path = write_yaml(&dir, "resume.yml", &yaml);
+
+    let mut base = BaseProbeConfig::new();
+    base.sink = Some(SinkConfig::File {
+        path: records.clone(),
+    });
+    base.timeout_ms = Some(200);
+    let scenario = DiscoverScenarioConfig::new(
+        base,
+        vec![
+            Target::DnsName("pinned.lab".to_string()),
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+        ],
+        vec![ProberConfig::TcpConnect { ports: vec![22] }],
+    );
+
+    let checkpoint = dir.path().join("scan.checkpoint");
+    std::fs::write(
+        &checkpoint,
+        format!(
+            r#"{{"checkpoint_version":1,"scan_id":"01J000000000000000000000AA","initiated_at":"2026-01-01T00:00:00Z","resume_fingerprint":"{}","source_config_hash":null,"dns_pins":[[{{"DnsName":"pinned.lab"}},["10.9.9.9","10.9.9.10"]]],"highest_flushed_index":1}}"#,
+            resume_fingerprint(&scenario)
+        ),
+    )
+    .expect("write the checkpoint");
+
+    let args = vec![
+        "discover".to_string(),
+        "--file".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+        "--resume".to_string(),
+        "--dry-run".to_string(),
+    ];
+    let output = tokio::task::spawn_blocking(move || {
+        common::rastreo()
+            .args(&args)
+            .output()
+            .expect("spawn rastreo")
+    })
+    .await
+    .expect("join");
+
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("pinned.lab → 10.9.9.9, 10.9.9.10"),
+        "the rehearsal replays the pinned addresses rather than looking the name up: {stdout}"
+    );
+    assert!(
+        stdout.contains("total probes: 3"),
+        "4 pinned and expanded hosts less the 1 the checkpoint already flushed: {stdout}"
+    );
+}
+
+// The rehearsal counts what the resume left and the run counts the whole plan; a guard keyed on either disagrees.
+#[cfg(feature = "config")]
+#[tokio::test]
+async fn the_dry_run_and_the_scan_agree_a_flushed_resume_beside_a_stale_name_has_nothing_left() {
+    use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
+    use rastreo_core::{resume_fingerprint, ProberConfig, SinkConfig, Target};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let records = dir.path().join("records.ndjson");
+    let yaml = format!(
+        "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: flushed\n    timeout_ms: 200\n    targets:\n      - DnsName: \"stale.lab\"\n      - Cidr: \"10.0.0.0/30\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n    sink:\n      type: file\n      path: \"{}\"\n",
+        records.display()
+    );
+    let path = write_yaml(&dir, "flushed-resume.yml", &yaml);
+
+    let mut base = BaseProbeConfig::new();
+    base.sink = Some(SinkConfig::File {
+        path: records.clone(),
+    });
+    base.timeout_ms = Some(200);
+    let scenario = DiscoverScenarioConfig::new(
+        base,
+        vec![
+            Target::DnsName("stale.lab".to_string()),
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+        ],
+        vec![ProberConfig::TcpConnect { ports: vec![22] }],
+    );
+
+    let checkpoint = dir.path().join("scan.checkpoint");
+    std::fs::write(
+        &checkpoint,
+        format!(
+            r#"{{"checkpoint_version":1,"scan_id":"01J000000000000000000000AB","initiated_at":"2026-01-01T00:00:00Z","resume_fingerprint":"{}","source_config_hash":null,"dns_pins":[[{{"DnsName":"stale.lab"}},[]]],"highest_flushed_index":2}}"#,
+            resume_fingerprint(&scenario)
+        ),
+    )
+    .expect("write the checkpoint");
+
+    let args = vec![
+        "discover".to_string(),
+        "--file".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--checkpoint".to_string(),
+        checkpoint.to_string_lossy().into_owned(),
+        "--resume".to_string(),
+    ];
+    let outcomes = dry_run_then_scan(args).await;
+    for (label, (code, stderr)) in ["dry-run", "scan"].iter().zip(&outcomes) {
+        assert_eq!(
+            *code,
+            Some(0),
+            "the {label} must accept a resume whose CIDR resolved to 4 addresses; stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("every target resolved to no addresses"),
+            "the {label} must not claim a target set that resolved has none: {stderr}"
         );
     }
 }

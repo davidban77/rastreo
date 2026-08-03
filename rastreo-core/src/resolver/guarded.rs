@@ -314,4 +314,57 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<GuardedResolver>();
     }
+
+    struct AddresslessName;
+
+    #[async_trait::async_trait]
+    impl Resolver for AddresslessName {
+        async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError> {
+            match target {
+                Target::Ip(addr) => Ok(vec![ResolvedTarget {
+                    ip: *addr,
+                    original: target.clone(),
+                    resolved_at: std::time::SystemTime::now(),
+                }]),
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
+    fn stale() -> Target {
+        Target::DnsName("stale.lab".to_string())
+    }
+
+    #[test]
+    fn the_guard_hands_back_the_targets_the_inner_plan_found_no_addresses_for() {
+        let guard = GuardedResolver::new(Arc::new(AddresslessName), None, None);
+        let targets = vec![Target::Ip(ip(10, 0, 0, 1)), stale()];
+        let plan = rt().block_on(guard.plan(&targets)).expect("plan");
+        assert_eq!(plan.unresolvable_targets(), vec![&targets[1]]);
+        assert_eq!(plan.total_hosts(), 1);
+    }
+
+    #[test]
+    fn a_target_with_no_addresses_has_nothing_for_the_allowlist_to_refuse() {
+        let guard = GuardedResolver::new(
+            Arc::new(AddresslessName),
+            Some(vec![net("10.0.0.0/8")]),
+            None,
+        );
+        let targets = vec![Target::Ip(ip(10, 0, 0, 1)), stale()];
+        let plan = rt()
+            .block_on(guard.plan(&targets))
+            .expect("a target contributing no address cannot leave the allow-list");
+        assert_eq!(plan.unresolvable_targets(), vec![&targets[1]]);
+    }
+
+    #[test]
+    fn a_target_with_no_addresses_adds_nothing_to_the_aggregate_cap() {
+        let guard = GuardedResolver::new(Arc::new(AddresslessName), None, Some(1));
+        let targets = vec![Target::Ip(ip(10, 0, 0, 1)), stale()];
+        let plan = rt()
+            .block_on(guard.plan(&targets))
+            .expect("the sum only shrinks when a target contributes nothing");
+        assert_eq!(plan.total_hosts(), 1);
+    }
 }

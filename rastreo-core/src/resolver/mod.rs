@@ -1,14 +1,21 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::SystemTime;
 
+use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::NetError;
+use hickory_resolver::system_conf::read_system_conf;
 use hickory_resolver::TokioResolver;
 use ipnet::IpNet;
 
-use crate::error::{RastreoError, ResolverError, ResumeError};
+use crate::error::{DnsFailure, RastreoError, ResolverError, ResumeError};
 use crate::model::{ResolvedTarget, Target};
 
+mod classify;
 mod guarded;
 pub use guarded::GuardedResolver;
+
+use classify::answered_with_no_addresses;
 
 pub const DEFAULT_HOST_LIMIT: usize = 65_536;
 
@@ -25,8 +32,17 @@ pub struct ResolvedAddresses {
     pub sample: Vec<IpAddr>,
 }
 
+/// What one target spec contributes: its addresses, or nothing because it resolved to none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SpecContribution {
+    Addresses(ResolvedAddresses),
+    Unresolvable,
+}
+
 #[async_trait::async_trait]
 pub trait Resolver: Send + Sync {
+    /// An empty answer means the target has no addresses: the scan skips it, names it among the
+    /// plan's unresolvable targets, and runs on. Report a failure to *learn* the addresses as `Err`.
     async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError>;
 
     /// Resolve DNS eagerly and validate per-spec host limits, returning a plan whose lazy stream
@@ -102,10 +118,19 @@ impl ResolvedPlan {
 
     /// Each input target paired with what it contributes to the scan, in input order. Bounded by
     /// the spec count: a plan is built for a `/8` at the same cost as for a single address.
-    pub(crate) fn per_target_samples(&self) -> Vec<(Target, ResolvedAddresses)> {
+    pub(crate) fn per_target_samples(&self) -> Vec<(Target, SpecContribution)> {
         self.specs
             .iter()
             .map(|spec| (spec.original().clone(), spec.sample()))
+            .collect()
+    }
+
+    /// Targets that resolved to no addresses, in input order; each contributes nothing to the stream.
+    pub fn unresolvable_targets(&self) -> Vec<&Target> {
+        self.specs
+            .iter()
+            .filter(|spec| spec.is_unresolvable())
+            .map(PlannedSpec::original)
             .collect()
     }
 
@@ -246,18 +271,27 @@ impl PlannedSpec {
         }
     }
 
-    fn sample(&self) -> ResolvedAddresses {
+    fn is_unresolvable(&self) -> bool {
+        self.hosts() == 0
+    }
+
+    fn sample(&self) -> SpecContribution {
+        if self.is_unresolvable() {
+            return SpecContribution::Unresolvable;
+        }
         match self {
-            PlannedSpec::Block { first, last, .. } => ResolvedAddresses {
-                total: block_span(*first, *last),
-                sample: block_addresses(*first, *last)
-                    .take(SAMPLED_ADDRESSES)
-                    .collect(),
-            },
-            PlannedSpec::Resolved { ips, .. } => ResolvedAddresses {
+            PlannedSpec::Block { first, last, .. } => {
+                SpecContribution::Addresses(ResolvedAddresses {
+                    total: block_span(*first, *last),
+                    sample: block_addresses(*first, *last)
+                        .take(SAMPLED_ADDRESSES)
+                        .collect(),
+                })
+            }
+            PlannedSpec::Resolved { ips, .. } => SpecContribution::Addresses(ResolvedAddresses {
                 total: ips.len(),
                 sample: ips.iter().take(SAMPLED_ADDRESSES).copied().collect(),
-            },
+            }),
         }
     }
 
@@ -484,14 +518,17 @@ fn uncovered_point(lo: u128, hi: u128, ivals: &mut [(u128, u128)]) -> Option<u12
 /// per-target sample kept alongside for reporting.
 #[derive(Debug)]
 pub struct ScenarioResolution {
-    entries: Vec<(Target, Result<ResolvedAddresses, RastreoError>)>,
+    entries: Vec<(Target, Result<SpecContribution, RastreoError>)>,
     plan: Result<ResolvedPlan, RastreoError>,
+    resume_base: usize,
 }
 
 impl ScenarioResolution {
-    /// Addresses the scan would probe; `0` when it would abort before its first probe.
+    /// Addresses the scan would probe; `0` when it would abort first, and for a resume only what the checkpoint leaves it.
     pub fn total_hosts(&self) -> usize {
-        self.plan.as_ref().map_or(0, ResolvedPlan::total_hosts)
+        self.plan.as_ref().map_or(0, |plan| {
+            plan.total_hosts().saturating_sub(self.resume_base)
+        })
     }
 
     /// The error the scan would abort on before its first probe.
@@ -499,7 +536,21 @@ impl ScenarioResolution {
         self.plan.as_ref().err()
     }
 
-    pub(crate) fn entries(&self) -> &[(Target, Result<ResolvedAddresses, RastreoError>)] {
+    /// [`ScenarioResolution::refusal`] for a caller that needs to own the error, such as one mapping it onto a transport status.
+    pub fn into_refusal(self) -> Option<RastreoError> {
+        self.plan.err()
+    }
+
+    /// Targets that resolved to no addresses, in input order.
+    pub fn unresolvable_targets(&self) -> Vec<&Target> {
+        self.entries
+            .iter()
+            .filter(|(_, result)| matches!(result, Ok(SpecContribution::Unresolvable)))
+            .map(|(target, _)| target)
+            .collect()
+    }
+
+    pub(crate) fn entries(&self) -> &[(Target, Result<SpecContribution, RastreoError>)] {
         &self.entries
     }
 }
@@ -510,12 +561,9 @@ impl ScenarioResolution {
 pub async fn resolve_scenario(resolver: &dyn Resolver, targets: &[Target]) -> ScenarioResolution {
     match resolver.plan(targets).await {
         Ok(plan) => ScenarioResolution {
-            entries: plan
-                .per_target_samples()
-                .into_iter()
-                .map(|(target, sample)| (target, Ok(sample)))
-                .collect(),
+            entries: attribute(&plan),
             plan: Ok(plan),
+            resume_base: 0,
         },
         Err(refusal) => {
             let mut entries = Vec::with_capacity(targets.len());
@@ -528,38 +576,57 @@ pub async fn resolve_scenario(resolver: &dyn Resolver, targets: &[Target]) -> Sc
                             .per_target_samples()
                             .into_iter()
                             .next()
-                            .map_or_else(ResolvedAddresses::default, |(_, sample)| sample)
+                            .map_or(SpecContribution::Unresolvable, |(_, sample)| sample)
                     });
                 entries.push((target.clone(), result));
             }
             ScenarioResolution {
                 entries,
                 plan: Err(refusal),
+                resume_base: 0,
             }
         }
     }
 }
 
+/// The resolution a resumed scan replays: DNS from the checkpoint's pins, counted over what the flushed prefix leaves.
+pub fn resolve_pinned_scenario(
+    targets: &[Target],
+    dns_pins: &[(Target, Vec<IpAddr>)],
+    resume_base: usize,
+) -> Result<ScenarioResolution, RastreoError> {
+    let plan = ResolvedPlan::from_pinned(targets, dns_pins)?;
+    Ok(ScenarioResolution {
+        entries: attribute(&plan),
+        plan: Ok(plan),
+        resume_base,
+    })
+}
+
+fn attribute(plan: &ResolvedPlan) -> Vec<(Target, Result<SpecContribution, RastreoError>)> {
+    plan.per_target_samples()
+        .into_iter()
+        .map(|(target, sample)| (target, Ok(sample)))
+        .collect()
+}
+
+/// The system resolver, asked for each address family separately so a name's two answers stay distinguishable.
 pub struct HickoryResolver {
-    inner: TokioResolver,
+    v6: TokioResolver,
+    v4: TokioResolver,
     host_limit: usize,
 }
 
 impl HickoryResolver {
     pub fn from_system() -> Result<Self, RastreoError> {
-        let builder =
-            TokioResolver::builder_tokio().map_err(|source| ResolverError::DnsLookupFailed {
-                name: "<system resolver init>".into(),
-                source: source.into(),
-            })?;
-        let inner = builder
-            .build()
-            .map_err(|source| ResolverError::DnsLookupFailed {
-                name: "<system resolver init>".into(),
-                source: source.into(),
-            })?;
+        let (config, options) = read_system_conf().map_err(resolver_init_failed)?;
+        Self::from_config(&config, &options)
+    }
+
+    fn from_config(config: &ResolverConfig, options: &ResolverOpts) -> Result<Self, RastreoError> {
         Ok(Self {
-            inner,
+            v6: family_resolver(config, options, LookupIpStrategy::Ipv6Only)?,
+            v4: family_resolver(config, options, LookupIpStrategy::Ipv4Only)?,
             host_limit: DEFAULT_HOST_LIMIT,
         })
     }
@@ -613,24 +680,97 @@ impl HickoryResolver {
         })
     }
 
-    async fn lookup_dns(&self, name: &str) -> Result<Vec<IpAddr>, RastreoError> {
-        let lookup =
-            self.inner
-                .lookup_ip(name)
-                .await
-                .map_err(|source| ResolverError::DnsLookupFailed {
-                    name: name.to_string(),
-                    source: source.into(),
-                })?;
-        let ips: Vec<IpAddr> = lookup.iter().collect();
-        if ips.is_empty() {
-            return Err(ResolverError::DnsNoRecords {
-                name: name.to_string(),
-            }
-            .into());
-        }
-        Ok(ips)
+    async fn lookup_dns(&self, name: &str) -> Result<Vec<IpAddr>, ResolverError> {
+        let (v6, v4) = tokio::join!(
+            lookup_one_family(&self.v6, name),
+            lookup_one_family(&self.v4, name)
+        );
+        merge_family_lookups(v6, v4)
     }
+}
+
+fn resolver_init_failed(source: impl Into<NetError>) -> RastreoError {
+    ResolverError::DnsLookupFailed {
+        name: "<system resolver init>".into(),
+        source: DnsFailure::from(source.into()),
+    }
+    .into()
+}
+
+fn family_resolver(
+    config: &ResolverConfig,
+    options: &ResolverOpts,
+    strategy: LookupIpStrategy,
+) -> Result<TokioResolver, RastreoError> {
+    let mut options = options.clone();
+    options.ip_strategy = strategy;
+    TokioResolver::builder_with_config(config.clone(), TokioRuntimeProvider::default())
+        .with_options(options)
+        .build()
+        .map_err(resolver_init_failed)
+}
+
+async fn lookup_one_family(
+    resolver: &TokioResolver,
+    name: &str,
+) -> Result<Vec<IpAddr>, ResolverError> {
+    let lookup =
+        resolver
+            .lookup_ip(name)
+            .await
+            .map_err(|source| ResolverError::DnsLookupFailed {
+                name: name.to_string(),
+                source: source.into(),
+            })?;
+    addresses_or_no_records(name, lookup.iter().collect())
+}
+
+// A name is skipped only when *both* families answered that it has none, so the rule reads the pair.
+fn merge_family_lookups(
+    v6: Result<Vec<IpAddr>, ResolverError>,
+    v4: Result<Vec<IpAddr>, ResolverError>,
+) -> Result<Vec<IpAddr>, ResolverError> {
+    match (v6, v4) {
+        (Ok(mut sixes), Ok(fours)) => {
+            sixes.extend(fours);
+            Ok(sixes)
+        }
+        (Ok(ips), Err(_)) | (Err(_), Ok(ips)) => Ok(ips),
+        (Err(v6), Err(v4)) => Err(if answered_with_no_addresses(&v6) {
+            v4
+        } else {
+            v6
+        }),
+    }
+}
+
+// Every other lookup failure is about the nameserver rather than the target, so it stays fatal.
+fn dns_spec(
+    target: &Target,
+    looked_up: Result<Vec<IpAddr>, ResolverError>,
+) -> Result<PlannedSpec, ResolverError> {
+    let ips = match looked_up {
+        Ok(ips) => ips,
+        Err(err) if answered_with_no_addresses(&err) => {
+            tracing::warn!(%target, "target has no addresses; it will not be probed");
+            Vec::new()
+        }
+        Err(err) => return Err(err),
+    };
+    Ok(PlannedSpec::Resolved {
+        ips,
+        original: target.clone(),
+    })
+}
+
+// Keeps an empty pin unambiguous: a `Resolved` spec holds no addresses only when the network said so.
+fn addresses_or_no_records(name: &str, ips: Vec<IpAddr>) -> Result<Vec<IpAddr>, ResolverError> {
+    if ips.is_empty() {
+        return Err(ResolverError::DnsNoRecords {
+            name: name.to_string(),
+        });
+    }
+    Ok(ips)
 }
 
 #[async_trait::async_trait]
@@ -655,10 +795,7 @@ impl Resolver for HickoryResolver {
                 },
                 Target::Cidr(net) => self.plan_cidr(net, target)?,
                 Target::Range { start, end } => self.plan_range(*start, *end, target)?,
-                Target::DnsName(name) => PlannedSpec::Resolved {
-                    ips: self.lookup_dns(name).await?,
-                    original: target.clone(),
-                },
+                Target::DnsName(name) => dns_spec(target, self.lookup_dns(name).await)?,
             };
             specs.push(spec);
         }
@@ -670,6 +807,9 @@ impl Resolver for HickoryResolver {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use hickory_resolver::proto::op::ResponseCode;
+    use hickory_resolver::proto::rr::{Name, RData, Record, RecordType};
 
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -684,6 +824,13 @@ mod tests {
 
     fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    fn addresses_of(contribution: &SpecContribution) -> &ResolvedAddresses {
+        match contribution {
+            SpecContribution::Addresses(addresses) => addresses,
+            SpecContribution::Unresolvable => panic!("the target contributes addresses"),
+        }
     }
 
     #[test]
@@ -932,7 +1079,7 @@ mod tests {
         let per_target = plan.per_target_samples();
         let attributed: Vec<IpAddr> = per_target
             .iter()
-            .flat_map(|(_, addresses)| addresses.sample.iter().copied())
+            .flat_map(|(_, contribution)| addresses_of(contribution).sample.iter().copied())
             .collect();
         let streamed: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
         assert_eq!(
@@ -948,10 +1095,11 @@ mod tests {
         let r = resolver();
         let targets = vec![Target::Cidr("10.0.0.0/24".parse().expect("cidr"))];
         let plan = rt().block_on(r.plan(&targets)).expect("plan");
-        let (_, addresses) = plan
+        let (_, contribution) = plan
             .per_target_samples()
             .pop()
             .expect("one spec, one sample");
+        let addresses = addresses_of(&contribution);
         assert_eq!(addresses.total, 254);
         assert_eq!(addresses.sample.len(), SAMPLED_ADDRESSES);
         assert_eq!(addresses.sample[0], ipv4(10, 0, 0, 1));
@@ -995,7 +1143,11 @@ mod tests {
         let expanded: Vec<&[IpAddr]> = resolution
             .entries()
             .iter()
-            .map(|(_, result)| result.as_ref().expect("resolves").sample.as_slice())
+            .map(|(_, result)| {
+                addresses_of(result.as_ref().expect("resolves"))
+                    .sample
+                    .as_slice()
+            })
             .collect();
         assert_eq!(
             expanded,
@@ -1102,10 +1254,12 @@ mod tests {
         ];
         let resolution = rt().block_on(resolve_scenario(&r, &targets));
         assert!(resolution.refusal().is_some());
-        let attributed = resolution.entries()[0]
-            .1
-            .as_ref()
-            .expect("a target under the limit is attributed");
+        let attributed = addresses_of(
+            resolution.entries()[0]
+                .1
+                .as_ref()
+                .expect("a target under the limit is attributed"),
+        );
         assert_eq!(attributed.total, 1022);
         assert_eq!(attributed.sample.len(), SAMPLED_ADDRESSES);
     }
@@ -1339,5 +1493,488 @@ mod tests {
             .block_on(r.resolve_stream(&[Target::Ip(ipv4(10, 0, 0, 1))]))
             .expect("resolve_stream");
         assert_send(&stream);
+    }
+
+    fn dns(name: &str) -> Target {
+        Target::DnsName(name.to_string())
+    }
+
+    fn no_records(name: &str) -> ResolverError {
+        use hickory_resolver::net::{NetError, NoRecords};
+        use hickory_resolver::proto::op::{Query, ResponseCode};
+        use hickory_resolver::proto::rr::{Name, RecordType};
+
+        let query = Query::query(
+            Name::from_ascii(name).expect("test name parses"),
+            RecordType::AAAA,
+        );
+        ResolverError::DnsLookupFailed {
+            name: name.to_string(),
+            source: NetError::from(NoRecords::new(query, ResponseCode::NXDomain)).into(),
+        }
+    }
+
+    fn silent_nameserver(name: &str) -> ResolverError {
+        ResolverError::DnsLookupFailed {
+            name: name.to_string(),
+            source: hickory_resolver::net::NetError::Timeout.into(),
+        }
+    }
+
+    // A route that stops recording an address-less spec shows up as `unresolvable_targets` losing its entry.
+    #[test]
+    fn a_name_the_network_says_has_no_addresses_is_planned_rather_than_refused() {
+        let target = dns("stale.lab");
+        let spec = dns_spec(&target, Err(no_records("stale.lab.")))
+            .expect("an authoritative negative is not a refusal");
+        let plan = ResolvedPlan::new(vec![spec], SystemTime::now());
+        assert_eq!(plan.unresolvable_targets(), vec![&target]);
+        assert_eq!(plan.total_hosts(), 0);
+    }
+
+    #[test]
+    fn a_nameserver_that_did_not_answer_still_refuses_the_whole_plan() {
+        let target = dns("stale.lab");
+        assert!(matches!(
+            dns_spec(&target, Err(silent_nameserver("stale.lab."))),
+            Err(ResolverError::DnsLookupFailed { .. })
+        ));
+    }
+
+    // Every failure one family lookup can produce, paired with whether it answers that the name has none.
+    fn family_failures(name: &str) -> Vec<(&'static str, ResolverError, bool)> {
+        use hickory_resolver::net::{DnsError, NetError, NoRecords};
+        use hickory_resolver::proto::op::Query;
+
+        let query = || {
+            Query::query(
+                Name::from_ascii(name).expect("test name parses"),
+                RecordType::A,
+            )
+        };
+        let wrapped = |source: NetError| ResolverError::DnsLookupFailed {
+            name: name.to_string(),
+            source: source.into(),
+        };
+        vec![
+            (
+                "NXDOMAIN",
+                wrapped(NoRecords::new(query(), ResponseCode::NXDomain).into()),
+                true,
+            ),
+            (
+                "NODATA",
+                wrapped(NoRecords::new(query(), ResponseCode::NoError).into()),
+                true,
+            ),
+            (
+                "empty answer",
+                ResolverError::DnsNoRecords {
+                    name: name.to_string(),
+                },
+                true,
+            ),
+            ("timeout", wrapped(NetError::Timeout), false),
+            ("no connections", wrapped(NetError::NoConnections), false),
+            ("busy", wrapped(NetError::Busy), false),
+            (
+                "query case mismatch",
+                wrapped(NetError::QueryCaseMismatch),
+                false,
+            ),
+            (
+                "bad resolver state",
+                wrapped(NetError::Msg("resolver in a bad state".into())),
+                false,
+            ),
+            (
+                "io",
+                wrapped(NetError::Io(std::sync::Arc::new(std::io::Error::from(
+                    std::io::ErrorKind::ConnectionRefused,
+                )))),
+                false,
+            ),
+            (
+                "SERVFAIL",
+                wrapped(NetError::Dns(DnsError::ResponseCode(
+                    ResponseCode::ServFail,
+                ))),
+                false,
+            ),
+            (
+                "REFUSED",
+                wrapped(NetError::Dns(DnsError::ResponseCode(ResponseCode::Refused))),
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_name_is_skipped_only_when_both_families_answered_that_it_has_none() {
+        let count = family_failures("stale.lab").len();
+        for v6 in 0..count {
+            for v4 in 0..count {
+                let (v6_label, v6_err, v6_negative) = family_failures("stale.lab").remove(v6);
+                let (v4_label, v4_err, v4_negative) = family_failures("stale.lab").remove(v4);
+                let merged = merge_family_lookups(Err(v6_err), Err(v4_err))
+                    .expect_err("neither family produced an address");
+                assert_eq!(
+                    answered_with_no_addresses(&merged),
+                    v6_negative && v4_negative,
+                    "AAAA {v6_label} beside A {v4_label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_ipv6_nodata_beside_an_ipv4_fault_still_refuses_the_whole_plan() {
+        let target = dns("router-1.lab");
+        let merged = merge_family_lookups(
+            Err(no_records("router-1.lab.")),
+            Err(silent_nameserver("router-1.lab.")),
+        );
+        assert!(matches!(
+            dns_spec(&target, merged),
+            Err(ResolverError::DnsLookupFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn both_families_answering_that_the_name_has_none_plans_it_as_unresolvable() {
+        let target = dns("stale.lab");
+        let merged =
+            merge_family_lookups(Err(no_records("stale.lab.")), Err(no_records("stale.lab.")));
+        let spec = dns_spec(&target, merged).expect("both halves are authoritative negatives");
+        let plan = ResolvedPlan::new(vec![spec], SystemTime::now());
+        assert_eq!(plan.unresolvable_targets(), vec![&target]);
+    }
+
+    #[test]
+    fn addresses_from_one_family_survive_any_failure_of_the_other() {
+        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        for (label, err, _) in family_failures("router-1.lab") {
+            assert_eq!(
+                merge_family_lookups(Ok(vec![v6]), Err(err)).expect("AAAA answered"),
+                vec![v6],
+                "A {label} must not discard the AAAA answer"
+            );
+        }
+        for (label, err, _) in family_failures("router-1.lab") {
+            assert_eq!(
+                merge_family_lookups(Err(err), Ok(vec![ipv4(10, 0, 0, 5)])).expect("A answered"),
+                vec![ipv4(10, 0, 0, 5)],
+                "AAAA {label} must not discard the A answer"
+            );
+        }
+    }
+
+    #[test]
+    fn both_families_answering_yields_the_ipv6_addresses_before_the_ipv4_ones() {
+        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        assert_eq!(
+            merge_family_lookups(Ok(vec![v6]), Ok(vec![ipv4(10, 0, 0, 5)])).expect("both answered"),
+            vec![v6, ipv4(10, 0, 0, 5)]
+        );
+    }
+
+    // One nameserver answering by record type, so the two family lookups carry different hickory errors.
+    async fn spawn_nameserver(
+        answer: fn(RecordType) -> (Vec<Record>, ResponseCode),
+    ) -> (ResolverConfig, ResolverOpts) {
+        use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolveHosts};
+        use hickory_resolver::proto::op::{Message, MessageType, OpCode};
+        use hickory_resolver::proto::serialize::binary::{BinDecodable, BinEncodable};
+
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback nameserver");
+        let port = socket.local_addr().expect("local_addr").port();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            while let Ok((n, peer)) = socket.recv_from(&mut buf).await {
+                let Ok(request) = Message::from_bytes(&buf[..n]) else {
+                    continue;
+                };
+                let Some(query) = request.queries.first().cloned() else {
+                    continue;
+                };
+                let (answers, code) = answer(query.query_type());
+                let mut response = Message::new(0, MessageType::Response, OpCode::Query);
+                response.metadata.id = request.metadata.id;
+                response.metadata.response_code = code;
+                response.metadata.recursion_available = true;
+                response.add_query(query);
+                response.add_answers(answers);
+                if let Ok(bytes) = response.to_bytes() {
+                    let _ = socket.send_to(&bytes, peer).await;
+                }
+            }
+        });
+
+        let mut connection = ConnectionConfig::udp();
+        connection.port = port;
+        let mut name_server = NameServerConfig::udp(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        name_server.connections = vec![connection];
+        let mut options = ResolverOpts::default();
+        options.attempts = 0;
+        options.timeout = std::time::Duration::from_millis(500);
+        options.use_hosts_file = ResolveHosts::Never;
+        options.cache_size = 0;
+        (
+            ResolverConfig::from_parts(None, Vec::new(), vec![name_server]),
+            options,
+        )
+    }
+
+    // A joint lookup hides this: hickory keeps the AAAA half of a double failure, routinely a NODATA.
+    #[test]
+    fn a_nameserver_that_nodatas_aaaa_and_fails_a_refuses_the_whole_plan() {
+        rt().block_on(async {
+            let (config, options) = spawn_nameserver(|record_type| match record_type {
+                RecordType::AAAA => (Vec::new(), ResponseCode::NoError),
+                _ => (Vec::new(), ResponseCode::ServFail),
+            })
+            .await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            assert!(matches!(
+                r.plan(&[dns("router-1.lab")]).await,
+                Err(RastreoError::Resolver(
+                    ResolverError::DnsLookupFailed { .. }
+                ))
+            ));
+        });
+    }
+
+    #[test]
+    fn a_nameserver_that_nodatas_both_families_plans_the_name_as_unresolvable() {
+        let target = dns("stale.lab");
+        rt().block_on(async {
+            let (config, options) = spawn_nameserver(|_| (Vec::new(), ResponseCode::NoError)).await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let plan = r
+                .plan(std::slice::from_ref(&target))
+                .await
+                .expect("both families answered with none");
+            assert_eq!(plan.unresolvable_targets(), vec![&target]);
+        });
+    }
+
+    #[test]
+    fn a_nameserver_that_answers_only_a_still_yields_that_address() {
+        rt().block_on(async {
+            let (config, options) = spawn_nameserver(|record_type| match record_type {
+                RecordType::A => (
+                    vec![Record::from_rdata(
+                        Name::from_ascii("only-v4.lab.").expect("name parses"),
+                        60,
+                        RData::A(hickory_resolver::proto::rr::rdata::A(Ipv4Addr::new(
+                            10, 0, 0, 5,
+                        ))),
+                    )],
+                    ResponseCode::NoError,
+                ),
+                _ => (Vec::new(), ResponseCode::NoError),
+            })
+            .await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let ips: Vec<IpAddr> = r
+                .plan(&[dns("only-v4.lab")])
+                .await
+                .expect("the A half answered")
+                .into_stream()
+                .map(|rt| rt.ip)
+                .collect();
+            assert_eq!(ips, vec![ipv4(10, 0, 0, 5)]);
+        });
+    }
+
+    // `is_unresolvable` reads a host count, so a zero-span block would report as having no addresses.
+    #[test]
+    fn every_block_a_target_shape_produces_carries_at_least_one_address() {
+        let r = resolver();
+        let targets = vec![
+            Target::Ip(ipv4(10, 0, 0, 1)),
+            Target::Ip(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))),
+            Target::Cidr("10.0.0.1/32".parse().expect("cidr")),
+            Target::Cidr("10.0.0.0/31".parse().expect("cidr")),
+            Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+            Target::Cidr("2001:db8::/128".parse().expect("cidr")),
+            Target::Range {
+                start: ipv4(10, 0, 0, 1),
+                end: ipv4(10, 0, 0, 1),
+            },
+            Target::Range {
+                start: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                end: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+            },
+        ];
+        let plan = rt().block_on(r.plan(&targets)).expect("plan");
+        assert!(plan.unresolvable_targets().is_empty());
+    }
+
+    #[test]
+    fn the_system_resolver_asks_each_address_family_on_its_own() {
+        let r = resolver();
+        assert_eq!(r.v6.options().ip_strategy, LookupIpStrategy::Ipv6Only);
+        assert_eq!(r.v4.options().ip_strategy, LookupIpStrategy::Ipv4Only);
+    }
+
+    #[test]
+    fn a_name_that_resolved_is_planned_as_its_addresses() {
+        let target = dns("router-1.lab");
+        let spec = dns_spec(&target, Ok(vec![ipv4(10, 0, 0, 5)])).expect("resolved");
+        let plan = ResolvedPlan::new(vec![spec], SystemTime::now());
+        assert!(plan.unresolvable_targets().is_empty());
+        assert_eq!(plan.total_hosts(), 1);
+    }
+
+    #[test]
+    fn an_empty_successful_lookup_is_reported_as_having_no_records() {
+        assert!(matches!(
+            addresses_or_no_records("stale.lab", Vec::new()),
+            Err(ResolverError::DnsNoRecords { .. })
+        ));
+        assert_eq!(
+            addresses_or_no_records("router-1.lab", vec![ipv4(10, 0, 0, 5)]).expect("resolved"),
+            vec![ipv4(10, 0, 0, 5)]
+        );
+    }
+
+    struct StubResolver {
+        answers: Vec<(Target, Vec<IpAddr>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl Resolver for StubResolver {
+        async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError> {
+            let ips = match target {
+                Target::Ip(ip) => vec![*ip],
+                _ => self
+                    .answers
+                    .iter()
+                    .find(|(known, _)| known == target)
+                    .map(|(_, ips)| ips.clone())
+                    .unwrap_or_default(),
+            };
+            Ok(ips
+                .into_iter()
+                .map(|ip| ResolvedTarget {
+                    ip,
+                    original: target.clone(),
+                    resolved_at: SystemTime::now(),
+                })
+                .collect())
+        }
+    }
+
+    fn stub(answers: Vec<(Target, Vec<IpAddr>)>) -> StubResolver {
+        StubResolver { answers }
+    }
+
+    #[test]
+    fn the_default_plan_records_a_target_a_resolver_returned_nothing_for() {
+        let stale = dns("stale.lab");
+        let live = dns("router-1.lab");
+        let r = stub(vec![
+            (stale.clone(), Vec::new()),
+            (live.clone(), vec![ipv4(10, 0, 0, 5)]),
+        ]);
+        let plan = rt()
+            .block_on(r.plan(&[stale.clone(), live]))
+            .expect("an empty answer is not a refusal");
+        assert_eq!(plan.unresolvable_targets(), vec![&stale]);
+        assert_eq!(plan.total_hosts(), 1);
+    }
+
+    #[test]
+    fn a_target_with_no_addresses_contributes_nothing_to_the_stream() {
+        let stale = dns("stale.lab");
+        let plan = ResolvedPlan::new(
+            vec![
+                PlannedSpec::Block {
+                    first: ipv4(10, 0, 0, 1),
+                    last: ipv4(10, 0, 0, 2),
+                    original: Target::Cidr("10.0.0.0/30".parse().expect("cidr")),
+                },
+                PlannedSpec::Resolved {
+                    ips: Vec::new(),
+                    original: stale,
+                },
+                PlannedSpec::Block {
+                    first: ipv4(192, 168, 1, 5),
+                    last: ipv4(192, 168, 1, 5),
+                    original: Target::Ip(ipv4(192, 168, 1, 5)),
+                },
+            ],
+            SystemTime::now(),
+        );
+        let counted = plan.total_hosts();
+        let streamed: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
+        assert_eq!(counted, streamed.len());
+        assert_eq!(
+            streamed,
+            vec![ipv4(10, 0, 0, 1), ipv4(10, 0, 0, 2), ipv4(192, 168, 1, 5)],
+            "the skipped spec leaves the positions of the targets after it unchanged"
+        );
+    }
+
+    #[test]
+    fn a_target_with_no_addresses_is_pinned_at_its_own_position() {
+        let stale = dns("stale.lab");
+        let live = dns("router-1.lab");
+        let r = stub(vec![
+            (stale.clone(), Vec::new()),
+            (live.clone(), vec![ipv4(10, 0, 0, 5)]),
+        ]);
+        let targets = vec![stale.clone(), live.clone()];
+        let pins = rt().block_on(r.plan(&targets)).expect("plan").dns_pins();
+        assert_eq!(
+            pins,
+            vec![(stale.clone(), Vec::new()), (live, vec![ipv4(10, 0, 0, 5)])]
+        );
+
+        let resumed = ResolvedPlan::from_pinned(&targets, &pins).expect("from_pinned");
+        assert_eq!(
+            resumed.unresolvable_targets(),
+            vec![&stale],
+            "a resume replays the original resolution rather than asking again"
+        );
+        assert_eq!(resumed.total_hosts(), 1);
+    }
+
+    #[test]
+    fn resolve_scenario_names_the_targets_the_network_answered_nothing_for() {
+        let stale = dns("stale.lab");
+        let r = stub(vec![(stale.clone(), Vec::new())]);
+        let targets = vec![Target::Ip(ipv4(10, 0, 0, 1)), stale.clone()];
+        let resolution = rt().block_on(resolve_scenario(&r, &targets));
+        assert!(resolution.refusal().is_none());
+        assert_eq!(resolution.unresolvable_targets(), vec![&stale]);
+        assert_eq!(resolution.total_hosts(), 1);
+        assert_eq!(
+            resolution.entries()[1].1.as_ref().expect("attributed"),
+            &SpecContribution::Unresolvable
+        );
+    }
+
+    #[test]
+    fn a_pinned_resolution_counts_only_what_the_resume_has_left() {
+        let stale = dns("stale.lab");
+        let targets = vec![Target::Cidr("10.0.0.0/24".parse().expect("cidr")), stale];
+        let pins = vec![(targets[1].clone(), Vec::new())];
+        let resolution =
+            resolve_pinned_scenario(&targets, &pins, 100).expect("the pins match the targets");
+        assert_eq!(resolution.total_hosts(), 154);
+        assert_eq!(resolution.unresolvable_targets(), vec![&targets[1]]);
+    }
+
+    #[test]
+    fn a_pinned_resolution_over_a_stale_target_list_refuses() {
+        let targets = vec![dns("router-1.lab")];
+        assert!(matches!(
+            resolve_pinned_scenario(&targets, &[], 0),
+            Err(RastreoError::Resume(ResumeError::FingerprintMismatch))
+        ));
     }
 }

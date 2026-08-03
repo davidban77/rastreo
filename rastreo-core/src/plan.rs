@@ -7,9 +7,8 @@ use crate::config::{BaseProbeConfig, DiscoverScenarioConfig};
 use crate::encoder::EncoderConfig;
 use crate::error::RastreoError;
 use crate::fuser::{DirectFuser, FuserConfig};
-use crate::model::Target;
 use crate::prober::ProberConfig;
-use crate::resolver::{ResolvedAddresses, ScenarioResolution};
+use crate::resolver::{ResolvedAddresses, ScenarioResolution, SpecContribution};
 use crate::sink::{SinkConfig, SinkType};
 
 /// The pipeline stages a scenario alone determines, rendered without resolving a single target.
@@ -53,7 +52,7 @@ pub struct ScenarioPlan {
 pub struct DiscoveryPlan {
     /// Name of the scenario this plan describes.
     pub scenario: String,
-    /// Each configured target with what it contributes to the scan, or its resolution error.
+    /// Each configured target with what it contributes to the scan, whether it has no addresses, or the error the scan would abort on.
     pub targets: Vec<PlannedTarget>,
     /// Human-readable summary of each configured prober.
     pub probers: Vec<String>,
@@ -73,9 +72,9 @@ pub struct DiscoveryPlan {
     pub retries: u32,
     /// Effective per-probe timeout in milliseconds.
     pub timeout_ms: u64,
-    /// Total probes the scan would run: every address it would probe times probers, `0` when it would abort first.
+    /// Total probes the scan would run: every address it would probe times probers, `0` when it would abort first. A resumed plan counts only what the checkpoint left, so it sits below the sum of the per-target totals.
     pub total_probes: usize,
-    /// Error the scan would abort on before its first probe; absent when every target resolved.
+    /// Error the scan would abort on before its first probe; absent when the scan would start, which a target with no addresses does not prevent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
 }
@@ -85,7 +84,7 @@ pub struct DiscoveryPlan {
 pub struct PlannedTarget {
     /// The target as written in the scenario.
     pub target: String,
-    /// What the target contributes to the scan, or the resolution error.
+    /// What the target contributes to the scan, whether it has no addresses, or the error the scan would abort on.
     pub resolution: TargetResolution,
 }
 
@@ -94,6 +93,9 @@ pub struct PlannedTarget {
 #[non_exhaustive]
 pub enum TargetResolution {
     Resolved(ResolvedAddresses),
+    /// This target resolved to no addresses; the scan probes it zero times and runs on.
+    Unresolvable,
+    /// The scan would abort on this target rather than run without it.
     Error(String),
 }
 
@@ -158,9 +160,12 @@ impl ScenarioPlan {
                 .entries()
                 .iter()
                 .map(|(target, result)| PlannedTarget {
-                    target: render_target(target),
+                    target: target.to_string(),
                     resolution: match result {
-                        Ok(addresses) => TargetResolution::Resolved(addresses.clone()),
+                        Ok(SpecContribution::Addresses(addresses)) => {
+                            TargetResolution::Resolved(addresses.clone())
+                        }
+                        Ok(SpecContribution::Unresolvable) => TargetResolution::Unresolvable,
                         Err(err) => TargetResolution::Error(err.to_string()),
                     },
                 })
@@ -194,6 +199,9 @@ impl fmt::Display for DiscoveryPlan {
                         format_addresses(addresses)
                     )?;
                 }
+                TargetResolution::Unresolvable => {
+                    writeln!(f, "      {} → <unresolvable: no addresses>", planned.target)?;
+                }
                 TargetResolution::Error(err) => {
                     writeln!(f, "      {} → <error: {err}>", planned.target)?;
                 }
@@ -215,15 +223,6 @@ impl fmt::Display for DiscoveryPlan {
 }
 
 // In core so these #[non_exhaustive] enums match exhaustively — a new variant fails to compile here until rendered, where the CLI could only fall back to a catch-all.
-fn render_target(target: &Target) -> String {
-    match target {
-        Target::Ip(ip) => ip.to_string(),
-        Target::Cidr(net) => net.to_string(),
-        Target::Range { start, end } => format!("{start}-{end}"),
-        Target::DnsName(name) => name.clone(),
-    }
-}
-
 fn render_prober(config: &ProberConfig) -> String {
     match config {
         ProberConfig::TcpConnect { ports } => {
@@ -454,6 +453,7 @@ mod tests {
     use super::*;
     use crate::config::BaseProbeConfig;
     use crate::error::ConfigError;
+    use crate::model::Target;
     use crate::pipeline::RunOptions;
     use crate::resolver::SAMPLED_ADDRESSES;
     use crate::sink::{MemorySink, TeeChild, TeeSink};
@@ -538,26 +538,6 @@ mod tests {
                 ports: vec![22, 80],
             }],
         )
-    }
-
-    #[test]
-    fn render_target_uses_natural_form_per_variant() {
-        assert_eq!(render_target(&Target::Ip(ip(10, 0, 0, 1))), "10.0.0.1");
-        assert_eq!(
-            render_target(&Target::Cidr("10.0.0.0/24".parse().expect("cidr"))),
-            "10.0.0.0/24"
-        );
-        assert_eq!(
-            render_target(&Target::DnsName("example.com".into())),
-            "example.com"
-        );
-        assert_eq!(
-            render_target(&Target::Range {
-                start: ip(10, 0, 0, 1),
-                end: ip(10, 0, 0, 5),
-            }),
-            "10.0.0.1-10.0.0.5"
-        );
     }
 
     #[test]
@@ -1261,6 +1241,38 @@ mod tests {
         assert_eq!(json["fuser"], render_fuser(None));
         assert_eq!(json["classifier"], render_classifier(None));
         assert_eq!(json["encoder"], "ndjson");
+    }
+
+    fn plan_with(resolution: TargetResolution) -> DiscoveryPlan {
+        let config = tcp_scenario();
+        let mut plan = resolved_plan_of(
+            &config,
+            &resolution_of(&[Target::Ip(ip(127, 0, 0, 1))]),
+            default_knobs(),
+        );
+        plan.targets[0].target = "stale.lab".to_string();
+        plan.targets[0].resolution = resolution;
+        plan
+    }
+
+    #[test]
+    fn display_names_a_target_with_no_addresses_as_unresolvable() {
+        let out = plan_with(TargetResolution::Unresolvable).to_string();
+        assert!(
+            out.contains("stale.lab → <unresolvable: no addresses>"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("<error:"),
+            "a target with no addresses is not an error: {out}"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_target_serializes_as_its_own_state() {
+        let json =
+            serde_json::to_value(plan_with(TargetResolution::Unresolvable)).expect("serialize");
+        assert_eq!(json["targets"][0]["resolution"], "unresolvable");
     }
 
     #[test]
