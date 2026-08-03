@@ -2,10 +2,19 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
+const RERUN_MARKER: &str = "RASTREO_ENV_ISOLATION_RERUN";
+const POLLUTED_TEST: &str = "a_backtrace_exported_into_the_suite_never_reaches_the_binary";
+
 #[test]
 fn a_backtrace_exported_into_the_suite_never_reaches_the_binary() {
-    // SAFETY: the sibling test in this binary reads no environment variable.
-    unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
+    if std::env::var_os(RERUN_MARKER).is_none() {
+        return rerun_with_a_backtrace_exported();
+    }
+    assert_eq!(
+        std::env::var("RUST_BACKTRACE").ok().as_deref(),
+        Some("1"),
+        "the re-run must export the pollutant this test exists to catch"
+    );
 
     let output = common::rastreo_server()
         .args(["--port", "0"])
@@ -24,6 +33,28 @@ fn a_backtrace_exported_into_the_suite_never_reaches_the_binary() {
     assert!(
         !stderr.contains("backtrace"),
         "a backtrace is not part of the binary's output contract: {stderr}"
+    );
+}
+
+// The variable has to be in *this* process's environment for the assertion to mean anything, and
+// setting it here would realloc the environ array under every other thread's getenv. A child owns
+// its own environment from the moment it starts.
+fn rerun_with_a_backtrace_exported() {
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", POLLUTED_TEST])
+        .env("RUST_BACKTRACE", "1")
+        .env(RERUN_MARKER, "1")
+        .output()
+        .expect("re-run this test binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the re-run failed: {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "expected {POLLUTED_TEST} to run once in the re-run: {stdout}\n{stderr}"
     );
 }
 

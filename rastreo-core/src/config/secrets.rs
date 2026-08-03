@@ -1,5 +1,6 @@
 use serde_yaml_ng::Value;
 
+use crate::env::Env;
 use crate::error::ConfigError;
 
 /// The config file being expanded, named in the error when a referenced variable is unset.
@@ -25,10 +26,14 @@ impl SecretSource {
     }
 }
 
-/// Recursively expand `${VAR}` env-var references in string scalars and read `!file <path>` tagged scalars into their file contents. YAML mapping keys are left unmodified.
-pub(crate) fn expand(value: Value, source: SecretSource) -> Result<Value, ConfigError> {
+/// Recursively expand `${VAR}` references against `env` in string scalars and read `!file <path>` tagged scalars into their file contents. YAML mapping keys are left unmodified.
+pub(crate) fn expand(
+    value: Value,
+    source: SecretSource,
+    env: &dyn Env,
+) -> Result<Value, ConfigError> {
     match value {
-        Value::String(s) => Ok(Value::String(interpolate_env(&s, source)?)),
+        Value::String(s) => Ok(Value::String(interpolate_env(&s, source, env)?)),
         Value::Tagged(tagged) => {
             if tagged.tag == "file" {
                 let path = match tagged.value {
@@ -42,7 +47,7 @@ pub(crate) fn expand(value: Value, source: SecretSource) -> Result<Value, Config
                 };
                 Ok(Value::String(read_file_secret(&path)?))
             } else {
-                let inner = expand(tagged.value, source)?;
+                let inner = expand(tagged.value, source, env)?;
                 Ok(Value::Tagged(Box::new(serde_yaml_ng::value::TaggedValue {
                     tag: tagged.tag,
                     value: inner,
@@ -52,7 +57,7 @@ pub(crate) fn expand(value: Value, source: SecretSource) -> Result<Value, Config
         Value::Sequence(seq) => {
             let mut out = Vec::with_capacity(seq.len());
             for item in seq {
-                out.push(expand(item, source)?);
+                out.push(expand(item, source, env)?);
             }
             Ok(Value::Sequence(out))
         }
@@ -61,7 +66,7 @@ pub(crate) fn expand(value: Value, source: SecretSource) -> Result<Value, Config
                 // On error, this leaves `Null` in place of one value; caller must drop the
                 // partially-transformed tree.
                 let taken = std::mem::replace(v, Value::Null);
-                *v = expand(taken, source)?;
+                *v = expand(taken, source, env)?;
             }
             Ok(Value::Mapping(map))
         }
@@ -117,7 +122,11 @@ fn contains_secret_reference(value: &Value) -> bool {
     }
 }
 
-fn interpolate_env(input: &str, source: SecretSource) -> Result<String, ConfigError> {
+fn interpolate_env(
+    input: &str,
+    source: SecretSource,
+    env: &dyn Env,
+) -> Result<String, ConfigError> {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut copy_start = 0;
@@ -140,7 +149,7 @@ fn interpolate_env(input: &str, source: SecretSource) -> Result<String, ConfigEr
             if let Some(end) = find_ref_end(bytes, i) {
                 let name = &input[i + 2..end];
                 if is_valid_identifier(name) {
-                    let value = std::env::var(name).map_err(|_| {
+                    let value = env.var(name).map_err(|_| {
                         ConfigError::invalid(format!(
                             "environment variable {name} referenced in {} is not set",
                             source.reference_label()
@@ -215,80 +224,63 @@ fn yaml_type_name(v: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::MapEnv;
     use serde_yaml_ng::value::{Tag, TaggedValue};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn set_var(name: &str, value: &str) {
-        // SAFETY: env var mutation is process-global. Tests use unique per-test names to avoid interaction.
-        unsafe { std::env::set_var(name, value) };
-    }
-
-    fn remove_var(name: &str) {
-        // SAFETY: env var mutation is process-global. Tests use unique per-test names to avoid interaction.
-        unsafe { std::env::remove_var(name) };
-    }
-
     fn expand_scenario(value: Value) -> Result<Value, ConfigError> {
-        expand(value, SecretSource::Scenario)
+        expand_scenario_with(value, &MapEnv::new())
+    }
+
+    fn expand_scenario_with(value: Value, env: &dyn Env) -> Result<Value, ConfigError> {
+        expand(value, SecretSource::Scenario, env)
+    }
+
+    fn one(name: &str, value: &str) -> MapEnv {
+        MapEnv::new().set(name, value)
     }
 
     #[test]
     fn expand_replaces_single_env_var() {
-        set_var("RASTREO_TEST_SECRETS_SINGLE", "bar");
-        let out = expand_scenario(Value::String("${RASTREO_TEST_SECRETS_SINGLE}".into()))
-            .expect("expand");
+        let env = one("SINGLE", "bar");
+        let out = expand_scenario_with(Value::String("${SINGLE}".into()), &env).expect("expand");
         assert_eq!(out, Value::String("bar".into()));
-        remove_var("RASTREO_TEST_SECRETS_SINGLE");
     }
 
     #[test]
     fn expand_replaces_multiple_env_vars_in_one_string() {
-        set_var("RASTREO_TEST_SECRETS_MULTI_A", "foo");
-        set_var("RASTREO_TEST_SECRETS_MULTI_B", "bar");
-        let out = expand_scenario(Value::String(
-            "${RASTREO_TEST_SECRETS_MULTI_A}-${RASTREO_TEST_SECRETS_MULTI_B}".into(),
-        ))
-        .expect("expand");
+        let env = MapEnv::new().set("A", "foo").set("B", "bar");
+        let out = expand_scenario_with(Value::String("${A}-${B}".into()), &env).expect("expand");
         assert_eq!(out, Value::String("foo-bar".into()));
-        remove_var("RASTREO_TEST_SECRETS_MULTI_A");
-        remove_var("RASTREO_TEST_SECRETS_MULTI_B");
     }
 
     #[test]
     fn expand_preserves_surrounding_text() {
-        set_var("RASTREO_TEST_SECRETS_SURROUND", "middle");
-        let out = expand_scenario(Value::String(
-            "prefix-${RASTREO_TEST_SECRETS_SURROUND}-suffix".into(),
-        ))
-        .expect("expand");
+        let env = one("SURROUND", "middle");
+        let out = expand_scenario_with(Value::String("prefix-${SURROUND}-suffix".into()), &env)
+            .expect("expand");
         assert_eq!(out, Value::String("prefix-middle-suffix".into()));
-        remove_var("RASTREO_TEST_SECRETS_SURROUND");
     }
 
     #[test]
     fn expand_missing_env_var_returns_actionable_error() {
-        remove_var("RASTREO_TEST_SECRETS_MISSING_XYZ");
-        let err = expand_scenario(Value::String("${RASTREO_TEST_SECRETS_MISSING_XYZ}".into()))
-            .expect_err("must error");
+        let err = expand_scenario(Value::String("${MISSING_XYZ}".into())).expect_err("must error");
         let msg = format!("{err}");
-        assert!(
-            msg.contains("RASTREO_TEST_SECRETS_MISSING_XYZ"),
-            "msg: {msg}"
-        );
+        assert!(msg.contains("MISSING_XYZ"), "msg: {msg}");
         assert!(msg.contains("not set"), "msg: {msg}");
     }
 
     #[test]
     fn expand_missing_env_var_names_the_config_it_was_referenced_from() {
-        remove_var("RASTREO_TEST_SECRETS_SOURCE_LABEL");
         for (source, expected, other) in [
             (SecretSource::Scenario, "scenario", "sink config"),
             (SecretSource::SinkConfig, "sink config", "scenario"),
         ] {
             let err = expand(
-                Value::String("${RASTREO_TEST_SECRETS_SOURCE_LABEL}".into()),
+                Value::String("${SOURCE_LABEL}".into()),
                 source,
+                &MapEnv::new(),
             )
             .expect_err("must error");
             let msg = format!("{err}");
@@ -299,59 +291,46 @@ mod tests {
 
     #[test]
     fn expand_empty_env_var_substitutes_as_empty_string() {
-        set_var("RASTREO_TEST_SECRETS_EMPTY", "");
-        let out = expand_scenario(Value::String(
-            "prefix-${RASTREO_TEST_SECRETS_EMPTY}-suffix".into(),
-        ))
-        .expect("expand");
+        let env = one("EMPTY", "");
+        let out = expand_scenario_with(Value::String("prefix-${EMPTY}-suffix".into()), &env)
+            .expect("expand");
         assert_eq!(out, Value::String("prefix--suffix".into()));
-        remove_var("RASTREO_TEST_SECRETS_EMPTY");
     }
 
     #[test]
     fn expand_escape_sequence_preserves_literal() {
-        set_var("RASTREO_TEST_SECRETS_ESCAPE", "should-not-be-used");
-        let out = expand_scenario(Value::String("$${RASTREO_TEST_SECRETS_ESCAPE}".into()))
-            .expect("expand");
-        assert_eq!(out, Value::String("${RASTREO_TEST_SECRETS_ESCAPE}".into()));
-        remove_var("RASTREO_TEST_SECRETS_ESCAPE");
+        let env = one("ESCAPE", "should-not-be-used");
+        let out = expand_scenario_with(Value::String("$${ESCAPE}".into()), &env).expect("expand");
+        assert_eq!(out, Value::String("${ESCAPE}".into()));
     }
 
     #[test]
     fn expand_recurses_into_sequences_and_mappings() {
-        set_var("RASTREO_TEST_SECRETS_NESTED", "value");
+        let env = one("NESTED", "value");
         let yaml = "\
 outer:
   inner:
     - plain
-    - \"prefix-${RASTREO_TEST_SECRETS_NESTED}\"
+    - \"prefix-${NESTED}\"
 ";
         let raw: Value = serde_yaml_ng::from_str(yaml).expect("parse");
-        let out = expand_scenario(raw).expect("expand");
+        let out = expand_scenario_with(raw, &env).expect("expand");
         let outer = out.get("outer").expect("outer");
         let inner = outer.get("inner").expect("inner");
         let seq = inner.as_sequence().expect("sequence");
         assert_eq!(seq[0], Value::String("plain".into()));
         assert_eq!(seq[1], Value::String("prefix-value".into()));
-        remove_var("RASTREO_TEST_SECRETS_NESTED");
     }
 
     #[test]
     fn expand_does_not_expand_map_keys() {
-        set_var("RASTREO_TEST_SECRETS_KEY", "would-be-key");
+        let env = one("KEY", "would-be-key");
         let mut map = serde_yaml_ng::Mapping::new();
-        map.insert(
-            Value::String("${RASTREO_TEST_SECRETS_KEY}".into()),
-            Value::String("v".into()),
-        );
-        let out = expand_scenario(Value::Mapping(map)).expect("expand");
+        map.insert(Value::String("${KEY}".into()), Value::String("v".into()));
+        let out = expand_scenario_with(Value::Mapping(map), &env).expect("expand");
         let mapping = out.as_mapping().expect("mapping");
         let keys: Vec<_> = mapping.keys().collect();
-        assert_eq!(
-            keys[0],
-            &Value::String("${RASTREO_TEST_SECRETS_KEY}".into())
-        );
-        remove_var("RASTREO_TEST_SECRETS_KEY");
+        assert_eq!(keys[0], &Value::String("${KEY}".into()));
     }
 
     #[test]
@@ -479,11 +458,9 @@ credentials:
 
     #[test]
     fn expand_preserves_non_ascii_string_content() {
-        set_var("RASTREO_TEST_SECRETS_UTF8", "x");
-        let out = expand_scenario(Value::String("café-${RASTREO_TEST_SECRETS_UTF8}".into()))
-            .expect("expand");
+        let env = one("UTF8", "x");
+        let out = expand_scenario_with(Value::String("café-${UTF8}".into()), &env).expect("expand");
         assert_eq!(out, Value::String("café-x".into()));
-        remove_var("RASTREO_TEST_SECRETS_UTF8");
     }
 
     #[test]
@@ -494,12 +471,12 @@ credentials:
 
     #[test]
     fn expand_recurses_into_unknown_tag_body() {
-        set_var("RASTREO_TEST_SECRETS_TAGGED", "value");
+        let env = one("TAGGED", "value");
         let tagged = Value::Tagged(Box::new(TaggedValue {
             tag: Tag::new("Custom"),
-            value: Value::String("prefix-${RASTREO_TEST_SECRETS_TAGGED}-suffix".into()),
+            value: Value::String("prefix-${TAGGED}-suffix".into()),
         }));
-        let out = expand_scenario(tagged).expect("expand");
+        let out = expand_scenario_with(tagged, &env).expect("expand");
         match out {
             Value::Tagged(t) => {
                 assert!(t.tag == "Custom");
@@ -507,22 +484,14 @@ credentials:
             }
             other => panic!("expected Tagged, got {other:?}"),
         }
-        remove_var("RASTREO_TEST_SECRETS_TAGGED");
     }
 
     #[test]
     fn shape_failure_detail_quotes_an_env_reference_as_written() {
-        set_var("RASTREO_TEST_SECRETS_SHAPE_ENV", "the-secret");
-        let raw: Value = serde_yaml_ng::from_str("value: \"${RASTREO_TEST_SECRETS_SHAPE_ENV}\"\n")
-            .expect("yaml");
+        let raw: Value = serde_yaml_ng::from_str("value: \"${SHAPE_ENV}\"\n").expect("yaml");
         let detail = shape_failure_detail::<std::collections::HashMap<String, u8>>(&raw);
-        assert!(
-            detail.contains("${RASTREO_TEST_SECRETS_SHAPE_ENV}"),
-            "detail: {detail}"
-        );
-        assert!(!detail.contains("the-secret"), "detail: {detail}");
+        assert!(detail.contains("${SHAPE_ENV}"), "detail: {detail}");
         assert!(detail.contains("quoted as written"), "detail: {detail}");
-        remove_var("RASTREO_TEST_SECRETS_SHAPE_ENV");
     }
 
     #[test]
@@ -550,24 +519,19 @@ credentials:
     // A type that accepts the tree as written leaves only the substituted value to blame.
     #[test]
     fn shape_failure_detail_names_the_substitution_when_the_tree_as_written_is_valid() {
-        set_var("RASTREO_TEST_SECRETS_SHAPE_VALID", "the-secret");
-        let raw: Value =
-            serde_yaml_ng::from_str("value: \"${RASTREO_TEST_SECRETS_SHAPE_VALID}\"\n")
-                .expect("yaml");
+        let raw: Value = serde_yaml_ng::from_str("value: \"${SHAPE_VALID}\"\n").expect("yaml");
         let detail = shape_failure_detail::<std::collections::HashMap<String, String>>(&raw);
-        assert!(!detail.contains("the-secret"), "detail: {detail}");
         assert!(
             detail.contains("does not fit its field"),
             "detail: {detail}"
         );
         assert!(detail.contains("is not shown"), "detail: {detail}");
-        remove_var("RASTREO_TEST_SECRETS_SHAPE_VALID");
     }
 
     type StringlyTypedField = crate::config::ScenarioKind;
 
     fn reference_at_one_position() -> Value {
-        serde_yaml_ng::from_str("value: \"${RASTREO_TEST_NOTE_REFERENCE}\"\n").expect("yaml")
+        serde_yaml_ng::from_str("value: \"${NOTE_REFERENCE}\"\n").expect("yaml")
     }
 
     #[test]

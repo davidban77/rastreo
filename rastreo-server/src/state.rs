@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
+use rastreo_core::env::{Env, VarError};
 use rastreo_core::observability::otlp_config::{parse_env_bool, parse_env_u64};
 use rastreo_core::{
     DiscoverySummary, Resolver, Sink, SinkErrorClass, SinkType, PROBE_KIND_COUNT,
@@ -205,16 +206,16 @@ impl Default for MetricsConfig {
 
 impl MetricsConfig {
     /// Read `RASTREO_SCENARIO_LABEL_ALLOWLIST` (comma-separated) and `RASTREO_SCENARIO_LABEL_MAX_LENGTH`, falling back to defaults when unset.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let allowlist: HashSet<String> = match std::env::var("RASTREO_SCENARIO_LABEL_ALLOWLIST") {
+    pub fn from_env(env: &dyn Env) -> anyhow::Result<Self> {
+        let allowlist: HashSet<String> = match env.var("RASTREO_SCENARIO_LABEL_ALLOWLIST") {
             Ok(raw) => raw
                 .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .collect(),
-            Err(std::env::VarError::NotPresent) => HashSet::new(),
-            Err(std::env::VarError::NotUnicode(_)) => {
+            Err(VarError::NotPresent) => HashSet::new(),
+            Err(VarError::NotUnicode(_)) => {
                 return Err(anyhow::anyhow!(
                     "invalid value for RASTREO_SCENARIO_LABEL_ALLOWLIST: not valid UTF-8"
                 ));
@@ -228,7 +229,7 @@ impl MetricsConfig {
                 ));
             }
         }
-        let max_length = parse_env_u64("RASTREO_SCENARIO_LABEL_MAX_LENGTH", 64)? as usize;
+        let max_length = parse_env_u64(env, "RASTREO_SCENARIO_LABEL_MAX_LENGTH", 64)? as usize;
         Ok(Self {
             scenario_allowlist: allowlist,
             scenario_max_length: max_length.max(1),
@@ -394,18 +395,21 @@ impl Default for ReadinessConfig {
 
 impl ReadinessConfig {
     /// Read `RASTREO_MAX_INFLIGHT_SCANS`, `RASTREO_SINK_ERROR_QUARANTINE_SECS`, and `RASTREO_SCAN_ERROR_QUARANTINE_SECS`, falling back to defaults when unset.
-    pub fn from_env() -> anyhow::Result<Self> {
+    pub fn from_env(env: &dyn Env) -> anyhow::Result<Self> {
         let default = Self::default();
         Ok(Self {
             max_inflight_scans: parse_env_u64(
+                env,
                 "RASTREO_MAX_INFLIGHT_SCANS",
                 default.max_inflight_scans,
             )?,
             sink_error_quarantine: Duration::from_secs(parse_env_u64(
+                env,
                 "RASTREO_SINK_ERROR_QUARANTINE_SECS",
                 default.sink_error_quarantine.as_secs(),
             )?),
             scan_error_quarantine: Duration::from_secs(parse_env_u64(
+                env,
                 "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
                 default.scan_error_quarantine.as_secs(),
             )?),
@@ -429,8 +433,8 @@ impl Default for ShutdownConfig {
 
 impl ShutdownConfig {
     /// Read `RASTREO_SHUTDOWN_TIMEOUT_SECS` (default 60, clamped to a 1s minimum), falling back to the default when unset.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let secs = parse_env_u64("RASTREO_SHUTDOWN_TIMEOUT_SECS", 60)?.max(1);
+    pub fn from_env(env: &dyn Env) -> anyhow::Result<Self> {
+        let secs = parse_env_u64(env, "RASTREO_SHUTDOWN_TIMEOUT_SECS", 60)?.max(1);
         Ok(Self {
             timeout: Duration::from_secs(secs),
         })
@@ -444,8 +448,12 @@ pub const DEFAULT_MAX_RESULT_BYTES: usize = 33_554_432;
 /// Read `RASTREO_MAX_RESULT_BYTES` (default 32 MiB), the byte cap on the `POST /scans` response
 /// capture. Peak memory is ~3× the cap (NDJSON buffer + parsed records + serialized body), so
 /// raising it requires raising the pod's `limits.memory`.
-pub fn max_result_bytes_from_env() -> anyhow::Result<usize> {
-    Ok(parse_env_u64("RASTREO_MAX_RESULT_BYTES", DEFAULT_MAX_RESULT_BYTES as u64)? as usize)
+pub fn max_result_bytes_from_env(env: &dyn Env) -> anyhow::Result<usize> {
+    Ok(parse_env_u64(
+        env,
+        "RASTREO_MAX_RESULT_BYTES",
+        DEFAULT_MAX_RESULT_BYTES as u64,
+    )? as usize)
 }
 
 /// SSRF and DoS guards applied to `POST /scans` — an optional target allow-list, an
@@ -469,8 +477,8 @@ impl Default for TargetGuardConfig {
 
 impl TargetGuardConfig {
     /// Read `RASTREO_TARGET_ALLOWLIST` (comma-separated CIDRs or bare IPs; unset ⇒ allow all), `RASTREO_MAX_TOTAL_HOSTS` (0 disables), and `RASTREO_MAX_BODY_BYTES`, falling back to defaults.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let allowlist = match std::env::var("RASTREO_TARGET_ALLOWLIST") {
+    pub fn from_env(env: &dyn Env) -> anyhow::Result<Self> {
+        let allowlist = match env.var("RASTREO_TARGET_ALLOWLIST") {
             Ok(raw) => {
                 let mut nets = Vec::new();
                 for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -492,20 +500,23 @@ impl TargetGuardConfig {
                     Some(nets)
                 }
             }
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
+            Err(VarError::NotPresent) => None,
+            Err(VarError::NotUnicode(_)) => {
                 return Err(anyhow::anyhow!(
                     "invalid value for RASTREO_TARGET_ALLOWLIST: not valid UTF-8"
                 ));
             }
         };
-        let max_total_hosts =
-            match parse_env_u64("RASTREO_MAX_TOTAL_HOSTS", DEFAULT_MAX_TOTAL_HOSTS as u64)? {
-                0 => None,
-                n => Some(n as usize),
-            };
+        let max_total_hosts = match parse_env_u64(
+            env,
+            "RASTREO_MAX_TOTAL_HOSTS",
+            DEFAULT_MAX_TOTAL_HOSTS as u64,
+        )? {
+            0 => None,
+            n => Some(n as usize),
+        };
         let max_body_bytes =
-            parse_env_u64("RASTREO_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES as u64)? as usize;
+            parse_env_u64(env, "RASTREO_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES as u64)? as usize;
         Ok(Self {
             allowlist,
             max_total_hosts,
@@ -521,6 +532,7 @@ pub struct OtlpConfig;
 #[cfg(not(feature = "otlp"))]
 impl OtlpConfig {
     pub fn from_env(
+        _env: &dyn Env,
         _default_service_name: &str,
         _metrics_supported: bool,
     ) -> anyhow::Result<Option<Self>> {
@@ -772,20 +784,20 @@ impl Default for SinkProbeConfig {
 
 impl SinkProbeConfig {
     /// Read `RASTREO_SINK_CONFIG_PATH`, `RASTREO_SINK_PROBE_INTERVAL_SECS`, and `RASTREO_SINK_PROBE_TIMEOUT_SECS`, falling back to defaults when unset.
-    pub fn from_env() -> anyhow::Result<Self> {
-        let config_path = match std::env::var("RASTREO_SINK_CONFIG_PATH") {
+    pub fn from_env(env: &dyn Env) -> anyhow::Result<Self> {
+        let config_path = match env.var("RASTREO_SINK_CONFIG_PATH") {
             Ok(raw) if !raw.trim().is_empty() => Some(std::path::PathBuf::from(raw.trim())),
-            Ok(_) | Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
+            Ok(_) | Err(VarError::NotPresent) => None,
+            Err(VarError::NotUnicode(_)) => {
                 return Err(anyhow::anyhow!(
                     "invalid value for RASTREO_SINK_CONFIG_PATH: not valid UTF-8"
                 ));
             }
         };
         let probe_interval =
-            Duration::from_secs(parse_env_u64("RASTREO_SINK_PROBE_INTERVAL_SECS", 10)?.max(1));
+            Duration::from_secs(parse_env_u64(env, "RASTREO_SINK_PROBE_INTERVAL_SECS", 10)?.max(1));
         let probe_timeout =
-            Duration::from_secs(parse_env_u64("RASTREO_SINK_PROBE_TIMEOUT_SECS", 5)?.max(1));
+            Duration::from_secs(parse_env_u64(env, "RASTREO_SINK_PROBE_TIMEOUT_SECS", 5)?.max(1));
         Ok(Self {
             config_path,
             probe_interval,
@@ -830,13 +842,13 @@ pub enum AuthConfig {
 
 impl AuthConfig {
     /// Read `RASTREO_API_TOKEN` (enables auth) and `RASTREO_AUTH_DISABLED` (explicit opt-out); errors when neither is set so the scan endpoint is never silently open.
-    pub fn from_env() -> anyhow::Result<Self> {
-        match std::env::var("RASTREO_API_TOKEN") {
+    pub fn from_env(env: &dyn Env) -> anyhow::Result<Self> {
+        match env.var("RASTREO_API_TOKEN") {
             Ok(token) if !token.trim().is_empty() => Ok(Self::Enabled {
                 token: token.trim().to_string(),
             }),
-            Ok(_) | Err(std::env::VarError::NotPresent) => {
-                if parse_env_bool("RASTREO_AUTH_DISABLED", false)? {
+            Ok(_) | Err(VarError::NotPresent) => {
+                if parse_env_bool(env, "RASTREO_AUTH_DISABLED", false)? {
                     tracing::warn!(
                         "RASTREO_AUTH_DISABLED=true: the POST /scans endpoint is UNAUTHENTICATED — \
                          any caller that can reach it can trigger active network probes"
@@ -850,7 +862,7 @@ impl AuthConfig {
                     ))
                 }
             }
-            Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+            Err(VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
                 "invalid value for RASTREO_API_TOKEN: not valid UTF-8"
             )),
         }
@@ -937,7 +949,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rastreo_core::HickoryResolver;
+    use rastreo_core::{HickoryResolver, MapEnv};
 
     fn build_state() -> AppState {
         let resolver: Arc<dyn Resolver> =
@@ -1360,33 +1372,17 @@ mod tests {
 
     #[test]
     fn metrics_config_from_env_default_when_unset() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST");
-            std::env::remove_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH");
-        }
-        let cfg = MetricsConfig::from_env().expect("from_env");
+        let cfg = MetricsConfig::from_env(&MapEnv::new()).expect("from_env");
         assert!(cfg.scenario_allowlist.is_empty());
         assert_eq!(cfg.scenario_max_length, 64);
     }
 
     #[test]
     fn metrics_config_from_env_parses_comma_separated_allowlist() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SCENARIO_LABEL_ALLOWLIST", "prod, staging ,lab , ,");
-            std::env::set_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH", "32");
-        }
-        let cfg = MetricsConfig::from_env().expect("from_env");
-        // SAFETY: same guard covers cleanup.
-        unsafe {
-            std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST");
-            std::env::remove_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH");
-        }
+        let env = MapEnv::new()
+            .set("RASTREO_SCENARIO_LABEL_ALLOWLIST", "prod, staging ,lab , ,")
+            .set("RASTREO_SCENARIO_LABEL_MAX_LENGTH", "32");
+        let cfg = MetricsConfig::from_env(&env).expect("from_env");
         assert!(cfg.scenario_allowlist.contains("prod"));
         assert!(cfg.scenario_allowlist.contains("staging"));
         assert!(cfg.scenario_allowlist.contains("lab"));
@@ -1396,15 +1392,8 @@ mod tests {
 
     #[test]
     fn metrics_config_from_env_rejects_reserved_all_label() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SCENARIO_LABEL_ALLOWLIST", "prod,_all,lab");
-        }
-        let err = MetricsConfig::from_env().expect_err("must reject");
-        // SAFETY: same guard covers cleanup.
-        unsafe { std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST") };
+        let env = MapEnv::new().set("RASTREO_SCENARIO_LABEL_ALLOWLIST", "prod,_all,lab");
+        let err = MetricsConfig::from_env(&env).expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("_all"), "msg was {msg}");
         assert!(msg.contains("reserved"), "msg was {msg}");
@@ -1412,15 +1401,8 @@ mod tests {
 
     #[test]
     fn metrics_config_from_env_rejects_reserved_other_label() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SCENARIO_LABEL_ALLOWLIST", "other");
-        }
-        let err = MetricsConfig::from_env().expect_err("must reject");
-        // SAFETY: same guard covers cleanup.
-        unsafe { std::env::remove_var("RASTREO_SCENARIO_LABEL_ALLOWLIST") };
+        let env = MapEnv::new().set("RASTREO_SCENARIO_LABEL_ALLOWLIST", "other");
+        let err = MetricsConfig::from_env(&env).expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("other"), "msg was {msg}");
         assert!(msg.contains("reserved"), "msg was {msg}");
@@ -1428,15 +1410,8 @@ mod tests {
 
     #[test]
     fn metrics_config_from_env_rejects_non_numeric_max_length() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH", "not-a-number");
-        }
-        let err = MetricsConfig::from_env().expect_err("must reject");
-        // SAFETY: same guard covers cleanup.
-        unsafe { std::env::remove_var("RASTREO_SCENARIO_LABEL_MAX_LENGTH") };
+        let env = MapEnv::new().set("RASTREO_SCENARIO_LABEL_MAX_LENGTH", "not-a-number");
+        let err = MetricsConfig::from_env(&env).expect_err("must reject");
         let msg = err.to_string();
         assert!(
             msg.contains("RASTREO_SCENARIO_LABEL_MAX_LENGTH"),
@@ -1533,46 +1508,6 @@ mod tests {
         }
     }
 
-    // Serialise env-var reads so parallel tests do not race each other.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    const ENV_KEYS: [&str; 21] = [
-        "RASTREO_MAX_INFLIGHT_SCANS",
-        "RASTREO_SINK_ERROR_QUARANTINE_SECS",
-        "RASTREO_SCAN_ERROR_QUARANTINE_SECS",
-        "RASTREO_SHUTDOWN_TIMEOUT_SECS",
-        "RASTREO_OTLP_ENDPOINT",
-        "RASTREO_OTLP_METRICS_ENABLED",
-        "RASTREO_OTLP_LOGS_ENABLED",
-        "RASTREO_OTLP_TRACES_ENABLED",
-        "RASTREO_OTLP_METRICS_INTERVAL_SECS",
-        "RASTREO_OTLP_SERVICE_NAME",
-        "RASTREO_OTLP_PROTOCOL",
-        "RASTREO_OTLP_HEADERS",
-        "RASTREO_SINK_CONFIG_PATH",
-        "RASTREO_SINK_PROBE_INTERVAL_SECS",
-        "RASTREO_SINK_PROBE_TIMEOUT_SECS",
-        "RASTREO_API_TOKEN",
-        "RASTREO_AUTH_DISABLED",
-        "RASTREO_TARGET_ALLOWLIST",
-        "RASTREO_MAX_TOTAL_HOSTS",
-        "RASTREO_MAX_BODY_BYTES",
-        "RASTREO_MAX_RESULT_BYTES",
-    ];
-
-    fn clear_env() {
-        for k in ENV_KEYS {
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe { std::env::remove_var(k) };
-        }
-    }
-
     #[test]
     fn readiness_config_default_matches_documented_values() {
         let cfg = ReadinessConfig::default();
@@ -1583,9 +1518,7 @@ mod tests {
 
     #[test]
     fn readiness_config_from_env_uses_defaults_when_unset() {
-        let _guard = env_guard();
-        clear_env();
-        let cfg = ReadinessConfig::from_env().expect("from_env");
+        let cfg = ReadinessConfig::from_env(&MapEnv::new()).expect("from_env");
         assert_eq!(cfg.max_inflight_scans, 100);
         assert_eq!(cfg.sink_error_quarantine, Duration::from_secs(30));
         assert_eq!(cfg.scan_error_quarantine, Duration::from_secs(30));
@@ -1593,16 +1526,11 @@ mod tests {
 
     #[test]
     fn readiness_config_from_env_reads_custom_values() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_MAX_INFLIGHT_SCANS", "7");
-            std::env::set_var("RASTREO_SINK_ERROR_QUARANTINE_SECS", "12");
-            std::env::set_var("RASTREO_SCAN_ERROR_QUARANTINE_SECS", "45");
-        }
-        let cfg = ReadinessConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new()
+            .set("RASTREO_MAX_INFLIGHT_SCANS", "7")
+            .set("RASTREO_SINK_ERROR_QUARANTINE_SECS", "12")
+            .set("RASTREO_SCAN_ERROR_QUARANTINE_SECS", "45");
+        let cfg = ReadinessConfig::from_env(&env).expect("from_env");
         assert_eq!(cfg.max_inflight_scans, 7);
         assert_eq!(cfg.sink_error_quarantine, Duration::from_secs(12));
         assert_eq!(cfg.scan_error_quarantine, Duration::from_secs(45));
@@ -1610,12 +1538,8 @@ mod tests {
 
     #[test]
     fn readiness_config_from_env_rejects_non_numeric_value() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-        unsafe { std::env::set_var("RASTREO_MAX_INFLIGHT_SCANS", "not-a-number") };
-        let err = ReadinessConfig::from_env().expect_err("must reject non-numeric");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_MAX_INFLIGHT_SCANS", "not-a-number");
+        let err = ReadinessConfig::from_env(&env).expect_err("must reject non-numeric");
         let msg = err.to_string();
         assert!(msg.contains("RASTREO_MAX_INFLIGHT_SCANS"), "msg was {msg}");
         assert!(msg.contains("not-a-number"), "msg was {msg}");
@@ -1623,16 +1547,11 @@ mod tests {
 
     #[test]
     fn readiness_config_zero_disables_checks() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_MAX_INFLIGHT_SCANS", "0");
-            std::env::set_var("RASTREO_SINK_ERROR_QUARANTINE_SECS", "0");
-            std::env::set_var("RASTREO_SCAN_ERROR_QUARANTINE_SECS", "0");
-        }
-        let cfg = ReadinessConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new()
+            .set("RASTREO_MAX_INFLIGHT_SCANS", "0")
+            .set("RASTREO_SINK_ERROR_QUARANTINE_SECS", "0")
+            .set("RASTREO_SCAN_ERROR_QUARANTINE_SECS", "0");
+        let cfg = ReadinessConfig::from_env(&env).expect("from_env");
         assert_eq!(cfg.max_inflight_scans, 0);
         assert_eq!(cfg.sink_error_quarantine, Duration::ZERO);
         assert_eq!(cfg.scan_error_quarantine, Duration::ZERO);
@@ -1645,42 +1564,28 @@ mod tests {
 
     #[test]
     fn shutdown_config_from_env_uses_default_when_unset() {
-        let _guard = env_guard();
-        clear_env();
-        let cfg = ShutdownConfig::from_env().expect("from_env");
+        let cfg = ShutdownConfig::from_env(&MapEnv::new()).expect("from_env");
         assert_eq!(cfg.timeout, Duration::from_secs(60));
     }
 
     #[test]
     fn shutdown_config_from_env_reads_custom_value() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-        unsafe { std::env::set_var("RASTREO_SHUTDOWN_TIMEOUT_SECS", "15") };
-        let cfg = ShutdownConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_SHUTDOWN_TIMEOUT_SECS", "15");
+        let cfg = ShutdownConfig::from_env(&env).expect("from_env");
         assert_eq!(cfg.timeout, Duration::from_secs(15));
     }
 
     #[test]
     fn shutdown_config_from_env_clamps_zero_to_one_second() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-        unsafe { std::env::set_var("RASTREO_SHUTDOWN_TIMEOUT_SECS", "0") };
-        let cfg = ShutdownConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_SHUTDOWN_TIMEOUT_SECS", "0");
+        let cfg = ShutdownConfig::from_env(&env).expect("from_env");
         assert_eq!(cfg.timeout, Duration::from_secs(1));
     }
 
     #[test]
     fn shutdown_config_from_env_rejects_non_numeric_value() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-        unsafe { std::env::set_var("RASTREO_SHUTDOWN_TIMEOUT_SECS", "soon") };
-        let err = ShutdownConfig::from_env().expect_err("must reject non-numeric");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_SHUTDOWN_TIMEOUT_SECS", "soon");
+        let err = ShutdownConfig::from_env(&env).expect_err("must reject non-numeric");
         assert!(
             err.to_string().contains("RASTREO_SHUTDOWN_TIMEOUT_SECS"),
             "msg was {err}"
@@ -1694,12 +1599,8 @@ mod tests {
 
     #[test]
     fn auth_config_from_env_enables_with_token() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe { std::env::set_var("RASTREO_API_TOKEN", "s3cr3t") };
-        let cfg = AuthConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_API_TOKEN", "s3cr3t");
+        let cfg = AuthConfig::from_env(&env).expect("from_env");
         match cfg {
             AuthConfig::Enabled { token } => assert_eq!(token, "s3cr3t"),
             AuthConfig::Disabled => panic!("token set must enable auth"),
@@ -1708,20 +1609,14 @@ mod tests {
 
     #[test]
     fn auth_config_from_env_disabled_via_explicit_opt_out() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe { std::env::set_var("RASTREO_AUTH_DISABLED", "true") };
-        let cfg = AuthConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_AUTH_DISABLED", "true");
+        let cfg = AuthConfig::from_env(&env).expect("from_env");
         assert!(matches!(cfg, AuthConfig::Disabled));
     }
 
     #[test]
     fn auth_config_from_env_fails_closed_when_neither_set() {
-        let _guard = env_guard();
-        clear_env();
-        let err = AuthConfig::from_env().expect_err("must fail closed");
+        let err = AuthConfig::from_env(&MapEnv::new()).expect_err("must fail closed");
         let msg = err.to_string();
         assert!(msg.contains("RASTREO_API_TOKEN"), "msg: {msg}");
         assert!(msg.contains("RASTREO_AUTH_DISABLED"), "msg: {msg}");
@@ -1729,37 +1624,24 @@ mod tests {
 
     #[test]
     fn auth_config_from_env_treats_blank_token_as_unset() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe { std::env::set_var("RASTREO_API_TOKEN", "   ") };
-        let err = AuthConfig::from_env().expect_err("a blank token must not enable auth");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_API_TOKEN", "   ");
+        let err = AuthConfig::from_env(&env).expect_err("a blank token must not enable auth");
         assert!(err.to_string().contains("RASTREO_API_TOKEN"));
     }
 
     #[test]
     fn auth_config_from_env_trims_trailing_newline_from_token() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe { std::env::set_var("RASTREO_API_TOKEN", "s3cret\n") };
-        let cfg = AuthConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_API_TOKEN", "s3cret\n");
+        let cfg = AuthConfig::from_env(&env).expect("from_env");
         assert!(matches!(cfg, AuthConfig::Enabled { token } if token == "s3cret"));
     }
 
     #[test]
     fn auth_config_from_env_token_wins_over_disable_flag() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_API_TOKEN", "keepme");
-            std::env::set_var("RASTREO_AUTH_DISABLED", "true");
-        }
-        let cfg = AuthConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new()
+            .set("RASTREO_API_TOKEN", "keepme")
+            .set("RASTREO_AUTH_DISABLED", "true");
+        let cfg = AuthConfig::from_env(&env).expect("from_env");
         assert!(matches!(cfg, AuthConfig::Enabled { token } if token == "keepme"));
     }
 
@@ -1991,9 +1873,7 @@ mod tests {
 
     #[test]
     fn sink_probe_config_from_env_uses_defaults_when_unset() {
-        let _guard = env_guard();
-        clear_env();
-        let cfg = SinkProbeConfig::from_env().expect("from_env");
+        let cfg = SinkProbeConfig::from_env(&MapEnv::new()).expect("from_env");
         assert!(cfg.config_path.is_none());
         assert_eq!(cfg.probe_interval, Duration::from_secs(10));
         assert_eq!(cfg.probe_timeout, Duration::from_secs(5));
@@ -2001,16 +1881,11 @@ mod tests {
 
     #[test]
     fn sink_probe_config_from_env_reads_custom_values() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "/etc/rastreo/sink.yaml");
-            std::env::set_var("RASTREO_SINK_PROBE_INTERVAL_SECS", "30");
-            std::env::set_var("RASTREO_SINK_PROBE_TIMEOUT_SECS", "7");
-        }
-        let cfg = SinkProbeConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new()
+            .set("RASTREO_SINK_CONFIG_PATH", "/etc/rastreo/sink.yaml")
+            .set("RASTREO_SINK_PROBE_INTERVAL_SECS", "30")
+            .set("RASTREO_SINK_PROBE_TIMEOUT_SECS", "7");
+        let cfg = SinkProbeConfig::from_env(&env).expect("from_env");
         assert_eq!(
             cfg.config_path.as_deref(),
             Some(std::path::Path::new("/etc/rastreo/sink.yaml"))
@@ -2021,27 +1896,15 @@ mod tests {
 
     #[test]
     fn sink_probe_config_from_env_ignores_blank_path() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "   ");
-        }
-        let cfg = SinkProbeConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_SINK_CONFIG_PATH", "   ");
+        let cfg = SinkProbeConfig::from_env(&env).expect("from_env");
         assert!(cfg.config_path.is_none());
     }
 
     #[test]
     fn sink_probe_config_from_env_trims_whitespace_around_path() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "  /tmp/foo.yaml\t");
-        }
-        let cfg = SinkProbeConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_SINK_CONFIG_PATH", "  /tmp/foo.yaml\t");
+        let cfg = SinkProbeConfig::from_env(&env).expect("from_env");
         assert_eq!(
             cfg.config_path.as_deref(),
             Some(std::path::Path::new("/tmp/foo.yaml"))
@@ -2050,14 +1913,8 @@ mod tests {
 
     #[test]
     fn sink_probe_config_from_env_preserves_interior_whitespace() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SINK_CONFIG_PATH", "/tmp/foo bar.yaml");
-        }
-        let cfg = SinkProbeConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_SINK_CONFIG_PATH", "/tmp/foo bar.yaml");
+        let cfg = SinkProbeConfig::from_env(&env).expect("from_env");
         assert_eq!(
             cfg.config_path.as_deref(),
             Some(std::path::Path::new("/tmp/foo bar.yaml"))
@@ -2066,29 +1923,18 @@ mod tests {
 
     #[test]
     fn sink_probe_config_from_env_clamps_zero_to_one_second() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SINK_PROBE_INTERVAL_SECS", "0");
-            std::env::set_var("RASTREO_SINK_PROBE_TIMEOUT_SECS", "0");
-        }
-        let cfg = SinkProbeConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new()
+            .set("RASTREO_SINK_PROBE_INTERVAL_SECS", "0")
+            .set("RASTREO_SINK_PROBE_TIMEOUT_SECS", "0");
+        let cfg = SinkProbeConfig::from_env(&env).expect("from_env");
         assert_eq!(cfg.probe_interval, Duration::from_secs(1));
         assert_eq!(cfg.probe_timeout, Duration::from_secs(1));
     }
 
     #[test]
     fn sink_probe_config_from_env_rejects_non_numeric_interval() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard() serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_SINK_PROBE_INTERVAL_SECS", "not-a-number");
-        }
-        let err = SinkProbeConfig::from_env().expect_err("must reject");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_SINK_PROBE_INTERVAL_SECS", "not-a-number");
+        let err = SinkProbeConfig::from_env(&env).expect_err("must reject");
         let msg = err.to_string();
         assert!(
             msg.contains("RASTREO_SINK_PROBE_INTERVAL_SECS"),
@@ -2106,9 +1952,7 @@ mod tests {
 
     #[test]
     fn target_guard_config_from_env_uses_defaults_when_unset() {
-        let _guard = env_guard();
-        clear_env();
-        let cfg = TargetGuardConfig::from_env().expect("from_env");
+        let cfg = TargetGuardConfig::from_env(&MapEnv::new()).expect("from_env");
         assert!(cfg.allowlist.is_none());
         assert_eq!(cfg.max_total_hosts, Some(262_144));
         assert_eq!(cfg.max_body_bytes, 1_048_576);
@@ -2116,14 +1960,8 @@ mod tests {
 
     #[test]
     fn target_guard_config_from_env_parses_comma_separated_cidrs() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_TARGET_ALLOWLIST", "10.0.0.0/8, 192.168.0.0/16 , ");
-        }
-        let cfg = TargetGuardConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_TARGET_ALLOWLIST", "10.0.0.0/8, 192.168.0.0/16 , ");
+        let cfg = TargetGuardConfig::from_env(&env).expect("from_env");
         let nets = cfg.allowlist.expect("allowlist present");
         assert_eq!(
             nets,
@@ -2136,28 +1974,16 @@ mod tests {
 
     #[test]
     fn target_guard_config_from_env_parses_bare_ip_as_host_net() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_TARGET_ALLOWLIST", "10.0.0.5");
-        }
-        let cfg = TargetGuardConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_TARGET_ALLOWLIST", "10.0.0.5");
+        let cfg = TargetGuardConfig::from_env(&env).expect("from_env");
         let nets = cfg.allowlist.expect("allowlist present");
         assert_eq!(nets, vec!["10.0.0.5/32".parse::<IpNet>().unwrap()]);
     }
 
     #[test]
     fn target_guard_config_from_env_rejects_invalid_cidr() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_TARGET_ALLOWLIST", "10.0.0.0/8,not-a-cidr");
-        }
-        let err = TargetGuardConfig::from_env().expect_err("must reject");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_TARGET_ALLOWLIST", "10.0.0.0/8,not-a-cidr");
+        let err = TargetGuardConfig::from_env(&env).expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("RASTREO_TARGET_ALLOWLIST"), "msg was {msg}");
         assert!(msg.contains("not-a-cidr"), "msg was {msg}");
@@ -2165,42 +1991,25 @@ mod tests {
 
     #[test]
     fn target_guard_config_from_env_zero_max_total_hosts_disables_cap() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_MAX_TOTAL_HOSTS", "0");
-        }
-        let cfg = TargetGuardConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_MAX_TOTAL_HOSTS", "0");
+        let cfg = TargetGuardConfig::from_env(&env).expect("from_env");
         assert!(cfg.max_total_hosts.is_none());
     }
 
     #[test]
     fn target_guard_config_from_env_reads_custom_caps() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_MAX_TOTAL_HOSTS", "500");
-            std::env::set_var("RASTREO_MAX_BODY_BYTES", "4096");
-        }
-        let cfg = TargetGuardConfig::from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new()
+            .set("RASTREO_MAX_TOTAL_HOSTS", "500")
+            .set("RASTREO_MAX_BODY_BYTES", "4096");
+        let cfg = TargetGuardConfig::from_env(&env).expect("from_env");
         assert_eq!(cfg.max_total_hosts, Some(500));
         assert_eq!(cfg.max_body_bytes, 4096);
     }
 
     #[test]
     fn target_guard_config_from_env_rejects_non_numeric_max_total_hosts() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe {
-            std::env::set_var("RASTREO_MAX_TOTAL_HOSTS", "lots");
-        }
-        let err = TargetGuardConfig::from_env().expect_err("must reject");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_MAX_TOTAL_HOSTS", "lots");
+        let err = TargetGuardConfig::from_env(&env).expect_err("must reject");
         assert!(err.to_string().contains("RASTREO_MAX_TOTAL_HOSTS"));
     }
 
@@ -2231,31 +2040,21 @@ mod tests {
 
     #[test]
     fn max_result_bytes_from_env_uses_default_when_unset() {
-        let _guard = env_guard();
-        clear_env();
-        let cap = max_result_bytes_from_env().expect("from_env");
+        let cap = max_result_bytes_from_env(&MapEnv::new()).expect("from_env");
         assert_eq!(cap, DEFAULT_MAX_RESULT_BYTES);
     }
 
     #[test]
     fn max_result_bytes_from_env_reads_custom_value() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe { std::env::set_var("RASTREO_MAX_RESULT_BYTES", "50000000") };
-        let cap = max_result_bytes_from_env().expect("from_env");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_MAX_RESULT_BYTES", "50000000");
+        let cap = max_result_bytes_from_env(&env).expect("from_env");
         assert_eq!(cap, 50_000_000);
     }
 
     #[test]
     fn max_result_bytes_from_env_rejects_non_numeric_value() {
-        let _guard = env_guard();
-        clear_env();
-        // SAFETY: env_guard serialises env-var mutation across tests in this binary.
-        unsafe { std::env::set_var("RASTREO_MAX_RESULT_BYTES", "lots") };
-        let err = max_result_bytes_from_env().expect_err("must reject non-numeric");
-        clear_env();
+        let env = MapEnv::new().set("RASTREO_MAX_RESULT_BYTES", "lots");
+        let err = max_result_bytes_from_env(&env).expect_err("must reject non-numeric");
         assert!(
             err.to_string().contains("RASTREO_MAX_RESULT_BYTES"),
             "msg: {err}"
@@ -2264,31 +2063,25 @@ mod tests {
 
     #[cfg(feature = "otlp")]
     mod otlp_tests {
-        use super::{clear_env, env_guard};
         use crate::state::{OtlpConfig, OtlpProtocol};
+        use rastreo_core::MapEnv;
         use std::time::Duration;
 
         #[test]
         fn otlp_config_from_env_returns_none_when_both_disabled() {
-            let _guard = env_guard();
-            clear_env();
-            let cfg = OtlpConfig::from_env("rastreo-server", true).expect("from_env");
+            let cfg =
+                OtlpConfig::from_env(&MapEnv::new(), "rastreo-server", true).expect("from_env");
             assert!(cfg.is_none());
         }
 
         #[test]
         fn otlp_config_from_env_returns_some_when_metrics_enabled() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_METRICS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert!(cfg.metrics_enabled);
             assert!(!cfg.logs_enabled);
             assert_eq!(cfg.endpoint, "http://collector:4317");
@@ -2298,19 +2091,14 @@ mod tests {
 
         #[test]
         fn otlp_config_from_env_returns_some_when_logs_enabled() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "1");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-                std::env::set_var("RASTREO_OTLP_SERVICE_NAME", "custom-name");
-                std::env::set_var("RASTREO_OTLP_METRICS_INTERVAL_SECS", "10");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_LOGS_ENABLED", "1")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317")
+                .set("RASTREO_OTLP_SERVICE_NAME", "custom-name")
+                .set("RASTREO_OTLP_METRICS_INTERVAL_SECS", "10");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert!(!cfg.metrics_enabled);
             assert!(cfg.logs_enabled);
             assert_eq!(cfg.metrics_interval, Duration::from_secs(10));
@@ -2319,73 +2107,50 @@ mod tests {
 
         #[test]
         fn otlp_config_from_env_trims_endpoint() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "  http://collector:4317\n");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_METRICS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "  http://collector:4317\n");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert_eq!(cfg.endpoint, "http://collector:4317");
         }
 
         #[test]
         fn otlp_config_from_env_trims_service_name() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-                std::env::set_var("RASTREO_OTLP_SERVICE_NAME", "  edge-scanner \n");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_METRICS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317")
+                .set("RASTREO_OTLP_SERVICE_NAME", "  edge-scanner \n");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert_eq!(cfg.service_name, "edge-scanner");
         }
 
         #[test]
         fn otlp_config_from_env_rejects_metrics_enabled_without_endpoint() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe { std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true") };
-            let err = OtlpConfig::from_env("rastreo-server", true).expect_err("must reject");
-            clear_env();
+            let env = MapEnv::new().set("RASTREO_OTLP_METRICS_ENABLED", "true");
+            let err = OtlpConfig::from_env(&env, "rastreo-server", true).expect_err("must reject");
             let msg = err.to_string();
             assert!(msg.contains("RASTREO_OTLP_ENDPOINT"), "msg was {msg}");
         }
 
         #[test]
         fn otlp_config_from_env_rejects_logs_enabled_with_blank_endpoint() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "   ");
-            }
-            let err =
-                OtlpConfig::from_env("rastreo-server", true).expect_err("blank endpoint rejected");
-            clear_env();
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "   ");
+            let err = OtlpConfig::from_env(&env, "rastreo-server", true)
+                .expect_err("blank endpoint rejected");
             assert!(err.to_string().contains("RASTREO_OTLP_ENDPOINT"));
         }
 
         #[test]
         fn otlp_config_from_env_rejects_invalid_boolean() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe { std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "maybe") };
-            let err =
-                OtlpConfig::from_env("rastreo-server", true).expect_err("non-boolean rejected");
-            clear_env();
+            let env = MapEnv::new().set("RASTREO_OTLP_METRICS_ENABLED", "maybe");
+            let err = OtlpConfig::from_env(&env, "rastreo-server", true)
+                .expect_err("non-boolean rejected");
             let msg = err.to_string();
             assert!(
                 msg.contains("RASTREO_OTLP_METRICS_ENABLED"),
@@ -2396,17 +2161,12 @@ mod tests {
 
         #[test]
         fn otlp_config_from_env_rejects_invalid_interval() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-                std::env::set_var("RASTREO_OTLP_METRICS_INTERVAL_SECS", "not-a-number");
-            }
-            let err =
-                OtlpConfig::from_env("rastreo-server", true).expect_err("non-numeric rejected");
-            clear_env();
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_METRICS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317")
+                .set("RASTREO_OTLP_METRICS_INTERVAL_SECS", "not-a-number");
+            let err = OtlpConfig::from_env(&env, "rastreo-server", true)
+                .expect_err("non-numeric rejected");
             assert!(err
                 .to_string()
                 .contains("RASTREO_OTLP_METRICS_INTERVAL_SECS"));
@@ -2414,92 +2174,66 @@ mod tests {
 
         #[test]
         fn otlp_config_accepts_boolean_variants() {
-            let _guard = env_guard();
             for variant in ["true", "TRUE", "yes", "on", "1"] {
-                clear_env();
-                // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-                unsafe {
-                    std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", variant);
-                    std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-                }
-                let cfg = OtlpConfig::from_env("rastreo-server", true)
+                let env = MapEnv::new()
+                    .set("RASTREO_OTLP_METRICS_ENABLED", variant)
+                    .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+                let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                     .expect("from_env")
                     .expect("some");
                 assert!(cfg.metrics_enabled, "variant {variant} should enable");
             }
-            clear_env();
         }
 
         #[test]
         fn otlp_config_protocol_defaults_to_grpc() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
         }
 
         #[test]
         fn otlp_config_protocol_parses_grpc() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-                std::env::set_var("RASTREO_OTLP_PROTOCOL", "grpc");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317")
+                .set("RASTREO_OTLP_PROTOCOL", "grpc");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
         }
 
         #[test]
         fn otlp_config_protocol_parses_http_protobuf() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4318");
-                std::env::set_var("RASTREO_OTLP_PROTOCOL", "http-protobuf");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4318")
+                .set("RASTREO_OTLP_PROTOCOL", "http-protobuf");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
         }
 
         #[test]
         fn otlp_config_protocol_parses_http_alias() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4318");
-                std::env::set_var("RASTREO_OTLP_PROTOCOL", "http");
-            }
-            let cfg = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4318")
+                .set("RASTREO_OTLP_PROTOCOL", "http");
+            let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect("from_env")
                 .expect("some");
-            clear_env();
             assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
         }
 
         #[test]
         fn otlp_config_protocol_case_insensitive() {
-            let _guard = env_guard();
             for (variant, expected) in [
                 ("GRPC", OtlpProtocol::Grpc),
                 ("Grpc", OtlpProtocol::Grpc),
@@ -2507,34 +2241,25 @@ mod tests {
                 ("Http-Protobuf", OtlpProtocol::HttpProtobuf),
                 ("HTTP", OtlpProtocol::HttpProtobuf),
             ] {
-                clear_env();
-                // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-                unsafe {
-                    std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-                    std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-                    std::env::set_var("RASTREO_OTLP_PROTOCOL", variant);
-                }
-                let cfg = OtlpConfig::from_env("rastreo-server", true)
+                let env = MapEnv::new()
+                    .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+                    .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317")
+                    .set("RASTREO_OTLP_PROTOCOL", variant);
+                let cfg = OtlpConfig::from_env(&env, "rastreo-server", true)
                     .expect("from_env")
                     .expect("some");
                 assert_eq!(cfg.protocol, expected, "variant {variant} misparsed");
             }
-            clear_env();
         }
 
         #[test]
         fn otlp_config_rejects_unknown_protocol() {
-            let _guard = env_guard();
-            clear_env();
-            // SAFETY: env_guard() serialises env-var mutation across tests in this binary; no concurrent readers.
-            unsafe {
-                std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-                std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-                std::env::set_var("RASTREO_OTLP_PROTOCOL", "yaml");
-            }
-            let err = OtlpConfig::from_env("rastreo-server", true)
+            let env = MapEnv::new()
+                .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+                .set("RASTREO_OTLP_ENDPOINT", "http://collector:4317")
+                .set("RASTREO_OTLP_PROTOCOL", "yaml");
+            let err = OtlpConfig::from_env(&env, "rastreo-server", true)
                 .expect_err("unknown protocol rejected");
-            clear_env();
             let msg = err.to_string();
             assert!(msg.contains("RASTREO_OTLP_PROTOCOL"), "msg was {msg}");
             assert!(msg.contains("yaml"), "msg was {msg}");

@@ -3,6 +3,7 @@ pub mod classifier;
 pub mod collection_profile;
 pub mod config;
 pub mod encoder;
+pub mod env;
 pub mod error;
 pub mod fuser;
 pub mod hints;
@@ -34,6 +35,7 @@ pub use collection_profile::CollectionProfileAssembler;
 pub use encoder::{
     ensure_encoder_output_fits_sink, Encoder, EncoderConfig, NdjsonEncoder, TableEncoder,
 };
+pub use env::{Env, MapEnv, SystemEnv};
 pub use error::{
     ClassifierError, ConfigError, DnsFailure, EncoderError, ProbeError, ProbeErrorKind,
     RastreoError, ResolverError, ResumeError, RuntimeError,

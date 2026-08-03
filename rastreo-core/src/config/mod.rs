@@ -5,6 +5,8 @@ use schemars::JsonSchema;
 
 use crate::classifier::ClassifierConfig;
 use crate::encoder::EncoderConfig;
+#[cfg(feature = "config")]
+use crate::env::Env;
 use crate::error::{ConfigError, RastreoError};
 use crate::fuser::FuserConfig;
 use crate::model::Target;
@@ -15,12 +17,12 @@ use crate::sink::SinkConfig;
 /// larger value only shrinks each retransmit slice against the floor without extending the reach.
 pub const MAX_RETRIES: u32 = 1024;
 
-/// Parse a YAML scenario file from a UTF-8 string into a `ScenarioFile`. `${VAR}` env-var references and `!file <path>` tags are expanded before deserialization; missing vars or unreadable files fail here rather than surfacing at probe time.
+/// Parse a YAML scenario file from a UTF-8 string into a `ScenarioFile`. `${VAR}` references are resolved against `env` and `!file <path>` tags are read before deserialization; missing vars or unreadable files fail here rather than surfacing at probe time.
 #[cfg(feature = "config")]
-pub fn parse_scenario_file(input: &str) -> Result<ScenarioFile, RastreoError> {
+pub fn parse_scenario_file(input: &str, env: &dyn Env) -> Result<ScenarioFile, RastreoError> {
     let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
-    let file: ScenarioFile = deserialize_expanded(raw, secrets::SecretSource::Scenario)?;
+    let file: ScenarioFile = deserialize_expanded(raw, secrets::SecretSource::Scenario, env)?;
     file.defaults.ensure_no_retired_fields()?;
     file.defaults.ensure_retries_within_bound()?;
     for entry in &file.scenarios {
@@ -44,12 +46,12 @@ pub fn parse_discover_scenario_json(
     Ok(scenario)
 }
 
-/// Parse a standalone YAML sink config — the shape `RASTREO_SINK_CONFIG_PATH` points at. `${VAR}` env-var references and `!file <path>` tags are expanded before deserialization, so a broker credential can live in the environment or on a secret mount instead of in the file.
+/// Parse a standalone YAML sink config — the shape `RASTREO_SINK_CONFIG_PATH` points at. `${VAR}` references are resolved against `env` and `!file <path>` tags are read before deserialization, so a broker credential can live in the environment or on a secret mount instead of in the file.
 #[cfg(feature = "config")]
-pub fn parse_sink_config(input: &str) -> Result<SinkConfig, RastreoError> {
+pub fn parse_sink_config(input: &str, env: &dyn Env) -> Result<SinkConfig, RastreoError> {
     let raw: serde_yaml_ng::Value = serde_yaml_ng::from_str(input)
         .map_err(|e| ConfigError::InvalidValue(format!("invalid YAML: {e}")))?;
-    let config = deserialize_expanded(raw, secrets::SecretSource::SinkConfig)?;
+    let config = deserialize_expanded(raw, secrets::SecretSource::SinkConfig, env)?;
     Ok(config)
 }
 
@@ -57,8 +59,9 @@ pub fn parse_sink_config(input: &str) -> Result<SinkConfig, RastreoError> {
 fn deserialize_expanded<T: serde::de::DeserializeOwned>(
     raw: serde_yaml_ng::Value,
     source: secrets::SecretSource,
+    env: &dyn Env,
 ) -> Result<T, ConfigError> {
-    let expanded = secrets::expand(raw.clone(), source)?;
+    let expanded = secrets::expand(raw.clone(), source, env)?;
     ensure_no_retired_type_tags_yaml(&expanded)?;
     // The discarded error quotes the offending scalar verbatim, which for an expanded position is
     // the secret itself; `shape_failure_detail` re-derives it from the tree as written.
@@ -272,6 +275,8 @@ impl DiscoverScenarioConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "config")]
+    use crate::env::MapEnv;
 
     #[test]
     fn scenario_kind_deserializes_snake_case() {
@@ -345,7 +350,8 @@ mod tests {
     #[test]
     fn parse_scenario_file_rejects_retired_rate_limit_with_migration_hint() {
         let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    rate_limit: 50\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let err = parse_scenario_file(yaml).expect_err("retired rate_limit must error");
+        let err =
+            parse_scenario_file(yaml, &MapEnv::new()).expect_err("retired rate_limit must error");
         assert!(matches!(
             err,
             RastreoError::Config(ConfigError::InvalidValue(_))
@@ -359,7 +365,8 @@ mod tests {
     #[test]
     fn parse_scenario_file_rejects_retired_rate_limit_in_defaults() {
         let yaml = "version: 1\nkind: discovery\ndefaults:\n  rate_limit: 8\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let err = parse_scenario_file(yaml).expect_err("retired rate_limit in defaults must error");
+        let err = parse_scenario_file(yaml, &MapEnv::new())
+            .expect_err("retired rate_limit in defaults must error");
         let msg = format!("{err}");
         assert!(msg.contains("max_concurrent"), "msg: {msg}");
         assert!(msg.contains("probe_rate"), "msg: {msg}");
@@ -373,7 +380,8 @@ mod tests {
     // serde's own `unknown variant` message carries the tag name too, so asserting on the name alone would pass without the check under test.
     #[cfg(feature = "config")]
     fn retirement_message(yaml: &str) -> String {
-        let err = parse_scenario_file(yaml).expect_err("a retired type tag must error");
+        let err =
+            parse_scenario_file(yaml, &MapEnv::new()).expect_err("a retired type tag must error");
         assert!(matches!(
             err,
             RastreoError::Config(ConfigError::InvalidValue(_))
@@ -417,7 +425,7 @@ mod tests {
     #[test]
     fn parse_scenario_file_accepts_a_direct_fuser() {
         let yaml = scenario_with_fuser_yaml("      type: direct\n      confidence_baseline: 0.2\n");
-        let file = parse_scenario_file(&yaml).expect("a live fuser still parses");
+        let file = parse_scenario_file(&yaml, &MapEnv::new()).expect("a live fuser still parses");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         assert!(d.base.fuser.is_some());
     }
@@ -428,7 +436,7 @@ mod tests {
         let yaml = scenario_with_fuser_yaml(
             "      type: mib_enrichment\n      inner:\n        type: direct\n",
         );
-        let file = parse_scenario_file(&yaml).expect("mib_enrichment still parses");
+        let file = parse_scenario_file(&yaml, &MapEnv::new()).expect("mib_enrichment still parses");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         assert!(matches!(
             d.base.fuser,
@@ -440,7 +448,7 @@ mod tests {
     #[test]
     fn parse_scenario_file_accepts_max_concurrent_and_probe_rate() {
         let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    max_concurrent: 32\n    probe_rate: 100\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let file = parse_scenario_file(yaml).expect("parse");
+        let file = parse_scenario_file(yaml, &MapEnv::new()).expect("parse");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         assert_eq!(d.base.max_concurrent, Some(32));
         assert_eq!(d.base.probe_rate, Some(100));
@@ -450,7 +458,7 @@ mod tests {
     #[test]
     fn parse_scenario_file_accepts_retries() {
         let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    retries: 2\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let file = parse_scenario_file(yaml).expect("parse");
+        let file = parse_scenario_file(yaml, &MapEnv::new()).expect("parse");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         assert_eq!(d.base.retries, Some(2));
     }
@@ -459,7 +467,7 @@ mod tests {
     #[test]
     fn parse_scenario_file_accepts_retries_at_max() {
         let yaml = format!("version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    retries: {MAX_RETRIES}\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n");
-        let file = parse_scenario_file(&yaml).expect("retries at the max parses");
+        let file = parse_scenario_file(&yaml, &MapEnv::new()).expect("retries at the max parses");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         assert_eq!(d.base.retries, Some(MAX_RETRIES));
     }
@@ -468,7 +476,8 @@ mod tests {
     #[test]
     fn parse_scenario_file_rejects_retries_over_max() {
         let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    retries: 99999\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let err = parse_scenario_file(yaml).expect_err("retries over the max must error");
+        let err =
+            parse_scenario_file(yaml, &MapEnv::new()).expect_err("retries over the max must error");
         assert!(matches!(
             err,
             RastreoError::Config(ConfigError::InvalidValue(_))
@@ -482,8 +491,8 @@ mod tests {
     #[test]
     fn parse_scenario_file_rejects_retries_over_max_in_defaults() {
         let yaml = "version: 1\nkind: discovery\ndefaults:\n  retries: 5000\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let err =
-            parse_scenario_file(yaml).expect_err("retries over the max in defaults must error");
+        let err = parse_scenario_file(yaml, &MapEnv::new())
+            .expect_err("retries over the max in defaults must error");
         let msg = format!("{err}");
         assert!(msg.contains("retries"), "msg: {msg}");
     }
@@ -515,7 +524,7 @@ mod tests {
     #[test]
     fn parse_scenario_file_round_trips_minimal_yaml() {
         let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let file = parse_scenario_file(yaml).expect("parse");
+        let file = parse_scenario_file(yaml, &MapEnv::new()).expect("parse");
         assert_eq!(file.version, 1);
         assert_eq!(file.kind, ScenarioKind::Discovery);
         assert_eq!(file.scenarios.len(), 1);
@@ -525,7 +534,7 @@ mod tests {
     #[test]
     fn parse_scenario_file_maps_serde_error_to_config_error() {
         let yaml = "version: 1\nkind: [invalid\n";
-        let err = parse_scenario_file(yaml).expect_err("bad yaml");
+        let err = parse_scenario_file(yaml, &MapEnv::new()).expect_err("bad yaml");
         assert!(matches!(
             err,
             RastreoError::Config(ConfigError::InvalidValue(_))
@@ -537,16 +546,14 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_scenario_file_expands_env_var_in_probe_field() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_PARSE_ENV_HOST", "10.9.8.7") };
-        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${RASTREO_TEST_PARSE_ENV_HOST}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let file = parse_scenario_file(yaml).expect("parse");
+        let env = MapEnv::new().set("HOST", "10.9.8.7");
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${HOST}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let file = parse_scenario_file(yaml, &env).expect("parse");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         match &d.targets[0] {
             Target::Ip(ip) => assert_eq!(ip.to_string(), "10.9.8.7"),
             other => panic!("expected Ip target, got {other:?}"),
         }
-        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_ENV_HOST") };
     }
 
     #[cfg(feature = "config")]
@@ -559,7 +566,7 @@ mod tests {
         let yaml = format!(
             "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: !file {path}\n    probers:\n      - type: tcp_connect\n        ports: [22]\n"
         );
-        let file = parse_scenario_file(&yaml).expect("parse");
+        let file = parse_scenario_file(&yaml, &MapEnv::new()).expect("parse");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         match &d.targets[0] {
             Target::Ip(ip) => assert_eq!(ip.to_string(), "192.0.2.55"),
@@ -570,21 +577,19 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_scenario_file_missing_env_var_returns_actionable_error() {
-        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_ENV_MISSING") };
-        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${RASTREO_TEST_PARSE_ENV_MISSING}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let err = parse_scenario_file(yaml).expect_err("must error");
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${MISSING_HOST}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err = parse_scenario_file(yaml, &MapEnv::new()).expect_err("must error");
         let msg = format!("{err}");
-        assert!(msg.contains("RASTREO_TEST_PARSE_ENV_MISSING"), "msg: {msg}");
+        assert!(msg.contains("MISSING_HOST"), "msg: {msg}");
         assert!(msg.contains("not set"), "msg: {msg}");
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn parse_scenario_file_post_expansion_shape_error_is_labeled_distinctly() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_PARSE_ENV_BAD_IP", "not-an-ip") };
-        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${RASTREO_TEST_PARSE_ENV_BAD_IP}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
-        let err = parse_scenario_file(yaml).expect_err("must error");
+        let env = MapEnv::new().set("BAD_IP", "not-an-ip");
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"${BAD_IP}\"\n    probers:\n      - type: tcp_connect\n        ports: [22]\n";
+        let err = parse_scenario_file(yaml, &env).expect_err("must error");
         assert!(matches!(
             err,
             RastreoError::Config(ConfigError::InvalidValue(_))
@@ -592,36 +597,30 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("after secret expansion"), "msg: {msg}");
         assert!(!msg.contains("invalid YAML"), "msg: {msg}");
-        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_ENV_BAD_IP") };
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn parse_scenario_file_rejects_a_reference_in_a_numeric_field_holding_a_valid_number() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_PARSE_NUMERIC_REFERENCE", "500") };
-        let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: \"${RASTREO_TEST_PARSE_NUMERIC_REFERENCE}\"\nscenarios: []\n";
-        let err = parse_scenario_file(yaml).expect_err("expansion cannot fill a numeric field");
+        let env = MapEnv::new().set("NUMERIC_REFERENCE", "500");
+        let yaml = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: \"${NUMERIC_REFERENCE}\"\nscenarios: []\n";
+        let err =
+            parse_scenario_file(yaml, &env).expect_err("expansion cannot fill a numeric field");
         let msg = format!("{err}");
-        assert!(
-            msg.contains("${RASTREO_TEST_PARSE_NUMERIC_REFERENCE}"),
-            "msg: {msg}"
-        );
+        assert!(msg.contains("${NUMERIC_REFERENCE}"), "msg: {msg}");
         assert!(msg.contains("references resolved"), "msg: {msg}");
         assert!(
             msg.contains("can only fill a field that accepts one"),
             "msg: {msg}"
         );
-        unsafe { std::env::remove_var("RASTREO_TEST_PARSE_NUMERIC_REFERENCE") };
     }
 
     #[cfg(all(feature = "config", feature = "snmp"))]
     #[test]
     fn parse_scenario_file_expands_env_var_into_snmp_community() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_SECRETS_COMMUNITY", "supersecret") };
-        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: snmp\n        version: v2c\n        community: \"${RASTREO_TEST_SECRETS_COMMUNITY}\"\n";
-        let file = parse_scenario_file(yaml).expect("parse");
+        let env = MapEnv::new().set("COMMUNITY", "supersecret");
+        let yaml = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    targets:\n      - Ip: \"10.0.0.1\"\n    probers:\n      - type: snmp\n        version: v2c\n        community: \"${COMMUNITY}\"\n";
+        let file = parse_scenario_file(yaml, &env).expect("parse");
         let ScenarioEntry::Discover(d) = &file.scenarios[0];
         let community = match &d.probers[0] {
             ProberConfig::Snmp { community, .. } => community,
@@ -631,7 +630,6 @@ mod tests {
         let debug = format!("{community:?}");
         assert!(debug.starts_with("<redacted:"), "debug: {debug}");
         assert!(!debug.contains("supersecret"), "plaintext leaked: {debug}");
-        unsafe { std::env::remove_var("RASTREO_TEST_SECRETS_COMMUNITY") };
     }
 
     #[test]
@@ -661,7 +659,7 @@ mod tests {
             for (surface, rejection) in [
                 (
                     "scenario file",
-                    parse_scenario_file(&scenario_yaml).expect_err("rejected"),
+                    parse_scenario_file(&scenario_yaml, &MapEnv::new()).expect_err("rejected"),
                 ),
                 (
                     "scenario body",
@@ -669,7 +667,7 @@ mod tests {
                 ),
                 (
                     "sink config",
-                    parse_sink_config(&sink_yaml).expect_err("rejected"),
+                    parse_sink_config(&sink_yaml, &MapEnv::new()).expect_err("rejected"),
                 ),
             ] {
                 let msg = format!("{rejection}");
@@ -684,8 +682,7 @@ mod tests {
             }
 
             // Delivered through expansion, the tag reaches the walk only if expansion ran first.
-            for (delivery, reference, _keep) in
-                secret_references_to("RASTREO_TEST_CONFIG_RETIRED_TAG_SOURCE", tag)
+            for (delivery, reference, env, _keep) in secret_references_to("RETIRED_TAG_SOURCE", tag)
             {
                 let scenario_yaml = scenario_with_fuser_yaml(&format!(
                     "      type: {reference}\n      inner:\n        type: direct\n"
@@ -694,11 +691,11 @@ mod tests {
                 for (surface, rejection) in [
                     (
                         "scenario file",
-                        parse_scenario_file(&scenario_yaml).expect_err("rejected"),
+                        parse_scenario_file(&scenario_yaml, &env).expect_err("rejected"),
                     ),
                     (
                         "sink config",
-                        parse_sink_config(&sink_yaml).expect_err("rejected"),
+                        parse_sink_config(&sink_yaml, &env).expect_err("rejected"),
                     ),
                 ] {
                     let msg = format!("{rejection}");
@@ -715,22 +712,30 @@ mod tests {
         }
     }
 
-    /// Each expansion syntax as the YAML text resolving to `plaintext`, with the tempfile the `!file` arm must outlive.
+    /// Each expansion syntax as the YAML text resolving to `plaintext`, with the environment the `${VAR}` arm resolves against and the tempfile the `!file` arm must outlive.
     #[cfg(feature = "config")]
     fn secret_references_to(
         var: &str,
         plaintext: &str,
-    ) -> Vec<(&'static str, String, Option<tempfile::NamedTempFile>)> {
+    ) -> Vec<(
+        &'static str,
+        String,
+        MapEnv,
+        Option<tempfile::NamedTempFile>,
+    )> {
         use std::io::Write;
 
-        // SAFETY: env var mutation is process-global; each caller passes its own unique name.
-        unsafe { std::env::set_var(var, plaintext) };
         let mut file = tempfile::NamedTempFile::new().expect("tempfile");
         file.write_all(plaintext.as_bytes()).expect("write");
         let path = file.path().to_str().expect("utf-8 path").to_string();
         vec![
-            ("${VAR}", format!("\"${{{var}}}\""), None),
-            ("!file", format!("!file {path}"), Some(file)),
+            (
+                "${VAR}",
+                format!("\"${{{var}}}\""),
+                MapEnv::new().set(var, plaintext),
+                None,
+            ),
+            ("!file", format!("!file {path}"), MapEnv::new(), Some(file)),
         ]
     }
 
@@ -743,10 +748,10 @@ mod tests {
 
     #[cfg(feature = "config")]
     impl ExpandingSurface {
-        fn parse(self, yaml: &str) -> Result<(), RastreoError> {
+        fn parse(self, yaml: &str, env: &dyn Env) -> Result<(), RastreoError> {
             match self {
-                ExpandingSurface::ScenarioFile => parse_scenario_file(yaml).map(|_| ()),
-                ExpandingSurface::SinkConfig => parse_sink_config(yaml).map(|_| ()),
+                ExpandingSurface::ScenarioFile => parse_scenario_file(yaml, env).map(|_| ()),
+                ExpandingSurface::SinkConfig => parse_sink_config(yaml, env).map(|_| ()),
             }
         }
     }
@@ -778,12 +783,12 @@ mod tests {
         ]);
 
         for (position, surface, template) in positions {
-            for (delivery, reference, _keep) in
-                secret_references_to("RASTREO_TEST_CONFIG_SHAPE_ERROR_SOURCE", SECRET)
+            for (delivery, reference, env, _keep) in
+                secret_references_to("SHAPE_ERROR_SOURCE", SECRET)
             {
                 let yaml = template.replace("REF", &reference);
                 let err = surface
-                    .parse(&yaml)
+                    .parse(&yaml, &env)
                     .expect_err("a secret in a non-string position must fail shape validation");
                 let msg = format!("{err}");
                 assert!(
@@ -815,57 +820,47 @@ mod tests {
 
     #[test]
     fn parse_discover_scenario_json_leaves_env_var_references_literal() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_SCANS_BODY_VAR", "internal.example.net") };
         let body = serde_json::json!({
-            "targets": [{"DnsName": "${RASTREO_TEST_SCANS_BODY_VAR}"}],
+            "targets": [{"DnsName": "${SCANS_BODY_VAR}"}],
             "probers": [{"type": "tcp_connect", "ports": [22]}],
         });
         let scenario = parse_discover_scenario_json(body).expect("body parses");
         match &scenario.targets[0] {
             Target::DnsName(name) => assert_eq!(
-                name, "${RASTREO_TEST_SCANS_BODY_VAR}",
+                name, "${SCANS_BODY_VAR}",
                 "a client body must never read the server's environment"
             ),
             other => panic!("expected DnsName target, got {other:?}"),
         }
-        unsafe { std::env::remove_var("RASTREO_TEST_SCANS_BODY_VAR") };
     }
 
     #[test]
     fn parse_discover_scenario_json_leaves_a_nested_sink_reference_literal() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_SCANS_BODY_SINK_PATH", "captured") };
         let body = serde_json::json!({
             "targets": [{"Ip": "10.0.0.1"}],
             "probers": [{"type": "tcp_connect", "ports": [22]}],
-            "sink": {"type": "file", "path": "/var/lib/rastreo/${RASTREO_TEST_SCANS_BODY_SINK_PATH}.ndjson"},
+            "sink": {"type": "file", "path": "/var/lib/rastreo/${SCANS_BODY_SINK_PATH}.ndjson"},
         });
         let scenario = parse_discover_scenario_json(body).expect("body parses");
         match scenario.base.sink.as_ref().expect("sink present") {
             SinkConfig::File { path } => assert_eq!(
                 path,
-                &std::path::PathBuf::from(
-                    "/var/lib/rastreo/${RASTREO_TEST_SCANS_BODY_SINK_PATH}.ndjson"
-                ),
+                &std::path::PathBuf::from("/var/lib/rastreo/${SCANS_BODY_SINK_PATH}.ndjson"),
                 "a sink nested in a client body must never read the server's environment"
             ),
             other => panic!("expected File sink, got {other:?}"),
         }
-        unsafe { std::env::remove_var("RASTREO_TEST_SCANS_BODY_SINK_PATH") };
     }
 
     #[cfg(feature = "nats")]
     #[test]
     fn parse_discover_scenario_json_leaves_a_nested_sink_credential_literal() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_SCANS_BODY_SINK_PASS", "hunter2") };
         let body = serde_json::json!({
             "targets": [{"Ip": "10.0.0.1"}],
             "probers": [{"type": "tcp_connect", "ports": [22]}],
             "sink": {
                 "type": "nats",
-                "servers": ["nats://probe:${RASTREO_TEST_SCANS_BODY_SINK_PASS}@nats:4222"],
+                "servers": ["nats://probe:${SCANS_BODY_SINK_PASS}@nats:4222"],
                 "subject": "rastreo.discovery.records.v1",
                 "stream": "RASTREO",
             },
@@ -873,12 +868,11 @@ mod tests {
         let scenario = parse_discover_scenario_json(body).expect("body parses");
         match scenario.base.sink.as_ref().expect("sink present") {
             SinkConfig::Nats { servers, .. } => assert_eq!(
-                servers[0], "nats://probe:${RASTREO_TEST_SCANS_BODY_SINK_PASS}@nats:4222",
+                servers[0], "nats://probe:${SCANS_BODY_SINK_PASS}@nats:4222",
                 "a sink nested in a client body must never read the server's environment"
             ),
             other => panic!("expected Nats sink, got {other:?}"),
         }
-        unsafe { std::env::remove_var("RASTREO_TEST_SCANS_BODY_SINK_PASS") };
     }
 
     #[test]
@@ -895,14 +889,14 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_sink_config_accepts_a_live_sink() {
-        let config = parse_sink_config("type: stdout\n").expect("sink config");
+        let config = parse_sink_config("type: stdout\n", &MapEnv::new()).expect("sink config");
         assert!(matches!(config, SinkConfig::Stdout));
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn parse_sink_config_maps_malformed_yaml_to_config_error() {
-        let err = parse_sink_config("type: [stdout\n").expect_err("bad yaml");
+        let err = parse_sink_config("type: [stdout\n", &MapEnv::new()).expect_err("bad yaml");
         assert!(matches!(
             err,
             RastreoError::Config(ConfigError::InvalidValue(_))
@@ -913,22 +907,17 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_sink_config_maps_an_unknown_sink_to_config_error() {
-        let err = parse_sink_config("type: carrier_pigeon\n").expect_err("unknown sink");
+        let err =
+            parse_sink_config("type: carrier_pigeon\n", &MapEnv::new()).expect_err("unknown sink");
         assert!(format!("{err}").contains("sink shape validation failed"));
     }
 
     #[cfg(feature = "config")]
     #[test]
     fn parse_sink_config_expands_env_var_in_a_sink_field() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe {
-            std::env::set_var(
-                "RASTREO_TEST_SINK_ENV_PATH",
-                "/var/lib/rastreo/records.ndjson",
-            )
-        };
-        let config = parse_sink_config("type: file\npath: \"${RASTREO_TEST_SINK_ENV_PATH}\"\n")
-            .expect("sink config");
+        let env = MapEnv::new().set("SINK_PATH", "/var/lib/rastreo/records.ndjson");
+        let config =
+            parse_sink_config("type: file\npath: \"${SINK_PATH}\"\n", &env).expect("sink config");
         match config {
             SinkConfig::File { path } => assert_eq!(
                 path,
@@ -936,7 +925,6 @@ mod tests {
             ),
             other => panic!("expected File sink, got {other:?}"),
         }
-        unsafe { std::env::remove_var("RASTREO_TEST_SINK_ENV_PATH") };
     }
 
     #[cfg(feature = "config")]
@@ -947,8 +935,11 @@ mod tests {
         f.write_all(b"/var/lib/rastreo/from-mount.ndjson\n")
             .expect("write");
         let secret_path = f.path().to_str().expect("utf-8 path");
-        let config = parse_sink_config(&format!("type: file\npath: !file {secret_path}\n"))
-            .expect("sink config");
+        let config = parse_sink_config(
+            &format!("type: file\npath: !file {secret_path}\n"),
+            &MapEnv::new(),
+        )
+        .expect("sink config");
         match config {
             SinkConfig::File { path } => assert_eq!(
                 path,
@@ -961,15 +952,14 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_sink_config_missing_env_var_names_the_sink_config() {
-        unsafe { std::env::remove_var("RASTREO_TEST_SINK_ENV_MISSING") };
-        let err = parse_sink_config("type: file\npath: \"${RASTREO_TEST_SINK_ENV_MISSING}\"\n")
+        let err = parse_sink_config("type: file\npath: \"${SINK_MISSING}\"\n", &MapEnv::new())
             .expect_err("must error");
         assert!(matches!(
             err,
             RastreoError::Config(ConfigError::InvalidValue(_))
         ));
         let msg = format!("{err}");
-        assert!(msg.contains("RASTREO_TEST_SINK_ENV_MISSING"), "msg: {msg}");
+        assert!(msg.contains("SINK_MISSING"), "msg: {msg}");
         assert!(msg.contains("not set"), "msg: {msg}");
         assert!(msg.contains("sink config"), "msg: {msg}");
         assert!(!msg.contains("scenario"), "msg: {msg}");
@@ -978,10 +968,10 @@ mod tests {
     #[cfg(feature = "config")]
     #[test]
     fn parse_sink_config_empty_env_var_substitutes_as_empty_string() {
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_SINK_ENV_EMPTY", "") };
+        let env = MapEnv::new().set("SINK_SUFFIX", "");
         let config = parse_sink_config(
-            "type: file\npath: \"/var/lib/rastreo/records${RASTREO_TEST_SINK_ENV_EMPTY}.ndjson\"\n",
+            "type: file\npath: \"/var/lib/rastreo/records${SINK_SUFFIX}.ndjson\"\n",
+            &env,
         )
         .expect("an empty value is not an error");
         match config {
@@ -991,7 +981,6 @@ mod tests {
             ),
             other => panic!("expected File sink, got {other:?}"),
         }
-        unsafe { std::env::remove_var("RASTREO_TEST_SINK_ENV_EMPTY") };
     }
 
     #[cfg(all(feature = "config", feature = "nats"))]
@@ -999,10 +988,9 @@ mod tests {
     fn parse_sink_config_expands_env_var_into_the_nats_password() {
         use crate::sink::NatsCredentials;
 
-        // SAFETY: env var mutation is process-global; use a unique per-test name.
-        unsafe { std::env::set_var("RASTREO_TEST_SINK_NATS_PASS", "broker-secret") };
-        let yaml = "type: nats\nservers: [\"nats://nats:4222\"]\nsubject: rastreo.discovery.records.v1\nstream: RASTREO\ncredentials:\n  type: user_pass\n  username: probe\n  password: \"${RASTREO_TEST_SINK_NATS_PASS}\"\n";
-        let config = parse_sink_config(yaml).expect("sink config");
+        let env = MapEnv::new().set("NATS_PASS", "broker-secret");
+        let yaml = "type: nats\nservers: [\"nats://nats:4222\"]\nsubject: rastreo.discovery.records.v1\nstream: RASTREO\ncredentials:\n  type: user_pass\n  username: probe\n  password: \"${NATS_PASS}\"\n";
+        let config = parse_sink_config(yaml, &env).expect("sink config");
         let credentials = match config {
             SinkConfig::Nats { credentials, .. } => credentials,
             other => panic!("expected Nats sink, got {other:?}"),
@@ -1018,7 +1006,6 @@ mod tests {
             !debug.contains("broker-secret"),
             "plaintext leaked: {debug}"
         );
-        unsafe { std::env::remove_var("RASTREO_TEST_SINK_NATS_PASS") };
     }
 
     #[test]

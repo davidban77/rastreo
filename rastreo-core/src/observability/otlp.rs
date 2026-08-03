@@ -18,6 +18,7 @@ use tracing::Subscriber;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
+use crate::env::{Env, VarError};
 use crate::observability::otlp_config::{
     http_endpoint_for_signal, parse_env_bool, parse_env_headers, parse_env_protocol, parse_env_u64,
     OtlpProtocol,
@@ -62,20 +63,21 @@ impl OtlpConfig {
     /// env var is unset. When `metrics_supported` is false the metrics env vars are not read at all
     /// (the caller cannot export metrics). Returns `None` when nothing is enabled.
     pub fn from_env(
+        env: &dyn Env,
         default_service_name: &str,
         metrics_supported: bool,
     ) -> anyhow::Result<Option<Self>> {
         let metrics_enabled =
-            metrics_supported && parse_env_bool("RASTREO_OTLP_METRICS_ENABLED", false)?;
-        let logs_enabled = parse_env_bool("RASTREO_OTLP_LOGS_ENABLED", false)?;
-        let traces_enabled = parse_env_bool("RASTREO_OTLP_TRACES_ENABLED", false)?;
+            metrics_supported && parse_env_bool(env, "RASTREO_OTLP_METRICS_ENABLED", false)?;
+        let logs_enabled = parse_env_bool(env, "RASTREO_OTLP_LOGS_ENABLED", false)?;
+        let traces_enabled = parse_env_bool(env, "RASTREO_OTLP_TRACES_ENABLED", false)?;
         // A traces-only config must still return Some, else trace export silently no-ops.
         if !metrics_enabled && !logs_enabled && !traces_enabled {
             return Ok(None);
         }
-        let endpoint = match std::env::var("RASTREO_OTLP_ENDPOINT") {
+        let endpoint = match env.var("RASTREO_OTLP_ENDPOINT") {
             Ok(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
-            Ok(_) | Err(std::env::VarError::NotPresent) => {
+            Ok(_) | Err(VarError::NotPresent) => {
                 return Err(anyhow::anyhow!(
                     "RASTREO_OTLP_ENDPOINT is required when RASTREO_OTLP_METRICS_ENABLED, \
                      RASTREO_OTLP_LOGS_ENABLED, or RASTREO_OTLP_TRACES_ENABLED is true; set it \
@@ -83,27 +85,29 @@ impl OtlpConfig {
                      or http://otel-collector:4318 for HTTP+protobuf)"
                 ));
             }
-            Err(std::env::VarError::NotUnicode(_)) => {
+            Err(VarError::NotUnicode(_)) => {
                 return Err(anyhow::anyhow!(
                     "invalid value for RASTREO_OTLP_ENDPOINT: not valid UTF-8"
                 ));
             }
         };
-        let protocol = parse_env_protocol("RASTREO_OTLP_PROTOCOL", OtlpProtocol::Grpc)?;
+        let protocol = parse_env_protocol(env, "RASTREO_OTLP_PROTOCOL", OtlpProtocol::Grpc)?;
         let metrics_interval = Duration::from_secs(if metrics_supported {
             parse_env_u64(
+                env,
                 "RASTREO_OTLP_METRICS_INTERVAL_SECS",
                 DEFAULT_METRICS_INTERVAL_SECS,
             )?
         } else {
             DEFAULT_METRICS_INTERVAL_SECS
         });
-        let service_name = std::env::var("RASTREO_OTLP_SERVICE_NAME")
+        let service_name = env
+            .var("RASTREO_OTLP_SERVICE_NAME")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_service_name.to_string());
-        let headers = parse_env_headers("RASTREO_OTLP_HEADERS")?;
+        let headers = parse_env_headers(env, "RASTREO_OTLP_HEADERS")?;
         Ok(Some(Self {
             endpoint,
             protocol,
@@ -365,92 +369,53 @@ pub fn init_tracing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::MapEnv;
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::Mutex;
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-    }
+    const ENDPOINT: &str = "http://collector:4317";
 
-    const KEYS: [&str; 8] = [
-        "RASTREO_OTLP_ENDPOINT",
-        "RASTREO_OTLP_METRICS_ENABLED",
-        "RASTREO_OTLP_LOGS_ENABLED",
-        "RASTREO_OTLP_TRACES_ENABLED",
-        "RASTREO_OTLP_METRICS_INTERVAL_SECS",
-        "RASTREO_OTLP_SERVICE_NAME",
-        "RASTREO_OTLP_PROTOCOL",
-        "RASTREO_OTLP_HEADERS",
-    ];
-
-    fn clear() {
-        for k in KEYS {
-            // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-            unsafe { std::env::remove_var(k) };
-        }
+    fn logs_to(endpoint: &str) -> MapEnv {
+        MapEnv::new()
+            .set("RASTREO_OTLP_LOGS_ENABLED", "true")
+            .set("RASTREO_OTLP_ENDPOINT", endpoint)
     }
 
     #[test]
     fn from_env_returns_none_when_both_disabled() {
-        let _g = env_guard();
-        clear();
-        assert!(OtlpConfig::from_env("svc", true)
+        assert!(OtlpConfig::from_env(&MapEnv::new(), "svc", true)
             .expect("from_env")
             .is_none());
     }
 
     #[test]
     fn from_env_uses_provided_default_service_name() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-        }
-        let rastreo = OtlpConfig::from_env("rastreo", false)
+        let env = logs_to(ENDPOINT);
+        let rastreo = OtlpConfig::from_env(&env, "rastreo", false)
             .expect("from_env")
             .expect("some");
-        let server = OtlpConfig::from_env("rastreo-server", true)
+        let server = OtlpConfig::from_env(&env, "rastreo-server", true)
             .expect("from_env")
             .expect("some");
-        clear();
         assert_eq!(rastreo.service_name, "rastreo");
         assert_eq!(server.service_name, "rastreo-server");
     }
 
     #[test]
     fn from_env_service_name_env_overrides_default() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-            std::env::set_var("RASTREO_OTLP_SERVICE_NAME", "  edge \n");
-        }
-        let cfg = OtlpConfig::from_env("svc", true)
+        let env = logs_to(ENDPOINT).set("RASTREO_OTLP_SERVICE_NAME", "  edge \n");
+        let cfg = OtlpConfig::from_env(&env, "svc", true)
             .expect("from_env")
             .expect("some");
-        clear();
         assert_eq!(cfg.service_name, "edge");
     }
 
     #[test]
     fn from_env_metrics_enabled_parses_interval_default() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-        }
-        let cfg = OtlpConfig::from_env("svc", true)
+        let env = MapEnv::new()
+            .set("RASTREO_OTLP_METRICS_ENABLED", "true")
+            .set("RASTREO_OTLP_ENDPOINT", ENDPOINT);
+        let cfg = OtlpConfig::from_env(&env, "svc", true)
             .expect("from_env")
             .expect("some");
-        clear();
         assert!(cfg.metrics_enabled);
         assert!(!cfg.logs_enabled);
         assert_eq!(cfg.metrics_interval, Duration::from_secs(30));
@@ -458,15 +423,10 @@ mod tests {
 
     #[test]
     fn from_env_without_metrics_support_ignores_metrics_enabled() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_METRICS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-        }
-        let cfg = OtlpConfig::from_env("svc", false).expect("from_env");
-        clear();
+        let env = MapEnv::new()
+            .set("RASTREO_OTLP_METRICS_ENABLED", "true")
+            .set("RASTREO_OTLP_ENDPOINT", ENDPOINT);
+        let cfg = OtlpConfig::from_env(&env, "svc", false).expect("from_env");
         assert!(
             cfg.is_none(),
             "metrics env var must be inert without support"
@@ -475,18 +435,10 @@ mod tests {
 
     #[test]
     fn from_env_without_metrics_support_ignores_malformed_interval() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-            std::env::set_var("RASTREO_OTLP_METRICS_INTERVAL_SECS", "not-a-number");
-        }
-        let cfg = OtlpConfig::from_env("svc", false)
+        let env = logs_to(ENDPOINT).set("RASTREO_OTLP_METRICS_INTERVAL_SECS", "not-a-number");
+        let cfg = OtlpConfig::from_env(&env, "svc", false)
             .expect("malformed interval must be inert without support")
             .expect("some");
-        clear();
         assert!(cfg.logs_enabled);
         assert!(!cfg.metrics_enabled);
         assert_eq!(cfg.metrics_interval, Duration::from_secs(30));
@@ -494,60 +446,36 @@ mod tests {
 
     #[test]
     fn from_env_trims_endpoint() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "  http://collector:4317\n");
-        }
-        let cfg = OtlpConfig::from_env("svc", true)
+        let env = logs_to("  http://collector:4317\n");
+        let cfg = OtlpConfig::from_env(&env, "svc", true)
             .expect("from_env")
             .expect("some");
-        clear();
-        assert_eq!(cfg.endpoint, "http://collector:4317");
+        assert_eq!(cfg.endpoint, ENDPOINT);
     }
 
     #[test]
     fn from_env_requires_endpoint() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true") };
-        let err = OtlpConfig::from_env("svc", true).expect_err("must reject");
-        clear();
+        let env = MapEnv::new().set("RASTREO_OTLP_LOGS_ENABLED", "true");
+        let err = OtlpConfig::from_env(&env, "svc", true).expect_err("must reject");
         assert!(err.to_string().contains("RASTREO_OTLP_ENDPOINT"));
     }
 
     #[test]
     fn from_env_protocol_defaults_to_grpc() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-        }
-        let cfg = OtlpConfig::from_env("svc", true)
+        let cfg = OtlpConfig::from_env(&logs_to(ENDPOINT), "svc", true)
             .expect("from_env")
             .expect("some");
-        clear();
         assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
     }
 
     #[test]
     fn from_env_traces_only_returns_some() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_TRACES_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-        }
-        let cfg = OtlpConfig::from_env("svc", false)
+        let env = MapEnv::new()
+            .set("RASTREO_OTLP_TRACES_ENABLED", "true")
+            .set("RASTREO_OTLP_ENDPOINT", ENDPOINT);
+        let cfg = OtlpConfig::from_env(&env, "svc", false)
             .expect("from_env")
             .expect("traces-only must not be a silent no-op");
-        clear();
         assert!(cfg.traces_enabled);
         assert!(!cfg.metrics_enabled);
         assert!(!cfg.logs_enabled);
@@ -555,12 +483,8 @@ mod tests {
 
     #[test]
     fn from_env_traces_only_requires_endpoint() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var("RASTREO_OTLP_TRACES_ENABLED", "true") };
-        let err = OtlpConfig::from_env("svc", false).expect_err("must reject");
-        clear();
+        let env = MapEnv::new().set("RASTREO_OTLP_TRACES_ENABLED", "true");
+        let err = OtlpConfig::from_env(&env, "svc", false).expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("RASTREO_OTLP_ENDPOINT"), "msg was {msg}");
         assert!(msg.contains("RASTREO_OTLP_TRACES_ENABLED"), "msg was {msg}");
@@ -647,21 +571,13 @@ mod tests {
 
     #[test]
     fn from_env_reads_headers() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-            std::env::set_var(
-                "RASTREO_OTLP_HEADERS",
-                "authorization=Bearer t,x-scope-orgid=tenant",
-            );
-        }
-        let cfg = OtlpConfig::from_env("svc", true)
+        let env = logs_to(ENDPOINT).set(
+            "RASTREO_OTLP_HEADERS",
+            "authorization=Bearer t,x-scope-orgid=tenant",
+        );
+        let cfg = OtlpConfig::from_env(&env, "svc", true)
             .expect("from_env")
             .expect("some");
-        clear();
         assert_eq!(
             cfg.headers,
             vec![
@@ -673,16 +589,8 @@ mod tests {
 
     #[test]
     fn from_env_rejects_malformed_headers() {
-        let _g = env_guard();
-        clear();
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe {
-            std::env::set_var("RASTREO_OTLP_LOGS_ENABLED", "true");
-            std::env::set_var("RASTREO_OTLP_ENDPOINT", "http://collector:4317");
-            std::env::set_var("RASTREO_OTLP_HEADERS", "authorization");
-        }
-        let err = OtlpConfig::from_env("svc", true).expect_err("must reject");
-        clear();
+        let env = logs_to(ENDPOINT).set("RASTREO_OTLP_HEADERS", "authorization");
+        let err = OtlpConfig::from_env(&env, "svc", true).expect_err("must reject");
         assert!(err.to_string().contains("RASTREO_OTLP_HEADERS"));
     }
 

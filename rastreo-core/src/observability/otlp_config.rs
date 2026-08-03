@@ -1,5 +1,7 @@
 //! Shared OTLP config primitives: `OtlpProtocol` enum, permissive boolean/integer/protocol/header env parsers, and the HTTP+protobuf signal-path helper. Kept dep-free (`std` + `thiserror`) so it compiles under `--no-default-features` and both binaries can import it without pulling the OpenTelemetry chain.
 
+use crate::env::{Env, VarError};
+
 /// Error surfaced when parsing OTLP env-var configuration at startup.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -46,8 +48,12 @@ pub enum OtlpProtocol {
 
 /// Parse `name` as an [`OtlpProtocol`], case-insensitively, accepting `grpc`,
 /// `http-protobuf`, or the `http` alias. Returns `default` when the variable is unset.
-pub fn parse_env_protocol(name: &str, default: OtlpProtocol) -> Result<OtlpProtocol, OtlpEnvError> {
-    match std::env::var(name) {
+pub fn parse_env_protocol(
+    env: &dyn Env,
+    name: &str,
+    default: OtlpProtocol,
+) -> Result<OtlpProtocol, OtlpEnvError> {
+    match env.var(name) {
         Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "grpc" => Ok(OtlpProtocol::Grpc),
             "http-protobuf" | "http" => Ok(OtlpProtocol::HttpProtobuf),
@@ -56,8 +62,8 @@ pub fn parse_env_protocol(name: &str, default: OtlpProtocol) -> Result<OtlpProto
                 value: other.to_string(),
             }),
         },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => Err(OtlpEnvError::NotUtf8 {
+        Err(VarError::NotPresent) => Ok(default),
+        Err(VarError::NotUnicode(_)) => Err(OtlpEnvError::NotUtf8 {
             name: name.to_string(),
         }),
     }
@@ -66,8 +72,8 @@ pub fn parse_env_protocol(name: &str, default: OtlpProtocol) -> Result<OtlpProto
 /// Parse `name` as a boolean, accepting `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`
 /// so operators can use whichever spelling their config store prefers. Returns
 /// `default` when the variable is unset.
-pub fn parse_env_bool(name: &str, default: bool) -> Result<bool, OtlpEnvError> {
-    match std::env::var(name) {
+pub fn parse_env_bool(env: &dyn Env, name: &str, default: bool) -> Result<bool, OtlpEnvError> {
+    match env.var(name) {
         Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "true" | "1" | "yes" | "on" => Ok(true),
             "false" | "0" | "no" | "off" => Ok(false),
@@ -76,8 +82,8 @@ pub fn parse_env_bool(name: &str, default: bool) -> Result<bool, OtlpEnvError> {
                 value: raw,
             }),
         },
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => Err(OtlpEnvError::NotUtf8 {
+        Err(VarError::NotPresent) => Ok(default),
+        Err(VarError::NotUnicode(_)) => Err(OtlpEnvError::NotUtf8 {
             name: name.to_string(),
         }),
     }
@@ -85,15 +91,15 @@ pub fn parse_env_bool(name: &str, default: bool) -> Result<bool, OtlpEnvError> {
 
 /// Parse `name` as an unsigned integer of seconds. Returns `default` when the variable
 /// is unset.
-pub fn parse_env_u64(name: &str, default: u64) -> Result<u64, OtlpEnvError> {
-    match std::env::var(name) {
+pub fn parse_env_u64(env: &dyn Env, name: &str, default: u64) -> Result<u64, OtlpEnvError> {
+    match env.var(name) {
         Ok(raw) => raw.parse::<u64>().map_err(|source| OtlpEnvError::NotU64 {
             name: name.to_string(),
             value: raw,
             source,
         }),
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => Err(OtlpEnvError::NotUtf8 {
+        Err(VarError::NotPresent) => Ok(default),
+        Err(VarError::NotUnicode(_)) => Err(OtlpEnvError::NotUtf8 {
             name: name.to_string(),
         }),
     }
@@ -104,11 +110,11 @@ pub fn parse_env_u64(name: &str, default: u64) -> Result<u64, OtlpEnvError> {
 /// tokens so the parsed set applies cleanly to both the gRPC and HTTP exporters. Returns an
 /// empty vector when the variable is unset or blank; rejects an entry with no `=` or an
 /// empty/invalid name.
-pub fn parse_env_headers(name: &str) -> Result<Vec<(String, String)>, OtlpEnvError> {
-    let raw = match std::env::var(name) {
+pub fn parse_env_headers(env: &dyn Env, name: &str) -> Result<Vec<(String, String)>, OtlpEnvError> {
+    let raw = match env.var(name) {
         Ok(raw) => raw,
-        Err(std::env::VarError::NotPresent) => return Ok(Vec::new()),
-        Err(std::env::VarError::NotUnicode(_)) => {
+        Err(VarError::NotPresent) => return Ok(Vec::new()),
+        Err(VarError::NotUnicode(_)) => {
             return Err(OtlpEnvError::NotUtf8 {
                 name: name.to_string(),
             })
@@ -185,64 +191,45 @@ pub fn http_endpoint_for_signal(base: &str, signal_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::MapEnv;
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+    const VAR: &str = "RASTREO_TEST_OTLP_VALUE";
+
+    fn unset() -> MapEnv {
+        MapEnv::new()
+    }
+
+    fn env(value: &str) -> MapEnv {
+        MapEnv::new().set(VAR, value)
     }
 
     #[test]
     fn parse_env_protocol_returns_default_when_unset() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_PROTOCOL_UNSET";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::remove_var(var) };
-        let out = parse_env_protocol(var, OtlpProtocol::Grpc).expect("default");
+        let out = parse_env_protocol(&unset(), VAR, OtlpProtocol::Grpc).expect("default");
         assert_eq!(out, OtlpProtocol::Grpc);
     }
 
     #[test]
     fn parse_env_protocol_reads_grpc_variant() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_PROTOCOL_GRPC";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "grpc") };
-        let out = parse_env_protocol(var, OtlpProtocol::HttpProtobuf).expect("grpc");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_protocol(&env("grpc"), VAR, OtlpProtocol::HttpProtobuf).expect("grpc");
         assert_eq!(out, OtlpProtocol::Grpc);
     }
 
     #[test]
     fn parse_env_protocol_reads_http_protobuf_variant() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_PROTOCOL_HTTP_PROTOBUF";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "http-protobuf") };
-        let out = parse_env_protocol(var, OtlpProtocol::Grpc).expect("http-protobuf");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_protocol(&env("http-protobuf"), VAR, OtlpProtocol::Grpc)
+            .expect("http-protobuf");
         assert_eq!(out, OtlpProtocol::HttpProtobuf);
     }
 
     #[test]
     fn parse_env_protocol_accepts_http_alias() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_PROTOCOL_HTTP_ALIAS";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "http") };
-        let out = parse_env_protocol(var, OtlpProtocol::Grpc).expect("http alias");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_protocol(&env("http"), VAR, OtlpProtocol::Grpc).expect("http alias");
         assert_eq!(out, OtlpProtocol::HttpProtobuf);
     }
 
     #[test]
     fn parse_env_protocol_is_case_insensitive() {
-        let _g = env_guard();
         for (variant, expected) in [
             ("GRPC", OtlpProtocol::Grpc),
             ("Grpc", OtlpProtocol::Grpc),
@@ -250,27 +237,17 @@ mod tests {
             ("Http-Protobuf", OtlpProtocol::HttpProtobuf),
             ("HTTP", OtlpProtocol::HttpProtobuf),
         ] {
-            let var = "RASTREO_TEST_OTLP_PROTOCOL_CASE";
-            // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-            unsafe { std::env::set_var(var, variant) };
-            let out = parse_env_protocol(var, OtlpProtocol::Grpc).expect("parse");
-            // SAFETY: same guard.
-            unsafe { std::env::remove_var(var) };
+            let out = parse_env_protocol(&env(variant), VAR, OtlpProtocol::Grpc).expect("parse");
             assert_eq!(out, expected, "variant {variant} misparsed");
         }
     }
 
     #[test]
     fn parse_env_protocol_rejects_unknown_value() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_PROTOCOL_BAD";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "yaml") };
-        let err = parse_env_protocol(var, OtlpProtocol::Grpc).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let err =
+            parse_env_protocol(&env("yaml"), VAR, OtlpProtocol::Grpc).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains(VAR), "msg was {msg}");
         assert!(msg.contains("yaml"), "msg was {msg}");
         assert!(msg.contains("grpc"), "msg was {msg}");
         assert!(msg.contains("http-protobuf"), "msg was {msg}");
@@ -278,119 +255,65 @@ mod tests {
 
     #[test]
     fn parse_env_bool_returns_default_when_unset() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_BOOL_UNSET";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::remove_var(var) };
-        assert!(parse_env_bool(var, true).expect("default true"));
-        assert!(!parse_env_bool(var, false).expect("default false"));
+        assert!(parse_env_bool(&unset(), VAR, true).expect("default true"));
+        assert!(!parse_env_bool(&unset(), VAR, false).expect("default false"));
     }
 
     #[test]
     fn parse_env_bool_accepts_common_true_forms() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_BOOL_TRUE";
         for form in ["true", "TRUE", "1", "yes", "on", "  ON  "] {
-            // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-            unsafe { std::env::set_var(var, form) };
-            let out = parse_env_bool(var, false).expect("truthy");
+            let out = parse_env_bool(&env(form), VAR, false).expect("truthy");
             assert!(out, "form {form:?} should parse true");
         }
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
     }
 
     #[test]
     fn parse_env_bool_accepts_common_false_forms() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_BOOL_FALSE";
         for form in ["false", "FALSE", "0", "no", "off"] {
-            // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-            unsafe { std::env::set_var(var, form) };
-            let out = parse_env_bool(var, true).expect("falsy");
+            let out = parse_env_bool(&env(form), VAR, true).expect("falsy");
             assert!(!out, "form {form:?} should parse false");
         }
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
     }
 
     #[test]
     fn parse_env_bool_rejects_unknown_value() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_BOOL_BAD";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "maybe") };
-        let err = parse_env_bool(var, false).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
-        assert!(err.to_string().contains(var));
+        let err = parse_env_bool(&env("maybe"), VAR, false).expect_err("must reject");
+        assert!(err.to_string().contains(VAR));
         assert!(err.to_string().contains("maybe"));
     }
 
     #[test]
     fn parse_env_u64_returns_default_when_unset() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_U64_UNSET";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::remove_var(var) };
-        assert_eq!(parse_env_u64(var, 42).expect("default"), 42);
+        assert_eq!(parse_env_u64(&unset(), VAR, 42).expect("default"), 42);
     }
 
     #[test]
     fn parse_env_u64_reads_numeric_value() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_U64_OK";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "17") };
-        let out = parse_env_u64(var, 0).expect("parse");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
-        assert_eq!(out, 17);
+        assert_eq!(parse_env_u64(&env("17"), VAR, 0).expect("parse"), 17);
     }
 
     #[test]
     fn parse_env_u64_rejects_non_numeric_value() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_U64_BAD";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "not-a-number") };
-        let err = parse_env_u64(var, 0).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
-        assert!(err.to_string().contains(var));
+        let err = parse_env_u64(&env("not-a-number"), VAR, 0).expect_err("must reject");
+        assert!(err.to_string().contains(VAR));
         assert!(err.to_string().contains("not-a-number"));
     }
 
     #[test]
     fn parse_env_headers_returns_empty_when_unset() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_UNSET";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::remove_var(var) };
-        assert!(parse_env_headers(var).expect("unset").is_empty());
+        assert!(parse_env_headers(&unset(), VAR).expect("unset").is_empty());
     }
 
     #[test]
     fn parse_env_headers_returns_empty_when_blank() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_BLANK";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "   ") };
-        let out = parse_env_headers(var).expect("blank");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
-        assert!(out.is_empty());
+        assert!(parse_env_headers(&env("   "), VAR)
+            .expect("blank")
+            .is_empty());
     }
 
     #[test]
     fn parse_env_headers_reads_single_header() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_SINGLE";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "authorization=Bearer abc123") };
-        let out = parse_env_headers(var).expect("single");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_headers(&env("authorization=Bearer abc123"), VAR).expect("single");
         assert_eq!(
             out,
             vec![("authorization".to_string(), "Bearer abc123".to_string())]
@@ -399,13 +322,8 @@ mod tests {
 
     #[test]
     fn parse_env_headers_reads_multiple_headers() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_MULTI";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "authorization=Bearer t,x-scope-orgid=tenant-1") };
-        let out = parse_env_headers(var).expect("multi");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_headers(&env("authorization=Bearer t,x-scope-orgid=tenant-1"), VAR)
+            .expect("multi");
         assert_eq!(
             out,
             vec![
@@ -417,13 +335,8 @@ mod tests {
 
     #[test]
     fn parse_env_headers_splits_on_first_equals_only() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_EQ";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "authorization=Basic dXNlcjpwYXNz==") };
-        let out = parse_env_headers(var).expect("value with =");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_headers(&env("authorization=Basic dXNlcjpwYXNz=="), VAR)
+            .expect("value with =");
         assert_eq!(
             out,
             vec![(
@@ -435,13 +348,8 @@ mod tests {
 
     #[test]
     fn parse_env_headers_trims_whitespace_around_key_and_value() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_TRIM";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "  authorization  =  Bearer t  ,  x-a = b ") };
-        let out = parse_env_headers(var).expect("trim");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_headers(&env("  authorization  =  Bearer t  ,  x-a = b "), VAR)
+            .expect("trim");
         assert_eq!(
             out,
             vec![
@@ -453,13 +361,8 @@ mod tests {
 
     #[test]
     fn parse_env_headers_lowercases_names() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_CASE";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "Authorization=Bearer t,X-Scope-OrgID=tenant") };
-        let out = parse_env_headers(var).expect("case");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_headers(&env("Authorization=Bearer t,X-Scope-OrgID=tenant"), VAR)
+            .expect("case");
         assert_eq!(
             out,
             vec![
@@ -471,15 +374,9 @@ mod tests {
 
     #[test]
     fn parse_env_headers_rejects_entry_without_equals() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_NOEQ";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "authorization") };
-        let err = parse_env_headers(var).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let err = parse_env_headers(&env("authorization"), VAR).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains(VAR), "msg was {msg}");
         assert!(msg.contains("#1"), "msg was {msg}");
         assert!(msg.contains("key=value"), "msg was {msg}");
         assert!(!msg.contains("authorization"), "msg leaked entry: {msg}");
@@ -487,15 +384,9 @@ mod tests {
 
     #[test]
     fn parse_env_headers_rejects_empty_key_without_leaking_value() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_EMPTYKEY";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "=supersecrettoken") };
-        let err = parse_env_headers(var).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let err = parse_env_headers(&env("=supersecrettoken"), VAR).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains(VAR), "msg was {msg}");
         assert!(msg.contains("#1"), "msg was {msg}");
         assert!(
             !msg.contains("supersecrettoken"),
@@ -505,31 +396,19 @@ mod tests {
 
     #[test]
     fn parse_env_headers_rejects_non_token_name() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_BADNAME";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "bad name=value") };
-        let err = parse_env_headers(var).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let err = parse_env_headers(&env("bad name=value"), VAR).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains(VAR), "msg was {msg}");
         assert!(msg.contains("#1"), "msg was {msg}");
     }
 
     #[test]
     fn parse_env_headers_invalid_name_does_not_leak_credential() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_LEAK_INVALID_NAME";
         // A pasted `Basic <base64>` credential: the pre-`=` substring `Basic dXNlcjpwYXNz`
         // fails token validation on the space, but must never reach the error.
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "Basic dXNlcjpwYXNz==") };
-        let err = parse_env_headers(var).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let err = parse_env_headers(&env("Basic dXNlcjpwYXNz=="), VAR).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains(VAR), "msg was {msg}");
         assert!(
             !msg.contains("dXNlcjpwYXNz"),
             "error must not leak the pasted credential, msg was {msg}"
@@ -538,15 +417,9 @@ mod tests {
 
     #[test]
     fn parse_env_headers_bare_token_does_not_leak_credential() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_LEAK_BARE_TOKEN";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "glc_secretexampletoken") };
-        let err = parse_env_headers(var).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let err = parse_env_headers(&env("glc_secretexampletoken"), VAR).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains(var), "msg was {msg}");
+        assert!(msg.contains(VAR), "msg was {msg}");
         assert!(
             !msg.contains("glc_secretexampletoken"),
             "error must not leak a bare pasted token, msg was {msg}"
@@ -555,13 +428,8 @@ mod tests {
 
     #[test]
     fn parse_env_headers_missing_equals_does_not_leak_trailing_secret() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_NOEQ_SECRET";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "authorization mysecrettoken") };
-        let err = parse_env_headers(var).expect_err("must reject");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let err =
+            parse_env_headers(&env("authorization mysecrettoken"), VAR).expect_err("must reject");
         assert!(
             !err.to_string().contains("mysecrettoken"),
             "error must not leak a mistyped value, msg was {err}"
@@ -570,17 +438,36 @@ mod tests {
 
     #[test]
     fn parse_env_headers_skips_empty_entries() {
-        let _g = env_guard();
-        let var = "RASTREO_TEST_OTLP_HEADERS_EMPTY_ENTRIES";
-        // SAFETY: env_guard() serialises env-var mutation across tests; no concurrent readers.
-        unsafe { std::env::set_var(var, "authorization=Bearer t,,") };
-        let out = parse_env_headers(var).expect("trailing comma tolerated");
-        // SAFETY: same guard.
-        unsafe { std::env::remove_var(var) };
+        let out = parse_env_headers(&env("authorization=Bearer t,,"), VAR)
+            .expect("trailing comma tolerated");
         assert_eq!(
             out,
             vec![("authorization".to_string(), "Bearer t".to_string())]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_parser_refuses_a_value_that_is_not_utf8() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let env = MapEnv::new().set(VAR, OsString::from_vec(vec![0x66, 0xff, 0x6f]));
+        for msg in [
+            parse_env_protocol(&env, VAR, OtlpProtocol::Grpc)
+                .expect_err("protocol")
+                .to_string(),
+            parse_env_bool(&env, VAR, false)
+                .expect_err("bool")
+                .to_string(),
+            parse_env_u64(&env, VAR, 0).expect_err("u64").to_string(),
+            parse_env_headers(&env, VAR)
+                .expect_err("headers")
+                .to_string(),
+        ] {
+            assert!(msg.contains(VAR), "msg was {msg}");
+            assert!(msg.contains("not valid UTF-8"), "msg was {msg}");
+        }
     }
 
     #[test]

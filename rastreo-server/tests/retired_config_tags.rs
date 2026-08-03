@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
-use rastreo_core::{HickoryResolver, Resolver};
+use rastreo_core::{HickoryResolver, MapEnv, Resolver};
 use rastreo_server::state::{AppState, SinkProbeConfig};
 use rastreo_server::{build_app, spawn_sink_probe};
 use serde_json::json;
@@ -57,8 +57,13 @@ async fn sink_config_rejection(tag: &str) -> String {
         ..SinkProbeConfig::default()
     };
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let (state, probe_task) =
-        spawn_sink_probe(AppState::new(resolver()), &config, shutdown_rx).await;
+    let (state, probe_task) = spawn_sink_probe(
+        AppState::new(resolver()),
+        &config,
+        Arc::new(MapEnv::new()),
+        shutdown_rx,
+    )
+    .await;
     probe_task
         .expect("a rejected sink config is retried until it parses")
         .abort();
