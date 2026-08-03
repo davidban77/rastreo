@@ -8,7 +8,7 @@ The repository ships a Helm chart at `helm/rastreo/` that installs `rastreo-serv
 
 ## Install
 
-The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. The current published chart version is `0.11.0`. <!-- x-release-please-version --> An install with no `--version` pulls the latest published chart. To pin an upgrade intentionally, add `--version` with that version.
+The published chart lives at `oci://ghcr.io/davidban77/charts/rastreo` — each `v*` tag pushes a fresh version. The current published chart version is `0.12.0`. <!-- x-release-please-version --> An install with no `--version` pulls the latest published chart. To pin an upgrade intentionally, add `--version` with that version.
 
 The chart is fail-closed: `POST /scans` requires a bearer token, so an install with no token source stops before it creates anything. The production-safe path keeps the token in a `Secret` you manage and points the chart at it.
 
