@@ -29,7 +29,7 @@ pub enum EncoderConfig {
     Ndjson,
     /// Aligned fixed-width text for reading a scan directly; links and collection profiles are not rendered.
     Table {
-        /// Total line width the columns are laid out within, clamped to `55..=153`.
+        /// Total line width the columns are laid out within, clamped to 55–153.
         #[serde(default = "table::default_width")]
         width: u16,
     },

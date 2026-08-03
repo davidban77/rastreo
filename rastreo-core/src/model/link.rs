@@ -32,9 +32,9 @@ pub struct LinkEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct LinkRecord {
-    /// Schema version tag; always `LINK_CURRENT_SCHEMA_VERSION` for records emitted by this build.
+    /// Schema version tag; `v1` for records emitted by this build. Versioned independently of the device record.
     pub schema_version: String,
-    /// Canonical schema URL; always `LINK_SCHEMA_ID` for records emitted by this build.
+    /// URL of the JSON Schema this record conforms to — the same value as this schema's `$id`.
     pub schema_id: String,
     /// One end of the link; the `a`/`b` ordering is not significant.
     pub a: LinkEndpoint,

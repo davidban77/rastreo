@@ -42,7 +42,7 @@
         },
         {
           "const": "loopback",
-          "description": "Loopback address. Not currently inferred; reserved for future SNMP `ifDescr` signal.",
+          "description": "Loopback address. Reserved; never populated by this build.",
           "type": "string"
         },
         {
@@ -57,17 +57,17 @@
         },
         {
           "const": "carp",
-          "description": "CARP virtual IP. Not currently inferred from MAC because CARP shares the VRRPv2 prefix; reserved for future signal-based detection.",
+          "description": "CARP virtual IP. Reserved; never populated by this build — CARP shares the VRRPv2 MAC prefix, so such an address is reported as `vrrp`.",
           "type": "string"
         },
         {
           "const": "anycast",
-          "description": "Anycast address. Not currently inferred; reserved.",
+          "description": "Anycast address. Reserved; never populated by this build.",
           "type": "string"
         },
         {
           "const": "vip",
-          "description": "Virtual IP (VIP) fronting real IPs. Not currently inferred; reserved.",
+          "description": "Virtual IP (VIP) fronting real IPs. Reserved; never populated by this build.",
           "type": "string"
         }
       ]
@@ -435,7 +435,7 @@
   },
   "$id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`.\nLegacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize;\nconsumers should tag legacy records with an explicit v0 marker before ingest.",
+  "description": "One discovered device: the identity it is keyed by, everything the probers learned about it, and the platform and role the classifier assigned. A device that answered on several addresses arrives as a single record, with the extra addresses under `alt_ips`.",
   "properties": {
     "alt_ips": {
       "description": "Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.",
@@ -450,14 +450,14 @@
       "type": "number"
     },
     "http_server": {
-      "description": "Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `\"nginx\"`; absent (null) when no `HttpBanner` rule with `http_server_capture` matched.",
+      "description": "Web-server product name captured from the device's `HttpBanner` signal by a `platform_rules` entry — for `nginx/1.24.0` holds `\"nginx\"`; absent (null) when no `HttpBanner` rule with `http_server_capture` matched.",
       "type": [
         "string",
         "null"
       ]
     },
     "http_version": {
-      "description": "Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `\"1.24.0\"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.",
+      "description": "Web-server version captured from the device's `HttpBanner` signal by a `platform_rules` entry — for `nginx/1.24.0` holds `\"1.24.0\"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.",
       "type": [
         "string",
         "null"
@@ -539,7 +539,7 @@
       ]
     },
     "role": {
-      "description": "Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open`, `sys_object_id_prefix`, and `signal_match` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.",
+      "description": "Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) assigned by the `rules` classifier from its `ports_open`, `sys_object_id_prefix`, and `signal_match` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.",
       "type": [
         "string",
         "null"
@@ -556,11 +556,11 @@
       "description": "Provenance stamped by the pipeline at scan entry."
     },
     "schema_id": {
-      "description": "Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.",
+      "description": "URL of the JSON Schema this record conforms to — the same value as this schema's `$id`.",
       "type": "string"
     },
     "schema_version": {
-      "description": "Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build.",
+      "description": "Schema version tag; `v1` for records emitted by this build.",
       "type": "string"
     },
     "signals": {
@@ -571,7 +571,7 @@
       "type": "array"
     },
     "ssh_version": {
-      "description": "SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` holds `\"OpenSSH_8.9p1\"`; absent (null) when no `SshBanner` rule with `ssh_version_capture` matched.",
+      "description": "SSH software identifier captured from the device's `SshBanner` signal by a `platform_rules` entry — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` holds `\"OpenSSH_8.9p1\"`; absent (null) when no `SshBanner` rule with `ssh_version_capture` matched.",
       "type": [
         "string",
         "null"

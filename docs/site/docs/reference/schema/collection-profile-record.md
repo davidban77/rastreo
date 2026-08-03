@@ -25,8 +25,8 @@ device with two management endpoints yields two profiles sharing an `identity_ke
 | `note` | string \| null | no | Optional human-readable note about the profile; omitted when unset. |
 | `observed_at` | string (date-time) | yes | RFC 3339 UTC timestamp of when the capability data was observed. |
 | `scan_metadata` | [`ScanMetadata`](#scanmetadata) | yes | Provenance stamped by the pipeline at scan entry. |
-| `schema_id` | string | yes | Canonical schema URL; always `COLLECTION_PROFILE_SCHEMA_ID` for records emitted by this build. |
-| `schema_version` | string | yes | Schema version tag; always `COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION` for records emitted by this build. |
+| `schema_id` | string | yes | URL of the JSON Schema this record conforms to — the same value as this schema's `$id`. |
+| `schema_version` | string | yes | Schema version tag; `v1` for records emitted by this build. Versioned independently of the device record. |
 
 ## Definitions
 

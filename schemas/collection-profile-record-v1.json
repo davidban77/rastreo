@@ -195,11 +195,11 @@
       "description": "Provenance stamped by the pipeline at scan entry."
     },
     "schema_id": {
-      "description": "Canonical schema URL; always `COLLECTION_PROFILE_SCHEMA_ID` for records emitted by this build.",
+      "description": "URL of the JSON Schema this record conforms to — the same value as this schema's `$id`.",
       "type": "string"
     },
     "schema_version": {
-      "description": "Schema version tag; always `COLLECTION_PROFILE_CURRENT_SCHEMA_VERSION` for records emitted by this build.",
+      "description": "Schema version tag; `v1` for records emitted by this build. Versioned independently of the device record.",
       "type": "string"
     }
   },

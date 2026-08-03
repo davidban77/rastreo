@@ -78,17 +78,17 @@ impl Confidence {
 pub enum AltIpRole {
     /// Secondary interface address on the same device.
     Secondary,
-    /// Loopback address. Not currently inferred; reserved for future SNMP `ifDescr` signal.
+    /// Loopback address. Reserved; never populated by this build.
     Loopback,
     /// VRRP virtual IP — detected from the `00:00:5e:00:01:XX` or `00:00:5e:00:02:XX` MAC prefix.
     Vrrp,
     /// HSRP virtual IP — detected from the `00:00:0c:07:ac:XX` MAC prefix.
     Hsrp,
-    /// CARP virtual IP. Not currently inferred from MAC because CARP shares the VRRPv2 prefix; reserved for future signal-based detection.
+    /// CARP virtual IP. Reserved; never populated by this build — CARP shares the VRRPv2 MAC prefix, so such an address is reported as `vrrp`.
     Carp,
-    /// Anycast address. Not currently inferred; reserved.
+    /// Anycast address. Reserved; never populated by this build.
     Anycast,
-    /// Virtual IP (VIP) fronting real IPs. Not currently inferred; reserved.
+    /// Virtual IP (VIP) fronting real IPs. Reserved; never populated by this build.
     Vip,
 }
 
@@ -119,9 +119,7 @@ impl AltIp {
     }
 }
 
-/// Deserialization of `DeviceRecord` requires `schema_version` and `schema_id`.
-/// Legacy NDJSON produced by rastreo v0.5 or earlier will fail to deserialize;
-/// consumers should tag legacy records with an explicit v0 marker before ingest.
+/// One discovered device: the identity it is keyed by, everything the probers learned about it, and the platform and role the classifier assigned. A device that answered on several addresses arrives as a single record, with the extra addresses under `alt_ips`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct DeviceRecord {
@@ -144,16 +142,16 @@ pub struct DeviceRecord {
     /// Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.
     #[serde(default)]
     pub os_version: Option<String>,
-    /// SSH software identifier captured by a `PlatformRule` from `SshBanner` — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` holds `"OpenSSH_8.9p1"`; absent (null) when no `SshBanner` rule with `ssh_version_capture` matched.
+    /// SSH software identifier captured from the device's `SshBanner` signal by a `platform_rules` entry — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` holds `"OpenSSH_8.9p1"`; absent (null) when no `SshBanner` rule with `ssh_version_capture` matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_version: Option<String>,
-    /// Web-server product name captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `"nginx"`; absent (null) when no `HttpBanner` rule with `http_server_capture` matched.
+    /// Web-server product name captured from the device's `HttpBanner` signal by a `platform_rules` entry — for `nginx/1.24.0` holds `"nginx"`; absent (null) when no `HttpBanner` rule with `http_server_capture` matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_server: Option<String>,
-    /// Web-server version captured by a `PlatformRule` from `HttpBanner` — for `nginx/1.24.0` holds `"1.24.0"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.
+    /// Web-server version captured from the device's `HttpBanner` signal by a `platform_rules` entry — for `nginx/1.24.0` holds `"1.24.0"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
-    /// Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) populated by `RulesClassifier` from `ports_open`, `sys_object_id_prefix`, and `signal_match` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.
+    /// Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) assigned by the `rules` classifier from its `ports_open`, `sys_object_id_prefix`, and `signal_match` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.
     pub role: Option<String>,
     /// Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.
     pub confidence: Confidence,
@@ -166,9 +164,9 @@ pub struct DeviceRecord {
     /// Deduplicated `ProbeKind` values whose outcomes contributed to this record. Preserves authoritative provenance from ingest through fusion so consumers do not infer prober attribution from signals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probe_kinds: Vec<ProbeKind>,
-    /// Schema version tag; always `CURRENT_SCHEMA_VERSION` for records emitted by this build.
+    /// Schema version tag; `v1` for records emitted by this build.
     pub schema_version: String,
-    /// Canonical schema URL; always `CURRENT_SCHEMA_ID` for records emitted by this build.
+    /// URL of the JSON Schema this record conforms to — the same value as this schema's `$id`.
     pub schema_id: String,
     /// Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
