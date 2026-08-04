@@ -9,7 +9,7 @@ use rastreo_core::config::{ScenarioEntry, ScenarioKind};
 use super::discover::{
     load_scenario_file, merge_defaults, resolve_scenario_source, scenario_label,
 };
-use super::output::{print_scenario_invalid, OutputMode};
+use super::output::{print_scenario_invalid, print_scenario_valid, print_validated, OutputMode};
 
 #[derive(Parser, Debug)]
 pub struct ValidateArgs {
@@ -52,7 +52,7 @@ pub fn run(args: ValidateArgs, mode: OutputMode) -> Result<()> {
         merge_defaults(&mut cfg.base, &defaults);
         let label = scenario_label(&cfg.base, idx, total);
         match cfg.validate() {
-            Ok(()) => println!("{label}: ok"),
+            Ok(()) => print_scenario_valid(&label, mode),
             Err(err) => {
                 invalid += 1;
                 print_scenario_invalid(&label, &err.to_string());
@@ -61,7 +61,7 @@ pub fn run(args: ValidateArgs, mode: OutputMode) -> Result<()> {
     }
 
     if invalid == 0 {
-        println!("{total} scenario(s) validated: all valid");
+        print_validated(total, mode);
         Ok(())
     } else {
         Err(anyhow!("{invalid} of {total} scenario(s) invalid"))

@@ -726,6 +726,7 @@ async fn build_resolved_plan(
         .resolve(resolution))
 }
 
+// No verbosity reaches the plan: it is the only channel carrying what the run would do.
 fn render_dry_run(plans: &[DiscoveryPlan], format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Table => print!("{}", render_dry_run_text(plans)),

@@ -93,7 +93,7 @@ pub async fn run(cli: Cli, cancel: tokio::sync::watch::Receiver<bool>) -> Result
         Command::Discover(args) => discover::run(args, cancel, verbosity).await,
         #[cfg(feature = "config")]
         Command::Catalog(args) => match args.action {
-            CatalogAction::List => catalog::run_list(),
+            CatalogAction::List => catalog::run_list(OutputMode::from(verbosity)),
         },
         #[cfg(feature = "config")]
         Command::Validate(args) => validate::run(args, OutputMode::from(verbosity)),

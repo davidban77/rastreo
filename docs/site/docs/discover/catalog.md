@@ -96,6 +96,8 @@ When the search path holds no scenarios (every directory is missing or empty), t
 no catalog scenarios found (searched: /home/dave/.config/rastreo/catalog, /etc/rastreo/catalog)
 ```
 
+`-q` silences that note, which is consent to silence rather than a free trade: the empty listing tells you there were no scenarios, but only the note tells you which directories were searched — the thing you want when the answer comes back empty and you expected otherwise. It never silences the listing itself — nothing but the listing carries the names — so `rastreo catalog list -q` on a populated search path prints exactly the same lines on stdout. A script that reads the names can therefore run under `-q` and get stdout only.
+
 ## Restrictions
 
 - **No path separators** in the name. `@subdir/foo` and `@..\/foo` are rejected. Files must live directly inside a catalog directory; no subdirectory navigation.

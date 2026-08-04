@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use rastreo_core::{Env, SystemEnv};
 
+use super::output::{print_catalog_empty, OutputMode};
+
 const CATALOG_DIR_ENV: &str = "RASTREO_CATALOG_DIR";
 const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 const HOME_ENV: &str = "HOME";
@@ -23,12 +25,13 @@ pub fn list_catalog() -> Vec<(String, PathBuf)> {
     list_catalog_with_env(&SystemEnv)
 }
 
-pub fn run_list() -> Result<()> {
+pub fn run_list(mode: OutputMode) -> Result<()> {
     let entries = list_catalog();
     if entries.is_empty() {
-        super::output::print_catalog_empty(&none_found_message(&search_dirs(&SystemEnv)));
+        print_catalog_empty(&none_found_message(&search_dirs(&SystemEnv)), mode);
         return Ok(());
     }
+    // No verbosity reaches the listing: it is the only channel carrying the names.
     print!("{}", format_listing(&entries));
     Ok(())
 }
