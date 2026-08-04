@@ -365,10 +365,15 @@ fn port_that_reaches_no_selected_prober_is_reported_as_a_no_op() {
 }
 
 #[test]
-fn quiet_suppresses_the_selection_notes() {
+fn quiet_suppresses_the_selection_notes_and_keeps_the_plan() {
     let output = discover(&["--target", "127.0.0.1", "--port", "8080", "--dry-run", "-q"]);
     assert!(output.status.success(), "{}", stderr_of(&output));
     assert!(stderr_of(&output).is_empty(), "{}", stderr_of(&output));
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("[dry-run] would run 1 scenario") && stdout.contains("total probes:"),
+        "the plan is the only channel carrying what the run would do: {stdout}"
+    );
 }
 
 #[cfg(all(feature = "config", feature = "snmp"))]

@@ -83,6 +83,19 @@ The command exits `0`. Every scenario is valid.
 
 The command checks every scenario in the file, even after one fails. One run tells you about all the problems, not just the first.
 
+`-q` cuts it down to the failures. The `ok` lines and the `N scenario(s) validated: all valid` summary go; the per-scenario reasons and the final `Error:` line stay, because they and the exit code are the answer — a run that refuses says what it refused and why, whatever the verbosity. Run the clean file from [A valid scenario](#a-valid-scenario) under `-q` and it writes nothing at all, on either stream:
+
+```bash
+rastreo validate office.yml -q
+echo "exit $?"
+```
+
+```text
+exit 0
+```
+
+A file with a broken scenario keeps that scenario's reason and the `Error:` line and exits `1`, exactly as it does without the flag — see [Catching an invalid sink](#catching-an-invalid-sink) for the same file linted both ways. Lint a directory under `-q` and the log stays empty until something is wrong.
+
 ## Catching an invalid sink
 
 A common mistake is an empty Kafka `topic`. This file has one valid scenario and one with a blank topic:
@@ -125,6 +138,17 @@ Error: 1 of 2 scenario(s) invalid
 ```
 
 The command exits `1`. The valid scenario still reports `ok`; only the broken one is flagged.
+
+Under `-q` the same file keeps everything that says what is wrong and drops everything that says what is right:
+
+```bash
+rastreo validate two-scenarios.yml -q
+```
+
+```text
+scenario 'web-tier' (2 of 2): kafka sink: topic is empty
+Error: 1 of 2 scenario(s) invalid
+```
 
 Another common mistake is a TLS block that would accept any certificate. Setting `verify: false` with a `ca_cert` present is rejected, because the CA certificate would be read only when `verify: true` — a silent misconfiguration:
 
@@ -455,7 +479,7 @@ for scenario in scenarios/*.yml; do
 done
 ```
 
-The per-scenario `ok` lines and the final summary go to stdout and stderr, so the job log shows exactly which scenario failed and why. The runner needs no network access and no broker: `validate` opens no connection.
+The `ok` lines and the final summary go to stdout, and the reason each invalid scenario gives goes to stderr, so the job log shows exactly which scenario failed and why. Add `-q` when you want a log that stays empty until something is wrong — see [Reading the output](#reading-the-output). The runner needs no network access and no broker: `validate` opens no connection.
 
 It does need whatever local state the scenario's probers and fusers read when they are built. A CI runner is rarely the same machine as your scanner, so this is where a verdict stops being portable. Read [The verdict is about the host you run on](#the-verdict-is-about-the-host-you-run-on) before you rely on the result.
 

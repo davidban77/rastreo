@@ -19,7 +19,9 @@ pub(crate) use hints::{
 };
 pub(crate) use progress::{progress_display_loop, progress_style};
 #[cfg(feature = "config")]
-pub(crate) use report::{print_catalog_empty, print_scenario_invalid};
+pub(crate) use report::{
+    print_catalog_empty, print_scenario_invalid, print_scenario_valid, print_validated,
+};
 pub(crate) use width::stdout_table_width;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,8 +51,8 @@ impl Verbosity {
     }
 }
 
-/// What stderr carries, given the verbosity flags, whether the user asked for machine output, and
-/// where the record stream lands relative to stderr.
+/// What a run says about its result, given the verbosity flags, whether the user asked for machine
+/// output, and where the record stream lands relative to stderr. Refusal printers take no gate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OutputMode {
     verbosity: Verbosity,
@@ -78,7 +80,7 @@ impl OutputMode {
         self.destination
     }
 
-    /// Banners and the progress line.
+    /// Banners, the progress line, and `validate`'s `ok` lines and summary.
     pub(crate) fn prints_chrome(self) -> bool {
         self.verbosity.prints_chrome()
             && !self.would_land_in_the_record_stream()
@@ -128,29 +130,167 @@ pub(super) fn rust_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    #[test]
-    fn no_cli_source_outside_output_writes_to_stderr() {
-        let cli = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli");
-        let files = rust_sources(&cli);
-        assert!(files.len() > 3, "expected to walk the cli source tree");
+    const STDERR_WRITES: [&str; 3] = ["eprintln!", "eprint!", "stderr()"];
+    const STDOUT_MACROS: [&str; 2] = ["println!", "print!"];
+    const STDOUT_HANDLE: [&str; 1] = ["stdout()"];
 
-        let output_dir = cli.join("output");
-        let offenders: Vec<String> = files
+    /// Each file outside `cli/output/` that writes an answer to stdout, and how many times.
+    const STDOUT_WRITES_OUTSIDE_OUTPUT: [(&str, usize); 2] =
+        [("cli/catalog.rs", 1), ("cli/discover.rs", 2)];
+
+    fn src_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn write_sites(body: &str, forms: &[&str]) -> usize {
+        forms
             .iter()
-            .filter(|p| !p.starts_with(&output_dir))
-            .filter(|p| {
-                let body = std::fs::read_to_string(p).expect("read source");
-                body.contains("eprintln!") || body.contains("eprint!")
+            .map(|form| {
+                body.match_indices(form)
+                    .filter(|(at, _)| {
+                        !body[..*at]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    })
+                    .count()
             })
-            .map(|p| p.display().to_string())
+            .sum()
+    }
+
+    fn sources_outside_output() -> Vec<PathBuf> {
+        let src = src_dir();
+        let files = rust_sources(&src);
+        assert!(files.len() > 3, "expected to walk the crate source tree");
+        let output_dir = src.join("cli").join("output");
+        files
+            .into_iter()
+            .filter(|p| !p.starts_with(&output_dir))
+            .collect()
+    }
+
+    fn body_of(path: &Path) -> String {
+        std::fs::read_to_string(path).expect("read source")
+    }
+
+    fn relative(path: &Path) -> String {
+        path.strip_prefix(src_dir())
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn no_source_outside_output_writes_to_stderr() {
+        let offenders: Vec<String> = sources_outside_output()
+            .iter()
+            .filter(|p| write_sites(&body_of(p), &STDERR_WRITES) > 0)
+            .map(|p| relative(p))
             .collect();
 
         assert!(
             offenders.is_empty(),
-            "terminal output belongs in cli/output/, where Verbosity and the theme are applied; \
-             found direct stderr writes in {offenders:?}"
+            "terminal output belongs in cli/output/, where Verbosity and the theme are applied. \
+             This walks src/ outside cli/output/ for `eprintln!`, `eprint!`, and a `stderr()` \
+             handle, so a write cannot dodge it through `writeln!`. Found: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_named_answers_write_to_stdout_outside_output() {
+        let src = src_dir();
+        for (named, _) in STDOUT_WRITES_OUTSIDE_OUTPUT {
+            assert!(
+                src.join(named).is_file(),
+                "{named} is pinned here but does not exist; point the entry at the file that \
+                 writes the answer, or drop it"
+            );
+        }
+
+        let mut by_hand: Vec<String> = Vec::new();
+        let mut off_by: Vec<String> = Vec::new();
+        for path in sources_outside_output() {
+            let body = body_of(&path);
+            if write_sites(&body, &STDOUT_HANDLE) > 0 {
+                by_hand.push(relative(&path));
+            }
+            let pinned = STDOUT_WRITES_OUTSIDE_OUTPUT
+                .iter()
+                .find(|(named, _)| src.join(named) == path)
+                .map_or(0, |(_, count)| *count);
+            let found = write_sites(&body, &STDOUT_MACROS);
+            if found != pinned {
+                off_by.push(format!("{}: {found}, pinned at {pinned}", relative(&path)));
+            }
+        }
+
+        assert!(
+            by_hand.is_empty(),
+            "a `stdout()` handle writes past the Verbosity gate and past the count below, since \
+             `writeln!(std::io::stdout(), ..)` names no print macro. Outside cli/output/ the \
+             answers reach stdout through the macro family so this walk can count them. \
+             Found: {by_hand:?}"
+        );
+        assert!(
+            off_by.is_empty(),
+            "the only stdout writes outside cli/output/ are the answers no verbosity flag reaches \
+             — the catalog listing, and the dry-run plan once per --format. Adding, moving, or \
+             deleting one means changing the pinned count. Whether a counted write is *gated* is \
+             beyond a source walk: the -q runs in tests/quiet_flag.rs and \
+             tests/cli_probe_selection.rs are what pin that. Off by: {off_by:?}"
+        );
+    }
+
+    #[test]
+    fn a_stderr_write_is_not_read_as_a_stdout_one() {
+        assert_eq!(
+            write_sites("eprintln!(\"x\"); eprint!(\"x\");", &STDERR_WRITES),
+            2
+        );
+        assert_eq!(
+            write_sites("eprintln!(\"x\"); eprint!(\"x\");", &STDOUT_MACROS),
+            0
+        );
+        assert_eq!(
+            write_sites("println!(\"x\"); print!(\"x\");", &STDOUT_MACROS),
+            2
+        );
+        assert_eq!(
+            write_sites("println!(\"x\"); print!(\"x\");", &STDERR_WRITES),
+            0
+        );
+        assert_eq!(write_sites("writeln!(out, \"x\");", &STDOUT_MACROS), 0);
+        assert_eq!(
+            write_sites("writeln!(std::io::stdout(), \"x\");", &STDOUT_HANDLE),
+            1
+        );
+        assert_eq!(
+            write_sites("writeln!(std::io::stderr(), \"x\");", &STDERR_WRITES),
+            1
+        );
+        assert_eq!(
+            write_sites("writeln!(std::io::stderr(), \"x\");", &STDOUT_HANDLE),
+            0
+        );
+    }
+
+    #[test]
+    fn a_name_ending_in_stdout_is_not_read_as_a_stream_handle() {
+        assert_eq!(
+            write_sites("fn a_run_writes_to_stdout() {}", &STDOUT_HANDLE),
+            0
+        );
+        assert_eq!(
+            write_sites("theme::stderr_supports_colour()", &STDERR_WRITES),
+            0
+        );
+        // main.rs hands tracing the fn item, not a handle; the walk covers src/ only because of it.
+        assert_eq!(
+            write_sites(".with_writer(std::io::stderr)", &STDERR_WRITES),
+            0
         );
     }
 

@@ -196,6 +196,9 @@ fn scenario_file(dir: &tempfile::TempDir, name: &str, contents: &str) -> std::pa
 #[cfg(feature = "config")]
 const ONE_BAD_ONE_GOOD: &str = "version: 1\nkind: discovery\ndefaults:\n  timeout_ms: 50\n  sink:\n    type: stdout\nscenarios:\n  - signal_type: discover\n    name: bad\n    targets:\n      - Range:\n          start: \"10.0.0.5\"\n          end: \"10.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [9]\n  - signal_type: discover\n    name: good\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [9]\n";
 
+#[cfg(feature = "config")]
+const ONE_VALID_SCENARIO: &str = "version: 1\nkind: discovery\nscenarios:\n  - signal_type: discover\n    name: good\n    sink:\n      type: stdout\n    targets:\n      - Ip: \"127.0.0.1\"\n    probers:\n      - type: tcp_connect\n        ports: [9]\n";
+
 // A workspace-wide build unifies every prober feature on, so the gated variant must be one nothing
 // else enables; each test asserts the parse failed, so a build that turns it on fails loudly.
 #[cfg(all(feature = "config", not(feature = "mib_enrichment")))]
@@ -296,6 +299,121 @@ fn quiet_suppresses_the_feature_gate_hint_on_validate() {
     assert!(
         !stderr.contains("hint:"),
         "-q must suppress the feature-gate hint: {stderr}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[test]
+fn quiet_validate_of_a_clean_file_writes_nothing_and_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scenario_file(&dir, "clean.yml", ONE_VALID_SCENARIO);
+
+    let output = common::rastreo()
+        .args(["validate", "-q"])
+        .arg(&path)
+        .output()
+        .expect("spawn rastreo");
+
+    assert!(output.status.success(), "a valid file must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.is_empty(), "the ok line leaked under -q: {stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "quiet stderr must be empty: {stderr}");
+}
+
+#[cfg(feature = "config")]
+#[test]
+fn quiet_validate_names_what_is_broken_and_drops_what_passed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scenario_file(&dir, "mixed.yml", ONE_BAD_ONE_GOOD);
+
+    let output = common::rastreo()
+        .args(["validate", "-q"])
+        .arg(&path)
+        .output()
+        .expect("spawn rastreo");
+
+    assert_eq!(output.status.code(), Some(1), "an invalid file must exit 1");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("scenario 'bad'") && stderr.contains("IP range is invalid"),
+        "-q suppresses status output, not failures: {stderr}"
+    );
+    assert!(
+        stderr.contains("1 of 2 scenario(s) invalid"),
+        "the final verdict is a failure and survives -q: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.is_empty(),
+        "the ok line of the scenario that passed leaked under -q: {stdout}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[test]
+fn validate_without_quiet_reports_every_scenario_and_the_summary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scenario_file(&dir, "clean.yml", ONE_VALID_SCENARIO);
+
+    let output = common::rastreo()
+        .arg("validate")
+        .arg(&path)
+        .output()
+        .expect("spawn rastreo");
+
+    assert!(output.status.success(), "a valid file must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("scenario 'good' (1 of 1): ok"), "{stdout}");
+    assert!(
+        stdout.contains("1 scenario(s) validated: all valid"),
+        "{stdout}"
+    );
+}
+
+#[cfg(feature = "config")]
+#[test]
+fn quiet_catalog_list_still_prints_the_listing_it_was_asked_for() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    scenario_file(&dir, "office.yml", ONE_VALID_SCENARIO);
+
+    let output = common::rastreo()
+        .env("RASTREO_CATALOG_DIR", dir.path())
+        .args(["catalog", "list", "-q"])
+        .output()
+        .expect("spawn rastreo");
+
+    assert!(output.status.success(), "listing a catalog must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("@office"),
+        "the listing is the answer, not status about one: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "quiet stderr must be empty: {stderr}");
+}
+
+#[cfg(feature = "config")]
+#[test]
+fn quiet_catalog_list_of_an_empty_search_path_writes_nothing_and_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let output = common::rastreo()
+        .env("RASTREO_CATALOG_DIR", dir.path())
+        .args(["catalog", "list", "-q"])
+        .output()
+        .expect("spawn rastreo");
+
+    assert!(output.status.success(), "an empty catalog is not an error");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.is_empty(),
+        "nothing to list, nothing listed: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.is_empty(),
+        "the none-found line leaked under -q: {stderr}"
     );
 }
 
