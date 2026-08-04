@@ -6,6 +6,24 @@ pub(crate) fn answered_with_no_addresses(err: &ResolverError) -> bool {
         // `NetError` is #[non_exhaustive]; hickory's own predicate answers false for every other variant, so an unrecognized DNS failure stays fatal.
         ResolverError::DnsLookupFailed { source, .. } => source.net_error().is_no_records_found(),
         ResolverError::DnsNoRecords { .. } => true,
+        // A name that never became a query is no answer at all; `skips_only_this_target` is what decides it.
+        ResolverError::UnqueryableTargetName { .. }
+        | ResolverError::CidrTooLarge { .. }
+        | ResolverError::RangeTooLarge { .. }
+        | ResolverError::InvalidRange { .. }
+        | ResolverError::MixedFamilyRange { .. }
+        | ResolverError::TargetNotAllowed { .. }
+        | ResolverError::AggregateHostCapExceeded { .. } => false,
+    }
+}
+
+/// Whether the whole loss is one target contributing no addresses, so the scan skips it and runs on.
+pub(crate) fn skips_only_this_target(err: &ResolverError) -> bool {
+    match err {
+        ResolverError::DnsLookupFailed { .. } | ResolverError::DnsNoRecords { .. } => {
+            answered_with_no_addresses(err)
+        }
+        ResolverError::UnqueryableTargetName { .. } => true,
         ResolverError::CidrTooLarge { .. }
         | ResolverError::RangeTooLarge { .. }
         | ResolverError::InvalidRange { .. }
@@ -108,6 +126,63 @@ mod tests {
         }));
     }
 
+    fn malformed_response() -> NetError {
+        use hickory_resolver::proto::op::Message;
+        use hickory_resolver::proto::serialize::binary::BinDecodable;
+
+        NetError::Proto(
+            Message::from_bytes(&[0xff, 0xff, 0xff])
+                .expect_err("garbage is not a DNS message")
+                .into(),
+        )
+    }
+
+    // The same `ProtoError` an unparseable target name raises, arriving from the wire instead.
+    #[test]
+    fn a_nameserver_returning_a_malformed_response_still_refuses_the_whole_scan() {
+        let err = lookup_failed(malformed_response());
+        assert!(!answered_with_no_addresses(&err));
+        assert!(!skips_only_this_target(&err));
+    }
+
+    #[test]
+    fn a_name_that_never_became_a_query_is_not_an_answer_but_is_still_skipped() {
+        let err = ResolverError::UnqueryableTargetName {
+            name: "fe80::1%eth0".into(),
+        };
+        assert!(!answered_with_no_addresses(&err));
+        assert!(skips_only_this_target(&err));
+    }
+
+    #[test]
+    fn the_two_predicates_agree_on_every_dns_failure() {
+        let answers = [
+            lookup_failed(NetError::from(NoRecords::new(
+                query("missing.lab."),
+                ResponseCode::NXDomain,
+            ))),
+            lookup_failed(NetError::from(NoRecords::new(
+                query("missing.lab."),
+                ResponseCode::NoError,
+            ))),
+            ResolverError::DnsNoRecords {
+                name: "missing.lab".into(),
+            },
+            lookup_failed(NetError::Timeout),
+            lookup_failed(NetError::Dns(DnsError::ResponseCode(
+                ResponseCode::ServFail,
+            ))),
+            lookup_failed(malformed_response()),
+        ];
+        for err in answers {
+            assert_eq!(
+                skips_only_this_target(&err),
+                answered_with_no_addresses(&err),
+                "{err} must be skipped exactly when the network answered it has none"
+            );
+        }
+    }
+
     #[test]
     fn a_refusal_that_discards_enumerable_work_stays_fatal() {
         for err in [
@@ -132,6 +207,7 @@ mod tests {
             },
         ] {
             assert!(!answered_with_no_addresses(&err), "{err} must stay fatal");
+            assert!(!skips_only_this_target(&err), "{err} must stay fatal");
         }
     }
 
@@ -147,6 +223,7 @@ mod tests {
             },
         ] {
             assert!(!answered_with_no_addresses(&err), "{err} must stay fatal");
+            assert!(!skips_only_this_target(&err), "{err} must stay fatal");
         }
     }
 }

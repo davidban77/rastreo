@@ -213,7 +213,7 @@ fn a_dry_run_with_nothing_to_probe_puts_its_hint_in_the_merged_capture() {
     let (status, captured) = merged_redirect(cmd);
     assert_refused(status, &captured);
     assert!(
-        captured.contains("hint: Every name the scan was given answered with no addresses"),
+        captured.contains("hint: Either the network answered that these names have no addresses"),
         "the diagnosis travels with the error it explains: {captured:?}"
     );
 }
@@ -271,7 +271,7 @@ scenarios:
         "the run produced records before it refused: {captured:?}"
     );
     assert!(
-        captured.contains("hint: Every name the scan was given answered with no addresses"),
+        captured.contains("hint: Either the network answered that these names have no addresses"),
         "the diagnosis travels with the error it explains: {captured:?}"
     );
     assert!(

@@ -215,6 +215,40 @@ fn a_scenario_that_produced_a_summary_and_then_failed_is_named_failed() {
 }
 
 #[test]
+fn a_target_name_no_lookup_can_be_written_for_leaves_the_rest_of_the_scan_completed() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let port = open_port(&listener);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("run.json");
+
+    let output = scan_of_one_open_port(
+        port,
+        &[
+            "--target",
+            "192.168.1.1:80",
+            "--run-report",
+            &path.to_string_lossy(),
+        ],
+    )
+    .output()
+    .expect("spawn rastreo");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "one unusable name must not abort the scan; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = read_report(&path);
+    assert_eq!(report["scenarios"][0]["outcome"], "completed");
+    assert_eq!(
+        report["scenarios"][0]["summary"]["unresolvable_targets"],
+        serde_json::json!(["192.168.1.1:80"])
+    );
+    assert_eq!(report["scenarios"][0]["summary"]["records_emitted"], 1);
+}
+
+#[test]
 fn an_unwritable_report_path_does_not_replace_the_scans_own_diagnosis() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("no-such-directory").join("run.json");
@@ -226,7 +260,7 @@ fn an_unwritable_report_path_does_not_replace_the_scans_own_diagnosis() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr.contains("every target resolved to no addresses"),
+        stderr.contains("every target is unresolvable"),
         "the scan's own refusal is what the operator reads: {stderr}"
     );
     assert!(

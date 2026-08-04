@@ -57,7 +57,7 @@
         },
         {
           "const": "unresolvable",
-          "description": "This target resolved to no addresses; the scan probes it zero times and runs on.",
+          "description": "This target contributes no addresses; the scan probes it zero times and runs on.",
           "type": "string"
         },
         {

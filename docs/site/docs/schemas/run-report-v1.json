@@ -133,7 +133,7 @@
           "type": "integer"
         },
         "unresolvable_targets": {
-          "description": "Targets the network answered for with no addresses, as written in the scenario and in input\norder; each was probed zero times. Empty when every target resolved.",
+          "description": "Targets that contributed no addresses, as written in the scenario and in input order; each\nwas probed zero times. Empty when every target resolved.",
           "items": {
             "type": "string"
           },

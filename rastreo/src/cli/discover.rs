@@ -42,7 +42,7 @@ use super::probe_args::{parse_probe_ports, DnsQueryTypeArg, UdpProtocolArg, PROB
 
 const FLAG_DRIVEN_LABEL: &str = "discover";
 const NOTHING_TO_PROBE_HINT: &str =
-    "Every name the scan was given answered with no addresses. Check the names and the resolver configuration, or drop the stale ones from the target list.";
+    "Either the network answered that these names have no addresses, or they are not names a DNS query can carry: a port, brackets, or a zone suffix in a hostname. Check the target list for typos, then the resolver configuration.";
 const DEFAULT_CONCURRENCY: u32 = 64;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CHECKPOINT_INTERVAL: usize = 5000;
@@ -508,7 +508,7 @@ fn refuse_nothing_to_probe(
     }
     print_refusal_hint(NOTHING_TO_PROBE_HINT, mode);
     Err(anyhow!(
-        "every target resolved to no addresses ({}); there is nothing to probe",
+        "every target is unresolvable ({}); there is nothing to probe",
         unresolvable.join(", ")
     ))
 }
@@ -2026,12 +2026,12 @@ mod tests {
     #[test]
     fn a_scan_that_failed_keeps_its_diagnosis_when_the_report_could_not_be_written() {
         let err = run_outcome(
-            Err(anyhow!("every target resolved to no addresses")),
+            Err(anyhow!("every target is unresolvable")),
             Err(anyhow!("run report could not be written to /nope/run.json")),
         )
         .expect_err("the run failed");
         assert!(
-            err.to_string().contains("every target resolved"),
+            err.to_string().contains("every target is unresolvable"),
             "the scan's own failure is what the operator reads: {err}"
         );
     }
@@ -3445,6 +3445,23 @@ scenarios:
     #[test]
     fn a_target_set_that_wholly_resolved_is_never_refused() {
         assert!(refuse_nothing_to_probe(2, &[], quiet()).is_ok());
+    }
+
+    #[test]
+    fn the_refusal_and_its_hint_hold_for_a_target_no_lookup_was_performed_on() {
+        let err = refuse_nothing_to_probe(1, &["192.168.1.1:80".to_string()], quiet())
+            .expect_err("a scan that probed nothing did not succeed");
+        let refusal = err.to_string().to_lowercase();
+        assert!(refusal.contains("192.168.1.1:80"), "{refusal}");
+        assert!(
+            !refusal.contains("resolved to") && !refusal.contains("answered"),
+            "a target that was never looked up neither resolved nor answered: {refusal}"
+        );
+        let hint = NOTHING_TO_PROBE_HINT.to_lowercase();
+        assert!(
+            hint.contains("dns query can carry"),
+            "the hint must name the kind of target no lookup was performed for: {hint}"
+        );
     }
 
     #[test]

@@ -367,7 +367,7 @@ The summary fields, also published as a JSON Schema — it is the `DiscoverySumm
 | Field | Meaning |
 |---|---|
 | `targets_resolved` | Addresses the scan probed after CIDR, range, and DNS expansion. |
-| `unresolvable_targets` | Targets the network answered for with no addresses, as written in the request and in the order you sent them. Each was probed zero times and the rest of the scan ran as asked. Omitted when every target resolved. |
+| `unresolvable_targets` | Targets that contributed no addresses, as written in the request and in the order you sent them. Two kinds appear here: a name the network answered for with none, and a name no DNS query could carry. Each was probed zero times and the rest of the scan ran as asked. Omitted when every target resolved. |
 | `probe_attempts` | Probes started: `targets_resolved` × number of probers. |
 | `error_counts` | Faulted probes tallied by fault kind, as a JSON object — for example `{"decode_failed": 1}`. A kind appears only when it happened at least once, so a scan with no faults omits the field. A target that stays silent is a normal result, not a fault. See [Reachable, unreachable, and probe faults](../probe/index.md#reachable-unreachable-and-probe-faults). |
 | `records_emitted` | `DeviceRecord` events produced. By default only targets that at least one prober reached produce a record. |
@@ -492,9 +492,9 @@ Error surfaces:
 | `403`  | The target allow-list is set and a resolved target falls outside every allowed network. The whole request is rejected and nothing is probed. See [Restricting scan targets](#restricting-scan-targets). |
 | `413`  | The request body exceeded `RASTREO_MAX_BODY_BYTES`. Rejected before the JSON body is parsed. See [Restricting scan targets](#restricting-scan-targets). |
 | `429`  | `RASTREO_MAX_INFLIGHT_SCANS` real scans are already running. The body is `{"error":"inflight scan limit reached; retry once running scans complete"}`. A dry-run never counts against the cap and is never rejected. Setting the cap to `0` disables it. See [POST /scans](#post-scans). |
-| `400`  | The scenario failed validation — empty `targets`, empty `probers`, a backwards or mixed-family target range, a prober rastreo cannot build, a malformed `fuser` block, a `classifier` rule rastreo cannot compile (an unbalanced regex in `platform_rules`, a `sys_object_id_prefix` that is not dotted-decimal), a retired field, or a `retries` value above 1024. Also a malformed JSON body, a request over `RASTREO_MAX_TOTAL_HOSTS`, or a target-resolution error the caller can fix — a CIDR or range that expands past the host limit, or a name that resolved to no records. A `sink` or an `encoder` never causes a `400`, because the server drops both before it validates anything. A dry-run is refused on the same terms as a real scan. |
+| `400`  | The scenario failed validation — empty `targets`, empty `probers`, a backwards or mixed-family target range, a prober rastreo cannot build, a malformed `fuser` block, a `classifier` rule rastreo cannot compile (an unbalanced regex in `platform_rules`, a `sys_object_id_prefix` that is not dotted-decimal), a retired field, or a `retries` value above 1024. Also a malformed JSON body, a request over `RASTREO_MAX_TOTAL_HOSTS`, or a CIDR or range that expands past the per-target host limit. A target that contributes no addresses is not one of these: the scan skips it and answers `200`. A `sink` or an `encoder` never causes a `400`, because the server drops both before it validates anything. A dry-run is refused on the same terms as a real scan. |
 | `500`  | Internal probe / encoder / sink / runtime error. What the body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). |
-| `503`  | A DNS lookup for a target name failed, or the request exceeded `--request-timeout-ms`. What a DNS-failure body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
+| `503`  | A DNS lookup said nothing about the name — the server could not reach its resolver, or the lookup timed out or returned a server error. Also when the request exceeded `--request-timeout-ms`. What a DNS-failure body says depends on whether the caller authenticated — see [What a 5xx body tells you](#what-a-5xx-body-tells-you). A timed-out scan has its in-flight probes stopped and is counted as `rastreo_server_scans_total{outcome="cancelled"}`. |
 
 Most errors carry a JSON body of the shape `{"error": "<message>"}`. Three are different:
 
@@ -531,13 +531,13 @@ Redaction is the default for every other error the API builds. The scan endpoint
 
 Before a scan probes anything, you can preview exactly what it would do. Add `?dry_run=true` to the request. The server resolves every target and returns a discovery plan with HTTP 200. A dry-run runs no probers and writes to no sink.
 
-A scenario the scan would refuse has no plan either. The server applies the same check on both paths, and answers a refusal with the status the scan would answer — `400` for an invalid scenario or unresolvable client input, `503` when the server's own DNS failed. An out-of-allow-list target is the one exception, and it is deliberate: the dry-run comes back `200` with a plan naming the blocked target, where the scan answers `403`. That case is worked through at the end of this section.
+A scenario the scan would refuse has no plan either. The server applies the same check on both paths, and answers a refusal with the status the scan would answer — `400` for an invalid scenario or a target the caller can fix, `503` when the server's own DNS failed. An out-of-allow-list target is the one exception, and it is deliberate: the dry-run comes back `200` with a plan naming the blocked target, where the scan answers `403`. That case is worked through at the end of this section.
 
 ```json
 {"error":"scenario.probers must not be empty"}
 ```
 
-A target the network says has no addresses is not a refusal, so it answers `200` with the plan; the target carries `"resolution": "unresolvable"` and the rest of the scan is counted normally. Submit the same body without `?dry_run=true` and the completed scan names that target again in `summary.unresolvable_targets` — same string, same order, so a caller holding a plan and a summary reconciles them by the target as written.
+A target that contributes no addresses is not a refusal, so it answers `200` with the plan; the target carries `"resolution": "unresolvable"` and the rest of the scan is counted normally. That covers both a name the network answered for with none and a name no DNS query could carry — see [Names rastreo cannot look up](../discover/targets.md#names-rastreo-cannot-look-up). Submit the same body without `?dry_run=true` and the completed scan names that target again in `summary.unresolvable_targets` — same string, same order, so a caller holding a plan and a summary reconciles them by the target as written.
 
 Use a dry-run to validate a scenario before it probes the network:
 
@@ -563,7 +563,7 @@ The response is a `DiscoveryPlan`. Its fields are:
 
 - `scenario` — the scenario name, or `unnamed` when the request omits `name`.
 - `targets` — one entry per target you sent, each with the original `target` spec and a `resolution`.
-- `resolution` — one of three states. `resolved` carries the address count and the first few addresses; `resolved.total` is every address the scan would probe for that target, and `resolved.sample` holds the first six, so planning a `/16` costs no more than planning one host. The bare string `unresolvable` means the network answered that the target has no addresses — the scan skips it and probes the rest. `error` carries the reason the scan would abort rather than run without this target.
+- `resolution` — one of three states. `resolved` carries the address count and the first few addresses; `resolved.total` is every address the scan would probe for that target, and `resolved.sample` holds the first six, so planning a `/16` costs no more than planning one host. The bare string `unresolvable` means the target contributes no addresses, so the scan skips it and probes the rest. Either the network answered that the name has none, or no DNS query could carry the name. `error` carries the reason the scan would abort rather than run without this target.
 - `probers` — a readable summary of each prober the scan would run.
 - `fuser` — the fuser chain that would merge probe results into device records, outermost layer first.
 - `classifier` — the classifier that would derive the canonical `platform`, `role`, and version fields, with the number of rules the request added.
