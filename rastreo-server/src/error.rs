@@ -89,6 +89,8 @@ fn status_for(err: &RastreoError) -> StatusCode {
         RastreoError::Sink(_) => StatusCode::INTERNAL_SERVER_ERROR,
         RastreoError::Runtime(_) => StatusCode::INTERNAL_SERVER_ERROR,
         RastreoError::Resume(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        // Storing a run report is the server's own filesystem, never anything the caller sent.
+        RastreoError::Report(_) => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

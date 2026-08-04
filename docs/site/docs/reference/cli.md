@@ -29,7 +29,7 @@ Everything in this table goes to **stderr**. Records always go to the sink (stdo
 | `-v` | yes | yes | yes | yes | yes | `debug` |
 | `-vv` and up | yes | yes | yes | yes | yes | `trace` |
 
-A successful `-q` run writes nothing at all to stderr, which makes it the right choice for a cron job or a pipeline step. Errors still print — `-q` suppresses status output, not failures.
+A successful `-q` run writes nothing at all to stderr, which makes it the right choice for a cron job or a pipeline step. Errors still print — `-q` suppresses status output, not failures. Because it silences the completion banner as well, pair it with [`--run-report <PATH>`](../discover/cli.md#run-report) when the job needs the counters back: the report is a file and is written whatever the verbosity.
 
 `--format json` cuts the same rows as `-q` except hints, which stay: they go to stderr, and they are the most useful thing to read when a scan comes back empty. `-v` brings the banners back.
 
@@ -100,6 +100,7 @@ Probe one or more targets and emit `DeviceRecord` events to a sink. `--target` i
 | `--checkpoint <PATH>` | path | — | Write a resume checkpoint to this file during the scan. The scenario must be resume-safe — a durable sink (`file`, `kafka`, `nats`), no `identity` fuser, no `lldp` / `gnmi` prober — or the scan is refused before probing. Removed on success, kept on cancellation. See [Discover · CLI](../discover/cli.md#checkpoints). |
 | `--checkpoint-interval <N>` | integer | `5000` | Number of targets between checkpoint writes. Minimum 1. Ignored unless `--checkpoint` is set. |
 | `--resume` | flag | — | Resume from the checkpoint at `--checkpoint <PATH>`: skip the already-flushed targets, restore the original scan identity, and continue. The checkpoint must exist and still match the scenario's targets and sink destination, or the resume is refused before probing. Single-scenario runs only. Requires `--checkpoint`. See [Discover · CLI](../discover/cli.md#resuming). |
+| `--run-report <PATH>` | path | — | Write a JSON report of the run to this file: one entry per scenario the run reached, naming how it ended and carrying its summary when the scan produced one, plus the run's totals. One file per run, whatever the scenario count. Written whenever the run reached a scenario, whatever the exit code; a run that refuses before reaching one writes none. Rejected with `--dry-run`, which reaches no scenario. See [Discover · CLI](../discover/cli.md#run-report). |
 | `-v`, `--verbose` | counter | — | See top-level flags above. |
 | `-q`, `--quiet` | flag | — | See top-level flags above. |
 

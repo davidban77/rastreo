@@ -48,10 +48,9 @@ pub const DEFAULT_PROFILES_DESTINATION: &str = "rastreo.discovery.profiles.v1";
 
 /// Bounded taxonomy of sink failure classes surfaced on `sink_errors_total` and `dlq_records_total`.
 ///
-/// Each concrete sink tags its failures with one of these variants at the failure site;
-/// the class is carried on [`SinkError`], never re-derived from the message. Variants are
-/// `#[non_exhaustive]` so future sinks can add classes without breaking downstream exhaustive
-/// matching.
+/// Each concrete sink tags its failures with one of these classes at the failure site, and the class
+/// travels with the error rather than being re-derived from its message. The set grows as sinks are
+/// added, so a document may carry a class a cached schema copy does not list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, JsonSchema)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]

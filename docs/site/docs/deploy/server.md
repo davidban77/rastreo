@@ -362,7 +362,7 @@ The response is `{summary, records, truncated}`, plus an optional `hint` when a 
 }
 ```
 
-The summary fields:
+The summary fields, also published as a JSON Schema — it is the `DiscoverySummary` object nested in [`run-report-v1.json`](../reference/schema/run-report.md#discoverysummary), which the CLI's [`--run-report`](../discover/cli.md#run-report) writes to a file. The two carry the same object, so a new field on it must be optional to stay on `v1`:
 
 | Field | Meaning |
 |---|---|

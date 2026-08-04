@@ -9,7 +9,9 @@ src/
 ├── lib.rs           ← crate-root re-exports + version()
 ├── error.rs         ← RastreoError umbrella + sub-enums + ProbeErrorKind taxonomy
 ├── env.rs           ← Env trait + SystemEnv (the process) + MapEnv (a fixed set); the seam a read whose value a caller needs goes through
+├── atomic_file.rs   ← crate-private tmp-then-rename write, shared by the checkpoint and the run report
 ├── checkpoint/mod.rs ← Checkpoint (atomic write/load) + resume eligibility predicates + two-tier resume fingerprint
+├── run_report.rs    ← RunReport (a ScenarioReport per scenario reached + the run's aggregate and ScenarioTally), the document `rastreo discover --run-report` stores
 ├── kind_vocabulary.rs ← crate-private `kind_vocabulary!`: declares a kind enum plus all/index/label/from_label and its COUNT from one variant list
 ├── model/
 │   ├── target.rs        ← Target, ResolvedTarget
@@ -130,6 +132,18 @@ Two types and one entry point keep the callers honest. `RunOptions::plan` is the
 A plan costs what its spec list costs, never what its address space costs. `per_target_samples` carries a per-spec `ResolvedAddresses { total, sample }` — the host count the stream would yield, plus the first `SAMPLED_ADDRESSES` (6) of them, which is exactly what the render shows. The refusal path re-plans each target on its own and samples it the same way. `tests/plan_allocation_guards.rs` pins the invariant with the allocator: ten `/17` specs cost the same bytes to plan as ten `/24`s, on the resolving path and the refused path alike.
 
 `ResolvedPlan::new` is the single constructor, and it warns about overlapping specs, so every plan announces the duplicate probing it would perform whether it was built for a scan, a rehearsal, or a resume.
+
+## The Run Report
+
+Core owns every artifact rastreo writes to a caller-named path, and `RunReport` is the second one after `Checkpoint`: the CLI decides *whether* to write one, core decides *what one is*. Both go through `atomic_file::write_atomically`, so the tmp-then-rename that keeps a reader from seeing half a file has one implementation and one `.tmp` naming rule. A CI job reading a half-written report is the failure both exist to prevent.
+
+**The entry list is one `ScenarioReport` per scenario the run reached, and `outcome` is the only thing that says how each ended.** Presence cannot carry that: a scenario that produced a summary and then failed is byte-indistinguishable from one that succeeded, and no summary field re-derives the verdict — a *partially* unresolvable scenario completes with a non-empty `unresolvable_targets`, so that field is not the signal, and `targets_resolved == 0` re-implements an internal predicate that does not subtract a resume's flushed prefix. `summary` is therefore `Option`: absent for a scenario that was skipped or that failed before the scan returned one, present otherwise. The rule the CLI holds up is stated in `rastreo/CLAUDE.md`; what core guarantees is that every entry names its own verdict.
+
+`ScenarioTally` is a denormalization of that list, not a second source: `RunReport::new` takes the entries plus the `total` the run was asked for and folds `completed` / `failed` / `skipped` out of the outcomes itself, so a caller has no way to *construct* a tally the entries contradict — the fields stay `pub`, so one can still be assigned afterwards, which is conspicuous rather than impossible. `total` is the one number in the document that is not derivable, because a run cancelled between scenarios leaves the rest unreached — which is also why the entry list can be shorter than `total`. `RunReport::new` stamps `RUN_REPORT_VERSION` so a caller cannot claim a version it did not produce.
+
+`ScenarioReport`, `RunAggregate`, and `RunReport` are `#[non_exhaustive]` with constructors, so a field added to any of them is additive rather than breaking downstream. `ScenarioTally` deliberately is not: `rastreo`'s `every_tally_field_reaches_the_aggregate_banner` destructures it exhaustively so a new counter fails to compile until the banner prints it, and `#[non_exhaustive]` would replace that guard with a `..`.
+
+`run-report-v1.json` is on the published schema surface, which is what makes the `elapsed_ms` / `sink_type` / `error_counts` shapes a versioned contract rather than an accident of `serde`. That also spends `DiscoverySummary`'s producer-only allowance: a stored report is a copy a consumer replays, so a new summary field must be optional to stay on `v1`, where the server's response body alone would have let it be required. Enum *values* are the exception and are additive within `v1` — `ProbeKind`, `ProbeErrorKind`, `SinkType`, `SinkErrorClass`, and the `error_counts` keys all grow as probers and sinks are added, and the versioning policy publishes that plus the cached-copy caveat a strict validator has to know about. A doc comment on one of those enums must not promise wire leniency the schema's closed `enum` list cannot deliver.
 
 ## Second Streams
 

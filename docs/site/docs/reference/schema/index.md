@@ -19,6 +19,7 @@ Every `DeviceRecord` emitted by rastreo carries a `schema_version` field (curren
 - [ScanMetadata](scan-metadata.md) — the per-scan provenance object. Generated.
 - [ScenarioFile](scenario-config.md) — the YAML input schema for `rastreo discover --file`. Generated. Point an IDE YAML plugin at `https://davidban77.github.io/rastreo/schemas/scenario-v1.json` for autocomplete and validation; see [Editor setup](#editor-setup) below for the concrete snippets. The schema describes the full release-image feature set; a binary built with a feature subset will reject scenarios that use disabled probers, sinks, or fusers even though they validate against the schema.
 - [DiscoveryPlan](discovery-plan.md) — the dry-run preview of a scenario: resolved targets, probers, fuser, classifier, encoder, sink, and total probe count. Returned by `POST /scans?dry_run=true`. Generated. Currently `v2`: a target's `resolution.resolved` is now an object carrying the address `total` and a six-address `sample`, where `v1` carried a bare array of addresses. Expressions like `.targets[].resolution.resolved[]` become `.targets[].resolution.resolved.sample[]`, and `discovery-plan-v1.json` stays fetchable at its own URL.
+- [RunReport](run-report.md) — what one `rastreo discover` run did: how every scenario it reached ended, each one's summary where the scan produced one, and the run's totals. Written to the path given to `--run-report`. Generated. It embeds the same summary object `POST /scans` returns, so the summary's shape is published here rather than only described in prose. See [Discover · CLI](../../discover/cli.md#run-report).
 - [Streaming API](streaming-api.md) — Kafka topic / NATS subject conventions, correlation IDs, the AsyncAPI spec.
 - [DlqEnvelope](dlq-envelope.md) — the `x-rastreo-*` header and payload contract on every dead-letter message.
 
@@ -60,19 +61,22 @@ Both patterns validate against the same schema. Pick whichever fits the workflow
 
 ## Versioning policy
 
-Additive changes stay on `v1` and remain backward-compatible. Four kinds of change qualify:
+Additive changes stay on `v1` and remain backward-compatible. Five kinds of change qualify:
 
 - a new optional field on `DeviceRecord`
 - a new signal kind inside the `signals` array
 - a new optional field on `ScanMetadata`
 - a new arm on a union — a `oneOf` gains a case, like `TargetResolution` gaining `unresolvable` alongside `resolved` and `error`. A consumer that matches the arms it knows and treats the rest as unrecognised keeps working; one that assumes the arm list is closed does not, which is the same obligation the `signals` array already carries.
+- a new value in an enumerated vocabulary — `ProbeKind`, `ProbeErrorKind`, `SinkType`, `SinkErrorClass` — including a new key in a map those vocabularies key, like `error_counts`. rastreo grows these as probers and sinks are added; a probe kind is not a schema version.
 
-The `signals` array is open-ended on purpose. A consumer that meets an entry whose key it does not recognise must skip that entry, not reject the record. Consumers that ignore unknown fields — the default for most JSON libraries — keep working across an additive bump.
+The `signals` array is open-ended on purpose. A consumer that meets an entry whose key it does not recognise must skip that entry, not reject the record. Consumers that ignore unknown fields — the default for most JSON libraries — keep working across an additive bump. The enumerated vocabularies carry the same obligation: match the values you know, treat the rest as unrecognised, and do not assume the list is closed.
 
-!!! warning "Refresh a cached schema copy before validating signals strictly"
-    `device-record-v1.json` lists the signal kinds that existed when it was published. It allows no other key inside a `signals` entry. A strict validator running against an old cached copy therefore rejects a record carrying a newer signal kind. Refetch the schema by its `schema_id` URL when that happens. You can also skip strict validation of the `signals` array.
+!!! warning "Refresh a cached schema copy before validating vocabularies strictly"
+    A published schema lists the values that existed when it was published, and allows no others: `device-record-v1.json` names the signal kinds and no other key inside a `signals` entry, and every schema carrying `ProbeKind`, `ProbeErrorKind`, `SinkType`, or `SinkErrorClass` — including `run-report-v1.json` and its `error_counts` map — names those values and no others. A strict validator running against an old cached copy therefore rejects a document carrying a newer value, even though the value is additive. Refetch the schema by its `schema_id` URL when that happens, or skip strict validation of the `signals` array and the enumerated fields.
 
 The producer-only allowance is narrower than it looks. A schema whose stored copies no consumer replays — `DiscoveryPlan` is the only one — may **gain required fields** on `v1`, because `required` binds validators and no validator runs against a plan. It may **not** change a field's type, rename a field, or remove one: those break a consumer that merely *reads* the document, which is the one thing every consumer of a plan does. The record schemas get no allowance at all, because consumers replay stored records.
+
+`RunReport` gets none either, and neither does the summary object nested inside it. `--run-report` writes that document to a path you name, and a CI job that archives the file replays it — a validator does run against a stored report. So a new field on the run report, or on the summary `POST /scans` returns, has to be optional to stay on `v1`; making one required is a `v2`. A new *value* in one of the enumerated vocabularies the report carries stays additive, under the cached-copy caveat above.
 
 Breaking changes (renaming or removing a field, changing a field's type, tightening a previously-optional field to required) increment the schema's version, `v1` → `v2`. What the bump costs depends on how the schema is delivered. Schemas published on a topic bump with a new topic / subject name (`rastreo.discovery.records.v2`) so `v1` and `v2` run in parallel for one release cycle, and consumers migrate on their own schedule. Schemas delivered synchronously in a response body, or read as an input file — `discovery-plan`, `scenario` — have no parallel channel: the bump publishes a new file, the release notes call it out, and the old file stays fetchable at its `v1` URL as a frozen copy. Either way the promise is the same: a fixed `vN` URL always describes one shape.
 
@@ -92,6 +96,7 @@ All published schemas use JSON Schema **draft 2020-12**:
 - `scan-metadata-v1.json`
 - `scenario-v1.json`
 - `discovery-plan-v2.json` (and the frozen `discovery-plan-v1.json`)
+- `run-report-v1.json`
 - `dlq-envelope-v1.json`
 
 Four properties of the schema text matter when you write a validator against them:
@@ -135,6 +140,7 @@ schemas/
 ├── discovery-plan-v2.json            # JSON Schema for DiscoveryPlan
 ├── dlq-envelope-v1.json              # JSON Schema for DlqEnvelope (hand-written)
 ├── link-record-v1.json               # JSON Schema for LinkRecord
+├── run-report-v1.json                # JSON Schema for RunReport (--run-report output)
 ├── scan-metadata-v1.json             # JSON Schema for ScanMetadata
 └── scenario-v1.json                  # JSON Schema for ScenarioFile (YAML scenario input)
 ```

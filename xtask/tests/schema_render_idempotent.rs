@@ -156,6 +156,21 @@ fn committed_discovery_plan_render_matches_current_schema() {
 }
 
 #[test]
+fn committed_run_report_render_matches_current_schema() {
+    let root = workspace_root();
+    let raw = fs::read_to_string(root.join("schemas/run-report-v1.json"))
+        .expect("read run-report schema");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse schema");
+    let rendered = xtask::render_schema(&value, "rastreo-core/src/run_report.rs");
+    let committed = fs::read_to_string(root.join("docs/site/docs/reference/schema/run-report.md"))
+        .expect("read committed run-report.md");
+    assert_eq!(
+        rendered, committed,
+        "committed run-report.md is out of sync with the schema. Run `task schema:all`."
+    );
+}
+
+#[test]
 fn the_superseded_discovery_plan_v1_still_describes_the_v1_shape() {
     let root = workspace_root();
     let source = fs::read_to_string(root.join("schemas/discovery-plan-v1.json"))

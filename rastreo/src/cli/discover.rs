@@ -1,7 +1,5 @@
 use std::net::IpAddr;
-#[cfg(feature = "config")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
@@ -18,23 +16,25 @@ use rastreo_core::prober::{
 #[cfg(feature = "kafka")]
 use rastreo_core::KafkaFlushMode;
 use rastreo_core::Resolver;
+#[cfg(feature = "config")]
+use rastreo_core::ScenarioTally;
 use rastreo_core::{
     preflight_checkpoint_request, resolve_pinned_scenario, resolve_scenario, run_discovery,
     Checkpoint, CheckpointConfig, ConfigError, DiscoveryPlan, DiscoveryProgress, DiscoverySummary,
     EncoderConfig, Env, HickoryResolver, PlanKnobs, ProbeKind, RastreoError, ResumeError,
-    RunOptions, ScenarioResolution, SinkConfig, SystemEnv, Target,
+    RunOptions, RunReport, ScenarioOutcome, ScenarioReport, ScenarioResolution, SinkConfig,
+    SystemEnv, Target,
 };
 use tokio::sync::watch;
 
+use super::output::{
+    accumulate, enrich_scan_error_hint, print_complete, print_note, print_refusal_hint,
+    print_runtime_hints, print_start, progress_display_loop, progress_style, rebuild_hint,
+    record_destination, stdout_table_width, OutputMode, Verbosity,
+};
 #[cfg(feature = "config")]
 use super::output::{
-    accumulate, enrich_feature_hint, print_aggregate, print_blank, print_failed, print_notice,
-    ScenarioTally,
-};
-use super::output::{
-    enrich_scan_error_hint, print_complete, print_note, print_refusal_hint, print_runtime_hints,
-    print_start, progress_display_loop, progress_style, rebuild_hint, record_destination,
-    stdout_table_width, OutputMode, Verbosity,
+    enrich_feature_hint, print_aggregate, print_blank, print_failed, print_notice,
 };
 #[cfg(feature = "snmp")]
 use super::probe_args::SnmpVersionArg;
@@ -219,6 +219,12 @@ pub struct DiscoverArgs {
     /// the original scan identity, and continue. The checkpoint must exist and still match the scenario.
     #[arg(long, requires = "checkpoint")]
     pub resume: bool,
+
+    /// Write a JSON report of the run to this path: how every scenario the run reached ended, its summary
+    /// when it produced one, and the run's totals. Written whenever the run reached a scenario, whatever
+    /// the exit code; a run that refuses before reaching one writes none.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub run_report: Option<PathBuf>,
 }
 
 // Typed at the clap boundary so the plaintext never reaches a `{args:?}` render.
@@ -646,7 +652,7 @@ fn skip_prober_less_scenario(
     true
 }
 
-// json carries the plain scenario name (matching rastreo-server's scenario_label so both surfaces emit the same DiscoveryPlan.scenario); text keeps the multi-scenario `'name' (N of M)` header decoration.
+// Machine output carries the plain scenario name (matching rastreo-server's scenario_label so both surfaces name a scenario the same way); text keeps the multi-scenario `'name' (N of M)` header decoration.
 #[cfg(feature = "config")]
 fn scenario_plan_label(
     base: &BaseProbeConfig,
@@ -656,8 +662,13 @@ fn scenario_plan_label(
 ) -> String {
     match format {
         OutputFormat::Table => dry_run_scenario_label(base, idx, total),
-        OutputFormat::Json => base.name.clone().unwrap_or_else(|| "unnamed".to_string()),
+        OutputFormat::Json => machine_scenario_label(base),
     }
+}
+
+#[cfg(feature = "config")]
+fn machine_scenario_label(base: &BaseProbeConfig) -> String {
+    base.name.clone().unwrap_or_else(|| "unnamed".to_string())
 }
 
 #[cfg(feature = "config")]
@@ -806,6 +817,30 @@ fn render_error_chain(err: &dyn std::error::Error) -> String {
     rendered
 }
 
+// A report says how the scenarios the run reached ended, so a run that reached none writes no file.
+fn write_run_report(path: Option<&Path>, report: &RunReport) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if report.scenarios.is_empty() {
+        return Ok(());
+    }
+    report.write(path)?;
+    Ok(())
+}
+
+// A failed report write fails the run, but never replaces the diagnosis of the scan it was reporting on.
+fn run_outcome(scan: Result<()>, report_write: Result<()>) -> Result<()> {
+    scan.and(report_write)
+}
+
+fn outcome_of(scan: &Result<()>) -> ScenarioOutcome {
+    match scan {
+        Ok(()) => ScenarioOutcome::Completed,
+        Err(_) => ScenarioOutcome::Failed,
+    }
+}
+
 fn checkpoint_config(args: &DiscoverArgs) -> Option<CheckpointConfig> {
     args.checkpoint.as_ref().map(|path| CheckpointConfig {
         path: path.clone(),
@@ -823,21 +858,49 @@ async fn run_legacy(
 ) -> Result<()> {
     let scenario = scenario_from_flags(args, mode)?;
     let mode = mode_for_sink(mode, scenario.base.sink.as_ref());
-    let opts = run_options(&scenario, args);
-    let plan = opts
+    let (scan, summary) = scan_from_flags(&scenario, args, cancel, mode).await;
+
+    let mut aggregate = DiscoverySummary::default();
+    if let Some(summary) = &summary {
+        accumulate(&mut aggregate, summary);
+    }
+    let entry = ScenarioReport::new(FLAG_DRIVEN_LABEL.to_string(), outcome_of(&scan), summary);
+    let report = RunReport::new(vec![entry], 1, aggregate);
+
+    run_outcome(scan, write_run_report(args.run_report.as_deref(), &report))
+}
+
+// The scenario exists by now, so every way this ends is an outcome the report names.
+async fn scan_from_flags(
+    scenario: &DiscoverScenarioConfig,
+    args: &DiscoverArgs,
+    cancel: watch::Receiver<bool>,
+    mode: OutputMode,
+) -> (Result<()>, Option<DiscoverySummary>) {
+    let opts = run_options(scenario, args);
+    let plan = match opts
         .plan(
             FLAG_DRIVEN_LABEL.to_string(),
-            effective_knobs(&scenario, args),
+            effective_knobs(scenario, args),
         )
-        .await?;
+        .await
+    {
+        Ok(plan) => plan,
+        Err(err) => return (Err(refuse(err, mode)), None),
+    };
     print_start(&plan, scenario.targets.len(), mode);
     match run_discovery_reporting_progress(opts, cancel, mode).await {
         Ok(summary) => {
             print_complete(FLAG_DRIVEN_LABEL, &summary, mode);
             print_runtime_hints(&summary, mode);
-            refuse_nothing_to_probe(scenario.targets.len(), &summary.unresolvable_targets, mode)
+            let scan = refuse_nothing_to_probe(
+                scenario.targets.len(),
+                &summary.unresolvable_targets,
+                mode,
+            );
+            (scan, Some(summary))
         }
-        Err(err) => Err(refuse(err, mode)),
+        Err(err) => (Err(refuse(err, mode)), None),
     }
 }
 
@@ -846,7 +909,7 @@ async fn run_from_file(
     args: &DiscoverArgs,
     cancel: watch::Receiver<bool>,
     mode: OutputMode,
-) -> Result<(ScenarioTally, DiscoverySummary)> {
+) -> Result<RunReport> {
     let raw = args.file.as_deref().expect("file present per dispatch");
     let path = resolve_scenario_source(raw)?;
     let file = load_scenario_file(&path).map_err(|e| e.report(mode))?;
@@ -874,11 +937,8 @@ async fn run_from_file(
     let cli_sink = build_cli_sink_override(args)?;
     let cli_encoder = build_cli_encoder_override(args);
     let total = file.scenarios.len();
-    let mut tally = ScenarioTally {
-        total,
-        ..ScenarioTally::default()
-    };
     let mut aggregate = DiscoverySummary::default();
+    let mut scenarios: Vec<ScenarioReport> = Vec::with_capacity(total);
     // The aggregate is written after every scenario, so one of them claiming the destination claims it.
     let mut any_scenario_wrote_to_stdout = false;
 
@@ -905,8 +965,9 @@ async fn run_from_file(
             print_blank(mode);
         }
 
+        let name = machine_scenario_label(&cfg.base);
         if skip_prober_less_scenario(&cfg, &label, mode) {
-            tally.skipped += 1;
+            scenarios.push(ScenarioReport::new(name, ScenarioOutcome::Skipped, None));
             continue;
         }
 
@@ -914,8 +975,8 @@ async fn run_from_file(
         let plan = match opts.plan(label.clone(), effective_knobs(&cfg, args)).await {
             Ok(plan) => plan,
             Err(err) => {
-                tally.failed += 1;
                 report_scenario_failure(&label, &err, mode);
+                scenarios.push(ScenarioReport::new(name, ScenarioOutcome::Failed, None));
                 continue;
             }
         };
@@ -927,39 +988,43 @@ async fn run_from_file(
                 print_complete(&label, &summary, mode);
                 print_runtime_hints(&summary, mode);
                 accumulate(&mut aggregate, &summary);
-                match refuse_nothing_to_probe(
-                    cfg.targets.len(),
-                    &summary.unresolvable_targets,
-                    mode,
-                ) {
-                    Ok(()) => tally.completed += 1,
-                    Err(err) => {
-                        tally.failed += 1;
-                        print_failed(&label, &err.to_string());
-                    }
+                let scan =
+                    refuse_nothing_to_probe(cfg.targets.len(), &summary.unresolvable_targets, mode);
+                if let Err(err) = &scan {
+                    print_failed(&label, &err.to_string());
                 }
+                scenarios.push(ScenarioReport::new(name, outcome_of(&scan), Some(summary)));
             }
             Err(err) => {
-                tally.failed += 1;
                 report_scenario_failure(&label, &err, mode);
+                scenarios.push(ScenarioReport::new(name, ScenarioOutcome::Failed, None));
             }
         }
     }
 
+    let report = RunReport::new(scenarios, total, aggregate);
+    let tally = report.aggregate.scenario_counts;
+
     if total > 1 {
         let mode = mode.with_record_destination(record_destination(any_scenario_wrote_to_stdout));
         print_blank(mode);
-        print_aggregate(tally, &aggregate, mode);
+        print_aggregate(tally, &report.aggregate.summary, mode);
     }
 
+    let report_write = write_run_report(args.run_report.as_deref(), &report);
+    run_outcome(scenario_loop_outcome(tally, total, &path), report_write)?;
+    Ok(report)
+}
+
+#[cfg(feature = "config")]
+fn scenario_loop_outcome(tally: ScenarioTally, total: usize, path: &Path) -> Result<()> {
     if tally.failed > 0 {
         return Err(anyhow!(
             "{} of {total} scenario(s) failed; see individual errors above",
             tally.failed
         ));
     }
-    ensure_not_every_scenario_was_skipped(tally.skipped, total, &path)?;
-    Ok((tally, aggregate))
+    ensure_not_every_scenario_was_skipped(tally.skipped, total, path)
 }
 
 #[cfg(feature = "config")]
@@ -1629,6 +1694,7 @@ mod tests {
             checkpoint: None,
             checkpoint_interval: None,
             resume: false,
+            run_report: None,
         }
     }
 
@@ -1909,6 +1975,115 @@ mod tests {
         let mut a = args(&["127.0.0.1"], &[80]);
         a.checkpoint = Some(PathBuf::from("/tmp/ck.json"));
         assert!(!checkpoint_config(&a).expect("set").resume);
+    }
+
+    fn report_of(entries: usize) -> RunReport {
+        let scenarios = (0..entries)
+            .map(|i| {
+                ScenarioReport::new(
+                    format!("s{i}"),
+                    ScenarioOutcome::Completed,
+                    Some(DiscoverySummary::default()),
+                )
+            })
+            .collect();
+        RunReport::new(scenarios, entries, DiscoverySummary::default())
+    }
+
+    #[test]
+    fn a_run_that_reached_no_scenario_writes_no_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("run.json");
+        write_run_report(Some(&path), &report_of(0)).expect("a scenario-less run reports nothing");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_run_that_reached_a_scenario_writes_the_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("run.json");
+        write_run_report(Some(&path), &report_of(1)).expect("write");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn no_report_path_writes_nothing_anywhere() {
+        write_run_report(None, &report_of(1)).expect("an absent flag is not a failure");
+    }
+
+    #[test]
+    fn an_unwritable_report_path_fails_the_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing").join("run.json");
+        let err = write_run_report(Some(&path), &report_of(1)).expect_err("no such directory");
+        assert!(
+            err.to_string().contains("run report"),
+            "the failure names what could not be written: {err}"
+        );
+    }
+
+    #[test]
+    fn a_scan_that_failed_keeps_its_diagnosis_when_the_report_could_not_be_written() {
+        let err = run_outcome(
+            Err(anyhow!("every target resolved to no addresses")),
+            Err(anyhow!("run report could not be written to /nope/run.json")),
+        )
+        .expect_err("the run failed");
+        assert!(
+            err.to_string().contains("every target resolved"),
+            "the scan's own failure is what the operator reads: {err}"
+        );
+    }
+
+    #[test]
+    fn a_clean_scan_fails_on_a_report_it_could_not_write() {
+        let err = run_outcome(
+            Ok(()),
+            Err(anyhow!("run report could not be written to /nope/run.json")),
+        )
+        .expect_err("a report the operator asked for and did not get is a failure");
+        assert!(err.to_string().contains("run report"), "{err}");
+    }
+
+    #[test]
+    fn a_clean_scan_that_wrote_its_report_succeeds() {
+        assert!(run_outcome(Ok(()), Ok(())).is_ok());
+    }
+
+    #[test]
+    fn an_entry_is_named_completed_only_when_its_scan_returned_ok() {
+        assert_eq!(outcome_of(&Ok(())), ScenarioOutcome::Completed);
+        assert_eq!(
+            outcome_of(&Err(anyhow!("nothing to probe"))),
+            ScenarioOutcome::Failed
+        );
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_report_path_is_legal_beside_a_scenario_file() {
+        let argv = [
+            "discover",
+            "--file",
+            "/tmp/x.yml",
+            "--run-report",
+            "/tmp/r.json",
+        ];
+        assert!(parse_args(argv).is_ok());
+    }
+
+    #[test]
+    fn a_dry_run_refuses_a_report_path() {
+        let argv = [
+            "discover",
+            "--target",
+            "127.0.0.1",
+            "--dry-run",
+            "--run-report",
+            "/tmp/r.json",
+        ];
+        let err = parse_args(argv).expect_err("a rehearsal produces no summary to report");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[cfg(feature = "config")]
@@ -2872,17 +3047,21 @@ scenarios:
         a.file = Some(file.path().to_path_buf());
         let (_tx, cancel) = watch::channel(true);
 
-        let (tally, aggregate) = run_from_file(&a, cancel, OutputMode::from(Verbosity::Normal))
+        let report = run_from_file(&a, cancel, OutputMode::from(Verbosity::Normal))
             .await
             .expect("a cancelled run with no failed scenario exits ok");
 
         assert!(
-            aggregate.cancelled,
+            report.scenarios.is_empty(),
+            "no scenario was reached, so no entry carries the cancellation"
+        );
+        assert!(
+            report.aggregate.summary.cancelled,
             "a run interrupted before any scenario must not report a clean aggregate"
         );
-        assert_eq!(tally.total, 2);
-        assert_eq!(tally.completed, 0);
-        assert_eq!(tally.failed, 0);
+        assert_eq!(report.aggregate.scenario_counts.total, 2);
+        assert_eq!(report.aggregate.scenario_counts.completed, 0);
+        assert_eq!(report.aggregate.scenario_counts.failed, 0);
     }
 
     #[cfg(feature = "config")]
@@ -2897,12 +3076,13 @@ scenarios:
         a.timeout_ms = Some(50);
         let (_tx, cancel) = watch::channel(false);
 
-        let (tally, aggregate) = run_from_file(&a, cancel, OutputMode::from(Verbosity::Quiet))
+        let report = run_from_file(&a, cancel, OutputMode::from(Verbosity::Quiet))
             .await
             .expect("both scenarios run to completion against loopback");
 
-        assert!(!aggregate.cancelled);
-        assert_eq!(tally.completed, 2);
+        assert!(!report.aggregate.summary.cancelled);
+        assert_eq!(report.aggregate.scenario_counts.completed, 2);
+        assert_eq!(report.scenarios.len(), 2);
     }
 
     #[tokio::test]
@@ -3566,6 +3746,7 @@ scenarios:
             "checkpoint",
             "checkpoint_interval",
             "resume",
+            "run_report",
         ];
 
         let covered: Vec<String> = parameter_flags(&args_with_every_parameter_flag())
@@ -3842,6 +4023,7 @@ scenarios:
             "checkpoint",
             "checkpoint_interval",
             "resume",
+            "run_report",
         ];
         // Tried in order until one parses; a value-parse failure would mask the conflict.
         const SAMPLE_VALUES: &[&str] = &["1", "tcp=1"];
@@ -4179,6 +4361,7 @@ scenarios:
             "checkpoint",
             "checkpoint_interval",
             "resume",
+            "run_report",
         ];
 
         let covered: Vec<&str> = sink_flags(&args_with_every_sink_flag())

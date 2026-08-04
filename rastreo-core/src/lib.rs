@@ -1,3 +1,4 @@
+pub(crate) mod atomic_file;
 pub mod checkpoint;
 pub mod classifier;
 pub mod collection_profile;
@@ -17,6 +18,7 @@ pub mod prober;
 #[cfg(feature = "nats")]
 pub(crate) mod redact;
 pub mod resolver;
+pub mod run_report;
 pub mod scheduler;
 pub mod sink;
 pub mod topology;
@@ -38,7 +40,7 @@ pub use encoder::{
 pub use env::{Env, MapEnv, SystemEnv};
 pub use error::{
     ClassifierError, ConfigError, DnsFailure, EncoderError, ProbeError, ProbeErrorKind,
-    RastreoError, ResolverError, ResumeError, RuntimeError,
+    RastreoError, ReportError, ResolverError, ResumeError, RuntimeError,
 };
 pub use fuser::{
     DirectFuser, Fuser, FuserConfig, FuserKind, FuserSelectionOptions, IdentityFuser,
@@ -69,6 +71,9 @@ pub use prober::{
 pub use resolver::{
     resolve_pinned_scenario, resolve_scenario, GuardedResolver, HickoryResolver, ResolvedAddresses,
     ResolvedPlan, Resolver, ScenarioResolution, SAMPLED_ADDRESSES,
+};
+pub use run_report::{
+    RunAggregate, RunReport, ScenarioOutcome, ScenarioReport, ScenarioTally, RUN_REPORT_VERSION,
 };
 pub use scheduler::{BoundedScheduler, Scheduler, TargetScan};
 pub use sink::{
