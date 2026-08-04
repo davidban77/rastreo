@@ -41,7 +41,7 @@ absent (null) for a neighbor rastreo learned via LLDP but never probed ("known-u
 
 ### `ScanMetadata` {#scanmetadata}
 
-Per-scan provenance stamped on every emitted record. `scan_id` is a ULID; consumers can sort and correlate records by it.
+Per-scan provenance stamped on every emitted record. `scan_id` is a ULID, identical on every record in a scan, so consumers correlate a scan's records by it; across scans it orders only to the millisecond its timestamp encodes.
 
 | Field | Type | Required | Description |
 |---|---|---|---|

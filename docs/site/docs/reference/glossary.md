@@ -102,7 +102,7 @@ This glossary defines the terms used across rastreo's documentation and source. 
 
 **NDJSON** — Newline-Delimited JSON. One JSON object per line, separated by `\n`. NDJSON is rastreo's wire format: it is what every sink but stdout emits by default, and what every broker sink is required to carry, so a consumer can parse one line at a time without buffering the whole stream.
 
-**ULID** — Universally Unique Lexicographically Sortable Identifier. A 26-character identifier that sorts by creation time. Each scan gets a ULID `scan_id`, so consumers can order and correlate the records from one scan.
+**ULID** — Universally Unique Lexicographically Sortable Identifier. A 26-character identifier that sorts by creation time, to the millisecond its timestamp encodes. Each scan gets a ULID `scan_id`, stamped identically on every record from that scan, so consumers correlate a scan's records by it.
 
 ## Integration and delivery
 

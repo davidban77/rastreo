@@ -1,12 +1,12 @@
 ---
-description: Per-scan provenance stamped on every emitted record. `scan_id` is a ULID; consumers can sort and correlate records by it.
+description: Per-scan provenance stamped on every emitted record. `scan_id` is a ULID, identical on every record in a scan, so consumers correlate a scan's records by it; across scans it orders only to the millisecond its timestamp encodes.
 ---
 
 # ScanMetadata
 
 <!-- GENERATED FILE — do not edit by hand. Regenerate with `task schema:render`. -->
 
-Per-scan provenance stamped on every emitted record. `scan_id` is a ULID; consumers can sort and correlate records by it.
+Per-scan provenance stamped on every emitted record. `scan_id` is a ULID, identical on every record in a scan, so consumers correlate a scan's records by it; across scans it orders only to the millisecond its timestamp encodes.
 
 - Schema ID: `https://davidban77.github.io/rastreo/schemas/scan-metadata-v1.json`
 - JSON Schema draft: `https://json-schema.org/draft/2020-12/schema`

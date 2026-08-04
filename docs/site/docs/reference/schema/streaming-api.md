@@ -52,7 +52,7 @@ The full header and payload contract is on the [DlqEnvelope schema page](dlq-env
 
 The AsyncAPI spec declares the correlation ID as `$message.payload#/scan_metadata/scan_id` — the ULID stamped on `ScanMetadata` at scan entry. Consumers use it to group records that were produced together into a single logical batch.
 
-A ULID sorts lexicographically by generation time, so a consumer that groups by `scan_id` and sorts groups by that same key gets scans in chronological order for free — no separate timestamp field needed for group ordering.
+A ULID sorts lexicographically by generation time, so sorting groups by `scan_id` puts scans in chronological order down to the millisecond its timestamp encodes; scans that start within the same millisecond are ordered by the ULID's random bits, which is to say arbitrarily.
 
 ## Consumer pattern
 
