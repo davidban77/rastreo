@@ -8,11 +8,9 @@ mod report;
 pub(crate) mod theme;
 mod width;
 
+pub(crate) use banner::{accumulate, print_complete, print_start};
 #[cfg(feature = "config")]
-pub(crate) use banner::ScenarioTally;
-#[cfg(feature = "config")]
-pub(crate) use banner::{accumulate, print_aggregate, print_blank, print_failed, print_notice};
-pub(crate) use banner::{print_complete, print_start};
+pub(crate) use banner::{print_aggregate, print_blank, print_failed, print_notice};
 pub(crate) use destination::{record_destination, RecordDestination};
 #[cfg(feature = "config")]
 pub(crate) use hints::enrich_feature_hint;

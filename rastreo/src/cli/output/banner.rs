@@ -1,3 +1,5 @@
+#[cfg(feature = "config")]
+use rastreo_core::ScenarioTally;
 use rastreo_core::{DiscoverySummary, ScenarioPlan};
 
 use super::humanize;
@@ -63,15 +65,6 @@ pub(crate) fn print_notice(text: &str, mode: OutputMode) {
 }
 
 #[cfg(feature = "config")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ScenarioTally {
-    pub total: usize,
-    pub completed: usize,
-    pub failed: usize,
-    pub skipped: usize,
-}
-
-#[cfg(feature = "config")]
 fn aggregate_label(tally: ScenarioTally) -> String {
     if tally.completed == tally.total {
         format!("{} scenarios", tally.total)
@@ -91,7 +84,6 @@ fn aggregate_line(tally: ScenarioTally, summary: &DiscoverySummary) -> String {
 }
 
 // sink_type is deliberately not carried: scenarios in one file may write to different sinks.
-#[cfg(feature = "config")]
 pub(crate) fn accumulate(agg: &mut DiscoverySummary, scenario: &DiscoverySummary) {
     agg.targets_resolved += scenario.targets_resolved;
     agg.probe_attempts += scenario.probe_attempts;
@@ -898,7 +890,6 @@ mod tests {
         });
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_sums_every_headline_counter() {
         let mut agg = DiscoverySummary::default();
@@ -919,7 +910,6 @@ mod tests {
         assert_eq!(agg.elapsed, Duration::from_millis(5000));
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_merges_fault_tallies_by_kind() {
         let mut agg = DiscoverySummary::default();
@@ -934,7 +924,6 @@ mod tests {
         assert_eq!(agg.error_counts[&ProbeErrorKind::Other], 1);
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_merges_probe_kind_rows_instead_of_appending_duplicates() {
         let mut agg = DiscoverySummary::default();
@@ -956,7 +945,6 @@ mod tests {
         assert_eq!((tcp.attempted, tcp.errored), (15, 3));
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_merges_dlq_rows_by_destination_and_class() {
         let mut agg = DiscoverySummary::default();
@@ -973,7 +961,6 @@ mod tests {
         assert_eq!(agg.dlq_records_by_type_and_class[0].2, 5);
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_carries_every_serialized_field_except_the_sink() {
         let scenario = fully_populated();
@@ -987,11 +974,10 @@ mod tests {
         }
         assert_eq!(
             actual, expected,
-            "a new DiscoverySummary field must be folded into the multi-scenario aggregate"
+            "a new DiscoverySummary field must be folded into the aggregate the banner and the run report both read"
         );
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_leaves_the_sink_unattributed_across_scenarios() {
         let mut agg = DiscoverySummary::default();
@@ -1040,7 +1026,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_concatenates_the_unresolvable_targets_of_every_scenario() {
         let mut agg = DiscoverySummary::default();
@@ -1056,7 +1041,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "config")]
     #[test]
     fn accumulate_latches_the_first_fault_and_any_cancellation() {
         let mut agg = DiscoverySummary::default();

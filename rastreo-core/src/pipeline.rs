@@ -27,7 +27,7 @@ use crate::topology::TopologyAssembler;
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_CONCURRENCY: u32 = 64;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct DiscoverySummary {
     pub targets_resolved: usize,
@@ -43,10 +43,10 @@ pub struct DiscoverySummary {
     /// order; each was probed zero times. Empty when every target resolved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolvable_targets: Vec<String>,
-    /// Faulted probes tallied by [`ProbeErrorKind`]; empty when no probe faulted.
+    /// Faulted probes tallied by fault kind; empty when no probe faulted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub error_counts: BTreeMap<ProbeErrorKind, usize>,
-    /// Per-`ProbeKind` attempted / errored breakdown; empty when no probes ran.
+    /// Per-probe-kind attempted / errored breakdown; empty when no probes ran.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probes_by_kind: Vec<ProbeKindSummary>,
     /// Records delivered to a DLQ destination during this scan.
@@ -61,10 +61,12 @@ pub struct DiscoverySummary {
     /// True when the run terminated early via the cancellation token; counters reflect partial progress.
     #[serde(default)]
     pub cancelled: bool,
-    /// Kind and sample detail of the first probe that faulted; latched once per scan, `None` when no probe faulted.
+    /// Kind and sample detail of the first probe that faulted; latched once per scan, absent when no probe faulted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_probe_error: Option<ProbeFault>,
+    /// Milliseconds one scan took; on a summary folding several, the sum of their durations.
     #[serde(rename = "elapsed_ms", serialize_with = "serialize_duration_as_millis")]
+    #[schemars(with = "u64", rename = "elapsed_ms")]
     pub elapsed: Duration,
 }
 
@@ -79,7 +81,7 @@ pub struct DiscoveryProgress {
     pub elapsed_ms: u128,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct ProbeKindSummary {
     pub kind: ProbeKind,

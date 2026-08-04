@@ -806,9 +806,124 @@ A dry-run refuses the same path, so you can check before the scan starts. See [C
 - The scan **removes** the checkpoint when it finishes successfully. A completed scan has nothing left to resume, and a leftover file would block the next run.
 - The scan **keeps** the checkpoint when it is cancelled or killed. That file is the record of how far the scan got.
 
+## Run report
+
+The completion banner is prose on stderr, and `-q` silences it. `--run-report <PATH>` writes the same facts as a JSON document you can archive, assert on, or feed to `jq`:
+
+```bash
+rastreo discover --target 10.0.0.0/24 -q --run-report run.json
+jq '.aggregate.summary.records_emitted' run.json
+```
+
+The record stream is untouched — the report is a file, so `--sink stdout` still writes nothing but records to stdout, and a merged `2>&1` capture is unchanged.
+
+The document has three parts:
+
+- `report_version` — the shape's version, `1` today.
+- `scenarios` — one entry per scenario the run reached, in run order. Each carries the scenario's plain `scenario` name (`unnamed` when the YAML declared none, `discover` for a flag-driven run), an `outcome` of `completed`, `failed`, or `skipped`, and its own `summary` when the scan produced one.
+- `aggregate` — `scenario_counts` (`total`, `completed`, `failed`, `skipped`) plus a `summary` folding every scenario's counters together.
+
+```json
+{
+  "report_version": 1,
+  "scenarios": [
+    {
+      "scenario": "office",
+      "outcome": "completed",
+      "summary": {
+        "targets_resolved": 254,
+        "probe_attempts": 508,
+        "records_emitted": 12,
+        "links_emitted": 0,
+        "profiles_emitted": 0,
+        "probes_by_kind": [{ "kind": "TcpConnect", "attempted": 508, "errored": 0 }],
+        "dlq_records": 0,
+        "sink_type": "stdout",
+        "cancelled": false,
+        "elapsed_ms": 4210
+      }
+    },
+    {
+      "scenario": "spare-rack",
+      "outcome": "skipped"
+    }
+  ],
+  "aggregate": {
+    "scenario_counts": { "total": 2, "completed": 1, "failed": 0, "skipped": 1 },
+    "summary": {
+      "targets_resolved": 254,
+      "probe_attempts": 508,
+      "records_emitted": 12,
+      "links_emitted": 0,
+      "profiles_emitted": 0,
+      "probes_by_kind": [{ "kind": "TcpConnect", "attempted": 508, "errored": 0 }],
+      "dlq_records": 0,
+      "cancelled": false,
+      "elapsed_ms": 4210
+    }
+  }
+}
+```
+
+The summary object is the one [`POST /scans`](../deploy/server.md#post-scans) returns, field for field. Every field is listed on the [RunReport schema page](../reference/schema/run-report.md), and the document validates against [`run-report-v1.json`](../reference/schema/run-report.md).
+
+### What the entry list holds
+
+**One entry per scenario the run reached, whatever became of it.** A scenario that failed and a scenario that succeeded both get an entry; `outcome` is what tells them apart, and it is the only thing that does — `unresolvable_targets` being non-empty does not mean failed, since a scenario where *some* targets resolved is `completed` with a non-empty list.
+
+`summary` is present when the scan returned one, and absent otherwise: a scenario skipped for having no probers never ran, and one that failed before the scan returned — a target set the resolver refused, a sink that could not be opened — has nothing to summarise. Read the reason for those off stderr, which reports every scenario failure even under `-q` — that flag suppresses status output, not failures.
+
+So `scenarios | length` is the number of scenarios the run reached, and `.aggregate.scenario_counts.total` is the number the file asked for. They match unless the run was cancelled part-way, which is the one thing that leaves a scenario unreached:
+
+```bash
+jq -e '.aggregate.scenario_counts.total == (.scenarios | length)' run.json  # nothing was left unreached
+jq -e '.aggregate.scenario_counts | .completed == .total' run.json          # and every one of them ran clean
+jq -r '.scenarios[] | select(.outcome != "completed") | "\(.scenario): \(.outcome)"' run.json
+```
+
+`scenario_counts` is a denormalisation of that list: `completed`, `failed`, and `skipped` are the fold of the entries' outcomes, and `total` is the only number in the document that is not derivable from them.
+
+### One file per run
+
+A multi-scenario `--file` run writes **one** report holding every scenario, not one per scenario. That is the difference from `--checkpoint`, which is refused on a multi-scenario file because one path cannot record several scenarios' progress. A report can: the scenarios are a list inside it.
+
+Two properties of `aggregate.summary` follow from it being a fold rather than a measurement, and match what the aggregate banner prints: `elapsed_ms` is the **sum** of the scenarios' durations, not the run's wall clock, and `sink_type` is absent, because scenarios in one file may write to different sinks. Read a scenario's own `summary.sink_type` for that.
+
+### When the file appears
+
+**A report exists exactly when the run reached a scenario.** That is not the same as exiting `0`, in both directions:
+
+| Situation | Exit code | Report |
+|---|---|---|
+| Scan completed | `0` | written |
+| Every target resolved to no addresses | `1` | written — `outcome: "failed"`, and the summary names them in `unresolvable_targets` |
+| The scan itself failed — an unopenable sink, a target set the resolver refused | `1` | written — `outcome: "failed"`, no `summary` |
+| One scenario of several failed, the rest ran | `1` | written, one entry per scenario |
+| Every scenario in the file was skipped for having no probers | `1` | written, every entry `outcome: "skipped"` |
+| `--sink file` without `--output`, an unknown probe kind, an unreadable scenario file | `1` | **not written** — the run refused before reaching a scenario |
+| Cancelled before the first scenario started | `0` | **not written** — no scenario was reached |
+
+So a consumer must handle an absent file rather than assume it is there, and the exit code is what says why it is absent:
+
+```bash
+status=0
+rastreo discover --file @lab -q --run-report run.json || status=$?
+if [ -f run.json ]; then
+  jq '.aggregate' run.json
+elif [ "$status" -eq 0 ]; then
+  echo "cancelled before the first scenario started"
+else
+  echo "the run refused before reaching a scenario; read stderr"
+fi
+```
+
+If the path itself cannot be written — a missing directory, no permission — the run exits `1` and says so. A report you asked for and did not get is a failure, not a silent skip. It does not replace the scan's own diagnosis, though: when the scan failed *and* the report could not be written, the scan's error is the one printed, so an unwritable directory never masks why the scan failed.
+
+`--run-report` is rejected alongside `--dry-run`: a rehearsal reaches no scenario and probes nothing, so there would be no report to write. Use [`--dry-run --format json`](#machine-readable-output) for a machine-readable rehearsal.
+
 ## Runtime hints
 
-The CLI prints one `⚠ hint:` line to stderr under the completion banner. It appears when a probe faulted, or when a scan without a fault emitted zero records. Hints are suppressed when the run was cancelled, when `--dry-run` was used, and under `-q`.
+Every hint below is derived from the same summary the run report carries, so a pipeline reading the report can re-derive them without parsing stderr. The CLI prints one `⚠ hint:` line to stderr under the completion banner. It appears when a probe faulted, or when a scan without a fault emitted zero records. Hints are suppressed when the run was cancelled, when `--dry-run` was used, and under `-q`.
 
 One case is a scan that reached nothing. Nobody answered, `faults` stays at `0`, and you get the generic hint:
 
@@ -825,7 +940,7 @@ The same hints run when the scan itself fails — a target name that does not re
 
 ## Exit codes
 
-`rastreo discover` exits `0` on success and `1` on any error. Errors are written to stderr as a single line. Validation errors (for example, `--sink file` without `--output`) fail before any probe runs.
+`rastreo discover` exits `0` on success and `1` on any error. Errors are written to stderr as a single line. Validation errors (for example, `--sink file` without `--output`) fail before any probe runs. The exit code does not tell you whether a [run report](#run-report) was written — a run can exit `1` having produced one, and exit `0` having produced none.
 
 ## See also
 
@@ -834,3 +949,4 @@ The same hints run when the scan itself fails — a target name that does not re
 - [Catalog](catalog.md) — `@name` references and the catalog directory search order.
 - [Targets](targets.md) — the four target forms and how the CLI detects each one.
 - [Sinks](sinks.md) — stdout, file, and Kafka output in depth.
+- [RunReport schema](../reference/schema/run-report.md) — every field on the `--run-report` document.

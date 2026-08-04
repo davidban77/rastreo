@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
+use crate::atomic_file::write_atomically;
 use crate::config::DiscoverScenarioConfig;
 use crate::error::{RastreoError, ResumeError};
 use crate::fuser::{subtree_contains_identity, FuserConfig};
@@ -37,19 +38,12 @@ impl Checkpoint {
     /// Persist atomically: serialize to `<path>.tmp`, then rename onto `<path>` so a reader never
     /// observes a partially written file (atomic on POSIX within one filesystem).
     pub fn write(&self, path: impl AsRef<Path>) -> Result<(), ResumeError> {
-        let path = path.as_ref();
-        let tmp = tmp_path(path);
         // Infallible: no float/non-string-key field, and the sole `SystemTime` uses the total ISO8601 helper.
         let bytes = serde_json::to_vec(self).expect("Checkpoint serialization is infallible");
-        std::fs::write(&tmp, &bytes).map_err(|source| ResumeError::Persist {
-            path: tmp.clone(),
-            source,
-        })?;
-        std::fs::rename(&tmp, path).map_err(|source| ResumeError::Persist {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+        write_atomically(path.as_ref(), &bytes).map_err(|failure| ResumeError::Persist {
+            path: failure.path,
+            source: failure.source,
+        })
     }
 
     /// Read and validate a checkpoint. An unreadable or unparseable file yields
@@ -330,12 +324,6 @@ fn sink_label(sink: Option<&SinkConfig>) -> String {
     }
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut raw = path.as_os_str().to_owned();
-    raw.push(".tmp");
-    PathBuf::from(raw)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +331,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::time::Duration;
 
+    use crate::atomic_file::tmp_path;
     use crate::config::BaseProbeConfig;
     use crate::fuser::IdentityHints;
     use crate::model::ScanMetadata;

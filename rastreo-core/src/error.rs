@@ -32,6 +32,9 @@ pub enum RastreoError {
 
     #[error(transparent)]
     Resume(#[from] ResumeError),
+
+    #[error(transparent)]
+    Report(#[from] ReportError),
 }
 
 impl RastreoError {
@@ -91,7 +94,7 @@ impl ConfigError {
     }
 }
 
-/// The named reason a probe faulted, carried as data on the outcome's [`crate::ProbeFault`].
+/// The named reason a probe faulted, carried as data on the fault the outcome holds.
 #[derive(
     Debug,
     Clone,
@@ -296,6 +299,18 @@ pub enum ResumeError {
     CheckpointExists { path: PathBuf },
 
     #[error("checkpoint could not be written to {}", .path.display())]
+    Persist {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Why the report of a completed run could not be stored.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReportError {
+    #[error("run report could not be written to {}", .path.display())]
     Persist {
         path: PathBuf,
         #[source]
@@ -515,6 +530,15 @@ mod tests {
         )
     }
 
+    fn report_error_samples() -> Vec<ReportError> {
+        one_sample_per_variant!(ReportError;
+            ReportError::Persist { .. } => ReportError::Persist {
+                path: PathBuf::from("/var/lib/rastreo/run.json"),
+                source: denied(),
+            },
+        )
+    }
+
     fn sink_error(class: SinkErrorClass) -> SinkError {
         SinkError::new(
             class,
@@ -606,6 +630,11 @@ mod tests {
                 source: denied(),
             }
             .into(),
+            RastreoError::Report(_) => ReportError::Persist {
+                path: PathBuf::from("/var/lib/rastreo/run.json"),
+                source: denied(),
+            }
+            .into(),
         )
     }
 
@@ -619,6 +648,7 @@ mod tests {
             RastreoError::Runtime(inner) => inner,
             RastreoError::Classifier(inner) => inner,
             RastreoError::Resume(inner) => inner,
+            RastreoError::Report(inner) => inner,
         }
     }
 
@@ -635,6 +665,7 @@ mod tests {
         out.extend(runtime_error_samples().into_iter().map(boxed));
         out.extend(classifier_error_samples().into_iter().map(boxed));
         out.extend(resume_error_samples().into_iter().map(boxed));
+        out.extend(report_error_samples().into_iter().map(boxed));
         out.extend(sink_error_samples().into_iter().map(boxed));
         out.extend(otlp_env_error_samples().into_iter().map(boxed));
         #[cfg(feature = "snmp")]

@@ -89,7 +89,7 @@ pub fn generate_all() -> Result<()> {
 
 pub type SchemaSource = fn() -> Result<String>;
 
-pub const SCHEMAS: [(&str, SchemaSource); 6] = [
+pub const SCHEMAS: [(&str, SchemaSource); 7] = [
     ("device-record-v1.json", device_record_schema),
     ("link-record-v1.json", link_record_schema),
     (
@@ -99,6 +99,7 @@ pub const SCHEMAS: [(&str, SchemaSource); 6] = [
     ("scan-metadata-v1.json", scan_metadata_schema),
     ("scenario-v1.json", scenario_file_schema),
     ("discovery-plan-v2.json", discovery_plan_schema),
+    ("run-report-v1.json", run_report_schema),
 ];
 
 pub fn generate_into(dirs: &[&Path]) -> Result<()> {
@@ -155,6 +156,11 @@ pub fn render_all() -> Result<()> {
         &docs_dir.join("discovery-plan.md"),
         "rastreo-core/src/plan.rs",
     )?;
+    render_schema_file(
+        &schemas_dir.join("run-report-v1.json"),
+        &docs_dir.join("run-report.md"),
+        "rastreo-core/src/run_report.rs",
+    )?;
     Ok(())
 }
 
@@ -203,6 +209,14 @@ pub fn discovery_plan_schema() -> Result<String> {
         schema_for!(rastreo_core::DiscoveryPlan),
         "discovery-plan-v2.json",
         "DiscoveryPlan",
+    )
+}
+
+pub fn run_report_schema() -> Result<String> {
+    render_schema_json(
+        schema_for!(rastreo_core::RunReport),
+        "run-report-v1.json",
+        "RunReport",
     )
 }
 
@@ -584,6 +598,11 @@ fn format_type_field(ty: &Value, spec: &Value, defs: &Definitions<'_>) -> String
     if let Some(name) = ty.as_str() {
         match name {
             "array" => {
+                if let Some(positional) = spec.get("prefixItems").and_then(Value::as_array) {
+                    let parts: Vec<String> =
+                        positional.iter().map(|i| format_type(i, defs)).collect();
+                    return format!("[{}]", parts.join(", "));
+                }
                 let items = spec
                     .get("items")
                     .map(|i| format_type(i, defs))
@@ -1185,6 +1204,23 @@ mod tests {
         let out = format_type(&spec, &Vec::new());
         assert!(out.starts_with("array<"), "got: {out}");
         assert!(out.contains("`Signal`"));
+    }
+
+    #[test]
+    fn format_type_names_each_position_of_a_tuple() {
+        let spec = json!({
+            "type": "array",
+            "prefixItems": [
+                {"$ref": "#/$defs/SinkType"},
+                {"$ref": "#/$defs/SinkErrorClass"},
+                {"type": "integer", "format": "uint64"}
+            ]
+        });
+        let out = format_type(&spec, &Vec::new());
+        assert_eq!(
+            out,
+            "[[`SinkType`](#sinktype), [`SinkErrorClass`](#sinkerrorclass), uint64]"
+        );
     }
 
     #[test]
