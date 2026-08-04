@@ -1,9 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 use std::time::SystemTime;
 
 use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::NetError;
+use hickory_resolver::proto::rr::Name;
 use hickory_resolver::system_conf::read_system_conf;
 use hickory_resolver::TokioResolver;
 use ipnet::IpNet;
@@ -15,7 +17,7 @@ mod classify;
 mod guarded;
 pub use guarded::GuardedResolver;
 
-use classify::answered_with_no_addresses;
+use classify::{answered_with_no_addresses, skips_only_this_target};
 
 pub const DEFAULT_HOST_LIMIT: usize = 65_536;
 
@@ -125,7 +127,7 @@ impl ResolvedPlan {
             .collect()
     }
 
-    /// Targets that resolved to no addresses, in input order; each contributes nothing to the stream.
+    /// Targets that contribute no addresses, in input order; each contributes nothing to the stream.
     pub fn unresolvable_targets(&self) -> Vec<&Target> {
         self.specs
             .iter()
@@ -541,7 +543,7 @@ impl ScenarioResolution {
         self.plan.err()
     }
 
-    /// Targets that resolved to no addresses, in input order.
+    /// Targets that contribute no addresses, in input order.
     pub fn unresolvable_targets(&self) -> Vec<&Target> {
         self.entries
             .iter()
@@ -681,12 +683,35 @@ impl HickoryResolver {
     }
 
     async fn lookup_dns(&self, name: &str) -> Result<Vec<IpAddr>, ResolverError> {
+        let queried = queried_name(name)?;
         let (v6, v4) = tokio::join!(
-            lookup_one_family(&self.v6, name),
-            lookup_one_family(&self.v4, name)
+            lookup_one_family(&self.v6, name, &queried),
+            lookup_one_family(&self.v4, name, &queried)
         );
         merge_family_lookups(v6, v4)
     }
+}
+
+/// What `lookup_ip` is handed for a written target name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueriedName {
+    /// The written form is an address literal, which `lookup_ip` answers without asking a nameserver.
+    AddressLiteral,
+    Name(Name),
+}
+
+// Mirrors `lookup_ip`'s own gate: it reads the written form as an address before parsing it as a
+// name, and fails only when neither holds. `from_str_relaxed` is hickory's own IDNA-then-ascii
+// chain, which is what admits the underscores IDNA refuses.
+fn queried_name(written: &str) -> Result<QueriedName, ResolverError> {
+    if IpAddr::from_str(written).is_ok() {
+        return Ok(QueriedName::AddressLiteral);
+    }
+    Name::from_str_relaxed(written)
+        .map(QueriedName::Name)
+        .map_err(|_| ResolverError::UnqueryableTargetName {
+            name: written.to_string(),
+        })
 }
 
 fn resolver_init_failed(source: impl Into<NetError>) -> RastreoError {
@@ -713,15 +738,16 @@ fn family_resolver(
 async fn lookup_one_family(
     resolver: &TokioResolver,
     name: &str,
+    queried: &QueriedName,
 ) -> Result<Vec<IpAddr>, ResolverError> {
-    let lookup =
-        resolver
-            .lookup_ip(name)
-            .await
-            .map_err(|source| ResolverError::DnsLookupFailed {
-                name: name.to_string(),
-                source: source.into(),
-            })?;
+    let lookup = match queried {
+        QueriedName::AddressLiteral => resolver.lookup_ip(name).await,
+        QueriedName::Name(parsed) => resolver.lookup_ip(parsed.clone()).await,
+    }
+    .map_err(|source| ResolverError::DnsLookupFailed {
+        name: name.to_string(),
+        source: source.into(),
+    })?;
     addresses_or_no_records(name, lookup.iter().collect())
 }
 
@@ -744,15 +770,15 @@ fn merge_family_lookups(
     }
 }
 
-// Every other lookup failure is about the nameserver rather than the target, so it stays fatal.
+// Every other lookup failure impeaches the nameserver rather than the target, so it stays fatal.
 fn dns_spec(
     target: &Target,
     looked_up: Result<Vec<IpAddr>, ResolverError>,
 ) -> Result<PlannedSpec, ResolverError> {
     let ips = match looked_up {
         Ok(ips) => ips,
-        Err(err) if answered_with_no_addresses(&err) => {
-            tracing::warn!(%target, "target has no addresses; it will not be probed");
+        Err(err) if skips_only_this_target(&err) => {
+            tracing::warn!(%target, reason = %err, "target has no addresses; it will not be probed");
             Vec::new()
         }
         Err(err) => return Err(err),
@@ -1521,6 +1547,119 @@ mod tests {
         }
     }
 
+    // The wire-side source of the same `ProtoError` an over-long label raises before any query.
+    fn malformed_response(name: &str) -> ResolverError {
+        use hickory_resolver::proto::op::Message;
+        use hickory_resolver::proto::serialize::binary::BinDecodable;
+
+        ResolverError::DnsLookupFailed {
+            name: name.to_string(),
+            source: hickory_resolver::net::NetError::Proto(
+                Message::from_bytes(&[0xff, 0xff, 0xff])
+                    .expect_err("garbage is not a DNS message")
+                    .into(),
+            )
+            .into(),
+        }
+    }
+
+    #[test]
+    fn a_nameserver_returning_a_malformed_response_still_refuses_the_whole_plan() {
+        let target = dns("router-1.lab");
+        let merged = merge_family_lookups(
+            Err(malformed_response("router-1.lab.")),
+            Err(malformed_response("router-1.lab.")),
+        );
+        assert!(matches!(
+            dns_spec(&target, merged),
+            Err(ResolverError::DnsLookupFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_name_no_lookup_can_be_written_for_is_planned_rather_than_refused() {
+        let target = dns("fe80::1%eth0");
+        let spec = dns_spec(
+            &target,
+            Err(ResolverError::UnqueryableTargetName {
+                name: "fe80::1%eth0".into(),
+            }),
+        )
+        .expect("a name that never became a query is not a refusal");
+        let plan = ResolvedPlan::new(vec![spec], SystemTime::now());
+        assert_eq!(plan.unresolvable_targets(), vec![&target]);
+        assert_eq!(plan.total_hosts(), 0);
+    }
+
+    #[test]
+    fn a_name_the_idna_table_refuses_is_still_asked_for_by_its_ascii_form() {
+        assert_eq!(
+            queried_name("core_sw01.lab").expect("underscores are safe ascii labels"),
+            QueriedName::Name(Name::from_ascii("core_sw01.lab").expect("ascii name"))
+        );
+    }
+
+    fn asked_for(written: &str) -> String {
+        match queried_name(written).expect("a queryable name") {
+            QueriedName::Name(name) => name.to_ascii(),
+            QueriedName::AddressLiteral => panic!("{written} is not an address literal"),
+        }
+    }
+
+    #[test]
+    fn a_unicode_name_is_asked_for_in_the_punycode_form_idna_gives_it() {
+        assert_eq!(asked_for("münchen.lab"), "xn--mnchen-3ya.lab");
+    }
+
+    // `Name` compares case-insensitively, so the folding UTS46 performs is the one observable the ascii route cannot produce.
+    #[test]
+    fn the_ascii_fallback_never_preempts_idna() {
+        assert_eq!(asked_for("ROUTER-1.LAB"), "router-1.lab");
+    }
+
+    #[test]
+    fn an_address_literal_written_as_a_name_is_left_for_lookup_ip_to_shortcut() {
+        for literal in ["2001:db8::1", "192.168.1.1", "::1"] {
+            assert_eq!(
+                queried_name(literal).expect("an address literal is queryable"),
+                QueriedName::AddressLiteral,
+                "{literal} must reach lookup_ip as written"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_neither_route_accepts_is_refused_before_any_lookup() {
+        for written in [
+            "fe80::1%eth0",
+            "192.168.1.1:80",
+            "[::1]",
+            "10.0.0.1..2",
+            "host name.lab",
+            "-leading.lab",
+            &"a".repeat(300),
+        ] {
+            assert!(
+                matches!(
+                    queried_name(written),
+                    Err(ResolverError::UnqueryableTargetName { .. })
+                ),
+                "{written} names no DNS question and no address"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_name_is_asked_for_exactly_as_it_was_before() {
+        for written in ["router-1.lab", "_sip._tcp.example.com", "sw--01.lab"] {
+            assert_eq!(
+                queried_name(written).expect("an ordinary name is queryable"),
+                QueriedName::Name(Name::from_utf8(written).expect("utf8 name")),
+                "{written}"
+            );
+        }
+    }
+
     // A route that stops recording an address-less spec shows up as `unresolvable_targets` losing its entry.
     #[test]
     fn a_name_the_network_says_has_no_addresses_is_planned_rather_than_refused() {
@@ -1606,6 +1745,7 @@ mod tests {
                 wrapped(NetError::Dns(DnsError::ResponseCode(ResponseCode::Refused))),
                 false,
             ),
+            ("malformed response", malformed_response(name), false),
         ]
     }
 
@@ -1757,6 +1897,76 @@ mod tests {
                 .await
                 .expect("both families answered with none");
             assert_eq!(plan.unresolvable_targets(), vec![&target]);
+        });
+    }
+
+    #[test]
+    fn a_nameserver_is_asked_for_a_name_the_idna_table_refuses() {
+        rt().block_on(async {
+            let (config, options) = spawn_nameserver(|record_type| match record_type {
+                RecordType::A => (
+                    vec![Record::from_rdata(
+                        Name::from_ascii("core_sw01.lab.").expect("name parses"),
+                        60,
+                        RData::A(hickory_resolver::proto::rr::rdata::A(Ipv4Addr::new(
+                            10, 0, 0, 5,
+                        ))),
+                    )],
+                    ResponseCode::NoError,
+                ),
+                _ => (Vec::new(), ResponseCode::NoError),
+            })
+            .await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let ips: Vec<IpAddr> = r
+                .plan(&[dns("core_sw01.lab")])
+                .await
+                .expect("an underscored hostname is an ordinary inventory name")
+                .into_stream()
+                .map(|rt| rt.ip)
+                .collect();
+            assert_eq!(ips, vec![ipv4(10, 0, 0, 5)]);
+        });
+    }
+
+    #[test]
+    fn an_address_literal_written_as_a_name_resolves_without_asking_a_nameserver() {
+        rt().block_on(async {
+            let (config, options) =
+                spawn_nameserver(|_| (Vec::new(), ResponseCode::ServFail)).await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let ips: Vec<IpAddr> = r
+                .plan(&[dns("2001:db8::1")])
+                .await
+                .expect("a nameserver that refuses every query is never asked")
+                .into_stream()
+                .map(|rt| rt.ip)
+                .collect();
+            assert!(
+                ips.contains(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))),
+                "{ips:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_name_no_lookup_can_be_written_for_leaves_the_other_targets_scanned() {
+        rt().block_on(async {
+            let unqueryable = dns("fe80::1%eth0");
+            let (config, options) =
+                spawn_nameserver(|_| (Vec::new(), ResponseCode::ServFail)).await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let targets = vec![
+                Target::Ip(ipv4(10, 0, 0, 1)),
+                unqueryable.clone(),
+                Target::Ip(ipv4(10, 0, 0, 2)),
+            ];
+            let plan = r
+                .plan(&targets)
+                .await
+                .expect("one unqueryable name does not abort the scan");
+            assert_eq!(plan.unresolvable_targets(), vec![&unqueryable]);
+            assert_eq!(plan.total_hosts(), 2);
         });
     }
 

@@ -2249,7 +2249,7 @@ async fn the_dry_run_and_the_scan_agree_a_flushed_resume_beside_a_stale_name_has
             "the {label} must accept a resume whose CIDR resolved to 4 addresses; stderr: {stderr}"
         );
         assert!(
-            !stderr.contains("every target resolved to no addresses"),
+            !stderr.contains("every target is unresolvable"),
             "the {label} must not claim a target set that resolved has none: {stderr}"
         );
     }

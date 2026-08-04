@@ -38,9 +38,13 @@ The same rule applies to `rastreo-server`: `rastreo_server_probes_total{outcome=
 
 ## DNS resolution failures
 
-A scan against a hostname fails with one of two messages. `DNS lookup returned no records for <name>` means the name resolved but carried no `A` or `AAAA` record. `DNS lookup failed for <name>` means the lookup itself failed — system resolver unreachable, timed out, or refused. `rastreo-server` maps them to `400 Bad Request` and `503 Service Unavailable` respectively.
+A name that gets no addresses shows up in two very different ways, and they need different fixes.
 
-Check `/etc/resolv.conf` on the host running the scan. When the scan runs inside a container, the resolver inside the container is rarely the host's resolver — Docker rewrites `resolv.conf` to point at the embedded resolver. If the embedded resolver can not reach your internal DNS, hostnames will not resolve. The fix is to add the right upstreams to the container's resolver config (`--dns` flag on `docker run`, or `dns:` in `docker-compose.yml`).
+**One name did not resolve, the scan ran anyway.** The scan logs `WARN ... target has no addresses; it will not be probed`, counts the target as `unresolvable`, and probes every other target. `rastreo-server` answers `200 OK` and names the target in `summary.unresolvable_targets`. Look at that one name, not at your resolver. The `reason=` field on the warning tells you which of two things happened. Either the network answered that the name has no addresses, or rastreo never asked because the target is not a name a DNS query can carry. See [Names with no addresses](../discover/targets.md#names-with-no-addresses) and [Names rastreo cannot look up](../discover/targets.md#names-rastreo-cannot-look-up).
+
+**The whole scan aborted with `DNS lookup failed for <name>`.** The lookup said nothing about the name: the resolver was unreachable, the query timed out, or the server returned an error such as `SERVFAIL`. rastreo stops the scan rather than treating a nameserver problem as evidence about the target. `rastreo-server` answers `503 Service Unavailable`. This one is about your resolver.
+
+For the second case, check `/etc/resolv.conf` on the host running the scan. When the scan runs inside a container, the resolver inside the container is rarely the host's resolver — Docker rewrites `resolv.conf` to point at the embedded resolver. If the embedded resolver can not reach your internal DNS, hostnames will not resolve. The fix is to add the right upstreams to the container's resolver config (`--dns` flag on `docker run`, or `dns:` in `docker-compose.yml`).
 
 ## Kafka broker unreachable
 

@@ -39,8 +39,8 @@ pub struct DiscoverySummary {
     /// Collection profiles emitted on the second stream; `0` when no gNMI capability data was collected.
     #[serde(default)]
     pub profiles_emitted: usize,
-    /// Targets the network answered for with no addresses, as written in the scenario and in input
-    /// order; each was probed zero times. Empty when every target resolved.
+    /// Targets that contributed no addresses, as written in the scenario and in input order; each
+    /// was probed zero times. Empty when every target resolved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolvable_targets: Vec<String>,
     /// Faulted probes tallied by fault kind; empty when no probe faulted.

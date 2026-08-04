@@ -93,7 +93,7 @@ pub struct PlannedTarget {
 #[non_exhaustive]
 pub enum TargetResolution {
     Resolved(ResolvedAddresses),
-    /// This target resolved to no addresses; the scan probes it zero times and runs on.
+    /// This target contributes no addresses; the scan probes it zero times and runs on.
     Unresolvable,
     /// The scan would abort on this target rather than run without it.
     Error(String),

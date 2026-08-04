@@ -190,6 +190,10 @@ pub enum ResolverError {
     },
     #[error("DNS lookup returned no records for {name}")]
     DnsNoRecords { name: String },
+    #[error(
+        "target name {name} is neither a DNS name nor an IP address, so it was never looked up"
+    )]
+    UnqueryableTargetName { name: String },
     #[error("CIDR {cidr} expands to {hosts} hosts; exceeds the configured limit of {limit}")]
     CidrTooLarge {
         cidr: String,
@@ -420,6 +424,9 @@ mod tests {
             },
             ResolverError::DnsNoRecords { .. } => ResolverError::DnsNoRecords {
                 name: "missing.lab".into(),
+            },
+            ResolverError::UnqueryableTargetName { .. } => ResolverError::UnqueryableTargetName {
+                name: "fe80::1%eth0".into(),
             },
             ResolverError::CidrTooLarge { .. } => ResolverError::CidrTooLarge {
                 cidr: "10.0.0.0/8".into(),

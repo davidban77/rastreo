@@ -39,7 +39,7 @@ livenessProbe:
 - **Sink probe stalled** — the background probe task has not started a cycle recently enough for the server to stand behind the reachability verdict it is holding. Only active when `RASTREO_SINK_CONFIG_PATH` is set, and only once the task has run at least one cycle. See [When the probe task stops ticking](#when-the-probe-task-stops-ticking).
 - **Sink unreachable** — the server-side reachability probe reported the sink as unreachable on its last tick, or the sink has not built yet. Proactive gate: fires before the sink-error quarantine, because a probe failure indicates downstream ingest is offline right now. Only active when `RASTREO_SINK_CONFIG_PATH` is set. A sink that failed to build is rebuilt on every tick, so this gate clears by itself once the sink builds and probes clean.
 - **Recent sink error** — a scan failed in the last `RASTREO_SINK_ERROR_QUARANTINE_SECS` because the downstream sink (Kafka, NATS, file) errored. Reactive gate: catches transient errors between probe ticks; assumes the sink is still misbehaving until the window elapses.
-- **Recent scan error** — a `POST /scans` request failed in the last `RASTREO_SCAN_ERROR_QUARANTINE_SECS` for any reason (not necessarily a sink failure). Coarser check that catches an invalid scenario body, a resolver failure, or a runtime failure.
+- **Recent scan error** — a `POST /scans` request failed with a `5xx` in the last `RASTREO_SCAN_ERROR_QUARANTINE_SECS`. Coarser than the sink gate: it also catches a nameserver the server could not reach, an encoder failure, and a runtime failure. A request answered `4xx` never fires it. A body the caller can fix is not evidence that the server is unhealthy. Otherwise one client looping on a bad scenario would hold the pod out of the Service indefinitely.
 
 If any gate has fired, the response is `503 SERVICE_UNAVAILABLE`. Otherwise it is `200 OK`.
 
@@ -108,7 +108,7 @@ The not-ready body carries every field the ready body does, plus `reason`.
 | `sink_probe_stalled` | The sink reachability probe task has not started a cycle within the staleness window, so the cached `sink_reachable` value is no longer a verdict the server stands behind. The sink itself may be perfectly healthy. Only fires when `RASTREO_SINK_CONFIG_PATH` is set. See [When the probe task stops ticking](#when-the-probe-task-stops-ticking). |
 | `sink_unreachable` | The server-side sink reachability probe reported the sink as unreachable on its last tick, or the sink has not built yet and the last build attempt failed. Only fires when `RASTREO_SINK_CONFIG_PATH` is set. |
 | `sink_error_within_quarantine` | A sink error was observed less than `RASTREO_SINK_ERROR_QUARANTINE_SECS` ago. |
-| `scan_error_within_quarantine` | A scan error was observed less than `RASTREO_SCAN_ERROR_QUARANTINE_SECS` ago (and no sink error is currently quarantining). |
+| `scan_error_within_quarantine` | A scan failed with a `5xx` less than `RASTREO_SCAN_ERROR_QUARANTINE_SECS` ago (and no sink error is currently quarantining). A `4xx` never fires it. |
 
 When more than one gate fires simultaneously, the priority order is `inflight > sink_probe_stalled > sink_unreachable > sink_error_within_quarantine > scan_error_within_quarantine` — the most severe / most actionable reason is reported. `sink_probe_stalled` outranks `sink_unreachable` because a stalled task means the reachability value behind `sink_unreachable` is stale: reporting a broker outage from a verdict nobody refreshed would send you to the wrong system.
 
@@ -197,7 +197,7 @@ The gates are tuned through environment variables read at server startup. The st
 |---|---|---|
 | `RASTREO_MAX_INFLIGHT_SCANS` | `100` | Inflight `POST /scans` counter above which `/readyz` returns `503`. Set to `0` to disable the check. |
 | `RASTREO_SINK_ERROR_QUARANTINE_SECS` | `30` | Window after any sink error during which `/readyz` returns `503`. Set to `0` to disable the check. |
-| `RASTREO_SCAN_ERROR_QUARANTINE_SECS` | `30` | Window after any scan error during which `/readyz` returns `503`. Set to `0` to disable the check. |
+| `RASTREO_SCAN_ERROR_QUARANTINE_SECS` | `30` | Window after a scan that failed with a `5xx` during which `/readyz` returns `503`. Set to `0` to disable the check. |
 | `RASTREO_SINK_CONFIG_PATH` | unset | Path to a `SinkConfig` YAML file the server builds and probes. Leave unset to disable the reachability probe; `/readyz` reports `sink_reachable: null` and does not gate on this axis. |
 | `RASTREO_SINK_PROBE_INTERVAL_SECS` | `10` | Sink reachability probe cadence in seconds, and the retry cadence for a sink that has not built yet. Only meaningful when `RASTREO_SINK_CONFIG_PATH` is set. Minimum 1. |
 | `RASTREO_SINK_PROBE_TIMEOUT_SECS` | `5` | Per-probe timeout in seconds. Probes exceeding this count as failures. Minimum 1. |

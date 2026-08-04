@@ -39,7 +39,7 @@ What one discovery run did: how every scenario it reached ended, and the run's t
 | `records_emitted` | uint | yes | — |
 | `sink_type` | [`SinkType`](#sinktype) \| null | no | Concrete sink kind the scan wrote against. |
 | `targets_resolved` | uint | yes | — |
-| `unresolvable_targets` | array<string> | no | Targets the network answered for with no addresses, as written in the scenario and in input order; each was probed zero times. Empty when every target resolved. |
+| `unresolvable_targets` | array<string> | no | Targets that contributed no addresses, as written in the scenario and in input order; each was probed zero times. Empty when every target resolved. |
 
 ### `ProbeErrorKind` {#probeerrorkind}
 

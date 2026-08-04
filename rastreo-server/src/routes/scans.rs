@@ -125,11 +125,7 @@ pub async fn create_scan(
 
     // Ahead of the dry-run branch and of any resolution: a scenario a scan would refuse has no plan either.
     if let Err(err) = scenario.validate() {
-        state
-            .metrics
-            .record_scan_error(start.elapsed(), None, &label);
-        state.readiness.record_scan_error(false);
-        return Err(AppError::from_rastreo(err, disclosure));
+        return Err(record_scan_failure(&state, err, start, &label, disclosure));
     }
 
     if params.dry_run {
@@ -282,16 +278,30 @@ async fn run_scan(
             }))
         }
         Err(err) => {
-            let sink_class = err.sink_error_class();
-            let is_sink_error = sink_class.is_some();
-            state
-                .metrics
-                .record_scan_error(start.elapsed(), sink_class, &scenario_label);
-            state.readiness.record_scan_error(is_sink_error);
+            let failure = record_scan_failure(&state, err, start, &scenario_label, disclosure);
             outcome_guard.disarm();
-            Err(AppError::from_rastreo(err, disclosure))
+            Err(failure)
         }
     }
+}
+
+/// Counts a failed scan, and quarantines `/readyz` only when the status says the server owns the failure.
+fn record_scan_failure(
+    state: &AppState,
+    err: RastreoError,
+    start: Instant,
+    scenario_label: &str,
+    disclosure: ErrorDisclosure,
+) -> AppError {
+    let sink_class = err.sink_error_class();
+    state
+        .metrics
+        .record_scan_error(start.elapsed(), sink_class, scenario_label);
+    let failure = AppError::from_rastreo(err, disclosure);
+    if failure.status.is_server_error() {
+        state.readiness.record_scan_error(sink_class.is_some());
+    }
+    failure
 }
 
 // POST /scans is synchronous, so mid-scan progress can't be a response field; ops read it from the server log instead.
@@ -498,6 +508,107 @@ mod tests {
             response.records[0].mgmt_ip,
             Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
         );
+    }
+
+    fn scan_error_age(state: &AppState) -> Option<f64> {
+        state.readiness.last_scan_error.age_secs()
+    }
+
+    fn fail_scan(state: &AppState, err: RastreoError) -> AppError {
+        record_scan_failure(
+            state,
+            err,
+            Instant::now(),
+            "unnamed",
+            ErrorDisclosure::default(),
+        )
+    }
+
+    #[test]
+    fn a_failure_the_caller_can_fix_leaves_readiness_alone() {
+        use rastreo_core::error::ConfigError;
+
+        let state = state_with_system_resolver();
+        let failure = fail_scan(
+            &state,
+            RastreoError::Config(ConfigError::InvalidValue(
+                "targets must not be empty".into(),
+            )),
+        );
+        assert_eq!(failure.status, StatusCode::BAD_REQUEST);
+        assert!(
+            scan_error_age(&state).is_none(),
+            "a body the caller can fix must not take the pod out of rotation"
+        );
+    }
+
+    #[test]
+    fn a_failure_the_server_owns_quarantines_readiness() {
+        use rastreo_core::{SinkError, SinkErrorClass};
+
+        let state = state_with_system_resolver();
+        let failure = fail_scan(
+            &state,
+            RastreoError::Sink(SinkError::new(
+                SinkErrorClass::PublishFailure,
+                std::io::Error::other("broker refused"),
+            )),
+        );
+        assert_eq!(failure.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(scan_error_age(&state).is_some());
+        assert!(
+            state.readiness.last_sink_error.age_secs().is_some(),
+            "a sink failure stamps the sink quarantine too"
+        );
+    }
+
+    #[test]
+    fn a_target_the_allow_list_refuses_leaves_readiness_alone() {
+        let state = state_with_system_resolver();
+        let failure = fail_scan(
+            &state,
+            RastreoError::Resolver(ResolverError::TargetNotAllowed {
+                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            }),
+        );
+        assert_eq!(failure.status, StatusCode::FORBIDDEN);
+        assert!(
+            scan_error_age(&state).is_none(),
+            "a target the caller may not scan must not take the pod out of rotation"
+        );
+    }
+
+    #[test]
+    fn a_resolver_the_server_cannot_reach_still_quarantines_readiness() {
+        let state = state_with_system_resolver();
+        let failure = fail_scan(
+            &state,
+            RastreoError::Resolver(ResolverError::DnsLookupFailed {
+                name: "router-1.lab".into(),
+                source: hickory_resolver::net::NetError::NoConnections.into(),
+            }),
+        );
+        assert_eq!(failure.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(scan_error_age(&state).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_invalid_scenario_leaves_readiness_alone() {
+        let state = state_with_system_resolver();
+        let s = scenario(
+            Vec::new(),
+            vec![ProberConfig::TcpConnect { ports: vec![22] }],
+        );
+        let err = create_scan(
+            State(state.clone()),
+            Query(ScanParams::default()),
+            ErrorDisclosure::default(),
+            json_body(&s),
+        )
+        .await
+        .expect_err("empty targets must error");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(scan_error_age(&state).is_none());
     }
 
     #[test]
