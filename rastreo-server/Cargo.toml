@@ -68,5 +68,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 tempfile = { workspace = true }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true
