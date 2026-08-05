@@ -144,18 +144,41 @@ rastreo discover \
 
 rastreo probes each target on its own and does not remove duplicate addresses across targets. An address that appears in two targets is probed once for each of them. When that address responds, each probe produces its own record.
 
-Two common ways a target list overlaps:
+rastreo warns whenever two targets cover at least one shared address, whatever form each target takes. These are the shapes that come up most often:
 
+- A DNS name and an address target that repeats the address the name resolves to, for example `router-1.lab` and `10.0.0.5`. This is common in an inventory export that records some devices by name and others by address.
+- Two DNS names that answer with the same address, for example a device and its management alias.
 - A CIDR block and a host address inside it, for example `10.0.0.0/24` and `10.0.0.5`.
 - Two CIDR blocks or ranges that share addresses, for example `10.0.0.0/24` and `10.0.0.128/25`.
 
-rastreo logs a warning when it finds overlapping IP, CIDR, or range targets, naming the pair so you can see which ones to change. A `--dry-run` logs the same warning, so you can catch the overlap before the scan runs.
+The warning on stderr names the targets that overlap, so you can see which ones to change:
 
-!!! note "DNS names are not checked for overlap"
-    rastreo checks IP, CIDR, and range targets for overlap, but not DNS names. Two names that resolve to the same address are still probed once each, with no warning.
+```bash
+rastreo discover --target localhost --target 127.0.0.1 --probe tcp_connect --port 9
+```
+
+```text
+WARN scan:resolve: rastreo_core::resolver: target specs overlap; overlapping addresses will be probed and emitted more than once pairs_named=1 targets=2 more_pairs_overlap=false overlaps=DnsName("localhost") & Ip(127.0.0.1)
+```
+
+The message text is the same on every overlap. The fields carry the detail:
+
+| Field | What it holds |
+|---|---|
+| `overlaps` | The overlapping pairs, each written as two targets joined by `&`. Every target keeps its form: `Ip(10.0.0.5)`, `Cidr(10.0.0.0/24)`, `Range { start: 10.0.0.1, end: 10.0.0.10 }`, `DnsName("router-1.lab")`. |
+| `pairs_named` | How many pairs `overlaps` lists. |
+| `targets` | How many targets the list held. |
+| `more_pairs_overlap` | `true` when more pairs overlap than the warning named. |
+
+One warning names at most 20 pairs. A list with more overlap than that reports `pairs_named=20` and `more_pairs_overlap=true`. Read the named pairs as a sample, not as the whole set. A subnet target listed alongside the individual hosts inside it reaches the cap at 21 hosts.
+
+`--dry-run` reports the same overlaps without probing, so you can catch them before any traffic is sent. `-q` drops the warning along with every other one, since an overlap is not an error. Under `--log-format json` the same fields appear inside the line's `fields` object — see [Logging](../reference/logging.md).
 
 !!! tip "List disjoint targets to avoid duplicate probes"
     Cover each address once across your whole target list. Disjoint targets probe every address once, with no duplicate records.
+
+!!! info "A duplicate record is not a corrupt record"
+    Probing a shared address twice is what the target list asked for, not a failure. Both records carry the same [`identity_key`](identity.md), so a consumer that upserts on that key collapses them. What the overlap costs you is the extra probes and the extra records your consumer handles.
 
 ## Detection rules
 
@@ -183,4 +206,4 @@ The DNS-name row is a catch-all, so it also matches anything you mistyped. Detec
 
 - [CLI](cli.md) — the full flag reference for `rastreo discover`.
 - [Sinks](sinks.md) — where the resulting records go.
-- [Logging](../reference/logging.md) — where the overlapping-targets warning appears.
+- [Logging](../reference/logging.md) — how warnings are rendered, and how `-q` and `--log-format json` change them.

@@ -46,6 +46,12 @@ A name that gets no addresses shows up in two very different ways, and they need
 
 For the second case, check `/etc/resolv.conf` on the host running the scan. When the scan runs inside a container, the resolver inside the container is rarely the host's resolver — Docker rewrites `resolv.conf` to point at the embedded resolver. If the embedded resolver can not reach your internal DNS, hostnames will not resolve. The fix is to add the right upstreams to the container's resolver config (`--dns` flag on `docker run`, or `dns:` in `docker-compose.yml`).
 
+## The same device appears twice
+
+Two records with the same [`identity_key`](../discover/identity.md) mean two targets covered the same address. rastreo probed that address once for each target, and each probe produced its own record. The scan logs `WARN ... target specs overlap` and names the overlapping pairs, so the warning tells you which targets to change.
+
+The common cause is an inventory export that records some devices by name and others by address. A name and its own address both reach the target list. Cover each address once to stop the duplicate probes. A consumer that upserts on `identity_key` collapses the records either way. See [Overlapping targets](../discover/targets.md#overlapping-targets).
+
 ## Kafka broker unreachable
 
 The Kafka sink fails to start with `failed to connect to broker(s)` or a partition-client error. The most common cause is a `--brokers` value that does not resolve from the host running rastreo.
