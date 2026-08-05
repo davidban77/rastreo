@@ -517,7 +517,7 @@ mod tests {
             hold_ready_clone.notify_one();
             release_clone.notified().await;
         });
-        hold_ready.notified().await;
+        within("the holder to take the sink lock", hold_ready.notified()).await;
 
         let baseline_probe = reach.last_probe.age();
         let baseline_reachable = reach.reachable.load(Ordering::Relaxed);
@@ -537,7 +537,9 @@ mod tests {
         assert_eq!(metrics.sink_probe_failure.load(Ordering::Relaxed), 0);
 
         release.notify_one();
-        hold_handle.await.expect("holder task");
+        within("the holder to release the sink lock", hold_handle)
+            .await
+            .expect("holder task");
     }
 
     #[tokio::test]
@@ -566,7 +568,7 @@ mod tests {
             hold_ready_clone.notify_one();
             release_clone.notified().await;
         });
-        hold_ready.notified().await;
+        within("the holder to take the sink lock", hold_ready.notified()).await;
 
         let mut failures = ConstructionFailures::default();
         probe_tick(&slot, &config, &no_env(), &reach, &metrics, &mut failures).await;
@@ -588,7 +590,9 @@ mod tests {
         );
 
         release.notify_one();
-        hold_handle.await.expect("holder task");
+        within("the holder to release the sink lock", hold_handle)
+            .await
+            .expect("holder task");
     }
 
     #[tokio::test(start_paused = true)]
@@ -625,13 +629,15 @@ mod tests {
             hold_ready_clone.notify_one();
             tokio::time::sleep(hold).await;
         });
-        hold_ready.notified().await;
+        within("the holder to take the sink lock", hold_ready.notified()).await;
 
         let mut failures = ConstructionFailures::default();
         let start = tokio::time::Instant::now();
         probe_tick(&slot, &config, &no_env(), &reach, &metrics, &mut failures).await;
         let elapsed = start.elapsed();
-        hold_handle.await.expect("holder task");
+        within("the holder to release the sink lock", hold_handle)
+            .await
+            .expect("holder task");
 
         assert!(
             started.load(Ordering::SeqCst),
@@ -833,10 +839,7 @@ mod tests {
             .expect("run mkfifo");
         assert!(status.success(), "mkfifo failed: {status}");
 
-        let startup_path = path.clone();
-        tokio::spawn(async move {
-            let _ = tokio::fs::write(&startup_path, "type: not-a-real-sink\n").await;
-        });
+        let startup = FifoFeeder::spawn(&path, "type: not-a-real-sink\n");
 
         let resolver: StdArc<dyn Resolver> =
             StdArc::new(HickoryResolver::from_system().expect("resolver"));
@@ -851,13 +854,7 @@ mod tests {
         let handle = handle.expect("retry task spawned on parse failure");
         let startup_ticks = after.sink_reachability.ticks.load(Ordering::Relaxed);
 
-        // Feeds on a dropped sender too, so a failing assertion cannot leave the read blocked.
-        let (feed, feed_signal) = std::sync::mpsc::channel::<()>();
-        let feed_path = path.clone();
-        let feeder = std::thread::spawn(move || {
-            let _ = feed_signal.recv();
-            let _ = std::fs::write(&feed_path, "type: stdout\n");
-        });
+        let feeder = FifoFeeder::held(&path, "type: stdout\n");
 
         let reach = StdArc::clone(&after.sink_reachability);
         wait_until("the wedged cycle to record its start", move || {
@@ -870,9 +867,10 @@ mod tests {
             "the wedged cycle must not have reached a result, so only startup counted",
         );
 
+        // The aborted cycle's read outlives the task it was spawned from, so it is fed even so.
         handle.abort();
-        feed.send(()).expect("release the feeder");
-        feeder.join().expect("feeder thread");
+        feeder.join();
+        startup.join();
     }
 
     #[cfg(all(feature = "config", unix))]
@@ -888,21 +886,15 @@ mod tests {
         assert!(status.success(), "mkfifo failed: {status}");
 
         let probe_timeout = Duration::from_millis(200);
-        let bounded = tokio::time::timeout(
-            Duration::from_secs(5),
+        let outcome = within(
+            "the config read to end on the construction timeout",
             load_and_construct_sink(&path, probe_timeout, &no_env()),
         )
         .await;
 
-        // Feeds on a dropped sender too, so a failing assertion cannot leave the read blocked.
-        let (feed, feed_signal) = std::sync::mpsc::channel::<()>();
-        let feed_path = path.clone();
-        let feeder = std::thread::spawn(move || {
-            let _ = feed_signal.recv();
-            let _ = std::fs::write(&feed_path, "type: stdout\n");
-        });
+        // The timed-out read outlives the future that spawned it, so it is fed before the runtime goes.
+        let feeder = FifoFeeder::spawn(&path, "type: stdout\n");
 
-        let outcome = bounded.expect("the config read must not outlive the construction timeout");
         let err = outcome.err().expect("an unfed read cannot build a sink");
         let detail = format!("{:#}", err.err);
         assert!(detail.contains("timed out"), "error was: {detail}");
@@ -911,8 +903,7 @@ mod tests {
             "a config that never parsed names no kind"
         );
 
-        feed.send(()).expect("release the feeder");
-        feeder.join().expect("feeder thread");
+        feeder.join();
     }
 
     #[cfg(feature = "config")]
@@ -1034,7 +1025,11 @@ mod tests {
 
         let start = Instant::now();
         let (_tx, rx) = make_shutdown();
-        let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
+        let (after, handle) = within(
+            "the construction to end on its own timeout",
+            spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx),
+        )
+        .await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -1110,10 +1105,7 @@ mod tests {
             .expect("run mkfifo");
         assert!(status.success(), "mkfifo failed: {status}");
 
-        let startup_path = path.clone();
-        tokio::spawn(async move {
-            let _ = tokio::fs::write(&startup_path, "type: not-a-real-sink\n").await;
-        });
+        let startup = FifoFeeder::spawn(&path, "type: not-a-real-sink\n");
 
         let resolver: StdArc<dyn Resolver> =
             StdArc::new(HickoryResolver::from_system().expect("resolver"));
@@ -1127,27 +1119,25 @@ mod tests {
         let (after, handle) = spawn_sink_probe(state, &cfg, Arc::new(no_env()), rx).await;
         let handle = handle.expect("retry task spawned on parse failure");
         assert!(after.sink().is_none());
+        let startup_ticks = after.sink_reachability.ticks.load(Ordering::Relaxed);
 
-        // Feeds on a dropped sender too, so a failing assertion cannot leave the read blocked.
-        let (feed, feed_signal) = std::sync::mpsc::channel::<()>();
-        let feed_path = path.clone();
-        let feeder = std::thread::spawn(move || {
-            let _ = feed_signal.recv();
-            let _ = std::fs::write(&feed_path, "type: stdout\n");
-        });
+        let feeder = FifoFeeder::held(&path, "type: stdout\n");
 
-        // Long enough for the first retry tick to fire and block on the unfed FIFO.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // A tick stamps its start before it opens the config and yields nowhere in between, so a
+        // count past the startup one is a tick already inside the construction shutdown must finish.
+        let reach = StdArc::clone(&after.sink_reachability);
+        wait_until("the retry tick to enter its construction", move || {
+            reach.ticks.load(Ordering::Relaxed) > startup_ticks
+        })
+        .await;
         tx.send(true).expect("send shutdown");
-        feed.send(()).expect("release the feeder");
+        feeder.feed();
 
-        let joined = tokio::time::timeout(Duration::from_secs(5), handle).await;
-        feeder.join().expect("feeder thread");
-        assert!(
-            joined.is_ok(),
-            "probe task must exit once the in-flight construction completes",
-        );
-        joined.unwrap().expect("task joined cleanly");
+        within("the probe task to exit", handle)
+            .await
+            .expect("task joined cleanly");
+        feeder.join();
+        startup.join();
         assert!(
             after.sink().is_some(),
             "shutdown must not cancel a construction the tick already started",
@@ -1174,15 +1164,97 @@ mod tests {
         assert_eq!(panic_detail(&7_u32), "panic payload was not a string");
     }
 
+    const TEST_WAIT_LIMIT: Duration = Duration::from_secs(5);
+
+    async fn within<T>(label: &str, future: impl Future<Output = T>) -> T {
+        match timeout(TEST_WAIT_LIMIT, future).await {
+            Ok(value) => value,
+            Err(_) => panic!("timed out waiting for {label}"),
+        }
+    }
+
     #[cfg(feature = "config")]
     async fn wait_until(label: &str, mut condition: impl FnMut() -> bool) {
-        let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        within(label, async {
             while !condition() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await;
-        assert!(waited.is_ok(), "timed out waiting for {label}");
+    }
+
+    #[cfg(all(feature = "config", unix))]
+    struct FifoFeeder {
+        feed: std::sync::mpsc::Sender<()>,
+        thread: std::thread::JoinHandle<Result<(), String>>,
+    }
+
+    #[cfg(all(feature = "config", unix))]
+    impl FifoFeeder {
+        fn held(path: &Path, contents: &'static str) -> Self {
+            let (feed, gate) = std::sync::mpsc::channel::<()>();
+            let path = path.to_path_buf();
+            let thread = std::thread::spawn(move || {
+                // Writes on a dropped sender too, so a failing assertion cannot strand the read.
+                let _ = gate.recv();
+                write_fifo(&path, contents)
+            });
+            Self { feed, thread }
+        }
+
+        fn spawn(path: &Path, contents: &'static str) -> Self {
+            let feeder = Self::held(path, contents);
+            feeder.feed();
+            feeder
+        }
+
+        fn feed(&self) {
+            let _ = self.feed.send(());
+        }
+
+        fn join(self) {
+            self.feed();
+            match self.thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => panic!("{err}"),
+                Err(payload) => {
+                    panic!("feeder thread panicked: {}", panic_detail(payload.as_ref()))
+                }
+            }
+        }
+    }
+
+    // Opening a FIFO to write blocks until a reader opens it, so the retry reports a reader that
+    // never came rather than stalling the thread for as long as the process lives.
+    #[cfg(all(feature = "config", unix))]
+    fn write_fifo(path: &Path, contents: &str) -> Result<(), String> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let deadline = std::time::Instant::now() + TEST_WAIT_LIMIT;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)
+            {
+                Ok(mut fifo) => {
+                    return fifo
+                        .write_all(contents.as_bytes())
+                        .map_err(|err| format!("writing {} failed: {err}", path.display()))
+                }
+                Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "no reader opened {} within {TEST_WAIT_LIMIT:?}",
+                            path.display(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => return Err(format!("opening {} failed: {err}", path.display())),
+            }
+        }
     }
 
     #[cfg(feature = "config")]
