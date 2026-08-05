@@ -59,6 +59,14 @@ A DNS name. The system resolver is used unless the library caller installs a cus
 {"DnsName": "router-1.lab.local"}
 ```
 
+An IP address is a valid `DnsName` value. This matters when an inventory export emits every device as a name, including the devices it records by address:
+
+```json
+{"DnsName": "10.0.0.1"}
+```
+
+That target contributes one address, the same as `{"Ip": "10.0.0.1"}`. A name that answers with several addresses contributes all of them, and each address counts once. See [DNS name](../discover/targets.md#dns-name) for the address-count rule, and [Overlapping targets](../discover/targets.md#overlapping-targets) when two targets cover the same address.
+
 ## Probers
 
 Each entry in the `probers` array is an object with a `type` field. Thirteen probers are available today: `tcp_connect`, `http`, `dns`, `reverse_dns`, `udp`, `snmp`, `arp`, `ndp`, `ssh`, `icmp`, `tls`, `gnmi`, and `lldp`. `tcp_connect`, `dns`, `reverse_dns`, and `udp` are always available. The other nine each need their matching build feature. All nine are bundled with the published binaries and Docker image. The `lldp` feature turns on `snmp` as well.

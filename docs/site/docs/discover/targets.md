@@ -37,13 +37,26 @@ rastreo discover --target "10.0.0.1 - 10.0.0.5"
 
 ## DNS name
 
-Anything that is not an IP, a CIDR, or an IP range is treated as a DNS name. rastreo resolves it through the system resolver and probes the resulting address.
+Anything that is not an IP, a CIDR, or an IP range is treated as a DNS name. rastreo resolves it through the system resolver and probes the resulting addresses.
 
 ```bash
 rastreo discover --target router-1.lab.local
 ```
 
-When a name resolves to more than one A or AAAA record, every address is probed.
+A name contributes every address it resolves to. `localhost` normally answers with an IPv6 and an IPv4 address, so it contributes two:
+
+```bash
+rastreo discover --target localhost --dry-run
+```
+
+```text
+    targets:
+      localhost → ::1, 127.0.0.1
+```
+
+**Each address counts once per target.** Within one target, rastreo probes each address once, no matter how many records point at it. A nameserver that returns the same record twice in one answer still contributes one address.
+
+That rule applies to one target at a time. An address that two targets both cover is still probed for each of them — see [Overlapping targets](#overlapping-targets).
 
 **An underscore in a hostname is fine.** `core_sw01.lab` and `dist_rtr02.example.com` are common in device inventories, and rastreo asks the resolver for them exactly as written.
 
@@ -77,7 +90,7 @@ Two things stay fatal for the same reason a stale name does not: an over-cap CID
 
 The DNS-name form is the catch-all, so a mistyped target becomes a name too. Some strings are not names any DNS query can carry, and rastreo can tell that before it asks.
 
-rastreo looks a name up when all of these are true:
+An IP address never reaches these rules, whether you write it as an IP target or as a DNS name. Either way it contributes that one address. Every other value has to be a name, and rastreo looks one up when all of these are true:
 
 - Every part between the dots uses only letters, digits, hyphens, and underscores. Accented and non-Latin letters count as letters.
 - No part is empty, and no part starts with a hyphen.
