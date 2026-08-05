@@ -437,9 +437,9 @@ The output shows one block per scenario. Each block lists:
 
 The rate line reads `unlimited` when no pacing is set. A bottom line reports the total probe count — the addresses the scan would probe, multiplied by the probers. It is the number of probes the scan performs, including an address covered by two targets, which is probed once for each of them. See [Overlapping targets](targets.md#overlapping-targets).
 
-CIDRs and ranges that expand to more than six addresses are truncated with an ellipsis and a count. A target that does not resolve is listed with its reason in place of the addresses. The plan covers every target you configured, resolved or not.
+CIDRs and ranges that expand to more than six addresses are truncated with an ellipsis and a count. A target with no addresses is listed as `<unresolvable: no addresses>`. A target the resolver refused is listed as `<error: ...>`, carrying the reason. The plan covers every target you configured, resolved or not.
 
-The exit code is `1` when any target fails to resolve, and `0` when they all resolve. A real scan stops at the first target it cannot resolve, so a plan with a failing target describes a scan that would not start: its total probe count reads `0`, even where other targets resolved. The dry-run lists every failing target; a real scan reports only the first.
+The exit code follows the scan the plan describes. A target the resolver refuses makes the whole plan unrunnable. An over-cap CIDR or range is refused this way: the probe count reads `0` and the command exits `1`. A target that resolves to no addresses is skipped instead. The count then covers the targets that did resolve, and the command exits `0`. Only a plan where every target was skipped has nothing left to probe, and that exits `1`.
 
 Kafka, NATS, and file sinks are described from the configured values only. `--dry-run` never opens a network connection to the sink or writes to the output file, so a bogus broker address in `--brokers` completes in milliseconds instead of hanging.
 
@@ -471,17 +471,19 @@ The `encoder` line is the last stage before the sink: it names the format each r
 !!! tip "Safe to log or share"
     The plan strips inline credentials from a sink URL. A NATS server written as `nats://user:pass@host` renders as `nats://host`.
 
-A plan with failing targets still prints in full, then exits `1`:
+A plan with failing targets still prints in full, then exits `1`. Below, `nx.invalid` has no addresses and is skipped. The over-cap `10.0.0.0/8` refuses the whole plan:
 
 ```bash
 rastreo discover --target nx.invalid --target 10.0.0.0/8 --probe tcp_connect --port 22 --dry-run
 ```
 
 ```text
+WARN rastreo_core::resolver: target has no addresses; it will not be probed target=nx.invalid reason=DNS lookup failed for nx.invalid
+WARN rastreo_core::resolver: target has no addresses; it will not be probed target=nx.invalid reason=DNS lookup failed for nx.invalid
 [dry-run] would run 1 scenario
   scenario: discovery
     targets:
-      nx.invalid → <error: DNS lookup failed for nx.invalid>
+      nx.invalid → <unresolvable: no addresses>
       10.0.0.0/8 → <error: CIDR 10.0.0.0/8 expands to 16777214 hosts; exceeds the configured limit of 65536>
     probers: tcp_connect (ports 22)
     fuser: direct (include_unreachable false, confidence_baseline 0.1, confidence_per_signal 0.1)
@@ -493,9 +495,10 @@ rastreo discover --target nx.invalid --target 10.0.0.0/8 --probe tcp_connect --p
     retries: 0
     timeout_ms: 1000
 total probes: 0
-⚠ hint: DNS resolution failed for the target. Check the resolver configuration or the target's hostname.
-Error: DNS lookup failed for nx.invalid: no records found for Query { name: Name("nx.invalid."), query_type: AAAA, query_class: IN }
+Error: CIDR 10.0.0.0/8 expands to 16777214 hosts; exceeds the configured limit of 65536
 ```
+
+Swap `10.0.0.0/8` for `10.0.0.0/30` and the refusal is gone. The plan still lists `nx.invalid` as skipped. The count reads `total probes: 2`, and the command exits `0`.
 
 ### A scenario rastreo cannot build gets no plan
 
@@ -900,8 +903,47 @@ Two properties of `aggregate.summary` follow from it being a fold rather than a 
 | The scan itself failed — an unopenable sink, a target set the resolver refused | `1` | written — `outcome: "failed"`, no `summary` |
 | One scenario of several failed, the rest ran | `1` | written, one entry per scenario |
 | Every scenario in the file was skipped for having no probers | `1` | written, every entry `outcome: "skipped"` |
-| `--sink file` without `--output`, an unknown probe kind, an unreadable scenario file | `1` | **not written** — the run refused before reaching a scenario |
+| `--sink file` without `--output`, an unknown probe kind, a `--target` rastreo cannot read as a target form, an unreadable scenario file | `1` | **not written** — the run refused before reaching a scenario |
 | Cancelled before the first scenario started | `0` | **not written** — no scenario was reached |
+
+**A malformed `--target` reaches three of those rows, and how far the run got is what decides which.** Every case below exits `1` and prints one error, so the terminal alone cannot tell them apart.
+
+| `--target` | How far the run got | Report |
+|---|---|---|
+| `10.0.0.0/99`, `foo/bar`, `http://host`, an empty value | No target form matched, so no scenario was built | **not written** |
+| `10.0.0.0/8`, `10.0.0.9-10.0.0.1`, `10.0.0.1-2001:db8::1` | A target, but the resolver refused the whole set | written — `outcome: "failed"`, no `summary` |
+| `999.999.999.999`, `nx.invalid`, `192.168.1.1:80`, `fe80::1%eth0` | The scan ran, and the target contributed no addresses | written — `outcome: "failed"`, the summary names it in `unresolvable_targets` |
+
+Only two written forms fail to become a target at all. One is a value that is empty or only spaces. The other is a value containing `/` that is not a valid CIDR, which is why a pasted URL leaves no report. Everything else becomes one of the four target forms, so a scenario exists and the report names the failure. What decides this is the shape of the value, not whether it could ever have worked. See [Detection rules](targets.md#detection-rules).
+
+With several targets, the earliest row any one of them reaches is the row the whole run gets. A single unreadable value leaves no report, even when every other target resolved.
+
+```console
+$ rastreo discover --target 10.0.0.0/99 -q --run-report run.json
+Error: invalid --target "10.0.0.0/99"
+
+Caused by:
+    CIDR "10.0.0.0/99": invalid IP address syntax
+$ test -f run.json || echo "no report"
+no report
+
+$ rastreo discover --target 10.0.0.9-10.0.0.1 -q --run-report run.json
+Error: IP range is invalid: start 10.0.0.9 > end 10.0.0.1
+$ jq -r '.scenarios[0].outcome' run.json
+failed
+
+$ rastreo discover --target 192.168.1.1:80 -q --run-report run.json
+Error: every target is unresolvable (192.168.1.1:80); there is nothing to probe
+$ jq -r '.scenarios[0].summary.unresolvable_targets[]' run.json
+192.168.1.1:80
+```
+
+!!! tip "Telling the last two rows apart"
+    Both carry `outcome: "failed"` and both exit `1`. The presence of `summary` is what separates them, so test for it before you read any counter off the entry:
+
+    ```bash
+    jq -e '.scenarios[0].summary != null' run.json
+    ```
 
 So a consumer must handle an absent file rather than assume it is there, and the exit code is what says why it is absent:
 
