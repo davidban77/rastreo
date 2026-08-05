@@ -695,7 +695,8 @@ impl HickoryResolver {
 /// What `lookup_ip` is handed for a written target name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum QueriedName {
-    /// The written form is an address literal, which `lookup_ip` answers without asking a nameserver.
+    /// The written form parses as an address, so `lookup_ip` is handed the string unchanged and
+    /// keeps its own choice of whether to answer it directly or walk the search list first.
     AddressLiteral,
     Name(Name),
 }
@@ -756,18 +757,35 @@ fn merge_family_lookups(
     v6: Result<Vec<IpAddr>, ResolverError>,
     v4: Result<Vec<IpAddr>, ResolverError>,
 ) -> Result<Vec<IpAddr>, ResolverError> {
-    match (v6, v4) {
+    let contributed = match (v6, v4) {
         (Ok(mut sixes), Ok(fours)) => {
             sixes.extend(fours);
-            Ok(sixes)
+            sixes
         }
-        (Ok(ips), Err(_)) | (Err(_), Ok(ips)) => Ok(ips),
-        (Err(v6), Err(v4)) => Err(if answered_with_no_addresses(&v6) {
-            v4
-        } else {
-            v6
-        }),
+        (Ok(ips), Err(_)) | (Err(_), Ok(ips)) => ips,
+        (Err(v6), Err(v4)) => {
+            return Err(if answered_with_no_addresses(&v6) {
+                v4
+            } else {
+                v6
+            })
+        }
+    };
+    Ok(each_address_once(contributed))
+}
+
+// Union in first-seen order: every family answers an address literal from the written form, so a
+// concatenation would carry it twice.
+fn each_address_once(mut ips: Vec<IpAddr>) -> Vec<IpAddr> {
+    let mut kept = 0;
+    for index in 0..ips.len() {
+        if !ips[..kept].contains(&ips[index]) {
+            ips.swap(kept, index);
+            kept += 1;
+        }
     }
+    ips.truncate(kept);
+    ips
 }
 
 // Every other lookup failure impeaches the nameserver rather than the target, so it stays fatal.
@@ -1818,6 +1836,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_address_both_families_answered_is_carried_once() {
+        let shared = ipv4(127, 0, 0, 1);
+        assert_eq!(
+            merge_family_lookups(Ok(vec![shared]), Ok(vec![shared])).expect("both answered"),
+            vec![shared]
+        );
+    }
+
+    #[test]
+    fn the_union_keeps_each_address_at_its_first_appearance() {
+        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        let shared = ipv4(10, 0, 0, 5);
+        assert_eq!(
+            merge_family_lookups(Ok(vec![v6, shared]), Ok(vec![shared, ipv4(10, 0, 0, 6)]))
+                .expect("both answered"),
+            vec![v6, shared, ipv4(10, 0, 0, 6)]
+        );
+    }
+
+    #[test]
+    fn a_family_answering_the_same_address_twice_carries_it_once() {
+        let repeated = ipv4(10, 0, 0, 5);
+        for (label, err, _) in family_failures("router-1.lab") {
+            assert_eq!(
+                merge_family_lookups(Ok(vec![repeated, repeated]), Err(err))
+                    .expect("AAAA answered"),
+                vec![repeated],
+                "a repeated answer beside an A {label} is still one address"
+            );
+        }
+    }
+
     // One nameserver answering by record type, so the two family lookups carry different hickory errors.
     async fn spawn_nameserver(
         answer: fn(RecordType) -> (Vec<Record>, ResponseCode),
@@ -1930,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn an_address_literal_written_as_a_name_resolves_without_asking_a_nameserver() {
+    fn an_address_literal_written_as_a_name_resolves_though_the_nameserver_refuses_every_query() {
         rt().block_on(async {
             let (config, options) =
                 spawn_nameserver(|_| (Vec::new(), ResponseCode::ServFail)).await;
@@ -1938,7 +1989,7 @@ mod tests {
             let ips: Vec<IpAddr> = r
                 .plan(&[dns("2001:db8::1")])
                 .await
-                .expect("a nameserver that refuses every query is never asked")
+                .expect("a nameserver refusing every query cannot withhold the written address")
                 .into_stream()
                 .map(|rt| rt.ip)
                 .collect();
@@ -1946,6 +1997,118 @@ mod tests {
                 ips.contains(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))),
                 "{ips:?}"
             );
+        });
+    }
+
+    #[test]
+    fn an_address_literal_written_as_a_name_resolves_to_that_address_and_nothing_else() {
+        rt().block_on(async {
+            let (config, options) =
+                spawn_nameserver(|_| (Vec::new(), ResponseCode::ServFail)).await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            for literal in ["127.0.0.1", "2001:db8::1", "::1"] {
+                let plan = r.plan(&[dns(literal)]).await.expect(
+                    "a nameserver refusing every query cannot withhold the written address",
+                );
+                let ips: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
+                assert_eq!(
+                    ips,
+                    vec![literal.parse::<IpAddr>().expect("a literal")],
+                    "{literal} is one address however many lookups answered it"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_name_answered_by_both_families_resolves_to_both_addresses() {
+        rt().block_on(async {
+            let (config, options) = spawn_nameserver(|record_type| {
+                let name = Name::from_ascii("dual.lab.").expect("name parses");
+                let rdata = match record_type {
+                    RecordType::AAAA => RData::AAAA(hickory_resolver::proto::rr::rdata::AAAA(
+                        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+                    )),
+                    RecordType::A => RData::A(hickory_resolver::proto::rr::rdata::A(
+                        Ipv4Addr::new(10, 0, 0, 5),
+                    )),
+                    _ => return (Vec::new(), ResponseCode::NoError),
+                };
+                (
+                    vec![Record::from_rdata(name, 60, rdata)],
+                    ResponseCode::NoError,
+                )
+            })
+            .await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let plan = r.plan(&[dns("dual.lab")]).await.expect("both answered");
+            assert_eq!(plan.total_hosts(), 2);
+            let ips: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
+            assert_eq!(
+                ips,
+                vec![
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                    ipv4(10, 0, 0, 5)
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn two_targets_naming_the_same_address_each_still_contribute_it() {
+        rt().block_on(async {
+            let (config, options) =
+                spawn_nameserver(|_| (Vec::new(), ResponseCode::ServFail)).await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let targets = vec![
+                Target::Ip(ipv4(127, 0, 0, 1)),
+                Target::Cidr("127.0.0.0/31".parse().expect("cidr")),
+                dns("127.0.0.1"),
+            ];
+            let plan = r.plan(&targets).await.expect("every target resolves");
+            assert_eq!(
+                plan.total_hosts(),
+                4,
+                "de-duplication is within one target, never across them"
+            );
+            let ips: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
+            assert_eq!(
+                ips,
+                vec![
+                    ipv4(127, 0, 0, 1),
+                    ipv4(127, 0, 0, 0),
+                    ipv4(127, 0, 0, 1),
+                    ipv4(127, 0, 0, 1),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn a_nameserver_repeating_a_record_resolves_the_name_to_one_address() {
+        rt().block_on(async {
+            let (config, options) = spawn_nameserver(|record_type| match record_type {
+                RecordType::A => {
+                    let record = Record::from_rdata(
+                        Name::from_ascii("dup.lab.").expect("name parses"),
+                        60,
+                        RData::A(hickory_resolver::proto::rr::rdata::A(Ipv4Addr::new(
+                            10, 0, 0, 5,
+                        ))),
+                    );
+                    (vec![record.clone(), record], ResponseCode::NoError)
+                }
+                _ => (Vec::new(), ResponseCode::NoError),
+            })
+            .await;
+            let r = HickoryResolver::from_config(&config, &options).expect("resolver");
+            let plan = r
+                .plan(&[dns("dup.lab")])
+                .await
+                .expect("the A half answered");
+            assert_eq!(plan.total_hosts(), 1);
+            let ips: Vec<IpAddr> = plan.into_stream().map(|rt| rt.ip).collect();
+            assert_eq!(ips, vec![ipv4(10, 0, 0, 5)]);
         });
     }
 
