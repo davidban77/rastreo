@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.0](https://github.com/davidban77/rastreo/compare/v0.12.0...v0.13.0) (2026-08-06)
+
+
+### Features
+
+* **cli:** write a run report a script can read ([#275](https://github.com/davidban77/rastreo/issues/275)) ([92866ff](https://github.com/davidban77/rastreo/commit/92866ff700b824f83030d34c9f5cb09bc297db30))
+
+
+### Bug Fixes
+
+* **cli:** make -q mean the same thing on validate and catalog list ([#277](https://github.com/davidban77/rastreo/issues/277)) ([909b73d](https://github.com/davidban77/rastreo/commit/909b73d03c1d5d8546dfd3607a297bc3c90c9087))
+* **core:** carry each of a target's addresses once ([#281](https://github.com/davidban77/rastreo/issues/281)) ([8551a58](https://github.com/davidban77/rastreo/commit/8551a583d0ee76312b44427fe37f505a18eb6bf2))
+* **core:** skip a target no lookup can be written for instead of failing the run ([#278](https://github.com/davidban77/rastreo/issues/278)) ([c4a0b67](https://github.com/davidban77/rastreo/commit/c4a0b67533c9c0ebff0907a137ab50dec5002e04))
+* **core:** warn when any two targets cover the same address ([#282](https://github.com/davidban77/rastreo/issues/282)) ([99b18d1](https://github.com/davidban77/rastreo/commit/99b18d1b5e4624c5346f2a8d7184d57a056d3ca7))
+* **server:** bound every wait in the sink-probe tests so a lost race fails instead of hanging ([#280](https://github.com/davidban77/rastreo/issues/280)) ([cab3810](https://github.com/davidban77/rastreo/commit/cab3810d12d6234c4fb6e37ea7f7949eb60953a0))
+
+
+### Documentation
+
+* say what a scan id actually orders ([#274](https://github.com/davidban77/rastreo/issues/274)) ([16c7eff](https://github.com/davidban77/rastreo/commit/16c7effc8f2c94bf36f62f14178c63892d688546))
+* say when a run report appears and when it does not ([#279](https://github.com/davidban77/rastreo/issues/279)) ([86293a6](https://github.com/davidban77/rastreo/commit/86293a69a2d3b2c806def0e41f69859e602ac828))
+
 ## [0.12.0](https://github.com/davidban77/rastreo/compare/v0.11.0...v0.12.0) (2026-08-03)
 
 
