@@ -103,6 +103,24 @@ enum PlannedSpec {
     Resolved { ips: Vec<IpAddr>, original: Target },
 }
 
+// A wildcard-answering resolver puts a whole inventory of names on one address, and that is
+// quadratically many pairs, so the sweep stops once it has this many to name.
+const REPORTED_OVERLAPS: usize = 20;
+
+/// Target pairs that share an address, bounded to what one warning can name.
+struct Overlaps {
+    pairs: Vec<(Target, Target)>,
+    more: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct AddressInterval {
+    v6: bool,
+    lo: u128,
+    hi: u128,
+    spec: usize,
+}
+
 impl ResolvedPlan {
     fn new(specs: Vec<PlannedSpec>, resolved_at: SystemTime) -> Self {
         let plan = Self { specs, resolved_at };
@@ -222,38 +240,84 @@ impl ResolvedPlan {
     // no cross-target dedup. Warning at construction is what makes a rehearsal say so, not just a scan.
     fn warn_on_overlaps(&self) {
         let overlaps = self.find_overlaps();
-        if overlaps.is_empty() {
+        if overlaps.pairs.is_empty() {
             return;
         }
-        let pairs: Vec<String> = overlaps
+        let named: Vec<String> = overlaps
+            .pairs
             .iter()
             .map(|(a, b)| format!("{a:?} & {b:?}"))
             .collect();
         tracing::warn!(
-            overlaps = %pairs.join(", "),
+            pairs_named = named.len(),
+            targets = self.specs.len(),
+            more_pairs_overlap = overlaps.more,
+            overlaps = %named.join(", "),
             "target specs overlap; overlapping addresses will be probed and emitted more than once"
         );
     }
 
-    // Pairwise over contiguous blocks only — DNS point sets are excluded. No IP expansion; #specs is
-    // small, so the quadratic scan is cheaper than sorting.
-    fn find_overlaps(&self) -> Vec<(Target, Target)> {
-        let blocks: Vec<(bool, u128, u128, &Target)> = self
-            .specs
-            .iter()
-            .filter_map(PlannedSpec::interval)
-            .collect();
-        let mut out = Vec::new();
-        for a in 0..blocks.len() {
-            for b in (a + 1)..blocks.len() {
-                let (v6_a, lo_a, hi_a, target_a) = blocks[a];
-                let (v6_b, lo_b, hi_b, target_b) = blocks[b];
-                if v6_a == v6_b && lo_a <= hi_b && lo_b <= hi_a {
-                    out.push((target_a.clone(), target_b.clone()));
-                }
-            }
+    // A block contributes one interval and a resolved point set one per address, so no spec form is
+    // skipped and no block is ever expanded.
+    fn sweep_intervals(&self) -> Vec<AddressInterval> {
+        let mut intervals: Vec<AddressInterval> = Vec::with_capacity(self.specs.len());
+        for (spec, planned) in self.specs.iter().enumerate() {
+            planned.push_intervals(spec, &mut intervals);
         }
-        out
+        intervals.sort_unstable();
+        // A spec's repeats of one interval pair with nothing, so they would grow the open set
+        // without ever reaching the cap that ends the sweep.
+        intervals.dedup();
+        intervals
+    }
+
+    // One sorted sweep over the intervals, whose cost is their count and never the address space a
+    // block covers: everything open at a point mutually overlaps, so k specs open there means the
+    // C(k,2) pairs among them are already found, and `REPORTED_OVERLAPS` therefore bounds k.
+    fn find_overlaps(&self) -> Overlaps {
+        let intervals = self.sweep_intervals();
+
+        let mut active: Vec<usize> = Vec::new();
+        let mut found: Vec<(usize, usize)> = Vec::new();
+        let mut more = false;
+        for (index, interval) in intervals.iter().enumerate() {
+            active.retain(|&open| {
+                intervals[open].v6 == interval.v6 && intervals[open].hi >= interval.lo
+            });
+            for &open in &active {
+                let other = intervals[open].spec;
+                if other == interval.spec {
+                    continue;
+                }
+                let pair = (other.min(interval.spec), other.max(interval.spec));
+                if found.contains(&pair) {
+                    continue;
+                }
+                if found.len() >= REPORTED_OVERLAPS {
+                    more = true;
+                    break;
+                }
+                found.push(pair);
+            }
+            if more {
+                break;
+            }
+            active.push(index);
+        }
+
+        found.sort_unstable();
+        Overlaps {
+            pairs: found
+                .into_iter()
+                .map(|(a, b)| {
+                    (
+                        self.specs[a].original().clone(),
+                        self.specs[b].original().clone(),
+                    )
+                })
+                .collect(),
+            more,
+        }
     }
 }
 
@@ -297,18 +361,22 @@ impl PlannedSpec {
         }
     }
 
-    fn interval(&self) -> Option<(bool, u128, u128, &Target)> {
+    fn push_intervals(&self, spec: usize, out: &mut Vec<AddressInterval>) {
         match self {
-            PlannedSpec::Block {
-                first,
-                last,
-                original,
-            } => {
-                let (is_v6, lo) = ip_to_bits(*first);
+            PlannedSpec::Block { first, last, .. } => {
+                let (v6, lo) = ip_to_bits(*first);
                 let (_, hi) = ip_to_bits(*last);
-                Some((is_v6, lo, hi, original))
+                out.push(AddressInterval { v6, lo, hi, spec });
             }
-            PlannedSpec::Resolved { .. } => None,
+            PlannedSpec::Resolved { ips, .. } => out.extend(ips.iter().map(|ip| {
+                let (v6, bits) = ip_to_bits(*ip);
+                AddressInterval {
+                    v6,
+                    lo: bits,
+                    hi: bits,
+                    spec,
+                }
+            })),
         }
     }
 
@@ -1320,8 +1388,9 @@ mod tests {
             .block_on(r.plan(&[a.clone(), b.clone()]))
             .expect("plan");
         let overlaps = plan.find_overlaps();
-        assert_eq!(overlaps.len(), 1);
-        assert_eq!(overlaps[0], (a, b));
+        assert_eq!(overlaps.pairs.len(), 1);
+        assert_eq!(overlaps.pairs[0], (a, b));
+        assert!(!overlaps.more);
     }
 
     #[test]
@@ -1333,7 +1402,7 @@ mod tests {
             Target::Ip(ipv4(192, 168, 1, 1)),
         ];
         let plan = rt().block_on(r.plan(&targets)).expect("plan");
-        assert!(plan.find_overlaps().is_empty());
+        assert!(plan.find_overlaps().pairs.is_empty());
     }
 
     #[test]
@@ -1386,8 +1455,218 @@ mod tests {
         ];
         let plan = rt().block_on(r.plan(&targets)).expect("plan");
         assert!(
-            plan.find_overlaps().is_empty(),
+            plan.find_overlaps().pairs.is_empty(),
             "an IPv4 block and an IPv6 block never share addresses"
+        );
+    }
+
+    fn resolved(original: Target, ips: Vec<IpAddr>) -> PlannedSpec {
+        PlannedSpec::Resolved { ips, original }
+    }
+
+    fn named(name: &str, ips: Vec<IpAddr>) -> PlannedSpec {
+        resolved(Target::DnsName(name.to_string()), ips)
+    }
+
+    fn plan_of(specs: Vec<PlannedSpec>) -> ResolvedPlan {
+        ResolvedPlan::new(specs, std::time::SystemTime::now())
+    }
+
+    #[test]
+    fn a_name_overlaps_the_single_address_target_that_repeats_it() {
+        let name = Target::DnsName("router-1.lab".to_string());
+        let ip = ipv4(10, 0, 0, 5);
+        let plan = plan_of(vec![
+            named("router-1.lab", vec![ip]),
+            PlannedSpec::Block {
+                first: ip,
+                last: ip,
+                original: Target::Ip(ip),
+            },
+        ]);
+        assert_eq!(plan.find_overlaps().pairs, vec![(name, Target::Ip(ip))]);
+    }
+
+    #[test]
+    fn a_name_overlaps_a_block_that_covers_its_address() {
+        let net: IpNet = "10.0.0.0/24".parse().expect("cidr");
+        let (first, last, _) = cidr_bounds(&net);
+        let plan = plan_of(vec![
+            PlannedSpec::Block {
+                first,
+                last,
+                original: Target::Cidr(net),
+            },
+            named("router-1.lab", vec![ipv4(10, 0, 0, 5)]),
+        ]);
+        assert_eq!(plan.find_overlaps().pairs.len(), 1);
+    }
+
+    #[test]
+    fn a_name_inside_a_wide_block_overlaps_it() {
+        let net: IpNet = "10.0.0.0/8".parse().expect("cidr");
+        let (first, last, _) = cidr_bounds(&net);
+        let plan = plan_of(vec![
+            PlannedSpec::Block {
+                first,
+                last,
+                original: Target::Cidr(net),
+            },
+            named("router-1.lab", vec![ipv4(10, 200, 3, 9)]),
+        ]);
+        assert_eq!(plan.find_overlaps().pairs.len(), 1);
+    }
+
+    #[test]
+    fn two_names_that_answer_with_a_shared_address_overlap() {
+        let plan = plan_of(vec![
+            named("router-1.lab", vec![ipv4(10, 0, 0, 5)]),
+            named(
+                "router-1.mgmt.lab",
+                vec![ipv4(10, 0, 0, 9), ipv4(10, 0, 0, 5)],
+            ),
+        ]);
+        assert_eq!(plan.find_overlaps().pairs.len(), 1);
+    }
+
+    #[test]
+    fn two_names_with_disjoint_addresses_do_not_overlap() {
+        let plan = plan_of(vec![
+            named("router-1.lab", vec![ipv4(10, 0, 0, 5)]),
+            named("router-2.lab", vec![ipv4(10, 0, 0, 6)]),
+        ]);
+        assert!(plan.find_overlaps().pairs.is_empty());
+    }
+
+    #[test]
+    fn a_name_answering_with_several_addresses_does_not_overlap_itself() {
+        let plan = plan_of(vec![named(
+            "router-1.lab",
+            vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 6), ipv4(10, 0, 0, 7)],
+        )]);
+        assert!(plan.find_overlaps().pairs.is_empty());
+    }
+
+    #[test]
+    fn a_target_whose_answer_repeats_an_address_does_not_pair_with_itself() {
+        let plan = plan_of(vec![named(
+            "router-1.lab",
+            vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 5)],
+        )]);
+        assert!(plan.find_overlaps().pairs.is_empty());
+    }
+
+    #[test]
+    fn a_name_and_a_block_sharing_several_addresses_are_named_once() {
+        let net: IpNet = "10.0.0.0/24".parse().expect("cidr");
+        let (first, last, _) = cidr_bounds(&net);
+        let plan = plan_of(vec![
+            PlannedSpec::Block {
+                first,
+                last,
+                original: Target::Cidr(net),
+            },
+            named(
+                "router-1.lab",
+                vec![ipv4(10, 0, 0, 5), ipv4(10, 0, 0, 6), ipv4(10, 0, 0, 7)],
+            ),
+        ]);
+        assert_eq!(plan.find_overlaps().pairs.len(), 1);
+    }
+
+    #[test]
+    fn a_name_does_not_overlap_a_target_of_the_other_family() {
+        let ip = ipv4(10, 0, 0, 5);
+        let plan = plan_of(vec![
+            named("router-1.lab", vec![IpAddr::V6(Ipv6Addr::LOCALHOST)]),
+            PlannedSpec::Block {
+                first: ip,
+                last: ip,
+                original: Target::Ip(ip),
+            },
+        ]);
+        assert!(plan.find_overlaps().pairs.is_empty());
+    }
+
+    #[test]
+    fn a_target_the_planner_resolved_eagerly_overlaps_like_the_block_it_stands_for() {
+        let ip = ipv4(10, 0, 0, 5);
+        let net: IpNet = "10.0.0.0/29".parse().expect("cidr");
+        let plan = plan_of(vec![
+            resolved(Target::Ip(ip), vec![ip]),
+            resolved(
+                Target::Cidr(net),
+                (1..=6).map(|last| ipv4(10, 0, 0, last)).collect(),
+            ),
+        ]);
+        assert_eq!(
+            plan.find_overlaps().pairs,
+            vec![(Target::Ip(ip), Target::Cidr(net))]
+        );
+    }
+
+    #[test]
+    fn every_pair_of_target_forms_covering_one_address_is_named_in_input_order() {
+        let name = Target::DnsName("vip.lab".to_string());
+        let shared = ipv4(10, 0, 0, 5);
+        let targets = vec![
+            Target::Ip(shared),
+            Target::Cidr("10.0.0.0/24".parse().expect("cidr")),
+            Target::Range {
+                start: ipv4(10, 0, 0, 1),
+                end: ipv4(10, 0, 0, 10),
+            },
+            name.clone(),
+        ];
+        let plan = ResolvedPlan::from_pinned(&targets, &[(name, vec![shared])]).expect("plan");
+        let expected: Vec<(Target, Target)> = (0..targets.len())
+            .flat_map(|a| ((a + 1)..targets.len()).map(move |b| (a, b)))
+            .map(|(a, b)| (targets[a].clone(), targets[b].clone()))
+            .collect();
+        assert_eq!(plan.find_overlaps().pairs, expected);
+    }
+
+    #[test]
+    fn every_pair_is_named_while_they_fit_in_one_warning() {
+        let specs = (0..6)
+            .map(|i| named(&format!("host-{i}.lab"), vec![ipv4(10, 0, 0, 5)]))
+            .collect();
+        let overlaps = plan_of(specs).find_overlaps();
+        assert_eq!(overlaps.pairs.len(), 15);
+        assert!(!overlaps.more);
+    }
+
+    #[test]
+    fn an_inventory_of_names_on_one_address_names_a_bounded_sample_and_says_there_are_more() {
+        let specs = (0..500)
+            .map(|i| named(&format!("host-{i}.lab"), vec![ipv4(10, 0, 0, 5)]))
+            .collect();
+        let overlaps = plan_of(specs).find_overlaps();
+        assert_eq!(overlaps.pairs.len(), 20, "the documented cap");
+        assert!(overlaps.more);
+    }
+
+    fn plan_pinned_to_one_address(name: &str, copies: usize) -> ResolvedPlan {
+        let target = Target::DnsName(name.to_string());
+        let pins = vec![(target.clone(), vec![ipv4(10, 0, 0, 5); copies])];
+        ResolvedPlan::from_pinned(std::slice::from_ref(&target), &pins).expect("plan")
+    }
+
+    #[test]
+    fn a_checkpoint_pinning_one_address_many_times_sweeps_it_once() {
+        let plan = plan_pinned_to_one_address("vip.lab", 50_000);
+        assert_eq!(plan.sweep_intervals().len(), 1);
+        assert!(plan.find_overlaps().pairs.is_empty());
+    }
+
+    #[test]
+    fn a_checkpoint_pinning_one_address_many_times_costs_its_pin_count_not_its_square() {
+        let started = std::time::Instant::now();
+        plan_pinned_to_one_address("vip.lab", 20_000);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "20,000 pins of one address planned in {elapsed:?}"
         );
     }
 

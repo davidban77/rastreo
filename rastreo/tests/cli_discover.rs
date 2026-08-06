@@ -2451,6 +2451,58 @@ async fn the_dry_run_and_the_scan_both_name_overlapping_target_specs() {
     }
 }
 
+// hickory answers `localhost` itself under RFC 6761, and both loopback addresses are listed, so the
+// pair holds whichever family it returns and no nameserver or hosts file is consulted.
+#[test]
+fn the_dry_run_names_a_target_that_repeats_an_address_a_name_resolved_to() {
+    let output = common::rastreo()
+        .args([
+            "discover",
+            "--target",
+            "localhost",
+            "--target",
+            "127.0.0.1",
+            "--target",
+            "::1",
+            "--port",
+            "22222",
+            "--timeout-ms",
+            "200",
+            "--dry-run",
+        ])
+        .output()
+        .expect("spawn rastreo");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("target specs overlap") && stderr.contains(r#"DnsName("localhost") & Ip("#),
+        "a name and an address target covering one address must be named as a pair: {stderr}"
+    );
+}
+
+// Seven targets on one address are 21 pairs, one past what the warning names.
+#[test]
+fn the_dry_run_says_more_pairs_overlap_than_the_warning_named() {
+    let mut args = vec!["discover".to_string()];
+    for _ in 0..7 {
+        args.push("--target".to_string());
+        args.push("127.0.0.1".to_string());
+    }
+    args.extend(["--port", "22222", "--dry-run"].map(str::to_string));
+    let output = common::rastreo()
+        .args(&args)
+        .output()
+        .expect("spawn rastreo");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("pairs_named=20") && stderr.contains("more_pairs_overlap=true"),
+        "a truncated warning must say how many pairs it named and that there are more: {stderr}"
+    );
+}
+
 #[tokio::test]
 async fn the_flag_driven_dry_run_and_scan_agree_on_every_resolver_refusal() {
     for (target, _, needle) in RESOLVER_REFUSALS {
