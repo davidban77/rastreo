@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "LinkEndpoint": {
+      "description": "One end of a discovered link. `identity_key` correlates the endpoint to a probed device; it is\nabsent (null) for a neighbor rastreo learned via LLDP but never probed (\"known-unknown\").",
+      "properties": {
+        "chassis_id": {
+          "description": "LLDP chassis ID of the endpoint.",
+          "type": "string"
+        },
+        "identity_key": {
+          "description": "Identity of the probed device at this endpoint; absent (null) for a neighbor learned via LLDP but never probed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "LLDP port ID at this endpoint (e.g. `Gi0/1`), not a TCP port number.",
+          "type": "string"
+        },
+        "sys_name": {
+          "description": "LLDP system name of the endpoint, when advertised.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "chassis_id",
+        "port"
+      ],
+      "type": "object"
+    },
+    "ScanMetadata": {
+      "description": "Per-scan provenance stamped on every emitted record. `scan_id` is a ULID, identical on every record in a scan, so consumers correlate a scan's records by it; across scans it orders only to the millisecond its timestamp encodes.",
+      "properties": {
+        "initiated_at": {
+          "description": "RFC 3339 UTC timestamp of when the scan started.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "scan_id": {
+          "description": "ULID identifying this scan.",
+          "type": "string"
+        },
+        "scenario_name": {
+          "description": "Name of the scenario that produced this scan; absent (null) for an unnamed scenario.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_config_hash": {
+          "description": "`sha256:…` digest of the canonicalized scenario config that produced this scan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "scan_id",
+        "initiated_at"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://davidban77.github.io/rastreo/schemas/link-record-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A deduplicated topology edge between two endpoints. Both directions of a physical link collapse\ninto one record keyed by the unordered pair of LLDP chassis-ids.",
+  "properties": {
+    "a": {
+      "$ref": "#/$defs/LinkEndpoint",
+      "description": "One end of the link; the `a`/`b` ordering is not significant."
+    },
+    "b": {
+      "$ref": "#/$defs/LinkEndpoint",
+      "description": "The other end of the link."
+    },
+    "discovered_via": {
+      "description": "Discovery mechanism that produced the link (`lldp` today; leaves room for `cdp`/`gnmi`).",
+      "type": "string"
+    },
+    "observed_at": {
+      "description": "RFC 3339 UTC timestamp of when the link was observed.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "scan_metadata": {
+      "$ref": "#/$defs/ScanMetadata",
+      "description": "Provenance stamped by the pipeline at scan entry."
+    },
+    "schema_id": {
+      "description": "URL of the JSON Schema this record conforms to — the same value as this schema's `$id`.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "Schema version tag; `v1` for records emitted by this build. Versioned independently of the device record.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "schema_id",
+    "a",
+    "b",
+    "discovered_via",
+    "observed_at",
+    "scan_metadata"
+  ],
+  "title": "LinkRecord",
+  "type": "object"
+}

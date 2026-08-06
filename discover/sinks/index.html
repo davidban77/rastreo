@@ -1,0 +1,3367 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Output sinks for rastreo discover — stdout (default), file, Kafka, and NATS. Configuration, NDJSON contract, and how to choose.">
+      
+      
+      
+        <link rel="canonical" href="https://davidban77.github.io/rastreo/discover/sinks/">
+      
+      
+        <link rel="prev" href="../targets/">
+      
+      
+        <link rel="next" href="../enrichment/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Sinks - rastreo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#sinks" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="rastreo" class="md-header__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            rastreo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Sinks
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../get-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Get started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Discover
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../probe/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Probe
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../integrate/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Integrate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deploy/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Deploy
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="rastreo" class="md-nav__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    rastreo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../get-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Get started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Get started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discover
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Discover
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running scans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../targets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Targets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sinks
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sinks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-a-sink" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing a sink
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stdout-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        stdout (default)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        file
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#kafka" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Kafka
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Kafka">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#retrying-before-the-dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying before the dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NATS
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NATS">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#retrying-before-the-dead-letter-queue_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying before the dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dead-letter-queue_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ndjson-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NDJSON contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#encoders-a-sink-accepts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Encoders a sink accepts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../enrichment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Enrichment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../identity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../classification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Classification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../collection-profile/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection profiles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../probe/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Probe
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Probe
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tcp-connect/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TCP-connect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/http/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/reverse-dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reverse DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/udp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/snmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/arp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ARP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ndp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ssh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSH
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/icmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ICMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/gnmi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gNMI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/lldp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../integrate/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integrate
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Integrate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/source-of-truth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Source of truth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/reference-consumers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference consumers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../deploy/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploy
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deploy
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/schema/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7_6" id="__nav_7_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Schema
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/device-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DeviceRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/link-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LinkRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/collection-profile-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CollectionProfileRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/scan-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScanMetadata
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/scenario-config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScenarioFile
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/discovery-plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DiscoveryPlan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/run-report/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunReport
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/streaming-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/dlq-envelope/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DlqEnvelope
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/health-endpoints/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/otlp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OTLP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-a-sink" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing a sink
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stdout-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        stdout (default)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        file
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#kafka" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Kafka
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Kafka">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#retrying-before-the-dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying before the dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dead-letter-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NATS
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NATS">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#retrying-before-the-dead-letter-queue_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying before the dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dead-letter-queue_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dead-letter queue
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ndjson-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NDJSON contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#encoders-a-sink-accepts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Encoders a sink accepts
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/davidban77/rastreo/edit/main/docs/site/docs/discover/sinks.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+    
+      
+    
+    <a href="https://github.com/davidban77/rastreo/raw/main/docs/site/docs/discover/sinks.md" title="View source of this page" class="md-content__button md-icon">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M17 18c.56 0 1 .44 1 1s-.44 1-1 1-1-.44-1-1 .44-1 1-1m0-3c-2.73 0-5.06 1.66-6 4 .94 2.34 3.27 4 6 4s5.06-1.66 6-4c-.94-2.34-3.27-4-6-4m0 6.5a2.5 2.5 0 0 1-2.5-2.5 2.5 2.5 0 0 1 2.5-2.5 2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1-2.5 2.5M9.27 20H6V4h7v5h5v4.07c.7.08 1.36.25 2 .49V8l-6-6H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h4.5a8.2 8.2 0 0 1-1.23-2"/></svg>
+    </a>
+  
+
+
+<h1 id="sinks">Sinks<a class="headerlink" href="#sinks" title="Permanent link">&para;</a></h1>
+<p>A sink is where <code>DeviceRecord</code> events go after they are encoded. rastreo ships four sinks today: stdout (the default), a file sink that writes to a path, a Kafka sink that publishes events to a topic, and a NATS JetStream sink that publishes events to a subject. The sink decides <em>where</em> records go; <a href="../cli/#record-format"><code>--format</code></a> decides <em>how</em> they are rendered on the way out. Every sink but stdout renders <abbr title="JavaScript Object Notation">JSON</abbr> by default, so the on-the-wire shape downstream is identical regardless of destination.</p>
+<h2 id="choosing-a-sink">Choosing a sink<a class="headerlink" href="#choosing-a-sink" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>stdout</strong> for reading a scan yourself, and — with <code>--format json</code> — for ad-hoc shell pipelines into <code>jq</code>, <code>grep</code>, or any <abbr title="Newline-Delimited JSON">NDJSON</abbr> consumer. The default for a reason: no setup, no extra flags.</li>
+<li><strong>file</strong> for one-shot dumps you want to keep, share, or feed into another tool later. Append-mode means repeated scans accumulate into one file.</li>
+<li><strong>Kafka</strong> for streaming into a topic that downstream consumers reconcile into a source of truth such as NetBox, Nautobot, or Infrahub. Consumer offset management belongs to the downstream system. See <a href="../../integrate/">Integrate</a> for the wire contract.</li>
+<li><strong>NATS</strong> for a lighter-weight streaming transport with at-least-once JetStream delivery. Pick NATS when the reconcilers already speak NATS or when you want to avoid the Kafka broker footprint. See <a href="../../integrate/nats/">Integrate · NATS</a> for the wire contract.</li>
+</ul>
+<h2 id="stdout-default">stdout (default)<a class="headerlink" href="#stdout-default" title="Permanent link">&para;</a></h2>
+<p>The default sink writes records to stdout, as a table by default and as one <abbr title="Newline-Delimited JSON">NDJSON</abbr> <code>DeviceRecord</code> per line under <code>--format json</code>. That holds for a scenario file too: <code>sink: {type: stdout}</code> with no <code>encoder:</code> renders the table. Log lines and the end-of-run summary go to stderr, which keeps stdout clean for downstream tools. The live progress line is dropped while records share the terminal — see <a href="../cli/#progress">Progress</a>.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>rastreo<span class="w"> </span>discover<span class="w"> </span>--target<span class="w"> </span><span class="m">1</span>.1.1.1
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>rastreo<span class="w"> </span>discover<span class="w"> </span>--target<span class="w"> </span><span class="m">1</span>.1.1.1<span class="w"> </span>--format<span class="w"> </span>json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.
+</span></code></pre></div>
+<p>The second example pipes stdout into <code>jq</code> without any log noise, because <code>jq</code> reads stdin and rastreo's banners and logs went to stderr.</p>
+<h2 id="file">file<a class="headerlink" href="#file" title="Permanent link">&para;</a></h2>
+<p>The file sink appends one <abbr title="Newline-Delimited JSON">NDJSON</abbr> record per line to the path you give. The file is opened in append mode, so repeated runs add to the existing file rather than overwriting it. Pass <code>--format table</code> to write the aligned grid there instead.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>rastreo<span class="w"> </span>discover<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>--target<span class="w"> </span><span class="m">192</span>.0.2.0/24<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span>--probe<span class="w"> </span>tcp_connect<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span>--port<span class="w"> </span><span class="m">80</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span>--sink<span class="w"> </span>file<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">  </span>--output<span class="w"> </span>/tmp/scan.ndjson
+</span></code></pre></div>
+<p><code>--sink file</code> without <code>--output</code> is rejected before any probe runs, and so is <code>--output</code> without <code>--sink file</code>. See <a href="../cli/#destination-flags">Destination flags</a>.</p>
+<h2 id="kafka">Kafka<a class="headerlink" href="#kafka" title="Permanent link">&para;</a></h2>
+<p>The Kafka sink publishes <code>DeviceRecord</code> events to a Kafka topic. Each Kafka message carries exactly one <code>DeviceRecord</code>. Brokers are comma-separated; the topic is a single name. Two flush modes are available: batched (the default — buffers records and sends them in one produce request at a configurable byte threshold) and per-record (sends each record immediately). Both put one record in each message; the mode changes throughput, not the wire framing. Use <code>--kafka-flush-per-record</code> or <code>--kafka-batch-threshold &lt;BYTES&gt;</code> on the <abbr title="Command-Line Interface">CLI</abbr>; see <a href="../../integrate/">Integrate</a> for the full wire contract.</p>
+<div class="admonition warning">
+<p class="admonition-title">Requires the <code>kafka</code> build feature</p>
+<p>The <code>kafka</code> value for <code>--sink</code> only exists when the binary is built with the <code>kafka</code> Cargo feature. The default build does not include it. To build with Kafka support:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>cargo<span class="w"> </span>build<span class="w"> </span>--workspace<span class="w"> </span>--features<span class="w"> </span>kafka
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>cargo<span class="w"> </span>install<span class="w"> </span>--path<span class="w"> </span>rastreo<span class="w"> </span>--features<span class="w"> </span>kafka
+</span></code></pre></div>
+</div>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>rastreo<span class="w"> </span>discover<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span>--target<span class="w"> </span><span class="m">192</span>.0.2.0/24<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>--probe<span class="w"> </span>tcp_connect<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span>--port<span class="w"> </span><span class="m">80</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span>--sink<span class="w"> </span>kafka<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span>--brokers<span class="w"> </span>localhost:9092<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span>--topic<span class="w"> </span>rastreo.discovery.records.v1
+</span></code></pre></div>
+<p><code>--sink kafka</code> requires both <code>--brokers</code> and <code>--topic</code>; either missing is rejected before any probe runs, and so is either one given without <code>--sink kafka</code>. See <a href="../cli/#destination-flags">Destination flags</a>.</p>
+<p>Secured brokers — Confluent Cloud, Amazon <abbr title="Managed Streaming for Apache Kafka">MSK</abbr>, any <code>SASL_SSL</code> listener — need <abbr title="Transport Layer Security">TLS</abbr> and <abbr title="Simple Authentication and Security Layer">SASL</abbr> settings that the <abbr title="Command-Line Interface">CLI</abbr> flags do not cover. Configure them with <code>tls</code> and <code>sasl</code> blocks in a scenario file. The <abbr title="Transport Layer Security">TLS</abbr> <code>verify</code> field defaults to <code>false</code> (accept any certificate); set <code>verify: true</code> on production brokers. See <a href="../../integrate/kafka/#tls-and-sasl-authentication">Integrate · Kafka</a> for the full config surface and a Confluent Cloud example.</p>
+<h3 id="retrying-before-the-dead-letter-queue">Retrying before the dead-letter queue<a class="headerlink" href="#retrying-before-the-dead-letter-queue" title="Permanent link">&para;</a></h3>
+<p>A brief broker reconnect should not fill the dead-letter queue. The dead-letter queue, or <abbr title="Dead-Letter Queue">DLQ</abbr>, is a second topic for records the primary produce could not deliver. It is defined in full <a href="#dead-letter-queue">below</a>. The Kafka sink retries the primary produce with bounded backoff before it falls back to the <abbr title="Dead-Letter Queue">DLQ</abbr>. A short outage that clears within the retry budget reaches the primary topic and is never quarantined.</p>
+<p>Retry is on by default. Every Kafka sink retries even with no <code>retry</code> block. Add the block to change the limits. It has three fields:</p>
+<ul>
+<li><code>max_attempts</code> — the total number of primary produce attempts, including the first. The default <code>3</code> is the first attempt plus two retries. Set <code>1</code> to disable retry: the record goes to the <abbr title="Dead-Letter Queue">DLQ</abbr> on the first failure.</li>
+<li><code>backoff_initial_ms</code> — the wait before the first retry, in milliseconds. Default <code>100</code>.</li>
+<li><code>backoff_max_ms</code> — the largest wait between attempts, in milliseconds. Default <code>2000</code>.</li>
+</ul>
+<p>The wait doubles after each failed attempt and stops growing at <code>backoff_max_ms</code>. With the defaults, the sink waits 100 ms, then 200 ms.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">sink</span><span class="p">:</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">kafka</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="nt">brokers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">kafka-0.internal</span><span class="p p-Indicator">:</span><span class="nv">9092</span><span class="p p-Indicator">]</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="nt">topic</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.records.v1</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span><span class="nt">retry</span><span class="p">:</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">max_attempts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">    </span><span class="nt">backoff_initial_ms</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">    </span><span class="nt">backoff_max_ms</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2000</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">  </span><span class="nt">dead_letter</span><span class="p">:</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">    </span><span class="nt">topic</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.dlq</span>
+</span></code></pre></div>
+<p>Only the primary produce is retried. The <abbr title="Dead-Letter Queue">DLQ</abbr> produce is never retried. The total time is bounded: worst case is <code>max_attempts</code> produce attempts plus the capped waits between them. A failing sink cannot hang.</p>
+<div class="admonition tip">
+<p class="admonition-title">Disabling retry</p>
+<p>Set <code>max_attempts: 1</code> when you want a failure visible in the <abbr title="Dead-Letter Queue">DLQ</abbr> immediately. The record is quarantined on the first primary failure, with no retry in between.</p>
+</div>
+<h3 id="dead-letter-queue">Dead-letter queue<a class="headerlink" href="#dead-letter-queue" title="Permanent link">&para;</a></h3>
+<p>The Kafka sink can quarantine records the primary topic refused instead of dropping them silently. Configure a second Kafka topic under <code>dead_letter</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario (there is no <abbr title="Command-Line Interface">CLI</abbr> flag for the <abbr title="Dead-Letter Queue">DLQ</abbr>; it is a scenario-level concern). When the primary produce fails and a <abbr title="Dead-Letter Queue">DLQ</abbr> is configured, the sink publishes the same payload to the <abbr title="Dead-Letter Queue">DLQ</abbr> topic, logs a <code>WARN</code>, and returns success — the buffer is drained and the pipeline moves on. When no <abbr title="Dead-Letter Queue">DLQ</abbr> is configured, the primary failure surfaces as an error. The buffered records are kept, so the next flush retries them.</p>
+<p>The <abbr title="Dead-Letter Queue">DLQ</abbr> covers the device topic. The <a href="../topology/#where-links-are-emitted">links</a> and <a href="../collection-profile/#where-profiles-are-emitted">collection profiles</a> topics have no <abbr title="Dead-Letter Queue">DLQ</abbr> path. A failed produce there is kept for the next flush.</p>
+<p>Every flush produces all three topics whatever any one of them does, so a topic the broker refuses never holds back the topics it accepts. Records bound for a healthy topic land; records bound for the refused topic stay buffered. The flush returns the first failure in device-then-links-then-profiles order, so an outage that takes all three down reports the device error.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nt">sink</span><span class="p">:</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">kafka</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="nt">brokers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">kafka-0.internal</span><span class="p p-Indicator">:</span><span class="nv">9092</span><span class="p p-Indicator">]</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span><span class="nt">topic</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.records.v1</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">  </span><span class="nt">dead_letter</span><span class="p">:</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">    </span><span class="nt">topic</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.dlq</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">    </span><span class="nt">include_error_metadata</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span></code></pre></div>
+<p><abbr title="Dead-Letter Queue">DLQ</abbr> messages default to carrying a small header envelope so downstream consumers can filter and diagnose without inspecting the payload:</p>
+<table>
+<thead>
+<tr>
+<th>Header</th>
+<th>Value</th>
+<th>Encoding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>x-rastreo-source-topic</code></td>
+<td>Primary topic name (e.g. <code>rastreo.discovery.records.v1</code>)</td>
+<td>UTF-8 bytes</td>
+</tr>
+<tr>
+<td><code>x-rastreo-error-class</code></td>
+<td><code>produce_failure</code> — the class of a failed Kafka produce</td>
+<td>UTF-8 bytes</td>
+</tr>
+<tr>
+<td><code>x-rastreo-dlq-timestamp</code></td>
+<td><abbr title="Request for Comments">RFC</abbr> 3339 <abbr title="Coordinated Universal Time">UTC</abbr> timestamp of the <abbr title="Dead-Letter Queue">DLQ</abbr> publish</td>
+<td>UTF-8 bytes</td>
+</tr>
+</tbody>
+</table>
+<p>Set <code>include_error_metadata: false</code> to send the payload with no headers — the <abbr title="Dead-Letter Queue">DLQ</abbr> message body is byte-identical to what would have gone to the primary topic.</p>
+<p><strong>Failure model.</strong> Primary produce succeeds → the payload lands on the primary topic. Primary fails and <abbr title="Dead-Letter Queue">DLQ</abbr> succeeds → the payload lands on the <abbr title="Dead-Letter Queue">DLQ</abbr> topic, a <code>WARN</code> log is emitted, and the pipeline continues. Primary fails and <abbr title="Dead-Letter Queue">DLQ</abbr> also fails → an <code>ERROR</code> log records both failures, the sink returns the primary error, and the buffer is retained for the caller to retry via <code>flush()</code> (identical to the no-<abbr title="Dead-Letter Queue">DLQ</abbr> path).</p>
+<p><strong>Consumer guidance.</strong> A <abbr title="Dead-Letter Queue">DLQ</abbr> consumer typically re-publishes the payload to the primary topic once the underlying issue (broker outage, topic ACL, partition offline) is resolved. Filter on <code>x-rastreo-source-topic</code> when the same <abbr title="Dead-Letter Queue">DLQ</abbr> is shared across multiple discovery pipelines; use <code>x-rastreo-dlq-timestamp</code> to skip records older than a retention window.</p>
+<p><strong>Metric.</strong> Each successful Kafka <abbr title="Dead-Letter Queue">DLQ</abbr> delivery increments <code>rastreo_server_dlq_records_total{sink_type="kafka",error_class="produce_failure"}</code>, surfaced on <code>/metrics</code> and via <abbr title="OpenTelemetry Protocol">OTLP</abbr>. The <code>error_class</code> is the actual class of the failure that quarantined the record. A Kafka produce is the only path that sends a record to the Kafka <abbr title="Dead-Letter Queue">DLQ</abbr>, so Kafka <abbr title="Dead-Letter Queue">DLQ</abbr> traffic always carries <code>produce_failure</code>. See <a href="../../reference/observability/#dlq-error-class-attribution">Observability · <abbr title="Dead-Letter Queue">DLQ</abbr> error-class attribution</a> for the full class list and the <a href="../../reference/schema/dlq-envelope/">DlqEnvelope schema</a> for the header contract.</p>
+<p><strong>Reachability probe.</strong> When a <abbr title="Dead-Letter Queue">DLQ</abbr> is configured, the server-side sink reachability probe covers both partitions: it issues a <code>ListOffsets</code> against the primary partition <strong>and</strong> a <code>ListOffsets</code> against the <abbr title="Dead-Letter Queue">DLQ</abbr> partition on every tick, regardless of whether the primary succeeded. Either side returning an error flips <code>sink_reachable</code> to <code>false</code> on <code>/readyz</code>. <code>last_probe_error</code> names the failed side (<code>primary partition unreachable ...</code> or <code>dead-letter partition unreachable ...</code>); when both sides fail, both segments are included, joined by <code>;</code>. Operators get advance warning that <abbr title="Dead-Letter Queue">DLQ</abbr> fallback would fail — including the case where the primary is already down and the <abbr title="Dead-Letter Queue">DLQ</abbr> is the only remaining safety net.</p>
+<p><strong>See also.</strong> Sink failures surface operationally through the <a href="../../reference/health-endpoints/#readyz-readiness"><code>/readyz</code> readiness gate</a> on <code>rastreo-server</code>: a sink error observed within <code>RASTREO_SINK_ERROR_QUARANTINE_SECS</code> flips the pod to <code>503 not_ready</code>.</p>
+<h2 id="nats">NATS<a class="headerlink" href="#nats" title="Permanent link">&para;</a></h2>
+<p>The NATS sink publishes <code>DeviceRecord</code> events to a NATS JetStream subject. Each NATS message carries exactly one <code>DeviceRecord</code>. Because the wire options are richer than Kafka (four auth methods, two delivery modes, a stream binding), the NATS sink is configured through <abbr title="YAML Ain't Markup Language">YAML</abbr> scenarios loaded with <code>--file</code> or through the <code>POST /scans</code> request body — there are no dedicated <abbr title="Command-Line Interface">CLI</abbr> flags. Two delivery modes are available: per-record (the default — publishes each record and waits for its JetStream ack) and batched (pipelines the acks of many per-record publishes at a configurable byte threshold). Both put one record in each message. See <a href="../../integrate/nats/">Integrate · NATS</a> for the full wire contract, auth details, and stream setup.</p>
+<div class="admonition warning">
+<p class="admonition-title">Requires the <code>nats</code> build feature</p>
+<p>The <code>type: nats</code> value only exists when the binary is built with the <code>nats</code> Cargo feature. The default build does not include it. To build with NATS support:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>cargo<span class="w"> </span>build<span class="w"> </span>--workspace<span class="w"> </span>--features<span class="w"> </span>nats
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>cargo<span class="w"> </span>install<span class="w"> </span>--path<span class="w"> </span>rastreo<span class="w"> </span>--features<span class="w"> </span>nats
+</span></code></pre></div>
+</div>
+<div class="language-yaml highlight"><span class="filename">scenario.yaml</span><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># yaml-language-server: $schema=https://davidban77.github.io/rastreo/schemas/scenario-v1.json</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">discovery</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="nt">scenarios</span><span class="p">:</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">discover</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">    </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nats-scan</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="w">    </span><span class="nt">targets</span><span class="p">:</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">Cidr</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;192.0.2.0/24&quot;</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">    </span><span class="nt">probers</span><span class="p">:</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">tcp_connect</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">        </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">80</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">443</span><span class="p p-Indicator">]</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="w">    </span><span class="nt">sink</span><span class="p">:</span>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nats</span>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="w">      </span><span class="nt">servers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;nats://nats:4222&quot;</span><span class="p p-Indicator">]</span>
+</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="w">      </span><span class="nt">subject</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.records.v1</span>
+</span><span id="__span-7-16"><a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="w">      </span><span class="nt">stream</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo</span>
+</span></code></pre></div>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>rastreo<span class="w"> </span>discover<span class="w"> </span>--file<span class="w"> </span>scenario.yaml
+</span></code></pre></div>
+<h3 id="retrying-before-the-dead-letter-queue_1">Retrying before the dead-letter queue<a class="headerlink" href="#retrying-before-the-dead-letter-queue_1" title="Permanent link">&para;</a></h3>
+<p>The dead-letter queue, or <abbr title="Dead-Letter Queue">DLQ</abbr>, is a second JetStream subject for records the primary publish could not deliver. It is defined in full <a href="#dead-letter-queue_1">below</a>. The NATS sink retries the primary publish with bounded backoff before it falls back to the <abbr title="Dead-Letter Queue">DLQ</abbr>. A short broker outage that clears within the retry budget reaches the primary subject and is never quarantined. Retry works the same way as the Kafka sink, with the same <code>retry</code> block and defaults.</p>
+<p>The block has three fields:</p>
+<ul>
+<li><code>max_attempts</code> — the total number of primary publish attempts, including the first. The default <code>3</code> is the first attempt plus two retries. Set <code>1</code> to disable retry.</li>
+<li><code>backoff_initial_ms</code> — the wait before the first retry, in milliseconds. Default <code>100</code>.</li>
+<li><code>backoff_max_ms</code> — the largest wait between attempts, in milliseconds. Default <code>2000</code>.</li>
+</ul>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="nt">sink</span><span class="p">:</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nats</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span><span class="nt">servers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;nats://nats-0.internal:4222&quot;</span><span class="p p-Indicator">]</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span><span class="nt">subject</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.records.v1</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">  </span><span class="nt">stream</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">  </span><span class="nt">retry</span><span class="p">:</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">    </span><span class="nt">max_attempts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="w">    </span><span class="nt">backoff_initial_ms</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span>
+</span><span id="__span-9-9"><a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="w">    </span><span class="nt">backoff_max_ms</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2000</span>
+</span><span id="__span-9-10"><a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a><span class="w">  </span><span class="nt">dead_letter</span><span class="p">:</span>
+</span><span id="__span-9-11"><a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a><span class="w">    </span><span class="nt">stream</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo-dlq</span>
+</span><span id="__span-9-12"><a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a><span class="w">    </span><span class="nt">subject</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.dlq</span>
+</span></code></pre></div>
+<p>Retry covers the synchronous publish only. rastreo waits for each ack once and does not re-send the message inside the same attempt. An ack rejection goes straight to the <abbr title="Dead-Letter Queue">DLQ</abbr> with error class <code>ack_rejection</code>. With no <abbr title="Dead-Letter Queue">DLQ</abbr> configured, the sink keeps the record and the next flush publishes it again. A consumer can therefore see that record twice, which <a href="../../integrate/nats/#idempotency"><code>identity_key</code></a> makes harmless. The <abbr title="Dead-Letter Queue">DLQ</abbr> publish is never retried either.</p>
+<div class="admonition tip">
+<p class="admonition-title">Disabling retry</p>
+<p>Set <code>max_attempts: 1</code> when you want a failure visible in the <abbr title="Dead-Letter Queue">DLQ</abbr> immediately. The record is quarantined on the first primary publish failure, with no retry in between.</p>
+</div>
+<h3 id="dead-letter-queue_1">Dead-letter queue<a class="headerlink" href="#dead-letter-queue_1" title="Permanent link">&para;</a></h3>
+<p>The NATS sink can quarantine records the primary subject refused instead of dropping them silently. Configure a second JetStream stream + subject under <code>dead_letter</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario (there is no <abbr title="Command-Line Interface">CLI</abbr> flag for the <abbr title="Dead-Letter Queue">DLQ</abbr>; it is a scenario-level concern). Unlike Kafka, NATS has two failure surfaces the <abbr title="Dead-Letter Queue">DLQ</abbr> absorbs: the synchronous <code>publish()</code> call (broker unreachable, subject invalid) and the JetStream ack (broker accepted the publish for routing but refused durable storage — stream retention limits, wrong stream binding, quota exceeded). When either surface fails and a <abbr title="Dead-Letter Queue">DLQ</abbr> is configured, the sink publishes the same payload to the <abbr title="Dead-Letter Queue">DLQ</abbr> subject, logs a <code>WARN</code>, and returns success. When no <abbr title="Dead-Letter Queue">DLQ</abbr> is configured, the failure surfaces as an error and the sink keeps the record for the next flush.</p>
+<p>The <abbr title="Dead-Letter Queue">DLQ</abbr> covers the device subject. The <a href="../topology/#where-links-are-emitted">links</a> and <a href="../collection-profile/#where-profiles-are-emitted">collection profiles</a> subjects have no <abbr title="Dead-Letter Queue">DLQ</abbr> path. A failed publish there is kept for the next flush.</p>
+<p>Every flush publishes all three subjects whatever any one of them does, so a subject JetStream refuses never holds back the subjects it accepts. Records bound for a healthy subject land; records bound for the refused subject stay buffered. The flush returns the first failure in device-then-links-then-profiles order, so an outage that takes all three down reports the device error.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">sink</span><span class="p">:</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">nats</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span><span class="nt">servers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;nats://nats-0.internal:4222&quot;</span><span class="p p-Indicator">]</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">  </span><span class="nt">subject</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.records.v1</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">  </span><span class="nt">stream</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo</span>
+</span><span id="__span-10-6"><a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">  </span><span class="nt">dead_letter</span><span class="p">:</span>
+</span><span id="__span-10-7"><a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="w">    </span><span class="nt">stream</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo-dlq</span>
+</span><span id="__span-10-8"><a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">    </span><span class="nt">subject</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.dlq</span>
+</span><span id="__span-10-9"><a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">    </span><span class="nt">include_error_metadata</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span></code></pre></div>
+<p>The <abbr title="Dead-Letter Queue">DLQ</abbr> subject must be bound to a JetStream stream that exists on the same NATS cluster; construction fails fast if the stream is missing so records never silently drop. Both primary and <abbr title="Dead-Letter Queue">DLQ</abbr> publishes share the sink's single NATS connection.</p>
+<p><abbr title="Dead-Letter Queue">DLQ</abbr> messages default to carrying a small header envelope so downstream consumers can filter and diagnose without inspecting the payload:</p>
+<table>
+<thead>
+<tr>
+<th>Header</th>
+<th>Value</th>
+<th>Encoding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>x-rastreo-source-subject</code></td>
+<td>Primary subject name (e.g. <code>rastreo.discovery.records.v1</code>)</td>
+<td>NATS header string</td>
+</tr>
+<tr>
+<td><code>x-rastreo-error-class</code></td>
+<td><code>publish_failure</code> or <code>ack_rejection</code> (see below)</td>
+<td>NATS header string</td>
+</tr>
+<tr>
+<td><code>x-rastreo-dlq-timestamp</code></td>
+<td><abbr title="Request for Comments">RFC</abbr> 3339 <abbr title="Coordinated Universal Time">UTC</abbr> timestamp of the <abbr title="Dead-Letter Queue">DLQ</abbr> publish</td>
+<td>NATS header string</td>
+</tr>
+</tbody>
+</table>
+<p>The two error classes are diagnostically distinct so an ops team can triage <abbr title="Dead-Letter Queue">DLQ</abbr> traffic:</p>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>publish_failure</code></td>
+<td>The synchronous <code>publish()</code> to the primary subject failed. Typically broker unreachable or the subject/stream binding is wrong.</td>
+</tr>
+<tr>
+<td><code>ack_rejection</code></td>
+<td>JetStream accepted the publish for routing but refused durable storage. Typically stream retention hit, quota exceeded, or the subject is bound to a different stream than expected.</td>
+</tr>
+</tbody>
+</table>
+<p>Set <code>include_error_metadata: false</code> to send the payload with no headers — the <abbr title="Dead-Letter Queue">DLQ</abbr> message body is byte-identical to what would have gone to the primary subject.</p>
+<p><strong>Failure model.</strong> Primary publish OK, ack OK → the payload lands on the primary subject. Primary publish fails, <abbr title="Dead-Letter Queue">DLQ</abbr> publish + ack succeed → the payload lands on the <abbr title="Dead-Letter Queue">DLQ</abbr> subject, a <code>WARN</code> log is emitted, and the pipeline continues. Primary publish OK but ack fails, <abbr title="Dead-Letter Queue">DLQ</abbr> publish + ack succeed → same outcome, <code>WARN</code> log, pipeline continues. Any <abbr title="Dead-Letter Queue">DLQ</abbr> publish or ack failure → an <code>ERROR</code> log records the <abbr title="Dead-Letter Queue">DLQ</abbr> failure, the sink returns the original error, and the record is kept for the next <code>flush()</code>, which publishes it again.</p>
+<p><strong>Consumer guidance.</strong> A <abbr title="Dead-Letter Queue">DLQ</abbr> consumer typically re-publishes the payload to the primary subject once the underlying issue (broker outage, stream misconfiguration, quota) is resolved. Filter on <code>x-rastreo-source-subject</code> when the same <abbr title="Dead-Letter Queue">DLQ</abbr> is shared across multiple discovery pipelines; filter on <code>x-rastreo-error-class</code> to split triage between broker-connectivity issues (<code>publish_failure</code>) and stream-durability issues (<code>ack_rejection</code>); use <code>x-rastreo-dlq-timestamp</code> to skip records older than a retention window.</p>
+<p><strong>Metric.</strong> Each successful NATS <abbr title="Dead-Letter Queue">DLQ</abbr> delivery increments <code>rastreo_server_dlq_records_total{sink_type="nats",error_class="..."}</code>, surfaced on <code>/metrics</code> and via <abbr title="OpenTelemetry Protocol">OTLP</abbr>. The <code>error_class</code> is the actual class of the failure that quarantined the record: <code>publish_failure</code> when the synchronous publish failed, <code>ack_rejection</code> when JetStream refused durable storage after accepting the publish. The two classes let you split triage without opening logs. See <a href="../../reference/observability/#dlq-error-class-attribution">Observability · <abbr title="Dead-Letter Queue">DLQ</abbr> error-class attribution</a> for the full class list and the <a href="../../reference/schema/dlq-envelope/">DlqEnvelope schema</a> for the header contract.</p>
+<p><strong>See also.</strong> Sink failures surface operationally through the <a href="../../reference/health-endpoints/#readyz-readiness"><code>/readyz</code> readiness gate</a> on <code>rastreo-server</code>: a sink error observed within <code>RASTREO_SINK_ERROR_QUARANTINE_SECS</code> flips the pod to <code>503 not_ready</code>. Caveat: the current server-side gate only trips when a scan attempts a write and fails; it does not detect pre-request unreachability against a broker that is already down. For proactive detection, set <code>RASTREO_SINK_CONFIG_PATH</code> on <code>rastreo-server</code> to probe broker reachability on a fixed cadence and gate <code>/readyz</code> before a scan writes — see <a href="../../reference/health-endpoints/#readyz-readiness">Health endpoints</a>.</p>
+<h2 id="ndjson-contract"><abbr title="Newline-Delimited JSON">NDJSON</abbr> contract<a class="headerlink" href="#ndjson-contract" title="Permanent link">&para;</a></h2>
+<p>Under the <code>ndjson</code> encoding, the stdout and file sinks emit one <code>DeviceRecord</code> per line. Each line is a complete <abbr title="JavaScript Object Notation">JSON</abbr> object — no surrounding array, no trailing comma. The Kafka and NATS sinks use the same <abbr title="JavaScript Object Notation">JSON</abbr> encoding, and each message they publish carries exactly one <code>DeviceRecord</code>. See the <a href="../../integrate/">Integrate</a> section for the full transport contract.</p>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="p">{</span><span class="nt">&quot;identity_key&quot;</span><span class="p">:</span><span class="s2">&quot;ip:1.1.1.1&quot;</span><span class="p">,</span><span class="nt">&quot;mgmt_ip&quot;</span><span class="p">:</span><span class="s2">&quot;1.1.1.1&quot;</span><span class="p">,</span><span class="nt">&quot;mac&quot;</span><span class="p">:</span><span class="kc">null</span><span class="p">,</span><span class="nt">&quot;manufacturer&quot;</span><span class="p">:</span><span class="kc">null</span><span class="p">,</span><span class="nt">&quot;platform&quot;</span><span class="p">:</span><span class="kc">null</span><span class="p">,</span><span class="nt">&quot;role&quot;</span><span class="p">:</span><span class="kc">null</span><span class="p">,</span><span class="nt">&quot;confidence&quot;</span><span class="p">:</span><span class="mf">0.2</span><span class="p">,</span><span class="nt">&quot;last_seen&quot;</span><span class="p">:</span><span class="s2">&quot;2026-07-05T11:22:51.423959000Z&quot;</span><span class="p">,</span><span class="nt">&quot;signals&quot;</span><span class="p">:[{</span><span class="nt">&quot;OpenPort&quot;</span><span class="p">:</span><span class="mi">443</span><span class="p">}]}</span>
+</span></code></pre></div>
+<p>The field-by-field meaning of a <code>DeviceRecord</code> is covered in <a href="../../get-started/first-scan/#read-the-output">First scan</a>.</p>
+<h2 id="encoders-a-sink-accepts">Encoders a sink accepts<a class="headerlink" href="#encoders-a-sink-accepts" title="Permanent link">&para;</a></h2>
+<p>The stdout, file, and memory sinks carry any encoding: they hand bytes to a terminal, a file, or a buffer, and nothing downstream parses them for you. The <code>table</code> encoder is available on those three.</p>
+<p>Kafka and NATS are different. Their consumers read each message as one structured record, so an aligned-text message is unparseable garbage that a reconciler would ingest silently. A scenario pairing the <code>table</code> encoder with a <code>kafka</code> or <code>nats</code> sink is rejected before probing starts, and <code>rastreo validate</code> reports it offline without contacting the broker:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>scenario &#39;inventory&#39; (1 of 1): the table encoder writes aligned text rows, which this sink cannot carry: its consumers read one structured record per message. Use the ndjson encoder with this sink.
+</span></code></pre></div>
+<p>The same check runs against the sink object itself, so it also holds when a sink is supplied through the library <abbr title="Application Programming Interface">API</abbr> rather than through configuration — including a fan-out sink with a broker among its children.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../cli/"><abbr title="Command-Line Interface">CLI</abbr></a> — every flag <code>rastreo discover</code> accepts.</li>
+<li><a href="../../integrate/kafka/">Integrate · Kafka</a> — Kafka wire contract.</li>
+<li><a href="../../integrate/nats/">Integrate · NATS</a> — NATS JetStream wire contract.</li>
+<li><a href="../../reference/schema/dlq-envelope/">DlqEnvelope schema</a> — the header and payload contract on every dead-letter message.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../targets/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Targets">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Targets
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../enrichment/" class="md-footer__link md-footer__link--next" aria-label="Next: Enrichment">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Enrichment
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 David Flores · Built with Material for MkDocs
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/davidban77/rastreo" target="_blank" rel="noopener" title="rastreo on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.tracking", "navigation.instant", "navigation.footer", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "content.tooltips", "content.action.edit", "content.action.view", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

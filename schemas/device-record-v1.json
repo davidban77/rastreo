@@ -1,0 +1,591 @@
+{
+  "$defs": {
+    "AltIp": {
+      "description": "Additional IP merged into a `DeviceRecord` by the identity fuser, carrying the role hint and the probe kinds that responded on that IP.",
+      "properties": {
+        "address": {
+          "description": "Additional IP address merged into the device.",
+          "format": "ip",
+          "type": "string"
+        },
+        "responded_via": {
+          "description": "Probe kinds that responded on this IP before the identity fuser merged it into the primary record.",
+          "items": {
+            "$ref": "#/$defs/ProbeKind"
+          },
+          "type": "array"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AltIpRole"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Role hint mapped to NetBox / Nautobot / Infrahub IP-address role models. Absent (null) when the identity fuser can't infer a role from available signals."
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "type": "object"
+    },
+    "AltIpRole": {
+      "description": "Role hint attached to each `AltIp`. Values map 1:1 to NetBox / Nautobot / Infrahub IP-address role models so downstream reconcilers pull the role directly instead of re-inferring it.",
+      "oneOf": [
+        {
+          "const": "secondary",
+          "description": "Secondary interface address on the same device.",
+          "type": "string"
+        },
+        {
+          "const": "loopback",
+          "description": "Loopback address. Reserved; never populated by this build.",
+          "type": "string"
+        },
+        {
+          "const": "vrrp",
+          "description": "VRRP virtual IP — detected from the `00:00:5e:00:01:XX` or `00:00:5e:00:02:XX` MAC prefix.",
+          "type": "string"
+        },
+        {
+          "const": "hsrp",
+          "description": "HSRP virtual IP — detected from the `00:00:0c:07:ac:XX` MAC prefix.",
+          "type": "string"
+        },
+        {
+          "const": "carp",
+          "description": "CARP virtual IP. Reserved; never populated by this build — CARP shares the VRRPv2 MAC prefix, so such an address is reported as `vrrp`.",
+          "type": "string"
+        },
+        {
+          "const": "anycast",
+          "description": "Anycast address. Reserved; never populated by this build.",
+          "type": "string"
+        },
+        {
+          "const": "vip",
+          "description": "Virtual IP (VIP) fronting real IPs. Reserved; never populated by this build.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProbeKind": {
+      "enum": [
+        "TcpConnect",
+        "Udp",
+        "Http",
+        "Dns",
+        "Snmp",
+        "Arp",
+        "Ndp",
+        "Ssh",
+        "Icmp",
+        "Tls",
+        "ReverseDns",
+        "Gnmi",
+        "Lldp"
+      ],
+      "type": "string"
+    },
+    "ScanMetadata": {
+      "description": "Per-scan provenance stamped on every emitted record. `scan_id` is a ULID, identical on every record in a scan, so consumers correlate a scan's records by it; across scans it orders only to the millisecond its timestamp encodes.",
+      "properties": {
+        "initiated_at": {
+          "description": "RFC 3339 UTC timestamp of when the scan started.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "scan_id": {
+          "description": "ULID identifying this scan.",
+          "type": "string"
+        },
+        "scenario_name": {
+          "description": "Name of the scenario that produced this scan; absent (null) for an unnamed scenario.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_config_hash": {
+          "description": "`sha256:…` digest of the canonicalized scenario config that produced this scan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "scan_id",
+        "initiated_at"
+      ],
+      "type": "object"
+    },
+    "Signal": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "OpenPort": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "OpenPort"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "HttpBanner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "HttpBanner"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "SnmpSysObjectId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SnmpSysObjectId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "SnmpSysDescr": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SnmpSysDescr"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Mac": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Mac"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "DnsHost": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "DnsHost"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "NtpBanner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "NtpBanner"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "SipUserAgent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SipUserAgent"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "MemcachedVersion": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "MemcachedVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "StunMappedAddress": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "StunMappedAddress"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "SnmpSysName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SnmpSysName"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "SshBanner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SshBanner"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "SshHostKey": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "SshHostKey"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "IcmpEchoRttMicros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "IcmpEchoRttMicros"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "TlsSubject": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsSubject"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "TlsSanName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsSanName"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "TlsProtocolVersion": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsProtocolVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "TlsCipherSuite": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsCipherSuite"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "TlsAlpn": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "TlsAlpn"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ReverseDnsName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ReverseDnsName"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiVersion": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "GnmiVersion"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiSupportedModel": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "GnmiSupportedModel"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiSupportedEncoding": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "GnmiSupportedEncoding"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "GnmiState": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "value"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "GnmiState"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://davidban77.github.io/rastreo/schemas/device-record-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One discovered device: the identity it is keyed by, everything the probers learned about it, and the platform and role the classifier assigned. A device that answered on several addresses arrives as a single record, with the extra addresses under `alt_ips`.",
+  "properties": {
+    "alt_ips": {
+      "description": "Additional IPs merged into this device by the identity fuser — omitted when no identity fuser is configured or when the fuser saw nothing to merge. Each entry carries a role hint and the probe kinds that responded on that IP.",
+      "items": {
+        "$ref": "#/$defs/AltIp"
+      },
+      "type": "array"
+    },
+    "confidence": {
+      "description": "Confidence score in `[0.0, 1.0]` computed as `baseline + signals_observed * per_signal`, clamped. Higher values indicate stronger evidence that the record reflects a real device.",
+      "format": "double",
+      "type": "number"
+    },
+    "http_server": {
+      "description": "Web-server product name captured from the device's `HttpBanner` signal by a `platform_rules` entry — for `nginx/1.24.0` holds `\"nginx\"`; absent (null) when no `HttpBanner` rule with `http_server_capture` matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "http_version": {
+      "description": "Web-server version captured from the device's `HttpBanner` signal by a `platform_rules` entry — for `nginx/1.24.0` holds `\"1.24.0\"`; absent (null) when no `HttpBanner` rule with `http_version_capture` matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "identity_key": {
+      "description": "Canonical device identifier: `mac:XX:XX:XX:XX:XX:XX` when a MAC is discovered, else `ip:<address>`. Consumers use this as the primary identity key across scans.",
+      "type": "string"
+    },
+    "last_seen": {
+      "description": "RFC 3339 UTC timestamp of the most recent probe that produced signals for this device.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "mac": {
+      "description": "First MAC address emitted across all probers against this device. Formatted as lower-case colon-separated hex.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "manufacturer": {
+      "description": "Vendor name resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mgmt_ip": {
+      "description": "Management IP the device was probed on. For multi-IP devices merged by the identity fuser, this is the first target IP that survived resolution.",
+      "format": "ip",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "description": "Hardware model resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "os_version": {
+      "default": null,
+      "description": "Version string paired with `platform`, captured from the same signal that identified the platform (e.g. `15.7`, `1.24.0`). `null` when the classifier matched a platform but the pattern had no version capture group, or when no rule matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "platform": {
+      "description": "Fielded platform identifier (e.g. `cisco_ios`, `nokia_srlinux`, `linux`, `junos`) derived from SNMP `sysDescr`. SSH and HTTP banners name the software on a port rather than the device OS, so they claim a platform only under the opt-in banner heuristics.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "possible_alias_of": {
+      "default": null,
+      "description": "This record may be the same device as another (referenced by its `identity_key`), but the evidence wasn't strong enough to merge them (unlike the high-confidence `alt_ips` merge).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "probe_kinds": {
+      "description": "Deduplicated `ProbeKind` values whose outcomes contributed to this record. Preserves authoritative provenance from ingest through fusion so consumers do not infer prober attribution from signals.",
+      "items": {
+        "$ref": "#/$defs/ProbeKind"
+      },
+      "type": "array"
+    },
+    "product_family": {
+      "description": "Product family resolved from the SNMP `sysObjectID` by the MIB enrichment fuser. `null` when no MIB table entry matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role": {
+      "description": "Fielded device role (e.g. `router`, `switch`, `web_server`, `host`) assigned by the `rules` classifier from its `ports_open`, `sys_object_id_prefix`, and `signal_match` role rules. `null` when no rule matched, when the classifier is disabled, or when the record carries no signals a role rule can act on.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scan_metadata": {
+      "$ref": "#/$defs/ScanMetadata",
+      "default": {
+        "initiated_at": "1970-01-01T00:00:00Z",
+        "scan_id": "",
+        "scenario_name": null,
+        "source_config_hash": null
+      },
+      "description": "Provenance stamped by the pipeline at scan entry."
+    },
+    "schema_id": {
+      "description": "URL of the JSON Schema this record conforms to — the same value as this schema's `$id`.",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "Schema version tag; `v1` for records emitted by this build.",
+      "type": "string"
+    },
+    "signals": {
+      "description": "Deduplicated list of every observable fact collected from every prober that targeted this device.",
+      "items": {
+        "$ref": "#/$defs/Signal"
+      },
+      "type": "array"
+    },
+    "ssh_version": {
+      "description": "SSH software identifier captured from the device's `SshBanner` signal by a `platform_rules` entry — for `SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1` holds `\"OpenSSH_8.9p1\"`; absent (null) when no `SshBanner` rule with `ssh_version_capture` matched.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "identity_key",
+    "confidence",
+    "last_seen",
+    "signals",
+    "schema_version",
+    "schema_id"
+  ],
+  "title": "DeviceRecord",
+  "type": "object"
+}

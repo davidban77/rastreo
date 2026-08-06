@@ -1,0 +1,356 @@
+{
+  "$defs": {
+    "DiscoverySummary": {
+      "properties": {
+        "cancelled": {
+          "default": false,
+          "description": "True when the run terminated early via the cancellation token; counters reflect partial progress.",
+          "type": "boolean"
+        },
+        "dlq_records": {
+          "default": 0,
+          "description": "Records delivered to a DLQ destination during this scan.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dlq_records_by_type_and_class": {
+          "description": "DLQ deliveries keyed by `(destination sink type, failure class)`; empty when nothing was quarantined.",
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "$ref": "#/$defs/SinkType"
+              },
+              {
+                "$ref": "#/$defs/SinkErrorClass"
+              },
+              {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "elapsed_ms": {
+          "description": "Milliseconds one scan took; on a summary folding several, the sum of their durations.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_counts": {
+          "additionalProperties": false,
+          "description": "Faulted probes tallied by fault kind; empty when no probe faulted.",
+          "properties": {
+            "auth_failed": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "decode_failed": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dns_failed": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "other": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "permission_denied": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "first_probe_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProbeFault"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Kind and sample detail of the first probe that faulted; latched once per scan, absent when no probe faulted."
+        },
+        "links_emitted": {
+          "default": 0,
+          "description": "Topology links emitted on the second stream; `0` when no LLDP data was collected.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "probe_attempts": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "probes_by_kind": {
+          "description": "Per-probe-kind attempted / errored breakdown; empty when no probes ran.",
+          "items": {
+            "$ref": "#/$defs/ProbeKindSummary"
+          },
+          "type": "array"
+        },
+        "profiles_emitted": {
+          "default": 0,
+          "description": "Collection profiles emitted on the second stream; `0` when no gNMI capability data was collected.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "records_emitted": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sink_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SinkType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Concrete sink kind the scan wrote against."
+        },
+        "targets_resolved": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolvable_targets": {
+          "description": "Targets that contributed no addresses, as written in the scenario and in input order; each\nwas probed zero times. Empty when every target resolved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "targets_resolved",
+        "probe_attempts",
+        "records_emitted",
+        "elapsed_ms"
+      ],
+      "type": "object"
+    },
+    "ProbeErrorKind": {
+      "description": "The named reason a probe faulted, carried as data on the fault the outcome holds.",
+      "enum": [
+        "auth_failed",
+        "permission_denied",
+        "dns_failed",
+        "decode_failed",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ProbeFault": {
+      "description": "A typed probe fault carried on the outcome: the probe attempted a target and learned that\nsomething broke, without discarding the signals it may have gathered on other ports.",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProbeErrorKind"
+        }
+      },
+      "required": [
+        "kind",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "ProbeKind": {
+      "enum": [
+        "TcpConnect",
+        "Udp",
+        "Http",
+        "Dns",
+        "Snmp",
+        "Arp",
+        "Ndp",
+        "Ssh",
+        "Icmp",
+        "Tls",
+        "ReverseDns",
+        "Gnmi",
+        "Lldp"
+      ],
+      "type": "string"
+    },
+    "ProbeKindSummary": {
+      "properties": {
+        "attempted": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "errored": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProbeKind"
+        }
+      },
+      "required": [
+        "kind",
+        "attempted",
+        "errored"
+      ],
+      "type": "object"
+    },
+    "RunAggregate": {
+      "description": "The run's totals. `summary` folds every scenario's counters together, so its `elapsed_ms` is the\nsum of the scenarios' durations rather than wall clock, and it attributes no `sink_type`.",
+      "properties": {
+        "scenario_counts": {
+          "$ref": "#/$defs/ScenarioTally"
+        },
+        "summary": {
+          "$ref": "#/$defs/DiscoverySummary"
+        }
+      },
+      "required": [
+        "scenario_counts",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "ScenarioOutcome": {
+      "description": "How one scenario the run reached ended; `skipped` is a scenario that declared no probers and never ran.",
+      "enum": [
+        "completed",
+        "failed",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "ScenarioReport": {
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/ScenarioOutcome"
+        },
+        "scenario": {
+          "description": "The scenario's own name, or `unnamed` when it declared none.",
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiscoverySummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when the scenario produced none: it was skipped, or it failed before the scan returned one."
+        }
+      },
+      "required": [
+        "scenario",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "ScenarioTally": {
+      "description": "How many scenarios the run was asked for and how the ones it reached ended. `completed + failed +\nskipped` is the fold over the report's entries, and falls short of `total` when the run was\ncancelled before reaching the rest.",
+      "properties": {
+        "completed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "completed",
+        "failed",
+        "skipped"
+      ],
+      "type": "object"
+    },
+    "SinkErrorClass": {
+      "description": "Bounded taxonomy of sink failure classes surfaced on `sink_errors_total` and `dlq_records_total`.\n\nEach concrete sink tags its failures with one of these classes at the failure site, and the class\ntravels with the error rather than being re-derived from its message. The set grows as sinks are\nadded, so a document may carry a class a cached schema copy does not list.",
+      "enum": [
+        "publish_failure",
+        "ack_rejection",
+        "produce_failure",
+        "write_failure",
+        "flush_failure",
+        "other"
+      ],
+      "type": "string"
+    },
+    "SinkType": {
+      "description": "Concrete sink kind — surfaced on `dlq_records_total{sink_type}` and set on `DiscoverySummary`.",
+      "enum": [
+        "stdout",
+        "file",
+        "memory",
+        "kafka",
+        "nats",
+        "tee"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://davidban77.github.io/rastreo/schemas/run-report-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What one discovery run did: how every scenario it reached ended, and the run's totals.",
+  "properties": {
+    "aggregate": {
+      "$ref": "#/$defs/RunAggregate"
+    },
+    "report_version": {
+      "description": "Version of this document's shape. A consumer that does not recognise it cannot assume the field set.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "scenarios": {
+      "description": "One entry per scenario the run reached, in run order. Shorter than\n`aggregate.scenario_counts.total` when the run was cancelled before reaching the rest.",
+      "items": {
+        "$ref": "#/$defs/ScenarioReport"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "report_version",
+    "scenarios",
+    "aggregate"
+  ],
+  "title": "RunReport",
+  "type": "object"
+}

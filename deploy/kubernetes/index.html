@@ -1,0 +1,3713 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Install rastreo-server on Kubernetes with the bundled Helm chart — key values, image-source caveat, ServiceMonitor for Prometheus scraping, and chart-default security context.">
+      
+      
+      
+        <link rel="canonical" href="https://davidban77.github.io/rastreo/deploy/kubernetes/">
+      
+      
+        <link rel="prev" href="../docker/">
+      
+      
+        <link rel="next" href="../server/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Kubernetes - rastreo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#kubernetes" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="rastreo" class="md-header__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            rastreo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Kubernetes
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../get-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Get started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../discover/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Discover
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../probe/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Probe
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../integrate/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Integrate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Deploy
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="rastreo" class="md-nav__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    rastreo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../get-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Get started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Get started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../discover/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discover
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Discover
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running scans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/targets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Targets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/sinks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sinks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/enrichment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Enrichment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/identity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/classification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Classification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/collection-profile/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection profiles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/validate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../probe/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Probe
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Probe
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tcp-connect/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TCP-connect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/http/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/reverse-dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reverse DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/udp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/snmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/arp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ARP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ndp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ssh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSH
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/icmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ICMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/gnmi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gNMI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/lldp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../integrate/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integrate
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Integrate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/source-of-truth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Source of truth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/reference-consumers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference consumers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploy
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deploy
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key values
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custom-otlp-headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom OTLP headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sink-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sink credentials
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sink credentials">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#values-the-chart-refuses-to-render" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Values the chart refuses to render
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restricting-scan-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restricting scan targets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#image-source" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Image source
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#servicemonitor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ServiceMonitor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#podsecuritynetraw-arp-and-ndp-probers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        podSecurity.netRaw — ARP and NDP probers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#graceful-shutdown-and-terminationgraceperiodseconds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Graceful shutdown and terminationGracePeriodSeconds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-context" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security context
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#serviceaccount" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ServiceAccount
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#networkpolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NetworkPolicy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#structured-logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Structured logging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/schema/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7_6" id="__nav_7_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Schema
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/device-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DeviceRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/link-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LinkRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/collection-profile-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CollectionProfileRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/scan-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScanMetadata
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/scenario-config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScenarioFile
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/discovery-plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DiscoveryPlan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/run-report/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunReport
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/streaming-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/dlq-envelope/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DlqEnvelope
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/health-endpoints/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/otlp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OTLP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key values
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#authentication" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authentication
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custom-otlp-headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom OTLP headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sink-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sink credentials
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Sink credentials">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#values-the-chart-refuses-to-render" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Values the chart refuses to render
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#restricting-scan-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Restricting scan targets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#image-source" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Image source
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#servicemonitor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ServiceMonitor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#podsecuritynetraw-arp-and-ndp-probers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        podSecurity.netRaw — ARP and NDP probers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#graceful-shutdown-and-terminationgraceperiodseconds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Graceful shutdown and terminationGracePeriodSeconds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-context" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security context
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#serviceaccount" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ServiceAccount
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#networkpolicy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NetworkPolicy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#structured-logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Structured logging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/davidban77/rastreo/edit/main/docs/site/docs/deploy/kubernetes.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+    
+      
+    
+    <a href="https://github.com/davidban77/rastreo/raw/main/docs/site/docs/deploy/kubernetes.md" title="View source of this page" class="md-content__button md-icon">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M17 18c.56 0 1 .44 1 1s-.44 1-1 1-1-.44-1-1 .44-1 1-1m0-3c-2.73 0-5.06 1.66-6 4 .94 2.34 3.27 4 6 4s5.06-1.66 6-4c-.94-2.34-3.27-4-6-4m0 6.5a2.5 2.5 0 0 1-2.5-2.5 2.5 2.5 0 0 1 2.5-2.5 2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1-2.5 2.5M9.27 20H6V4h7v5h5v4.07c.7.08 1.36.25 2 .49V8l-6-6H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h4.5a8.2 8.2 0 0 1-1.23-2"/></svg>
+    </a>
+  
+
+
+<h1 id="kubernetes">Kubernetes<a class="headerlink" href="#kubernetes" title="Permanent link">&para;</a></h1>
+<p>The repository ships a Helm chart at <code>helm/rastreo/</code> that installs <code>rastreo-server</code> as a Deployment. The chart targets <code>rastreo-server</code> only — the <abbr title="Command-Line Interface">CLI</abbr> is a one-shot tool and is better run from a Kubernetes <code>Job</code> or from a laptop than from a long-lived pod. The chart's defaults match the bundled Docker image: non-root UID 65532, read-only root filesystem, and all capabilities dropped.</p>
+<h2 id="install">Install<a class="headerlink" href="#install" title="Permanent link">&para;</a></h2>
+<p>The published chart lives at <code>oci://ghcr.io/davidban77/charts/rastreo</code> — each <code>v*</code> tag pushes a fresh version. The current published chart version is <code>0.13.0</code>. <!-- x-release-please-version --> An install with no <code>--version</code> pulls the latest published chart. To pin an upgrade intentionally, add <code>--version</code> with that version.</p>
+<p>The chart is fail-closed: <code>POST /scans</code> requires a bearer token, so an install with no token source stops before it creates anything. The production-safe path keeps the token in a <code>Secret</code> you manage and points the chart at it.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>rastreo-api-token<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span>--from-literal<span class="o">=</span>api-token<span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="k">)</span><span class="s2">&quot;</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span>--set<span class="w"> </span>auth.existingSecret<span class="o">=</span>rastreo-api-token
+</span></code></pre></div>
+<p>For a quick lab install, let the chart generate the <code>Secret</code> from an inline token instead.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>--set<span class="w"> </span>auth.token<span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="k">)</span><span class="s2">&quot;</span>
+</span></code></pre></div>
+<p>See <a href="#authentication">Authentication</a> for all three token options, including how to run the endpoint unauthenticated on a trusted network.</p>
+<p>Or install from the checked-out source tree without pulling from the registry. The same token source applies.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>./helm/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span>--set<span class="w"> </span>auth.existingSecret<span class="o">=</span>rastreo-api-token
+</span></code></pre></div>
+<p>Use <code>--values myvalues.yaml</code> to override defaults without forking the chart. Set a token source in the file or on the command line.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span>--values<span class="w"> </span>myvalues.yaml<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>--set<span class="w"> </span>auth.existingSecret<span class="o">=</span>rastreo-api-token
+</span></code></pre></div>
+<h2 id="key-values">Key values<a class="headerlink" href="#key-values" title="Permanent link">&para;</a></h2>
+<p>The most useful <code>values.yaml</code> knobs are:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>What it controls</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>replicaCount</code></td>
+<td><code>1</code></td>
+<td>Number of <code>rastreo-server</code> pods.</td>
+</tr>
+<tr>
+<td><code>image.repository</code></td>
+<td><code>ghcr.io/davidban77/rastreo</code></td>
+<td>The container image. See the caveat below.</td>
+</tr>
+<tr>
+<td><code>image.tag</code></td>
+<td>chart <code>appVersion</code></td>
+<td>Tag to pull; empty means use <code>appVersion</code>.</td>
+</tr>
+<tr>
+<td><code>server.port</code></td>
+<td><code>8080</code></td>
+<td>Port <code>rastreo-server</code> listens on inside the container.</td>
+</tr>
+<tr>
+<td><code>server.maxResultBytes</code></td>
+<td><code>33554432</code></td>
+<td>Byte cap on the <code>POST /scans</code> response records (32 MiB). Renders <code>RASTREO_MAX_RESULT_BYTES</code>. Peak memory is ~3× this value, so raise <code>resources.limits.memory</code> before raising it. See <a href="../server/#bounded-response-size">rastreo-server · Bounded response size</a>.</td>
+</tr>
+<tr>
+<td><code>auth.enabled</code></td>
+<td><code>true</code></td>
+<td>Require a bearer token on <code>POST /scans</code>. Fail-closed: render errors unless a token source is set. Set <code>false</code> to deploy unauthenticated. See <a href="#authentication">Authentication</a>.</td>
+</tr>
+<tr>
+<td><code>auth.token</code></td>
+<td><code>""</code></td>
+<td>Inline bearer token. The chart renders a <code>Secret</code> holding it. Prefer <code>auth.existingSecret</code> in production. See <a href="#authentication">Authentication</a>.</td>
+</tr>
+<tr>
+<td><code>auth.existingSecret</code></td>
+<td><code>""</code></td>
+<td>Name of a pre-existing <code>Secret</code> holding the token. Takes precedence over <code>auth.token</code>. See <a href="#authentication">Authentication</a>.</td>
+</tr>
+<tr>
+<td><code>auth.secretKey</code></td>
+<td><code>api-token</code></td>
+<td>Key within the <code>Secret</code> that holds the token value.</td>
+</tr>
+<tr>
+<td><code>targetGuard.allowlist</code></td>
+<td><code>[]</code></td>
+<td>List of CIDRs (or bare IPs) the server may probe. Empty means allow any target. Renders <code>RASTREO_TARGET_ALLOWLIST</code>. See <a href="#restricting-scan-targets">Restricting scan targets</a>.</td>
+</tr>
+<tr>
+<td><code>targetGuard.maxTotalHosts</code></td>
+<td><code>262144</code></td>
+<td>Cap on the total resolved hosts across all targets in one request. <code>0</code> disables. Renders <code>RASTREO_MAX_TOTAL_HOSTS</code>. See <a href="#restricting-scan-targets">Restricting scan targets</a>.</td>
+</tr>
+<tr>
+<td><code>targetGuard.maxBodyBytes</code></td>
+<td><code>1048576</code></td>
+<td><code>POST /scans</code> request body size limit in bytes. Renders <code>RASTREO_MAX_BODY_BYTES</code>. See <a href="#restricting-scan-targets">Restricting scan targets</a>.</td>
+</tr>
+<tr>
+<td><code>serviceAccount.create</code></td>
+<td><code>true</code></td>
+<td>Create a dedicated <code>ServiceAccount</code> with token automounting disabled. See <a href="#serviceaccount">ServiceAccount</a>.</td>
+</tr>
+<tr>
+<td><code>networkPolicy.enabled</code></td>
+<td><code>false</code></td>
+<td>Create a <code>NetworkPolicy</code> restricting which peers reach the pod. See <a href="#networkpolicy">NetworkPolicy</a>.</td>
+</tr>
+<tr>
+<td><code>service.type</code></td>
+<td><code>ClusterIP</code></td>
+<td><code>ClusterIP</code>, <code>NodePort</code>, or <code>LoadBalancer</code>.</td>
+</tr>
+<tr>
+<td><code>resources.requests</code> / <code>.limits</code></td>
+<td><code>100m</code>/<code>128Mi</code> / <code>500m</code>/<code>256Mi</code></td>
+<td>Pod CPU and memory requests and limits.</td>
+</tr>
+<tr>
+<td><code>autoscaling.enabled</code></td>
+<td><code>false</code></td>
+<td>Enable an HPA scaling between <code>minReplicas</code> and <code>maxReplicas</code>.</td>
+</tr>
+<tr>
+<td><code>podDisruptionBudget.enabled</code></td>
+<td><code>false</code></td>
+<td>Create a PDB with <code>minAvailable: 1</code>.</td>
+</tr>
+<tr>
+<td><code>ingress.enabled</code></td>
+<td><code>false</code></td>
+<td>Create an <code>Ingress</code> for the service.</td>
+</tr>
+<tr>
+<td><code>serviceMonitor.enabled</code></td>
+<td><code>false</code></td>
+<td>Create a Prometheus Operator <code>ServiceMonitor</code> that scrapes <code>/metrics</code>.</td>
+</tr>
+<tr>
+<td><code>alerts.enabled</code></td>
+<td><code>false</code></td>
+<td>Create a Prometheus Operator <code>PrometheusRule</code> with the packaged alerts. See <a href="../../reference/observability/#alerts">Observability · Alerts</a>.</td>
+</tr>
+<tr>
+<td><code>readiness.maxInflightScans</code></td>
+<td>unset (binary default <code>100</code>)</td>
+<td><code>/readyz</code> gate: max concurrent <code>POST /scans</code> before the pod reports not-ready. Set to <code>0</code> to disable. Renders <code>RASTREO_MAX_INFLIGHT_SCANS</code>. See <a href="../../reference/health-endpoints/#readyz-readiness">Health endpoints · <code>/readyz</code></a>.</td>
+</tr>
+<tr>
+<td><code>readiness.sinkErrorQuarantineSeconds</code></td>
+<td>unset (binary default <code>30</code>)</td>
+<td><code>/readyz</code> gate: quarantine window after any sink error. Set to <code>0</code> to disable. Renders <code>RASTREO_SINK_ERROR_QUARANTINE_SECS</code>. See <a href="../../reference/health-endpoints/#readyz-readiness">Health endpoints · <code>/readyz</code></a>.</td>
+</tr>
+<tr>
+<td><code>readiness.scanErrorQuarantineSeconds</code></td>
+<td>unset (binary default <code>30</code>)</td>
+<td><code>/readyz</code> gate: quarantine window after a scan that failed with a <code>5xx</code>. A <code>4xx</code> never starts it. Set to <code>0</code> to disable. Renders <code>RASTREO_SCAN_ERROR_QUARANTINE_SECS</code>. See <a href="../../reference/health-endpoints/#readyz-readiness">Health endpoints · <code>/readyz</code></a>.</td>
+</tr>
+<tr>
+<td><code>sink.config</code></td>
+<td><code>{}</code></td>
+<td>Sink config the chart renders into a <code>ConfigMap</code> and mounts at <code>/etc/rastreo/sink/sink.yaml</code>. Empty means the server runs with no sink and no reachability probe. See <a href="#sink-credentials">Sink credentials</a>.</td>
+</tr>
+<tr>
+<td><code>sink.configYaml</code></td>
+<td><code>""</code></td>
+<td>The same document as a verbatim string, for a config carrying a <code>!file</code> tag. Mutually exclusive with <code>sink.config</code>. See <a href="#sink-credentials">Sink credentials</a>.</td>
+</tr>
+<tr>
+<td><code>extraEnv</code></td>
+<td><code>[]</code></td>
+<td>Extra <code>EnvVar</code> entries on the container, so a <code>${VAR}</code> reference in the sink config resolves from a <code>Secret</code>. See <a href="#sink-credentials">Sink credentials</a>.</td>
+</tr>
+<tr>
+<td><code>extraEnvFrom</code></td>
+<td><code>[]</code></td>
+<td>Extra <code>EnvFromSource</code> entries on the container. Each key of the referenced <code>Secret</code> or <code>ConfigMap</code> becomes a variable, as long as the key is a valid variable name. See <a href="#sink-credentials">Sink credentials</a>.</td>
+</tr>
+<tr>
+<td><code>extraVolumes</code></td>
+<td><code>[]</code></td>
+<td>Extra pod volumes, for mounting the <code>Secret</code> an <code>!file</code> reference reads. See <a href="#sink-credentials">Sink credentials</a>.</td>
+</tr>
+<tr>
+<td><code>extraVolumeMounts</code></td>
+<td><code>[]</code></td>
+<td>Extra container volume mounts. A mount that overlaps <code>/etc/rastreo/sink</code>, or that names a volume <code>extraVolumes</code> does not define, fails the render.</td>
+</tr>
+<tr>
+<td><code>grafana.dashboardsEnabled</code></td>
+<td><code>false</code></td>
+<td>Deploy the bundled Grafana dashboard as a labeled <code>ConfigMap</code> for sidecar auto-discovery. See <a href="../../reference/observability/#grafana-dashboard">Observability · Grafana dashboard</a>.</td>
+</tr>
+<tr>
+<td><code>podSecurity.netRaw</code></td>
+<td><code>false</code></td>
+<td>Add <code>NET_RAW</code> to the container capabilities. Required for the <abbr title="Address Resolution Protocol">ARP</abbr> and <abbr title="Neighbor Discovery Protocol">NDP</abbr> probers. See <a href="#podsecuritynetraw-arp-and-ndp-probers"><code>podSecurity.netRaw</code></a>.</td>
+</tr>
+<tr>
+<td><code>logFormat</code></td>
+<td>unset (binary default <code>text</code>)</td>
+<td>Log line format on stderr. Set to <code>json</code> for Loki / <abbr title="Elasticsearch, Logstash, and Kibana">ELK</abbr> / Splunk ingestion; renders <code>RASTREO_LOG_FORMAT</code> on the pod. See <a href="../../reference/logging/">Logging</a>.</td>
+</tr>
+<tr>
+<td><code>otlp.metricsEnabled</code></td>
+<td><code>false</code></td>
+<td>Push metrics via OpenTelemetry <abbr title="OpenTelemetry Protocol">OTLP</abbr>. Requires an <abbr title="OpenTelemetry Protocol">OTLP</abbr>-enabled image build (see <code>image.tag: X.Y.Z-otlp</code>). See <a href="../../reference/otlp/"><abbr title="OpenTelemetry Protocol">OTLP</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>otlp.logsEnabled</code></td>
+<td><code>false</code></td>
+<td>Push logs via OpenTelemetry <abbr title="OpenTelemetry Protocol">OTLP</abbr>. Requires an <abbr title="OpenTelemetry Protocol">OTLP</abbr>-enabled image build. See <a href="../../reference/otlp/"><abbr title="OpenTelemetry Protocol">OTLP</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>otlp.endpoint</code></td>
+<td><code>""</code></td>
+<td><abbr title="OpenTelemetry Protocol">OTLP</abbr> collector <abbr title="Uniform Resource Locator">URL</abbr>, e.g. <code>http://otel-collector.observability.svc:4317</code> (<abbr title="gRPC Remote Procedure Calls">gRPC</abbr>) or <code>http://otel-collector.observability.svc:4318</code> (<abbr title="Hypertext Transfer Protocol">HTTP</abbr>+protobuf). Required when either <abbr title="OpenTelemetry Protocol">OTLP</abbr> toggle is on.</td>
+</tr>
+<tr>
+<td><code>otlp.protocol</code></td>
+<td><code>grpc</code></td>
+<td><abbr title="OpenTelemetry Protocol">OTLP</abbr> transport protocol. <code>grpc</code> targets a collector's <abbr title="gRPC Remote Procedure Calls">gRPC</abbr> port (4317). <code>http-protobuf</code> targets the <abbr title="Hypertext Transfer Protocol">HTTP</abbr>+protobuf port (4318). See <a href="../../reference/otlp/#transport-protocol"><abbr title="OpenTelemetry Protocol">OTLP</abbr> · Transport protocol</a>.</td>
+</tr>
+<tr>
+<td><code>otlp.headers</code></td>
+<td><code>""</code></td>
+<td>Custom headers on every <abbr title="OpenTelemetry Protocol">OTLP</abbr> export, for authenticating to a hosted collector. The chart renders a <code>Secret</code> holding the value. Prefer <code>otlp.headersExistingSecret</code> in production. See <a href="#custom-otlp-headers">Custom <abbr title="OpenTelemetry Protocol">OTLP</abbr> headers</a>.</td>
+</tr>
+<tr>
+<td><code>otlp.headersExistingSecret</code></td>
+<td><code>""</code></td>
+<td>Name of a pre-existing <code>Secret</code> holding the headers value. Takes precedence over <code>otlp.headers</code>. See <a href="#custom-otlp-headers">Custom <abbr title="OpenTelemetry Protocol">OTLP</abbr> headers</a>.</td>
+</tr>
+<tr>
+<td><code>otlp.headersSecretKey</code></td>
+<td><code>otlp-headers</code></td>
+<td>Key within the <code>Secret</code> that holds the headers value.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">The result cap and the memory limit move together</p>
+<p><code>server.maxResultBytes</code> caps the <code>POST /scans</code> response at 32 MiB by default. Peak memory at response time is roughly 3× that cap, so the default fits under <code>resources.limits.memory</code> of <code>256Mi</code>. If you raise <code>server.maxResultBytes</code>, raise <code>resources.limits.memory</code> by the same proportion. A scan too large to return in one response still streams every record to a server-configured sink — see <a href="../server/#bounded-response-size">rastreo-server · Bounded response size</a>.</p>
+</div>
+<h2 id="authentication">Authentication<a class="headerlink" href="#authentication" title="Permanent link">&para;</a></h2>
+<p><code>POST /scans</code> is authenticated by default — see <a href="../server/#authentication">rastreo-server · Authentication</a> for the request shape and the 401 response. On Kubernetes the chart supplies the bearer token to the pod for you.</p>
+<p>The chart is fail-closed. With <code>auth.enabled: true</code> (the default), <code>helm template</code> and <code>helm install</code> error unless you supply a token source. This stops an unauthenticated scan endpoint from reaching the cluster by accident.</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>Error: execution error at (rastreo/templates/deployment.yaml): auth.enabled is true but no token source is set: set auth.token to render a Secret, set auth.existingSecret to reference one, or set auth.enabled=false to run POST /scans unauthenticated (not recommended)
+</span></code></pre></div>
+<p>You have three ways to supply the token.</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:3"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">Existing Secret (production)</label><label for="__tabbed_1_2">Inline token</label><label for="__tabbed_1_3">Unauthenticated (not recommended)</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<p>Create the <code>Secret</code> with your own tooling, then point the chart at it with <code>auth.existingSecret</code>. The token never passes through Helm values or your shell history.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>rastreo-api-token<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span>--from-literal<span class="o">=</span>api-token<span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="k">)</span><span class="s2">&quot;</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">  </span>--set<span class="w"> </span>auth.existingSecret<span class="o">=</span>rastreo-api-token
+</span></code></pre></div>
+<p><code>auth.existingSecret</code> takes precedence over <code>auth.token</code>. The default key inside the <code>Secret</code> is <code>api-token</code>; set <code>auth.secretKey</code> if your <code>Secret</code> uses a different key.</p>
+</div>
+<div class="tabbed-block">
+<p>Pass the token to the chart with <code>auth.token</code> and it renders a <code>Secret</code> for you. This is the simplest path for a lab, but the token is stored in your release values, so avoid it in production.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span>--set<span class="w"> </span>auth.token<span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="k">)</span><span class="s2">&quot;</span>
+</span></code></pre></div>
+</div>
+<div class="tabbed-block">
+<p>Deploy with no authentication. The pod starts with <code>RASTREO_AUTH_DISABLED=true</code> and logs a WARNING that the endpoint is open. Only do this on a trusted, isolated network.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span>--set<span class="w"> </span>auth.enabled<span class="o">=</span><span class="nb">false</span>
+</span></code></pre></div>
+<p>A <code>POST /scans</code> that fails on this deployment returns <code>{"error":"internal server error"}</code> with no detail, because the caller never proved who they were. Read the pod logs for the reason, or turn authentication back on — see <a href="../server/#what-a-5xx-body-tells-you">What a 5xx body tells you</a>.</p>
+</div>
+</div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Read the token back for a client request</p>
+<p>Fetch the stored token to build an authenticated call:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>kubectl<span class="w"> </span>get<span class="w"> </span>secret<span class="w"> </span>rastreo-api-token<span class="w"> </span>-o<span class="w"> </span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.data.api-token}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>base64<span class="w"> </span>-d
+</span></code></pre></div>
+</div>
+<h2 id="custom-otlp-headers">Custom <abbr title="OpenTelemetry Protocol">OTLP</abbr> headers<a class="headerlink" href="#custom-otlp-headers" title="Permanent link">&para;</a></h2>
+<p>Hosted <abbr title="OpenTelemetry Protocol">OTLP</abbr> collectors — Grafana Cloud, Honeycomb, Dynatrace, or a tenant-scoped Tempo or Mimir — usually need an authentication header on every export. The chart injects that header from a <code>Secret</code> and sets <code>RASTREO_OTLP_HEADERS</code> on the pod. See <a href="../../reference/otlp/#custom-headers"><abbr title="OpenTelemetry Protocol">OTLP</abbr> · Custom headers</a> for the header format and the fail-fast behaviour.</p>
+<p>The header value is a comma-separated list of <code>key=value</code> pairs, for example <code>authorization=Bearer &lt;token&gt;</code> or <code>authorization=Bearer &lt;token&gt;,x-scope-orgid=&lt;tenant&gt;</code>. A header value is a bearer token or <abbr title="Application Programming Interface">API</abbr> key, so supply it from a <code>Secret</code>. The chart renders the headers env only when an <abbr title="OpenTelemetry Protocol">OTLP</abbr> signal is enabled, so pair these values with <code>otlp.logsEnabled</code>, <code>otlp.metricsEnabled</code>, or <code>otlp.tracesEnabled</code>.</p>
+<p>You have two ways to supply the headers.</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="2:2"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">Existing Secret (production)</label><label for="__tabbed_2_2">Inline value</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<p>Create the <code>Secret</code> with your own tooling, then point the chart at it with <code>otlp.headersExistingSecret</code>. The token never passes through Helm values or your shell history.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>rastreo-otlp-headers<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>--from-literal<span class="o">=</span>otlp-headers<span class="o">=</span><span class="s2">&quot;authorization=Bearer </span><span class="nv">$OTLP_TOKEN</span><span class="s2">&quot;</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">  </span>--set<span class="w"> </span>otlp.logsEnabled<span class="o">=</span><span class="nb">true</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">  </span>--set<span class="w"> </span>otlp.endpoint<span class="o">=</span>http://otel-collector.observability.svc:4318<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">  </span>--set<span class="w"> </span>otlp.protocol<span class="o">=</span>http-protobuf<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-8"><a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="w">  </span>--set<span class="w"> </span>otlp.headersExistingSecret<span class="o">=</span>rastreo-otlp-headers
+</span></code></pre></div>
+<p><code>otlp.headersExistingSecret</code> takes precedence over <code>otlp.headers</code>. The default key inside the <code>Secret</code> is <code>otlp-headers</code>; set <code>otlp.headersSecretKey</code> if your <code>Secret</code> uses a different key.</p>
+</div>
+<div class="tabbed-block">
+<p>Pass the headers to the chart with <code>otlp.headers</code> and it renders a <code>Secret</code> for you. This is the simplest path for a lab, but the value is stored in your release values, so avoid it in production.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">otlp</span><span class="p">:</span>
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">logsEnabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span><span class="nt">endpoint</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;http://otel-collector.observability.svc:4318&quot;</span>
+</span><span id="__span-10-4"><a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">  </span><span class="nt">protocol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http-protobuf</span>
+</span><span id="__span-10-5"><a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">  </span><span class="nt">headers</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;authorization=Bearer</span><span class="nv"> </span><span class="s">&lt;token&gt;,x-scope-orgid=&lt;tenant&gt;&quot;</span>
+</span></code></pre></div>
+<p>The chart renders a <code>Secret</code> named <code>&lt;release&gt;-otlp</code> holding the value and mounts it into the pod as <code>RASTREO_OTLP_HEADERS</code>.</p>
+</div>
+</div>
+</div>
+<h2 id="sink-credentials">Sink credentials<a class="headerlink" href="#sink-credentials" title="Permanent link">&para;</a></h2>
+<p>The sink config the chart renders is a <code>ConfigMap</code>: plaintext at rest, readable by anyone with access to the namespace, and echoed back by <code>helm get values</code>. A broker password does not belong in it. Put the credential in a <code>Secret</code> and leave a reference in the sink config — the server resolves the reference when it reads the file, so only the reference is ever stored. Two reference syntaxes exist and the chart reaches both; <a href="../../reference/secrets/">Secrets</a> covers the syntax, the field types that accept one, and the error messages.</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="3:2"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">Environment variable (<code>${VAR}</code>)</label><label for="__tabbed_3_2">Mounted file (<code>!file</code>)</label></div>
+<div class="tabbed-content">
+<div class="tabbed-block">
+<p>Write <code>${KAFKA_PASSWORD}</code> where the password goes and name the <code>Secret</code> key in <code>extraEnv</code>. The chart renders the entry as container environment, and the server substitutes the value when it loads the config.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>rastreo-kafka<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">password</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$KAFKA_PASSWORD</span><span class="s2">&quot;</span>
+</span></code></pre></div>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="nt">sink</span><span class="p">:</span>
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">  </span><span class="nt">config</span><span class="p">:</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">kafka</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="w">    </span><span class="nt">brokers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;kafka.observability.svc:9092&quot;</span><span class="p p-Indicator">]</span>
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="w">    </span><span class="nt">topic</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo.discovery.records.v1</span>
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="w">    </span><span class="nt">sasl</span><span class="p">:</span>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="w">      </span><span class="nt">mechanism</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">scram_sha_512</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="w">      </span><span class="nt">username</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo</span>
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="w">      </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;${KAFKA_PASSWORD}&quot;</span>
+</span><span id="__span-12-10"><a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>
+</span><span id="__span-12-11"><a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a><span class="nt">extraEnv</span><span class="p">:</span>
+</span><span id="__span-12-12"><a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">KAFKA_PASSWORD</span>
+</span><span id="__span-12-13"><a id="__codelineno-12-13" name="__codelineno-12-13" href="#__codelineno-12-13"></a><span class="w">    </span><span class="nt">valueFrom</span><span class="p">:</span>
+</span><span id="__span-12-14"><a id="__codelineno-12-14" name="__codelineno-12-14" href="#__codelineno-12-14"></a><span class="w">      </span><span class="nt">secretKeyRef</span><span class="p">:</span>
+</span><span id="__span-12-15"><a id="__codelineno-12-15" name="__codelineno-12-15" href="#__codelineno-12-15"></a><span class="w">        </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo-kafka</span>
+</span><span id="__span-12-16"><a id="__codelineno-12-16" name="__codelineno-12-16" href="#__codelineno-12-16"></a><span class="w">        </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">password</span>
+</span></code></pre></div>
+<p>The rendered <code>ConfigMap</code> carries the reference, never the password:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="nt">data</span><span class="p">:</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="w">  </span><span class="nt">sink.yaml</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="w">    </span><span class="no">brokers:</span>
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="w">    </span><span class="no">- kafka.observability.svc:9092</span>
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="w">    </span><span class="no">sasl:</span>
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="w">      </span><span class="no">mechanism: scram_sha_512</span>
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="w">      </span><span class="no">password: ${KAFKA_PASSWORD}</span>
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="w">      </span><span class="no">username: rastreo</span>
+</span><span id="__span-13-9"><a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a><span class="w">    </span><span class="no">topic: rastreo.discovery.records.v1</span>
+</span><span id="__span-13-10"><a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="w">    </span><span class="no">type: kafka</span>
+</span></code></pre></div>
+<p><code>extraEnvFrom</code> does the same job for a whole object at once: each key in the referenced <code>Secret</code> or <code>ConfigMap</code> becomes a variable on the container, as long as the key is a valid variable name — letters, digits, and underscores, not starting with a digit. Kubernetes skips a key it cannot use as a name and reports it only in a pod event, so <code>--from-literal=kafka-password=…</code> yields no <code>KAFKA_PASSWORD</code> on the container: the reference never resolves and <code>/readyz</code> sits at 503 with <code>reason: "sink_unreachable"</code>. Name the key <code>KAFKA_PASSWORD</code> in the <code>Secret</code>, or bring a dashed key across with the <code>extraEnv</code> entry above, which renames it on the way in.</p>
+</div>
+<div class="tabbed-block">
+<p>Write <code>!file</code> and the path the <code>Secret</code> is mounted at, mount the <code>Secret</code> with <code>extraVolumes</code> and <code>extraVolumeMounts</code>, and the server reads the file when it loads the config.</p>
+<p>Put the document in <code>sink.configYaml</code> rather than <code>sink.config</code>. Helm parses <code>sink.config</code> before any template runs, which drops the <code>!file</code> tag and leaves the path behind as an ordinary string — the server would then authenticate with the text <code>/run/secrets/kafka/password</code>. A document written into <code>sink.configYaml</code> reaches the <code>ConfigMap</code> character for character, so the tag survives.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>rastreo-kafka<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">password</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$KAFKA_PASSWORD</span><span class="s2">&quot;</span>
+</span></code></pre></div>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="nt">sink</span><span class="p">:</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="w">  </span><span class="nt">configYaml</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="w">    </span><span class="no">type: kafka</span>
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="w">    </span><span class="no">brokers: [&quot;kafka.observability.svc:9092&quot;]</span>
+</span><span id="__span-15-5"><a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a><span class="w">    </span><span class="no">topic: rastreo.discovery.records.v1</span>
+</span><span id="__span-15-6"><a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a><span class="w">    </span><span class="no">sasl:</span>
+</span><span id="__span-15-7"><a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="w">      </span><span class="no">mechanism: scram_sha_512</span>
+</span><span id="__span-15-8"><a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a><span class="w">      </span><span class="no">username: rastreo</span>
+</span><span id="__span-15-9"><a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a><span class="w">      </span><span class="no">password: !file /run/secrets/kafka/password</span>
+</span><span id="__span-15-10"><a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a>
+</span><span id="__span-15-11"><a id="__codelineno-15-11" name="__codelineno-15-11" href="#__codelineno-15-11"></a><span class="nt">extraVolumes</span><span class="p">:</span>
+</span><span id="__span-15-12"><a id="__codelineno-15-12" name="__codelineno-15-12" href="#__codelineno-15-12"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">kafka-credentials</span>
+</span><span id="__span-15-13"><a id="__codelineno-15-13" name="__codelineno-15-13" href="#__codelineno-15-13"></a><span class="w">    </span><span class="nt">secret</span><span class="p">:</span>
+</span><span id="__span-15-14"><a id="__codelineno-15-14" name="__codelineno-15-14" href="#__codelineno-15-14"></a><span class="w">      </span><span class="nt">secretName</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rastreo-kafka</span>
+</span><span id="__span-15-15"><a id="__codelineno-15-15" name="__codelineno-15-15" href="#__codelineno-15-15"></a>
+</span><span id="__span-15-16"><a id="__codelineno-15-16" name="__codelineno-15-16" href="#__codelineno-15-16"></a><span class="nt">extraVolumeMounts</span><span class="p">:</span>
+</span><span id="__span-15-17"><a id="__codelineno-15-17" name="__codelineno-15-17" href="#__codelineno-15-17"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">kafka-credentials</span>
+</span><span id="__span-15-18"><a id="__codelineno-15-18" name="__codelineno-15-18" href="#__codelineno-15-18"></a><span class="w">    </span><span class="nt">mountPath</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/run/secrets/kafka</span>
+</span><span id="__span-15-19"><a id="__codelineno-15-19" name="__codelineno-15-19" href="#__codelineno-15-19"></a><span class="w">    </span><span class="nt">readOnly</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span></code></pre></div>
+<p>Each key of the <code>Secret</code> becomes a file under the mount path, so the <code>password</code> key lands at <code>/run/secrets/kafka/password</code> and the <code>ConfigMap</code> holds that line exactly as written. A read-only mount needs no capability and no writable root filesystem, so it works under the chart's hardened defaults as they ship.</p>
+</div>
+</div>
+</div>
+<p>Setting <code>sink.config</code> and <code>sink.configYaml</code> together stops the render — the chart writes one <code>sink.yaml</code> and will not merge them:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>Error: execution error at (rastreo/templates/deployment.yaml:1:19): sink.config and sink.configYaml are both set: the chart writes one sink.yaml and will not merge them. Keep sink.config for a config Helm parses, or sink.configYaml for one it copies through verbatim (the only form that preserves a !file tag).
+</span></code></pre></div>
+<p>A reference that cannot resolve is not fatal. The pod starts and stays up, <code>/readyz</code> returns <code>503</code> with <code>reason: "sink_unreachable"</code>, and <code>last_probe_error</code> names the variable or the path it could not read. The server re-reads the config file and rebuilds the sink every <code>RASTREO_SINK_PROBE_INTERVAL_SECS</code>, so a <code>!file</code> path that is mounted late, a corrected ConfigMap, or a broker that comes back clears the condition without a restart. An unset environment variable is the exception: a variable's value is fixed when the process starts, so <code>${VAR}</code> resolves the same way on every attempt and the pod does need restarting once the <code>Secret</code> is in place. See <a href="../server/#sink-reachability-probe">rastreo-server · Sink reachability probe</a>.</p>
+<h3 id="values-the-chart-refuses-to-render">Values the chart refuses to render<a class="headerlink" href="#values-the-chart-refuses-to-render" title="Permanent link">&para;</a></h3>
+<p>Kubernetes keeps the last duplicate of an environment variable, rejects two volumes sharing a name, and rejects a mount that names no volume. A value that collides with what the chart renders would therefore shadow it with nothing in the manifest to show for it, or fail on apply — long after <code>helm template</code> looked clean. The chart stops at template time instead, naming the key and the entry in the error:</p>
+<ul>
+<li><code>extraEnv</code> naming a variable the chart sets — <code>RASTREO_API_TOKEN</code>, <code>RASTREO_SINK_CONFIG_PATH</code>, and the rest of the <code>RASTREO_*</code> set the values above render.</li>
+<li><code>extraEnv</code> naming the same variable twice.</li>
+<li><code>extraVolumes</code> using the name <code>sink-config</code>, which the chart gives its sink config volume. Reserved whether or not a sink config is set today, so adding one later cannot collide with a deploy that already works.</li>
+<li><code>extraVolumeMounts</code> naming a volume nothing defines — a one-word difference between <code>kafka-credentials</code> in <code>extraVolumes</code> and <code>kafka-creds</code> in the mount otherwise renders cleanly, and the credential silently never arrives.</li>
+<li><code>extraVolumeMounts</code> mounting <code>/etc/rastreo/sink</code>, or a path inside or above it — <code>/etc</code>, <code>/etc/rastreo/./sink</code>, and <code>/</code> included — which would hide the sink config the server reads.</li>
+<li>Any <code>extra*</code> value that is not a list of mappings, or an entry missing a field Kubernetes requires: a <code>name</code> on <code>extraEnv</code> and <code>extraVolumes</code>, a <code>name</code> and a <code>mountPath</code> on <code>extraVolumeMounts</code>.</li>
+</ul>
+<p><code>extraEnvFrom</code> is not checked for collisions: an explicit <code>env</code> entry wins over an <code>envFrom</code> key of the same name, so a key arriving that way cannot displace what the chart sets.</p>
+<div class="admonition note">
+<p class="admonition-title">Sink config edits stop taking effect once the sink builds</p>
+<p>The server re-reads the sink config on every probe interval until the sink builds, and never again after that — the built sink is held for the process lifetime. Which side of that line you are on decides what an edit does. Before the sink builds, correcting the <code>ConfigMap</code> (or mounting a <code>!file</code> secret that was missing) is picked up within one <code>RASTREO_SINK_PROBE_INTERVAL_SECS</code> and the pod goes ready on its own. After it builds, the identical edit is read by nothing: no log line, no <code>/readyz</code> change, and the pod keeps writing to the topic it opened at build time. A rotated <code>Secret</code> behind a <code>${VAR}</code> or <code>!file</code> reference is the same rule — it changes what the next pod reads, not what a running one holds.</p>
+<p>The server logs one <code>INFO</code> line the moment the sink attaches, naming the config path and the sink kind, so that line marks where self-healing stops. From then on, <code>kubectl rollout restart deployment/&lt;release&gt;</code> is what applies a sink config change. Editing <code>sink.config</code> or <code>sink.configYaml</code> and running <code>helm upgrade</code> rolls the pods on its own: the chart stamps a checksum of the sink config onto the pod template.</p>
+</div>
+<h2 id="restricting-scan-targets">Restricting scan targets<a class="headerlink" href="#restricting-scan-targets" title="Permanent link">&para;</a></h2>
+<p>Authentication controls who may call <code>POST /scans</code>. The target guard controls which addresses the server is allowed to probe, and how large one request may be. See <a href="../server/#restricting-scan-targets">rastreo-server · Restricting scan targets</a> for the full behaviour and the 403 / 400 / 413 responses.</p>
+<p>The chart exposes three values under <code>targetGuard</code>:</p>
+<ul>
+<li><code>targetGuard.allowlist</code> — a list of CIDRs (or bare IPs) the server may probe. Empty (the default) renders no <code>RASTREO_TARGET_ALLOWLIST</code>, so every target is allowed.</li>
+<li><code>targetGuard.maxTotalHosts</code> — the cap on the total resolved hosts across all targets in one request. Default <code>262144</code>; <code>0</code> disables it.</li>
+<li><code>targetGuard.maxBodyBytes</code> — the <code>POST /scans</code> request body size limit in bytes. Default <code>1048576</code> (1 MiB).</li>
+</ul>
+<p>Set the allow-list and keep the two always-on caps at their defaults:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-17-1"><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-17-2"><a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="w">  </span>--set<span class="w"> </span>auth.existingSecret<span class="o">=</span>rastreo-api-token<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-17-3"><a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="w">  </span>--set<span class="w"> </span><span class="s1">&#39;targetGuard.allowlist={10.0.0.0/8,192.168.0.0/16}&#39;</span>
+</span></code></pre></div>
+<p>Or set all three in a values file:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nt">targetGuard</span><span class="p">:</span>
+</span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="w">  </span><span class="nt">allowlist</span><span class="p">:</span>
+</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10.0.0.0/8</span>
+</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">192.168.0.0/16</span>
+</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="w">  </span><span class="nt">maxTotalHosts</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">262144</span>
+</span><span id="__span-18-6"><a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a><span class="w">  </span><span class="nt">maxBodyBytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1048576</span>
+</span></code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">The allow-list is opt-in and rejects the whole request</p>
+<p>An empty <code>targetGuard.allowlist</code> (the default) allows any target. When you populate it, a scan whose resolved targets include any address outside the listed networks is rejected in full with <code>403</code> — nothing is probed.</p>
+</div>
+<h2 id="image-source">Image source<a class="headerlink" href="#image-source" title="Permanent link">&para;</a></h2>
+<p>The chart's default <code>image.repository</code> is <code>ghcr.io/davidban77/rastreo</code> — a multi-arch image built from the same source tree, published on every <code>v*</code> tag. <code>image.tag</code> defaults to the chart's <code>appVersion</code>, so the install pulls the matching <code>ghcr.io/davidban77/rastreo</code> image.</p>
+<p>To pin to a different image (a fork in a private registry, a mid-cycle build, or a specific <abbr title="Secure Hash Algorithm">SHA</abbr>), override <code>image.repository</code> and <code>image.tag</code>:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>helm<span class="w"> </span>install<span class="w"> </span>rastreo<span class="w"> </span>oci://ghcr.io/davidban77/charts/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-19-2"><a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="w">  </span>--set<span class="w"> </span>image.repository<span class="o">=</span>my-registry.example.com/rastreo<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-19-3"><a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="w">  </span>--set<span class="w"> </span>image.tag<span class="o">=</span>X.Y.Z
+</span></code></pre></div>
+<h2 id="servicemonitor">ServiceMonitor<a class="headerlink" href="#servicemonitor" title="Permanent link">&para;</a></h2>
+<p>Enable Prometheus scraping by setting <code>serviceMonitor.enabled: true</code>. <code>rastreo-server</code> exposes Prometheus-format metrics at <code>GET /metrics</code> — scan counts and outcomes, probe success/error totals, records emitted, sink errors, a request-duration histogram, uptime, and build info. The chart's default <code>serviceMonitor.path: /metrics</code> matches.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="nt">serviceMonitor</span><span class="p">:</span>
+</span><span id="__span-20-2"><a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-20-3"><a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a><span class="w">  </span><span class="nt">interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30s</span>
+</span><span id="__span-20-4"><a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="w">  </span><span class="nt">scrapeTimeout</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10s</span>
+</span><span id="__span-20-5"><a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="w">  </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/metrics&quot;</span>
+</span></code></pre></div>
+<p>All metric names use the <code>rastreo_server_</code> prefix. See <a href="../server/#get-metrics">rastreo-server · GET /metrics</a> for the per-metric table, and <a href="../../reference/observability/">Observability</a> for the bundled Grafana dashboard and <code>PrometheusRule</code> alerts.</p>
+<h2 id="podsecuritynetraw-arp-and-ndp-probers"><code>podSecurity.netRaw</code> — <abbr title="Address Resolution Protocol">ARP</abbr> and <abbr title="Neighbor Discovery Protocol">NDP</abbr> probers<a class="headerlink" href="#podsecuritynetraw-arp-and-ndp-probers" title="Permanent link">&para;</a></h2>
+<p>The <abbr title="Address Resolution Protocol">ARP</abbr> and <abbr title="Neighbor Discovery Protocol">NDP</abbr> probers open <code>AF_PACKET</code> raw sockets to send Ethernet frames directly, which requires the <code>CAP_NET_RAW</code> Linux capability. The chart does NOT grant this by default because Pod Security Standards <code>restricted</code> and most managed Kubernetes distributions disallow capability additions. Opt in by setting <code>podSecurity.netRaw: true</code>:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="nt">podSecurity</span><span class="p">:</span>
+</span><span id="__span-21-2"><a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="w">  </span><span class="nt">netRaw</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span></code></pre></div>
+<p>When enabled, the rendered container <code>securityContext.capabilities.add</code> includes <code>NET_RAW</code> alongside the default <code>drop: [ALL]</code>. The Pod Security Standards <code>baseline</code> profile permits this; <code>restricted</code> does not — check the target namespace's Pod Security admission mode with <code>kubectl get ns &lt;ns&gt; -o yaml</code> before enabling. Some managed clusters (GKE Autopilot, EKS Fargate) prohibit capability additions cluster-wide and cannot run the <abbr title="Address Resolution Protocol">ARP</abbr> or <abbr title="Neighbor Discovery Protocol">NDP</abbr> probers regardless of chart values.</p>
+<p>The image ships with <code>CAP_NET_RAW</code> set on both <code>/rastreo</code> and <code>/rastreo-server</code> as a permitted-only file capability, and each binary raises it to effective in-process just before opening a raw socket. Because the capability is not effective at exec time, the default deploy — non-root, <code>drop: [ALL]</code>, no capability added — execs and runs cleanly; it does not crash-loop under a restricted <code>securityContext</code>. Setting <code>podSecurity.netRaw: true</code> adds <code>NET_RAW</code> to the container so the probers can actually open their sockets, while keeping the pod non-root and hardened.</p>
+<p>Without this toggle, scenarios that reference <code>type: arp</code> or <code>type: ndp</code> record a clean <code>permission_denied</code> fault at probe time; the scan finishes with exit 0 and the pod keeps running. Only those specific probes fail — the container does not crash.</p>
+<h2 id="graceful-shutdown-and-terminationgraceperiodseconds">Graceful shutdown and <code>terminationGracePeriodSeconds</code><a class="headerlink" href="#graceful-shutdown-and-terminationgraceperiodseconds" title="Permanent link">&para;</a></h2>
+<p><code>rastreo-server</code> handles <code>SIGTERM</code> by refusing new connections, draining inflight <code>POST /scans</code> requests against the per-request timeout, and stopping the background sink-reachability probe. The process exits once both drains complete. A hard timeout bounds the wait so a stuck scan cannot block shutdown forever: <code>RASTREO_SHUTDOWN_TIMEOUT_SECS</code>, default 60 seconds. When the drain runs longer, the server logs a warning and force-exits. Set <code>terminationGracePeriodSeconds</code> on the pod spec to cover the longest expected scan plus the probe-iteration budget — for the binary defaults (60s request timeout, 5s probe timeout) <code>terminationGracePeriodSeconds: 75</code> gives a ~10s safety margin. The chart ships this value out of the box. If the grace period expires before drain completes, the kubelet sends <code>SIGKILL</code> and any inflight scan is aborted mid-flight without reaching the server-configured sink.</p>
+<div class="admonition note">
+<p class="admonition-title">The app timeout stays below the grace period</p>
+<p><code>RASTREO_SHUTDOWN_TIMEOUT_SECS</code> should stay below <code>terminationGracePeriodSeconds</code> so the app force-exits on its own before the kubelet sends <code>SIGKILL</code>. The defaults already do this: the app timeout is 60 seconds and the chart grace period is 75. The app exits first and logs a clean warning.</p>
+</div>
+<h2 id="security-context">Security context<a class="headerlink" href="#security-context" title="Permanent link">&para;</a></h2>
+<p>The chart's <code>podSecurityContext</code> and container <code>securityContext</code> are restrictive by default:</p>
+<ul>
+<li>Non-root: <code>runAsNonRoot: true</code>, <code>runAsUser: 65532</code>, <code>runAsGroup: 65532</code>, <code>fsGroup: 65532</code>.</li>
+<li>Read-only root: <code>readOnlyRootFilesystem: true</code>.</li>
+<li>No new privileges: <code>allowPrivilegeEscalation: false</code>.</li>
+<li>All capabilities dropped: <code>capabilities.drop: [ALL]</code>.</li>
+<li>Seccomp: <code>seccompProfile.type: RuntimeDefault</code>.</li>
+</ul>
+<p>These line up with Pod Security Standards <code>restricted</code> out of the box. Most clusters do not need to override them.</p>
+<h2 id="serviceaccount">ServiceAccount<a class="headerlink" href="#serviceaccount" title="Permanent link">&para;</a></h2>
+<p>The chart creates a dedicated <code>ServiceAccount</code> for the pod with token automounting turned off. <code>rastreo-server</code> never calls the Kubernetes <abbr title="Application Programming Interface">API</abbr>, so the pod carries no mounted <abbr title="Application Programming Interface">API</abbr> token.</p>
+<ul>
+<li><code>serviceAccount.create</code> (default <code>true</code>) — create the <code>ServiceAccount</code>. Set <code>false</code> to use one you already manage.</li>
+<li><code>serviceAccount.name</code> — the name to use. Empty derives it from the release name.</li>
+<li><code>serviceAccount.annotations</code> — annotations to add, for example an IAM role binding.</li>
+</ul>
+<p>The rendered <code>ServiceAccount</code> sets <code>automountServiceAccountToken: false</code>.</p>
+<h2 id="networkpolicy">NetworkPolicy<a class="headerlink" href="#networkpolicy" title="Permanent link">&para;</a></h2>
+<p>The chart can render a <code>NetworkPolicy</code> that limits which peers reach the pod. It is off by default because a correct policy depends on your cluster topology. With no configured sources on an enforcing <abbr title="Container Network Interface">CNI</abbr>, the policy would deny all access.</p>
+<p>Enable it and list the peers allowed to reach each port:</p>
+<ul>
+<li><code>networkPolicy.enabled</code> — set to <code>true</code> to create the policy.</li>
+<li><code>networkPolicy.ingress</code> — peers allowed to reach the <abbr title="Application Programming Interface">API</abbr> port, which serves <code>POST /scans</code> and the rest of the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> <abbr title="Application Programming Interface">API</abbr>.</li>
+<li><code>networkPolicy.monitoring</code> — peers allowed to scrape <code>/metrics</code>, such as your monitoring namespace.</li>
+</ul>
+<p>Each entry under <code>ingress</code> and <code>monitoring</code> is a standard <code>NetworkPolicyPeer</code>: a <code>namespaceSelector</code>, a <code>podSelector</code>, or both.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-22-1"><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="nt">networkPolicy</span><span class="p">:</span>
+</span><span id="__span-22-2"><a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-22-3"><a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="w">  </span><span class="nt">ingress</span><span class="p">:</span>
+</span><span id="__span-22-4"><a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">namespaceSelector</span><span class="p">:</span>
+</span><span id="__span-22-5"><a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a><span class="w">        </span><span class="nt">matchLabels</span><span class="p">:</span>
+</span><span id="__span-22-6"><a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a><span class="w">          </span><span class="nt">kubernetes.io/metadata.name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">automation</span>
+</span><span id="__span-22-7"><a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a><span class="w">  </span><span class="nt">monitoring</span><span class="p">:</span>
+</span><span id="__span-22-8"><a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">namespaceSelector</span><span class="p">:</span>
+</span><span id="__span-22-9"><a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a><span class="w">        </span><span class="nt">matchLabels</span><span class="p">:</span>
+</span><span id="__span-22-10"><a id="__codelineno-22-10" name="__codelineno-22-10" href="#__codelineno-22-10"></a><span class="w">          </span><span class="nt">kubernetes.io/metadata.name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">monitoring</span>
+</span></code></pre></div>
+<div class="admonition warning">
+<p class="admonition-title">Health probes need node traffic, not a selector</p>
+<p>Kubernetes liveness and readiness probes come from the kubelet on the node, not from a pod or namespace. A <code>namespaceSelector</code> or <code>podSelector</code> peer does NOT admit them. On a <abbr title="Container Network Interface">CNI</abbr> that enforces host traffic, add the node or pod <abbr title="Classless Inter-Domain Routing">CIDR</abbr> as an <code>ipBlock</code> peer. Otherwise the health probes fail and the pod restarts in a loop.</p>
+<p><code>networkPolicy.monitoring</code> admits metrics scraping only. It does not admit the health probes.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-23-1"><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="nt">networkPolicy</span><span class="p">:</span>
+</span><span id="__span-23-2"><a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-23-3"><a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a><span class="w">  </span><span class="nt">ingress</span><span class="p">:</span>
+</span><span id="__span-23-4"><a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">namespaceSelector</span><span class="p">:</span>
+</span><span id="__span-23-5"><a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a><span class="w">        </span><span class="nt">matchLabels</span><span class="p">:</span>
+</span><span id="__span-23-6"><a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a><span class="w">          </span><span class="nt">kubernetes.io/metadata.name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">automation</span>
+</span><span id="__span-23-7"><a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">ipBlock</span><span class="p">:</span>
+</span><span id="__span-23-8"><a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a><span class="w">        </span><span class="nt">cidr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10.244.0.0/16</span><span class="w">   </span><span class="c1"># your node or pod CIDR — where health probes originate</span>
+</span></code></pre></div>
+</div>
+<h2 id="structured-logging">Structured logging<a class="headerlink" href="#structured-logging" title="Permanent link">&para;</a></h2>
+<p>For log aggregation compatibility (Loki, <abbr title="Elasticsearch, Logstash, and Kibana">ELK</abbr>, Splunk, or any pipeline that expects one <abbr title="JavaScript Object Notation">JSON</abbr> object per line), set <code>logFormat: json</code> in <code>values.yaml</code>:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-24-1"><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="nt">logFormat</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">json</span>
+</span></code></pre></div>
+<p>The chart renders <code>RASTREO_LOG_FORMAT=json</code> on the container's env. Leave the key unset (or <code>null</code>) to inherit the binary default of <code>text</code>. See <a href="../../reference/logging/">Logging</a> for the <abbr title="JavaScript Object Notation">JSON</abbr> field shape and drop-in Promtail / Filebeat snippets.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../docker/">Docker</a> — the image the chart deploys.</li>
+<li><a href="../server/">rastreo-server</a> — the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> <abbr title="Application Programming Interface">API</abbr> the pods expose.</li>
+<li><a href="../../reference/observability/">Observability</a> — Grafana dashboard and PrometheusRule alerts shipped by the chart.</li>
+<li><a href="../../reference/logging/">Logging</a> — log format and aggregator ingestion examples.</li>
+<li><a href="../../reference/otlp/"><abbr title="OpenTelemetry Protocol">OTLP</abbr></a> — OpenTelemetry <abbr title="OpenTelemetry Protocol">OTLP</abbr> export for metrics and logs.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../docker/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Docker">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Docker
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../server/" class="md-footer__link md-footer__link--next" aria-label="Next: Server">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Server
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 David Flores · Built with Material for MkDocs
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/davidban77/rastreo" target="_blank" rel="noopener" title="rastreo on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.tracking", "navigation.instant", "navigation.footer", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "content.tooltips", "content.action.edit", "content.action.view", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,3630 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Every CLI flag for rastreo and rastreo-server, with defaults, accepted values, and environment-variable equivalents.">
+      
+      
+      
+        <link rel="canonical" href="https://davidban77.github.io/rastreo/reference/cli/">
+      
+      
+        <link rel="prev" href="../">
+      
+      
+        <link rel="next" href="../configuration/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>CLI reference - rastreo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cli-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="rastreo" class="md-header__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            rastreo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              CLI reference
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../get-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Get started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../discover/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Discover
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../probe/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Probe
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../integrate/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Integrate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deploy/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Deploy
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="rastreo" class="md-nav__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    rastreo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../get-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Get started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Get started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../discover/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discover
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Discover
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running scans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/targets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Targets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/sinks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sinks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/enrichment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Enrichment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/identity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/classification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Classification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/collection-profile/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection profiles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../discover/validate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../probe/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Probe
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Probe
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tcp-connect/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TCP-connect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/http/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/reverse-dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reverse DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/udp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/snmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/arp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ARP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ndp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ssh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSH
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/icmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ICMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/gnmi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gNMI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/lldp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../integrate/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integrate
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Integrate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/source-of-truth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Source of truth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/reference-consumers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference consumers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../deploy/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploy
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deploy
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI reference
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#top-level-flags-rastreo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Top-level flags (rastreo)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Top-level flags (rastreo)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-each-verbosity-level-shows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What each verbosity level shows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#log-level-precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log-level precedence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#colour-and-glyphs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Colour and glyphs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rastreo-discover" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        rastreo discover
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rastreo-validate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        rastreo validate
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rastreo-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        rastreo-server
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#env-var-precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Env-var precedence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build features
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#exit-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exit codes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../schema/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7_6" id="__nav_7_6_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Schema
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/device-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DeviceRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/link-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LinkRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/collection-profile-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CollectionProfileRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/scan-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScanMetadata
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/scenario-config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScenarioFile
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/discovery-plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DiscoveryPlan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/run-report/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunReport
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/streaming-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema/dlq-envelope/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DlqEnvelope
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../health-endpoints/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../otlp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OTLP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#top-level-flags-rastreo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Top-level flags (rastreo)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Top-level flags (rastreo)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-each-verbosity-level-shows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What each verbosity level shows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#log-level-precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log-level precedence
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#colour-and-glyphs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Colour and glyphs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rastreo-discover" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        rastreo discover
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rastreo-validate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        rastreo validate
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rastreo-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        rastreo-server
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#env-var-precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Env-var precedence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#build-features" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build features
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#exit-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exit codes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/davidban77/rastreo/edit/main/docs/site/docs/reference/cli.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+    
+      
+    
+    <a href="https://github.com/davidban77/rastreo/raw/main/docs/site/docs/reference/cli.md" title="View source of this page" class="md-content__button md-icon">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M17 18c.56 0 1 .44 1 1s-.44 1-1 1-1-.44-1-1 .44-1 1-1m0-3c-2.73 0-5.06 1.66-6 4 .94 2.34 3.27 4 6 4s5.06-1.66 6-4c-.94-2.34-3.27-4-6-4m0 6.5a2.5 2.5 0 0 1-2.5-2.5 2.5 2.5 0 0 1 2.5-2.5 2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1-2.5 2.5M9.27 20H6V4h7v5h5v4.07c.7.08 1.36.25 2 .49V8l-6-6H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h4.5a8.2 8.2 0 0 1-1.23-2"/></svg>
+    </a>
+  
+
+
+<h1 id="cli-reference"><abbr title="Command-Line Interface">CLI</abbr> reference<a class="headerlink" href="#cli-reference" title="Permanent link">&para;</a></h1>
+<p>This page lists every command-line flag for both binaries — the <code>rastreo</code> <abbr title="Command-Line Interface">CLI</abbr> and the <code>rastreo-server</code> <abbr title="Hypertext Transfer Protocol">HTTP</abbr> control plane. For worked examples and walkthroughs, see <a href="../../discover/cli/">Discover · <abbr title="Command-Line Interface">CLI</abbr></a> and <a href="../../deploy/server/">Deploy · Server</a>. The structured tables below are the lookup form.</p>
+<h2 id="top-level-flags-rastreo">Top-level flags (rastreo)<a class="headerlink" href="#top-level-flags-rastreo" title="Permanent link">&para;</a></h2>
+<p>These flags apply to <code>rastreo</code> itself, before any subcommand. They are global — the verbosity flags also work when placed after the subcommand.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-v</code>, <code>--verbose</code></td>
+<td>—</td>
+<td>Show the per-kind detail lines under the completion banner and raise the log level. Repeatable (<code>-vv</code>, <code>-vvv</code>). Logs always go to stderr.</td>
+</tr>
+<tr>
+<td><code>-q</code>, <code>--quiet</code></td>
+<td>—</td>
+<td>Suppress banners, the progress line, hints, and all logs below <code>error</code>. Wins over <code>--verbose</code>.</td>
+</tr>
+<tr>
+<td><code>--log-format &lt;FORMAT&gt;</code></td>
+<td><code>text</code></td>
+<td>Log line format on stderr. Values: <code>text</code> (human-readable) or <code>json</code> (one <abbr title="JavaScript Object Notation">JSON</abbr> object per line). Env var: <code>RASTREO_LOG_FORMAT</code>. See <a href="../logging/">Logging</a>.</td>
+</tr>
+<tr>
+<td><code>-h</code>, <code>--help</code></td>
+<td>—</td>
+<td>Print help and exit.</td>
+</tr>
+<tr>
+<td><code>-V</code>, <code>--version</code></td>
+<td>—</td>
+<td>Print version and exit.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="what-each-verbosity-level-shows">What each verbosity level shows<a class="headerlink" href="#what-each-verbosity-level-shows" title="Permanent link">&para;</a></h3>
+<p>Everything in this table goes to <strong>stderr</strong>. Records always go to the sink (stdout by default) and are never affected by verbosity.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>start banner</th>
+<th>progress line</th>
+<th>completion banner</th>
+<th>detail lines</th>
+<th>hints</th>
+<th>log level</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-q</code></td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td><code>error</code></td>
+</tr>
+<tr>
+<td><em>(no flag)</em></td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>no</td>
+<td>yes</td>
+<td><code>info</code></td>
+</tr>
+<tr>
+<td><code>-v</code></td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>debug</code></td>
+</tr>
+<tr>
+<td><code>-vv</code> and up</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td><code>trace</code></td>
+</tr>
+</tbody>
+</table>
+<p>A successful <code>-q</code> run writes nothing at all to stderr, which makes it the right choice for a cron job or a pipeline step. Errors still print — <code>-q</code> suppresses status output, not failures. Because it silences the completion banner as well, pair it with <a href="../../discover/cli/#run-report"><code>--run-report &lt;PATH&gt;</code></a> when the job needs the counters back: the report is a file and is written whatever the verbosity.</p>
+<p>The same rule reaches the other two subcommands, and the rule is this: <strong><code>-q</code> never removes the only channel carrying the answer, and never removes a failure. Everything else goes.</strong> That includes things nothing else tells you — the counters above are one, and so is the <code>hint:</code> line, which is where the remedy lives: an error message names what is wrong, and the hint names the flag or the rebuild that fixes it. So a <code>-q</code> run that fails gives you the error without the remedy. When the error alone does not tell you what to do, run the same command again without the flag. <a href="../../discover/validate/#reading-the-output"><code>validate</code></a> drops the per-scenario <code>ok</code> lines and the <code>all valid</code> summary — both on stdout — and keeps the reason each invalid scenario gives on stderr, because that reason and the exit code are the answer; a clean file under <code>-q</code> writes nothing to either stream and exits <code>0</code>. <a href="../../discover/catalog/#listing-catalog-scenarios"><code>catalog list</code></a> drops the <code>no catalog scenarios found</code> note on stderr and keeps the listing on stdout, because nothing else carries the names. Records and the <code>--dry-run</code> plan are the same case as the listing: no verbosity flag has ever reached either.</p>
+<p><code>--format json</code> cuts the same rows as <code>-q</code> except hints, which stay: they go to stderr, and they are the most useful thing to read when a scan comes back empty. <code>-v</code> brings the banners back.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>start banner</th>
+<th>progress line</th>
+<th>completion banner</th>
+<th>detail lines</th>
+<th>hints</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--format json</code></td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>--format json -v</code></td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>--format json -q</code></td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>--format json</code> with stderr merged into stdout</td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>no</td>
+<td>only on a refusal</td>
+</tr>
+</tbody>
+</table>
+<p>The last row is the case where a hint <em>could</em> reach the record stream: <code>&gt; scan.json 2&gt;&amp;1</code> and <code>2&gt;&amp;1 | jq</code> give both streams one destination, and a <code>hint:</code> line there is a line the consumer has to parse. Records win while the scan is producing them, on <code>-v</code> too. They stop winning the moment the run refuses: the error prints, and so does the hint that explains it, because an error whose remedy was suppressed leaves you an exit code and nothing to act on. <strong>A merged capture that exits 0 is nothing but records; one that exits 1 carries the diagnosis.</strong> Give stderr a destination of its own (<code>2&gt; scan.log</code>) and every row above applies again.</p>
+<p>Which records land on stdout is read per scenario. <code>--file scan.yml</code> with a <code>sink: {type: file}</code> writes no records to stdout, so a merged capture there keeps every row above even under <code>--format json</code> — the merge rule only fires where the records actually are.</p>
+<p>The progress line has a second condition on top of these. It is dropped whenever the records land where it would paint — your terminal on the default stdout sink, or the file or pipe both streams were merged into. Redirect stdout on its own, redirect stderr on its own, or use <code>--sink file</code> and it comes back. See <a href="../../discover/cli/#progress">Progress</a>.</p>
+<h3 id="log-level-precedence">Log-level precedence<a class="headerlink" href="#log-level-precedence" title="Permanent link">&para;</a></h3>
+<p>An explicit <code>-q</code> or <code>-v</code> typed on the invocation wins over <code>RUST_LOG</code>. With neither flag given, <code>RUST_LOG</code> wins over the built-in <code>info</code> default. So <code>RUST_LOG=debug rastreo discover -q ...</code> is silent, while <code>RUST_LOG=debug rastreo discover ...</code> logs at debug.</p>
+<h3 id="colour-and-glyphs">Colour and glyphs<a class="headerlink" href="#colour-and-glyphs" title="Permanent link">&para;</a></h3>
+<p>Colour is enabled when stderr is a terminal that reports colour support, and disabled when it is redirected to a file or a pipe — so <code>2&gt;scan.log</code> never contains escape sequences. The standard overrides apply: <code>NO_COLOR</code> (any value but <code>0</code>) turns colour off, and <code>CLICOLOR_FORCE=1</code> or <code>FORCE_COLOR=1</code> turns it on even when the output is piped. Log lines follow the same decision as the banners. This is the <code>rastreo</code> <abbr title="Command-Line Interface">CLI</abbr>'s behaviour: <code>rastreo-server</code> colours its log lines whenever stderr is a terminal and does not consult <code>NO_COLOR</code>, <code>CLICOLOR_FORCE</code>, or <code>FORCE_COLOR</code>.</p>
+<p>Banners use the Unicode glyphs <code>▶</code>, <code>■</code>, <code>⚠</code>, <code>•</code>, and <code>→</code>. They fall back to the ASCII <code>&gt;</code>, <code>#</code>, <code>!</code>, <code>*</code>, and <code>-&gt;</code> when <code>LC_ALL</code> / <code>LC_CTYPE</code> / <code>LANG</code> names a non-UTF-8 locale, or when you set <code>RASTREO_ASCII</code> to any non-empty value other than <code>0</code>.</p>
+<p>The completion glyph is blue on a clean run and turns yellow when the run covered less ground than you asked for — it was cancelled, records were quarantined to a dead-letter destination, a target contributed no addresses, or a scenario in a multi-scenario file failed or was skipped. Probe faults alone do not tint it; they are expected on any real scan and are counted in the <code>faults:</code> field.</p>
+<table>
+<thead>
+<tr>
+<th>Env var</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RUST_LOG</code></td>
+<td>Tracing filter directive. Overridden by an explicit <code>-q</code> / <code>-v</code>.</td>
+</tr>
+<tr>
+<td><code>RASTREO_FORMAT</code></td>
+<td>Record format, same values as <code>--format</code>. Overridden by the flag. Because it is an explicit statement, it also overrides a scenario's <code>encoder</code> — <code>RASTREO_FORMAT=table</code> left exported in a shell will refuse every scenario with a Kafka or NATS sink, which cannot carry an aligned grid.</td>
+</tr>
+<tr>
+<td><code>NO_COLOR</code></td>
+<td>Any value but <code>0</code> disables colour on stderr.</td>
+</tr>
+<tr>
+<td><code>CLICOLOR_FORCE</code>, <code>FORCE_COLOR</code></td>
+<td>Force colour on even when stderr is not a terminal.</td>
+</tr>
+<tr>
+<td><code>RASTREO_ASCII</code></td>
+<td>Any non-empty value other than <code>0</code> forces the ASCII glyph table.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="rastreo-discover">rastreo discover<a class="headerlink" href="#rastreo-discover" title="Permanent link">&para;</a></h2>
+<p>Probe one or more targets and emit <code>DeviceRecord</code> events to a sink. <code>--target</code> is required unless <code>--file</code> is set; everything else has a default.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Type</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-f</code>, <code>--file &lt;PATH&gt;</code></td>
+<td>path</td>
+<td>—</td>
+<td>Load a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario file instead of building the scan from flags. Accepts a filesystem path, or an <code>@name</code> <a href="../../discover/catalog/">catalog</a> reference resolved via the catalog search path. Mutually exclusive with every flag-driven scan argument (<code>--target</code>, <code>--port</code>, <code>--probe</code>, <code>--probe-ports</code>, and the per-prober parameters). Requires the <code>config</code> build feature (on by default). See <a href="../../discover/cli/#yaml-driven-mode">Discover · <abbr title="Command-Line Interface">CLI</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--target &lt;TARGET&gt;...</code></td>
+<td>string</td>
+<td>— (required)</td>
+<td>Target to probe. Accepts a single <abbr title="Internet Protocol">IP</abbr>, a <abbr title="Classless Inter-Domain Routing">CIDR</abbr> block (<code>10.0.0.0/24</code>), an <abbr title="Internet Protocol">IP</abbr> range (<code>10.0.0.1-10.0.0.5</code>), or a <abbr title="Domain Name System">DNS</abbr> name. Repeatable; multiple values per flag accepted. See <a href="../../discover/targets/">Targets</a>.</td>
+</tr>
+<tr>
+<td><code>--probe &lt;KIND&gt;</code></td>
+<td>string list</td>
+<td>the default set</td>
+<td>Probe kinds to run. Repeatable; comma-separated values accepted (<code>--probe icmp,snmp</code>). Accepts any kind name, the <code>tcp</code> alias for <code>tcp_connect</code>, and the <code>default</code> keyword. Omit it to run the default set. See <a href="../../discover/cli/#choosing-probers">Choosing probers</a>.</td>
+</tr>
+<tr>
+<td><code>-p</code>, <code>--port &lt;PORT&gt;</code></td>
+<td>port number</td>
+<td>per-prober defaults</td>
+<td>Ports for the probers that have no well-known port: <code>tcp_connect</code>, <code>http</code>, and <code>udp</code>. Repeatable; comma-separated values accepted (<code>-p 22,80,443</code>). Probers with a protocol port (<code>dns</code> 53, <code>snmp</code> 161, <code>ssh</code> 22, <code>tls</code> 443, <code>gnmi</code> 57400) ignore it — retarget those with <code>--probe-ports</code>.</td>
+</tr>
+<tr>
+<td><code>--probe-ports &lt;KIND&gt;=&lt;PORT&gt;</code></td>
+<td>string</td>
+<td>—</td>
+<td>Port list for one prober, overriding both <code>--port</code> and the prober's own default. Repeatable, one prober per flag (<code>--probe-ports snmp=1161 --probe-ports http=8080,8443</code>). Repeating it for the <em>same</em> prober is last-wins; put every port in one comma-separated value instead.</td>
+</tr>
+<tr>
+<td><code>--udp-protocol &lt;PROTOCOL&gt;</code></td>
+<td>enum</td>
+<td>—</td>
+<td><abbr title="User Datagram Protocol">UDP</abbr> service to fingerprint. Required when <code>udp</code> is selected. Values: <code>ntp</code>, <code>sip_options</code>, <code>memcached_stats</code>, <code>stun_binding</code>. See <a href="../../probe/udp/"><abbr title="User Datagram Protocol">UDP</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--dns-query &lt;NAME&gt;</code></td>
+<td>string list</td>
+<td>—</td>
+<td>Name to look up against each target. Required when <code>dns</code> is selected. Repeatable; comma-separated values accepted. See <a href="../../probe/dns/"><abbr title="Domain Name System">DNS</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--dns-query-type &lt;TYPE&gt;</code></td>
+<td>enum</td>
+<td><code>a</code></td>
+<td>Record type for <code>--dns-query</code>. Values: <code>a</code>, <code>aaaa</code>, <code>mx</code>, <code>txt</code>, <code>ptr</code>, <code>ns</code>, <code>cname</code>.</td>
+</tr>
+<tr>
+<td><code>--snmp-community &lt;COMMUNITY&gt;</code></td>
+<td>string</td>
+<td><code>public</code></td>
+<td><abbr title="Simple Network Management Protocol">SNMP</abbr> read community for the flag-driven scan. Env var: <code>RASTREO_SNMP_COMMUNITY</code> — prefer it, because a flag value is visible to anyone who can run <code>ps</code>. Neither form affects a <code>--file</code> run, which takes the community from the scenario's <code>community:</code> field. Requires the <code>snmp</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--snmp-version &lt;VERSION&gt;</code></td>
+<td>enum</td>
+<td><code>v2c</code></td>
+<td><abbr title="Simple Network Management Protocol">SNMP</abbr> protocol version. Values: <code>v1</code>, <code>v2c</code>, <code>v3</code>. Requires the <code>snmp</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--http-path &lt;PATH&gt;</code></td>
+<td>string</td>
+<td><code>/</code></td>
+<td>Request path for the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> prober. Requires the <code>http</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--icmp-count &lt;N&gt;</code></td>
+<td>integer</td>
+<td><code>3</code></td>
+<td>Echo requests per target for the <abbr title="Internet Control Message Protocol">ICMP</abbr> prober. Minimum 1. Requires the <code>icmp</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--interface &lt;NAME&gt;</code></td>
+<td>string</td>
+<td>auto-select</td>
+<td>Interface the <abbr title="Address Resolution Protocol">ARP</abbr> and <abbr title="Neighbor Discovery Protocol">NDP</abbr> probers send from. Unset means auto-select per target from the local subnets. Requires the <code>arp</code> or <code>ndp</code> build feature. See <a href="../../probe/arp/"><abbr title="Address Resolution Protocol">ARP</abbr></a> and <a href="../../probe/ndp/"><abbr title="Neighbor Discovery Protocol">NDP</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--format &lt;FORMAT&gt;</code></td>
+<td>enum</td>
+<td><code>table</code> on stdout, <code>json</code> elsewhere</td>
+<td>Record format. Values: <code>table</code> (aliased <code>text</code>) for the aligned triage grid, <code>json</code> (aliased <code>ndjson</code>) for one <abbr title="JavaScript Object Notation">JSON</abbr> object per line. Env var: <code>RASTREO_FORMAT</code>. Unset, the destination decides: a <code>--file</code> scenario with a stdout sink and no <code>encoder:</code> renders the table too. An explicit value overrides the scenario's <code>encoder</code>. See <a href="../../discover/cli/#record-format">Record format</a>.</td>
+</tr>
+<tr>
+<td><code>--sink &lt;SINK&gt;</code></td>
+<td>enum</td>
+<td><code>stdout</code>, or the scenario's <code>sink</code> under <code>--file</code></td>
+<td>Output destination. Values: <code>stdout</code>, <code>file</code>. <code>kafka</code> is available only when the binary is built with the <code>kafka</code> Cargo feature. Setting it under <code>--file</code> overrides the scenario's own <code>sink</code>. See <a href="../../discover/sinks/">Sinks</a>.</td>
+</tr>
+<tr>
+<td><code>--output &lt;PATH&gt;</code></td>
+<td>path</td>
+<td>—</td>
+<td>File path for <code>--sink file</code>. Required when the file sink is selected, and rejected before any probe runs otherwise — <code>--output</code> without <code>--sink file</code> is an error, not a silent no-op, on the flag-driven and the <code>--file</code> surface alike. See <a href="../../discover/cli/#destination-flags">Destination flags</a>.</td>
+</tr>
+<tr>
+<td><code>--brokers &lt;BROKERS&gt;</code></td>
+<td>string list</td>
+<td>—</td>
+<td>Comma-separated Kafka brokers. Requires <code>--sink kafka</code>, and rejected before any probe runs without it. Requires the <code>kafka</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--topic &lt;TOPIC&gt;</code></td>
+<td>string</td>
+<td>—</td>
+<td>Kafka topic. Requires <code>--sink kafka</code>, and rejected before any probe runs without it. Requires the <code>kafka</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--kafka-flush-per-record</code></td>
+<td>flag</td>
+<td>—</td>
+<td>Flush every <code>DeviceRecord</code> as a separate Kafka message. Mutually exclusive with <code>--kafka-batch-threshold</code>. Requires <code>--sink kafka</code> and the <code>kafka</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--kafka-batch-threshold &lt;BYTES&gt;</code></td>
+<td>integer</td>
+<td><code>65536</code></td>
+<td>Bytes accumulated in the sink buffer before one produce request goes out, carrying one message per record. Minimum 1. Requires <code>--sink kafka</code> and the <code>kafka</code> build feature.</td>
+</tr>
+<tr>
+<td><code>--concurrency &lt;N&gt;</code></td>
+<td>integer</td>
+<td><code>64</code></td>
+<td>Maximum number of probes in flight at once. Minimum 1.</td>
+</tr>
+<tr>
+<td><code>--rate &lt;N&gt;</code></td>
+<td>integer</td>
+<td>unset</td>
+<td>Maximum number of probes started per second. Minimum 1. Unset means probes start as fast as concurrency allows.</td>
+</tr>
+<tr>
+<td><code>--retries &lt;N&gt;</code></td>
+<td>integer</td>
+<td><code>0</code></td>
+<td>Retransmit attempts for the connectionless probers — <abbr title="User Datagram Protocol">UDP</abbr>, <abbr title="Simple Network Management Protocol">SNMP</abbr>, <abbr title="Domain Name System">DNS</abbr>, and reverse <abbr title="Domain Name System">DNS</abbr>. <code>0</code> is single-shot (default). Range 0–1024. It divides <code>--timeout-ms</code> across attempts, so the total time per probe is unchanged. <abbr title="Transmission Control Protocol">TCP</abbr>-based probers (<code>tcp_connect</code>, <code>http</code>, <code>ssh</code>, <code>tls</code>) and <abbr title="Internet Control Message Protocol">ICMP</abbr> ignore it. With <code>--file</code>, it overrides the scenario <code>retries</code>. See <a href="../../discover/cli/#retries-on-lossy-links">Discover · <abbr title="Command-Line Interface">CLI</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--timeout-ms &lt;MS&gt;</code></td>
+<td>integer</td>
+<td><code>1000</code></td>
+<td>Per-probe <abbr title="Transmission Control Protocol">TCP</abbr>-connect timeout in milliseconds. Minimum 1.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>flag</td>
+<td>—</td>
+<td>Resolve targets and print the plan without probing or opening a sink. Applies the same refusals a run applies, including the <code>--checkpoint</code> and <code>--resume</code> checks. With <code>--format json</code> the plan is a <abbr title="JavaScript Object Notation">JSON</abbr> array instead of the text plan. See <a href="../../discover/cli/#dry-run-mode">Discover · <abbr title="Command-Line Interface">CLI</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--checkpoint &lt;PATH&gt;</code></td>
+<td>path</td>
+<td>—</td>
+<td>Write a resume checkpoint to this file during the scan. The scenario must be resume-safe — a durable sink (<code>file</code>, <code>kafka</code>, <code>nats</code>), no <code>identity</code> fuser, no <code>lldp</code> / <code>gnmi</code> prober — or the scan is refused before probing. Removed on success, kept on cancellation. See <a href="../../discover/cli/#checkpoints">Discover · <abbr title="Command-Line Interface">CLI</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--checkpoint-interval &lt;N&gt;</code></td>
+<td>integer</td>
+<td><code>5000</code></td>
+<td>Number of targets between checkpoint writes. Minimum 1. Ignored unless <code>--checkpoint</code> is set.</td>
+</tr>
+<tr>
+<td><code>--resume</code></td>
+<td>flag</td>
+<td>—</td>
+<td>Resume from the checkpoint at <code>--checkpoint &lt;PATH&gt;</code>: skip the already-flushed targets, restore the original scan identity, and continue. The checkpoint must exist and still match the scenario's targets and sink destination, or the resume is refused before probing. Single-scenario runs only. Requires <code>--checkpoint</code>. See <a href="../../discover/cli/#resuming">Discover · <abbr title="Command-Line Interface">CLI</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>--run-report &lt;PATH&gt;</code></td>
+<td>path</td>
+<td>—</td>
+<td>Write a <abbr title="JavaScript Object Notation">JSON</abbr> report of the run to this file: one entry per scenario the run reached, naming how it ended and carrying its summary when the scan produced one, plus the run's totals. One file per run, whatever the scenario count. Written whenever the run reached a scenario, whatever the exit code; a run that refuses before reaching one writes none. Rejected with <code>--dry-run</code>, which reaches no scenario. See <a href="../../discover/cli/#run-report">Discover · <abbr title="Command-Line Interface">CLI</abbr></a>.</td>
+</tr>
+<tr>
+<td><code>-v</code>, <code>--verbose</code></td>
+<td>counter</td>
+<td>—</td>
+<td>See top-level flags above.</td>
+</tr>
+<tr>
+<td><code>-q</code>, <code>--quiet</code></td>
+<td>flag</td>
+<td>—</td>
+<td>See top-level flags above.</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>--brokers</code>, <code>--topic</code>, <code>--kafka-flush-per-record</code>, and <code>--kafka-batch-threshold</code> flags are only present in the help output and the parser when the binary was built with <code>--features kafka</code>. The default build omits them entirely, because it carries no sink that could consume them. The same holds for the per-prober parameters: <code>--snmp-community</code> and <code>--snmp-version</code> need <code>--features snmp</code>, <code>--http-path</code> needs <code>http</code>, <code>--icmp-count</code> needs <code>icmp</code>, and <code>--interface</code> needs <code>arp</code> or <code>ndp</code>.</p>
+<p><code>--probe</code> and <code>--probe-ports</code> always accept every kind name, whatever the build. Naming a kind this binary was not built with fails with a message that says which Cargo feature is missing, so a typo and a missing feature never look the same:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Error: probe kind &#39;gnmi&#39; requires the &#39;gnmi&#39; Cargo feature, which this binary was not built with
+</span></code></pre></div>
+<p>Run <code>rastreo discover --help</code> for the full kind list with each kind's feature annotation.</p>
+<p><code>--probe-ports</code> and each per-prober parameter configure specific probers. Supply one for a prober the run does not select and rastreo prints a note on stderr naming the flag, the kind, and the <code>--probe</code> value that would select it, rather than discarding the value in silence. See <a href="../../discover/cli/#per-prober-parameters">Per-prober parameters</a>.</p>
+<h2 id="rastreo-validate">rastreo validate<a class="headerlink" href="#rastreo-validate" title="Permanent link">&para;</a></h2>
+<p>Lint a scenario file offline: check the config shape and every scenario's sink config with no <abbr title="Domain Name System">DNS</abbr>, no probing, and no broker connection. Takes one positional argument. Requires the <code>config</code> build feature (on by default). For a walkthrough with worked examples, see <a href="../../discover/validate/">Discover · Validate</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Type</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;FILE&gt;</code></td>
+<td>path</td>
+<td>— (required)</td>
+<td>Scenario file to validate. Accepts a path, or an <code>@name</code> catalog reference resolved the same way as <code>discover --file</code>. See <a href="../../discover/catalog/">Catalog</a>.</td>
+</tr>
+</tbody>
+</table>
+<p>It exits <code>0</code> when every scenario in the file is valid and <code>1</code> when any scenario is invalid or the file itself cannot be parsed. It prints one <code>ok</code> or error line per scenario plus a final summary line — see <a href="../../discover/validate/#reading-the-output">Discover · Validate</a>. A <code>type: kafka</code> sink is only recognized with the <code>kafka</code> build feature, and <code>type: nats</code> with the <code>nats</code> feature; validate the file with the same build you plan to run it with.</p>
+<h2 id="rastreo-server">rastreo-server<a class="headerlink" href="#rastreo-server" title="Permanent link">&para;</a></h2>
+<p>Run the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> control plane. Every flag has both a <abbr title="Command-Line Interface">CLI</abbr> form and an environment-variable form; the <abbr title="Command-Line Interface">CLI</abbr> form overrides the environment when both are set.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Type</th>
+<th>Default</th>
+<th>Env var</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--bind &lt;BIND&gt;</code></td>
+<td><abbr title="Internet Protocol">IP</abbr> address</td>
+<td><code>0.0.0.0</code></td>
+<td><code>RASTREO_SERVER_BIND</code></td>
+<td>Address the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> listener binds to. Accepts <abbr title="Internet Protocol version 4">IPv4</abbr> or <abbr title="Internet Protocol version 6">IPv6</abbr>.</td>
+</tr>
+<tr>
+<td><code>--port &lt;PORT&gt;</code></td>
+<td>port number</td>
+<td><code>8080</code></td>
+<td><code>RASTREO_SERVER_PORT</code></td>
+<td><abbr title="Transmission Control Protocol">TCP</abbr> port the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> listener binds to.</td>
+</tr>
+<tr>
+<td><code>--request-timeout-ms &lt;MS&gt;</code></td>
+<td>integer</td>
+<td><code>60000</code></td>
+<td><code>RASTREO_SERVER_REQUEST_TIMEOUT_MS</code></td>
+<td>Per-request timeout. Requests that exceed this return <code>503 Service Unavailable</code>. Minimum 1.</td>
+</tr>
+<tr>
+<td><code>--log-format &lt;FORMAT&gt;</code></td>
+<td>enum</td>
+<td><code>text</code></td>
+<td><code>RASTREO_LOG_FORMAT</code></td>
+<td>Log line format on stderr. Values: <code>text</code> (human-readable) or <code>json</code> (one <abbr title="JavaScript Object Notation">JSON</abbr> object per line). See <a href="../logging/">Logging</a>.</td>
+</tr>
+<tr>
+<td><code>-h</code>, <code>--help</code></td>
+<td>flag</td>
+<td>—</td>
+<td>—</td>
+<td>Print help and exit.</td>
+</tr>
+<tr>
+<td><code>-V</code>, <code>--version</code></td>
+<td>flag</td>
+<td>—</td>
+<td>—</td>
+<td>Print version and exit.</td>
+</tr>
+</tbody>
+</table>
+<p><code>rastreo-server</code> does not have <code>-v</code> / <code>-q</code> flags. Log level is controlled by the <code>RUST_LOG</code> environment variable (<code>RUST_LOG=debug rastreo-server ...</code>); the default is <code>info</code>. Logs are emitted to stderr.</p>
+<h2 id="env-var-precedence">Env-var precedence<a class="headerlink" href="#env-var-precedence" title="Permanent link">&para;</a></h2>
+<p>For both binaries, the precedence from lowest to highest is: built-in default, then environment variable, then <abbr title="Command-Line Interface">CLI</abbr> flag. A flag value always wins over an environment-variable value. Variables only apply to flags that declare an env mapping in the table above. <code>RUST_LOG</code> follows the same rule: it beats the built-in default but loses to an explicit <code>-q</code> / <code>-v</code>.</p>
+<h2 id="build-features">Build features<a class="headerlink" href="#build-features" title="Permanent link">&para;</a></h2>
+<p>Some flags and flag values only exist when the matching Cargo feature was enabled at build time. The features below apply to <code>rastreo</code> and <code>rastreo-server</code> alike.</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Default</th>
+<th>Effect on <abbr title="Command-Line Interface">CLI</abbr></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config</code></td>
+<td>yes</td>
+<td>Enables <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario-file parsing. Required for <code>rastreo discover --file &lt;path&gt;</code>. Without it, the flag-driven form (<code>--target</code> + <code>--probe</code>) remains the only discovery entry point.</td>
+</tr>
+<tr>
+<td><code>kafka</code></td>
+<td>no</td>
+<td>Adds <code>kafka</code> as a valid value for <code>--sink</code>, plus the <code>--kafka-flush-per-record</code> and <code>--kafka-batch-threshold</code> flags. The default build does not include it; build with <code>cargo build --features kafka</code> to enable.</td>
+</tr>
+<tr>
+<td><code>nats</code></td>
+<td>no</td>
+<td>Enables the NATS JetStream sink. Configured only through <abbr title="YAML Ain't Markup Language">YAML</abbr> scenarios loaded via <code>--file</code> or the <code>POST /scans</code> body (<code>type: nats</code>); no dedicated <abbr title="Command-Line Interface">CLI</abbr> flags. Also available via <code>POST /scans</code>.</td>
+</tr>
+<tr>
+<td><code>http</code></td>
+<td>no</td>
+<td>Enables the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> prober. Selected with <code>--probe http</code>, or as <code>type: http</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario. Also available via <code>POST /scans</code>.</td>
+</tr>
+<tr>
+<td><code>snmp</code></td>
+<td>no</td>
+<td>Enables the <abbr title="Simple Network Management Protocol">SNMP</abbr> prober (v1 / v2c / v3 with <abbr title="User-based Security Model">USM</abbr>), plus the <code>--snmp-community</code> and <code>--snmp-version</code> flags. Selected with <code>--probe snmp</code>, or as <code>type: snmp</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario. Also available via <code>POST /scans</code>.</td>
+</tr>
+<tr>
+<td><code>arp</code></td>
+<td>no</td>
+<td>Enables the <abbr title="Address Resolution Protocol">ARP</abbr> prober for <abbr title="Internet Protocol version 4">IPv4</abbr> link-layer neighbor discovery, plus the <code>--interface</code> flag. Requires <code>CAP_NET_RAW</code> at runtime. Selected with <code>--probe arp</code>, or as <code>type: arp</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario.</td>
+</tr>
+<tr>
+<td><code>ndp</code></td>
+<td>no</td>
+<td>Enables the <abbr title="Neighbor Discovery Protocol">NDP</abbr> prober for <abbr title="Internet Protocol version 6">IPv6</abbr> link-layer neighbor discovery, plus the <code>--interface</code> flag. Requires <code>CAP_NET_RAW</code> at runtime. Selected with <code>--probe ndp</code>, or as <code>type: ndp</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario.</td>
+</tr>
+<tr>
+<td><code>ssh</code></td>
+<td>no</td>
+<td>Enables the <abbr title="Secure Shell">SSH</abbr> prober. Selected with <code>--probe ssh</code>, or as <code>type: ssh</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario. Also available via <code>POST /scans</code>.</td>
+</tr>
+<tr>
+<td><code>icmp</code></td>
+<td>no</td>
+<td>Enables the <abbr title="Internet Control Message Protocol">ICMP</abbr> Echo prober, plus the <code>--icmp-count</code> flag. Prefers unprivileged <code>SOCK_DGRAM</code> and falls back to <code>SOCK_RAW</code> (requires <code>CAP_NET_RAW</code>). Selected with <code>--probe icmp</code>, or as <code>type: icmp</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario. Also available via <code>POST /scans</code>.</td>
+</tr>
+<tr>
+<td><code>tls</code></td>
+<td>no</td>
+<td>Enables the <abbr title="Transport Layer Security">TLS</abbr> handshake prober. Opens a <abbr title="Transport Layer Security">TLS</abbr> connection to each configured port, accepts any certificate (fingerprinting, not authentication), and emits the leaf certificate's Subject <abbr title="Common Name">CN</abbr> and Subject Alternative Names as <code>TlsSubject</code> / <code>TlsSanName</code> signals. Selected with <code>--probe tls</code>, or as <code>type: tls</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario. Also available via <code>POST /scans</code>.</td>
+</tr>
+<tr>
+<td><code>gnmi</code></td>
+<td>no</td>
+<td>Enables the <abbr title="gRPC Network Management Interface">gNMI</abbr> prober for <abbr title="gRPC Remote Procedure Calls">gRPC</abbr>/<abbr title="gRPC Network Management Interface">gNMI</abbr> device fingerprinting. Selected with <code>--probe gnmi</code>, or as <code>type: gnmi</code> in a <abbr title="YAML Ain't Markup Language">YAML</abbr> scenario. Credentials are <abbr title="YAML Ain't Markup Language">YAML</abbr>-only. Also available via <code>POST /scans</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="exit-codes">Exit codes<a class="headerlink" href="#exit-codes" title="Permanent link">&para;</a></h2>
+<p>Both binaries exit <code>0</code> on success and <code>1</code> on any error. Errors are written to stderr as a single line. Validation errors — missing required flags, mutually-exclusive flags set together, file-sink without <code>--output</code> — fail before any probe runs or any <abbr title="Hypertext Transfer Protocol">HTTP</abbr> request is accepted.</p>
+<p>A target that contributed no addresses is not an error while any other target was probed: the run exits <code>0</code>, the completion banner counts it as <code>unresolvable: N</code>, and <code>-v</code> names which targets. Like every other fact the completion banner carries — probe faults, quarantined records, a cancelled run — <code>-q</code> silences it, so pair <code>-q</code> with <code>--dry-run --format json</code> if you need the answer without the banner: each target carries its own <code>"resolution"</code>, and <code>unresolvable</code> is one of the three states. It becomes exit <code>1</code> only when <strong>every</strong> target contributed no addresses, because then the scan probed nothing at all. See <a href="../../discover/targets/#names-with-no-addresses">Names with no addresses</a> and <a href="../../discover/targets/#names-rastreo-cannot-look-up">Names rastreo cannot look up</a>.</p>
+<p>A scenario with no probers reads the same way one level up. <code>rastreo discover --file</code> skips it, probes the rest of the file, and exits <code>0</code>, and the aggregate banner reports the shortfall twice over: the label counts only the scenarios that ran (<code>1 of 2 scenarios</code>), a <code>skipped: N</code> field counts the ones that did not, and the <code>■</code> turns yellow. A notice on stderr names each skipped scenario as the run reaches it. <code>-q</code> silences all of it, as it does for an unresolvable target. It becomes exit <code>1</code> only when <strong>every</strong> scenario in the file was skipped. See <a href="../../discover/cli/#a-scenario-rastreo-cannot-build-gets-no-plan">Discover · a scenario with no probers</a>.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../../discover/cli/">Discover · <abbr title="Command-Line Interface">CLI</abbr></a> — walkthrough with worked examples.</li>
+<li><a href="../scenario/">Scenario schema</a> — the <abbr title="JavaScript Object Notation">JSON</abbr> shape <code>rastreo-server</code> accepts.</li>
+<li><a href="../errors/">Error reference</a> — what each error means and how to fix it.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../" class="md-footer__link md-footer__link--prev" aria-label="Previous: Reference">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Reference
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../configuration/" class="md-footer__link md-footer__link--next" aria-label="Next: Configuration">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Configuration
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 David Flores · Built with Material for MkDocs
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/davidban77/rastreo" target="_blank" rel="noopener" title="rastreo on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.tracking", "navigation.instant", "navigation.footer", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "content.tooltips", "content.action.edit", "content.action.view", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

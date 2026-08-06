@@ -1,0 +1,3723 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The classifier stage assigns canonical platform, os_version, ssh_version, http_server, http_version, and role values on each DeviceRecord after fusion and before encoding. The rules classifier runs by default with a baked-in platform table and a baked-in role table; noop turns classification off.">
+      
+      
+      
+        <link rel="canonical" href="https://davidban77.github.io/rastreo/discover/classification/">
+      
+      
+        <link rel="prev" href="../identity/">
+      
+      
+        <link rel="next" href="../topology/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Classification - rastreo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#classification" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="rastreo" class="md-header__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            rastreo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Classification
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../get-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Get started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Discover
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../probe/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Probe
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../integrate/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Integrate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deploy/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Deploy
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="rastreo" class="md-nav__button md-logo" aria-label="rastreo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    rastreo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/davidban77/rastreo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    davidban77/rastreo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../get-started/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Get started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Get started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../get-started/first-scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discover
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Discover
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running scans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../targets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Targets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sinks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sinks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../enrichment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Enrichment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../identity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Classification
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Classification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#available-classifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Available classifiers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pipeline-position" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline position
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rules-classifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rules classifier
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Rules classifier">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#signal-kinds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Signal kinds
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#baked-in-platform-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Baked-in platform rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Baked-in platform rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#banner-heuristics-opt-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Banner heuristics (opt-in)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#baked-in-role-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Baked-in role rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Baked-in role rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#port-heuristics-opt-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Port heuristics (opt-in)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sys_object_id_prefix-matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        sys_object_id_prefix matching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signal_match-matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signal_match matching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ports_open-matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ports_open matching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#extending-the-rule-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extending the rule set
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../collection-profile/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection profiles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../probe/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Probe
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Probe
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tcp-connect/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TCP-connect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/http/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/reverse-dns/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reverse DNS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/udp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    UDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/snmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SNMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/arp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ARP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ndp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/ssh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSH
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/icmp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ICMP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/tls/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/gnmi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gNMI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../probe/lldp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLDP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../integrate/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integrate
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Integrate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/kafka/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kafka
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/nats/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    NATS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/source-of-truth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Source of truth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/reference-consumers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference consumers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrate/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../deploy/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploy
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_6" id="__nav_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deploy
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/docker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Docker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/kubernetes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Kubernetes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploy/server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7" id="__nav_7_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/scenario/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scenario
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_6" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/schema/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_7_6" id="__nav_7_6_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Schema
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/device-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DeviceRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/link-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LinkRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/collection-profile-record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CollectionProfileRecord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/scan-metadata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScanMetadata
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/scenario-config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ScenarioFile
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/discovery-plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DiscoveryPlan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/run-report/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunReport
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/streaming-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/schema/dlq-envelope/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DlqEnvelope
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/health-endpoints/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health endpoints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/logging/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Logging
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/otlp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OTLP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#available-classifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Available classifiers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pipeline-position" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline position
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rules-classifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rules classifier
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Rules classifier">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#signal-kinds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Signal kinds
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#baked-in-platform-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Baked-in platform rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Baked-in platform rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#banner-heuristics-opt-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Banner heuristics (opt-in)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#baked-in-role-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Baked-in role rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Baked-in role rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#port-heuristics-opt-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Port heuristics (opt-in)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sys_object_id_prefix-matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        sys_object_id_prefix matching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signal_match-matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signal_match matching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ports_open-matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ports_open matching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#extending-the-rule-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extending the rule set
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#precedence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/davidban77/rastreo/edit/main/docs/site/docs/discover/classification.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+    
+      
+    
+    <a href="https://github.com/davidban77/rastreo/raw/main/docs/site/docs/discover/classification.md" title="View source of this page" class="md-content__button md-icon">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M17 18c.56 0 1 .44 1 1s-.44 1-1 1-1-.44-1-1 .44-1 1-1m0-3c-2.73 0-5.06 1.66-6 4 .94 2.34 3.27 4 6 4s5.06-1.66 6-4c-.94-2.34-3.27-4-6-4m0 6.5a2.5 2.5 0 0 1-2.5-2.5 2.5 2.5 0 0 1 2.5-2.5 2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1-2.5 2.5M9.27 20H6V4h7v5h5v4.07c.7.08 1.36.25 2 .49V8l-6-6H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h4.5a8.2 8.2 0 0 1-1.23-2"/></svg>
+    </a>
+  
+
+
+<h1 id="classification">Classification<a class="headerlink" href="#classification" title="Permanent link">&para;</a></h1>
+<p>Classification is the pipeline stage that assigns canonical <code>platform</code>, <code>os_version</code>, <code>ssh_version</code>, <code>http_server</code>, <code>http_version</code>, and <code>role</code> values on each <code>DeviceRecord</code>. It runs after fusion (per-<abbr title="Internet Protocol">IP</abbr> records plus identity correlation) and before encoding, so the classifier sees the fully merged record — every signal from every prober against every <abbr title="Internet Protocol">IP</abbr> that folded into the device.</p>
+<p><code>platform</code> is a fielded identifier for the OS the device runs — <code>cisco_ios</code>, <code>linux</code>, <code>freebsd</code>, <code>junos</code>. <code>os_version</code> carries the OS version paired with <code>platform</code>, for example <code>15.7</code> (IOS release) or <code>Ubuntu</code> (Linux distro token from an <abbr title="Secure Shell">SSH</abbr> banner). <code>ssh_version</code> carries the <abbr title="Secure Shell">SSH</abbr> software identifier from an <code>SshBanner</code> — for example <code>OpenSSH_8.9p1</code>. <code>http_server</code> and <code>http_version</code> carry the web-server product and version captured from an <code>HttpBanner</code> — for example <code>nginx</code> + <code>1.24.0</code>. <code>role</code> is a fielded category like <code>router</code>, <code>switch</code>, <code>web_server</code>, or <code>host</code>.</p>
+<p>All six fields exist so downstream reconcilers (NetBox, Nautobot, Infrahub) receive already-canonicalised values instead of inferring them from raw signals. Keeping the web-server product on its own field (<code>http_server</code>) preserves <code>platform</code> for the OS — nginx runs on Linux, BSD, and Windows, so putting <code>nginx</code> in <code>platform</code> would be a category error against source-of-truth OS-platform models.</p>
+<p>Two classifier variants ship: <code>rules</code> (the default — regex-driven platform detection plus signal-driven role detection, each backed by a table that ships with rastreo) and <code>noop</code> (pass-through). The <code>rules</code> classifier populates <code>platform</code>, <code>os_version</code>, <code>ssh_version</code>, <code>http_server</code>, and <code>http_version</code> in its platform phase, then <code>role</code> in its role phase.</p>
+<div class="admonition info">
+<p class="admonition-title">Each field is written only from evidence about the thing it names</p>
+<p><code>platform</code> and <code>os_version</code> name the device's operating system, so they are written only from a signal that identifies the device — an <abbr title="Simple Network Management Protocol">SNMP</abbr> <code>sysDescr</code>, not a service banner. <code>ssh_version</code>, <code>http_server</code>, and <code>http_version</code> name software listening on a port, so they are written from that port's banner regardless of what identified the platform.</p>
+<p>A Nokia SR Linux switch answers <abbr title="Secure Shell">SSH</abbr> with <code>SSH-2.0-OpenSSH_10.0p2 Debian-7+deb13u2</code>. That banner is a fact about the sshd binary, not about the switch: it yields <code>ssh_version: OpenSSH_10.0p2</code> and nothing else, while <code>platform: nokia_srlinux</code> and <code>os_version: 26.3.3</code> come from the device's <code>sysDescr</code>. Scan the same switch with only the <abbr title="Secure Shell">SSH</abbr> prober and <code>platform</code> stays <code>null</code> — a <code>null</code> never overwrites the curated platform in your source of truth, and <code>linux</code> would. If you scan a server estate where a service banner really does identify the machine, opt into the <a href="#banner-heuristics-opt-in">banner heuristics</a>.</p>
+</div>
+<h2 id="available-classifiers">Available classifiers<a class="headerlink" href="#available-classifiers" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Classifier</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rules</code></td>
+<td>Runs a platform phase (regex patterns against a named signal kind) then a role phase (<code>sysObjectID</code> subtree containment, regex against a named signal kind, and <code>OpenPort</code> set-membership matching). First match per phase wins. Selected when the scenario does not configure a classifier, running the baked-in tables on their own.</td>
+</tr>
+<tr>
+<td><code>noop</code></td>
+<td>Leaves every <code>DeviceRecord</code> unchanged. <code>platform</code>, <code>os_version</code>, <code>ssh_version</code>, <code>http_server</code>, <code>http_version</code>, and <code>role</code> stay <code>null</code>. Select it explicitly to get raw signals with no canonical fields derived from them.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="pipeline-position">Pipeline position<a class="headerlink" href="#pipeline-position" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart LR
+    P[Probe] --&gt; F[Fuse]
+    F --&gt; C[Classify]
+    C --&gt; E[Encode]
+    E --&gt; S[Sink]
+    style C stroke-width:4px</code></pre>
+<p>The classifier is the fourth stage. Each stage has one job:</p>
+<ul>
+<li><strong>probe</strong> — runs each configured prober and produces raw probe outcomes per target.</li>
+<li><strong>fuse</strong> — groups outcomes into <code>DeviceRecord</code> objects and correlates records that describe the same physical device.</li>
+<li><strong>classify</strong> — assigns <code>platform</code>, <code>os_version</code>, <code>ssh_version</code>, <code>http_server</code>, <code>http_version</code>, and <code>role</code> on each merged record.</li>
+<li><strong>encode</strong> — renders the record in the output format.</li>
+<li><strong>sink</strong> — delivers the encoded record to Kafka, NATS, a file, stdout, or memory.</li>
+</ul>
+<p>Because the classifier runs after fusion, it operates on merged records. A device with three interfaces classifies once, not three times.</p>
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
+<p>The classifier is configured under the top-level <code>classifier</code> key of a scenario. Omitting the key is equivalent to writing this — the <code>rules</code> classifier over the baked-in tables:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rules</span>
+</span></code></pre></div>
+<p>To turn classification off and get raw signals only, ask for <code>noop</code> explicitly:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">noop</span>
+</span></code></pre></div>
+<p>The <code>type</code> field is required whenever the key is present. Each variant adds its own configuration fields.</p>
+<p>Classification is configurable only from a scenario file. A flag-driven <code>rastreo discover --target ...</code> has no <code>--classifier</code> flag, so a flag-mode scan always runs the default <code>rules</code> classifier; put the scenario in a <abbr title="YAML Ain't Markup Language">YAML</abbr> file and run <code>rastreo discover --file scan.yaml</code> when you need <code>noop</code> or your own rules.</p>
+<h2 id="rules-classifier">Rules classifier<a class="headerlink" href="#rules-classifier" title="Permanent link">&para;</a></h2>
+<p>The <code>rules</code> classifier walks each <code>DeviceRecord</code>'s signals in two phases. The platform phase evaluates an ordered list of regex rules, filling each of <code>platform</code> (with its paired <code>os_version</code>), <code>ssh_version</code>, and <code>http_server</code> (with its paired <code>http_version</code>) from the first rule that both matches and claims that slot. The role phase then evaluates an ordered list of role rules and, on first match, sets <code>role</code>. Both phases preserve prepopulated values on the record.</p>
+<p>The fields fill independently, so a rule winning <code>platform</code> does not stop a later rule from contributing <code>ssh_version</code>. A Cisco IOS device whose <code>sysDescr</code> sets <code>platform: cisco_ios</code> still reports the <code>ssh_version</code> its <abbr title="Secure Shell">SSH</abbr> banner carries.</p>
+<p>Because it is the default, every scan populates <code>platform</code> and <code>role</code> on records reaching your downstream (NetBox, Nautobot, Infrahub) wherever the signals support it. That makes the default tables a write path into your source of truth, so they follow one principle: <strong>a device gets a platform or a role when rastreo has evidence about the device, and stays <code>null</code> when rastreo only has a guess.</strong> A <code>null</code> never overwrites anything downstream; a guess does. The default platform table claims a platform only from an <abbr title="Simple Network Management Protocol">SNMP</abbr> <code>sysDescr</code>, which names the vendor and version of the device itself. The default role table is multi-port only: <code>[22, 179]</code> (<abbr title="Secure Shell">SSH</abbr> + <abbr title="Border Gateway Protocol">BGP</abbr>) says router in a way a lone open port never can. The banner and single-port heuristics ship too, but you opt into them — see <a href="#banner-heuristics-opt-in">Banner heuristics</a> and <a href="#port-heuristics-opt-in">Port heuristics</a>.</p>
+<p>Add your own rules for anything the defaults do not cover — in particular, <code>sys_object_id_prefix</code> role rules against your own devices' <code>sysObjectID</code> values (rastreo ships no baked defaults for <abbr title="Object Identifier">OID</abbr> prefixes; see <a href="#baked-in-role-rules">Baked-in role rules</a> for why).</p>
+<p>Rules are validated when the classifier is built, not at match time: a regex that fails to compile, a <code>ports_open</code> rule with an empty <code>ports</code> list, and a <code>sys_object_id_prefix</code> whose prefix is not a dotted-decimal <abbr title="Object Identifier">OID</abbr> are all rejected before the scan starts.</p>
+<h3 id="signal-kinds">Signal kinds<a class="headerlink" href="#signal-kinds" title="Permanent link">&para;</a></h3>
+<p>Platform rules and <code>signal_match</code> role rules address signals through the same vocabulary. Whichever rule kind you are writing, <code>signal</code> takes one of these values:</p>
+<table>
+<thead>
+<tr>
+<th><code>signal</code></th>
+<th>Emitted by</th>
+<th>What it is good for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>snmp_sys_descr</code></td>
+<td><code>snmp</code></td>
+<td>Platform and OS version. The richest banner most network devices publish.</td>
+</tr>
+<tr>
+<td><code>snmp_sys_object_id</code></td>
+<td><code>snmp</code></td>
+<td>Vendor, model, and role. The enterprise arc — <code>6527</code> in <code>1.3.6.1.4.1.6527.1.20.26</code> — names the vendor unambiguously, which makes it the strongest evidence <abbr title="Simple Network Management Protocol">SNMP</abbr> hands you.</td>
+</tr>
+<tr>
+<td><code>snmp_sys_name</code></td>
+<td><code>snmp</code></td>
+<td>Role, if your fleet follows a hostname convention such as <code>dc1-spine01</code>. Weak platform evidence: a hostname is whatever the operator typed.</td>
+</tr>
+<tr>
+<td><code>ssh_banner</code></td>
+<td><code>ssh</code></td>
+<td>Platform, OS version, and <abbr title="Secure Shell">SSH</abbr> software.</td>
+</tr>
+<tr>
+<td><code>http_banner</code></td>
+<td><code>http</code></td>
+<td>Web-server product and version. Weak platform evidence: nginx and Apache run on every OS.</td>
+</tr>
+</tbody>
+</table>
+<p>A rule naming a signal kind the record does not carry simply does not match — no error, no partial classification. That means you can write rules against <code>snmp_sys_object_id</code> and keep them in a scenario you also run without the <abbr title="Simple Network Management Protocol">SNMP</abbr> prober.</p>
+<h2 id="baked-in-platform-rules">Baked-in platform rules<a class="headerlink" href="#baked-in-platform-rules" title="Permanent link">&para;</a></h2>
+<p>The baked-in rules are evaluated in the order shown below. <abbr title="Simple Network Management Protocol">SNMP</abbr> <code>sysDescr</code> rules run first (most specific), followed by <abbr title="Secure Shell">SSH</abbr> banner rules, then <abbr title="Hypertext Transfer Protocol">HTTP</abbr> banner rules. Only the <code>sysDescr</code> rules claim a <code>platform</code>; the banner rules contribute the software fields for the port they read.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Signal</th>
+<th>Pattern</th>
+<th><code>platform</code></th>
+<th><code>os_version</code></th>
+<th><code>ssh_version</code></th>
+<th><code>http_server</code></th>
+<th><code>http_version</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>snmp_sys_descr</code></td>
+<td><code>^Cisco IOS Software.*Version (?P&lt;version&gt;[\d\.]+)</code></td>
+<td><code>cisco_ios</code></td>
+<td><code>version</code></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>snmp_sys_descr</code></td>
+<td><code>^Cisco IOS XR.*Version (?P&lt;version&gt;[\d\.]+)</code></td>
+<td><code>cisco_ios_xr</code></td>
+<td><code>version</code></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>snmp_sys_descr</code></td>
+<td><code>^Cisco NX-OS.*Version (?P&lt;version&gt;[\d\.]+)</code></td>
+<td><code>cisco_nxos</code></td>
+<td><code>version</code></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>snmp_sys_descr</code></td>
+<td><code>^Juniper Networks, Inc\..*JUNOS (?P&lt;version&gt;[\d\.]+)</code></td>
+<td><code>junos</code></td>
+<td><code>version</code></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>snmp_sys_descr</code></td>
+<td><code>^Arista Networks EOS version (?P&lt;version&gt;[\d\.]+)</code></td>
+<td><code>arista_eos</code></td>
+<td><code>version</code> (numeric prefix; the <code>M</code>/<code>F</code> maintenance/feature suffix is not captured)</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>snmp_sys_descr</code></td>
+<td><code>^SRLinux-v(?P&lt;version&gt;[\d\.]+)</code></td>
+<td><code>nokia_srlinux</code></td>
+<td><code>version</code> → <code>26.3.3</code> (the build suffix after the version, <code>-392-g480f5fa2d04</code>, is not captured)</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>snmp_sys_descr</code></td>
+<td><code>^Linux\s+\S+\s+(?P&lt;version&gt;[\d\.]+)-</code></td>
+<td><code>linux</code></td>
+<td><code>version</code> (kernel release, e.g. <code>5.15.0</code>, not the distro name like <code>Ubuntu 22.04</code>)</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>ssh_banner</code></td>
+<td><code>^SSH-2\.0-(?P&lt;sshv&gt;OpenSSH_[\d\.p]+)\s+(?P&lt;osv&gt;Ubuntu)</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>sshv</code> → <code>OpenSSH_9.6p1</code></td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>ssh_banner</code></td>
+<td><code>^SSH-2\.0-(?P&lt;sshv&gt;OpenSSH_[\d\.p]+)\s+(?P&lt;osv&gt;Debian)</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>sshv</code> → <code>OpenSSH_9.2p1</code></td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>ssh_banner</code></td>
+<td><code>^SSH-2\.0-(?P&lt;sshv&gt;OpenSSH_[\d\.p]+)\s+(?P&lt;osv&gt;FreeBSD)</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>sshv</code> → <code>OpenSSH_9.5</code></td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>11</td>
+<td><code>http_banner</code></td>
+<td><code>^(?P&lt;server&gt;nginx)/(?P&lt;version&gt;[\d\.]+)</code></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td><code>server</code> → <code>nginx</code></td>
+<td><code>version</code> → <code>1.24.0</code></td>
+</tr>
+<tr>
+<td>12</td>
+<td><code>http_banner</code></td>
+<td><code>^(?P&lt;server&gt;Apache)/(?P&lt;version&gt;[\d\.]+)</code></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td><code>server</code> → <code>Apache</code></td>
+<td><code>version</code> → <code>2.4.58</code></td>
+</tr>
+</tbody>
+</table>
+<div class="admonition warning">
+<p class="admonition-title">Match <code>sysObjectID</code> by subtree, not by regex</p>
+<p>Rules 1–7 key on <code>sysDescr</code> rather than <code>sysObjectID</code> for two reasons: <code>sysDescr</code> carries the OS version that populates <code>os_version</code>, and a platform rule can only reach <code>sysObjectID</code> through a regex. A regex has no notion of an <abbr title="Object Identifier">OID</abbr> arc boundary — <code>^1\.3\.6\.1\.4\.1\.6527</code> matches <code>1.3.6.1.4.1.65271</code>, a different vendor's tree. If you write a platform rule against <code>snmp_sys_object_id</code>, anchor the pattern at an arc boundary with a trailing <code>\.</code> or <code>$</code>: <code>^1\.3\.6\.1\.4\.1\.6527\.</code> or <code>^1\.3\.6\.1\.4\.1\.6527$</code>. Role rules have <code>sys_object_id_prefix</code>, which compares whole arcs and needs no such care — prefer it when you are classifying by <abbr title="Object Identifier">OID</abbr>.</p>
+</div>
+<h3 id="banner-heuristics-opt-in">Banner heuristics (opt-in)<a class="headerlink" href="#banner-heuristics-opt-in" title="Permanent link">&para;</a></h3>
+<p>An <abbr title="Secure Shell">SSH</abbr> or <abbr title="Hypertext Transfer Protocol">HTTP</abbr> banner names the software answering on a port. On a general-purpose server that software usually does imply the OS; on a network appliance it does not. A Nokia SR Linux switch answers <abbr title="Secure Shell">SSH</abbr> from a Debian-packaged OpenSSH and HTTPS from gunicorn, and neither says the switch runs Linux as far as a source-of-truth platform field is concerned.</p>
+<p>Guessing a platform from a banner is off by default for that reason. Turn it on where the estate justifies it — a fleet of Ubuntu and FreeBSD servers, say — by listing the whole table under <code>platform_rules</code> and leaving <code>merge_mode</code> at its default <code>extend</code>. Your rules are checked first, so the baked-in copies appended behind them are never reached and the platform phase behaves as if they had replaced the table — while the baked-in <em>role</em> table stays in play. <code>merge_mode: replace</code> would drop it, and every record would come back with <code>role: null</code>. The <code>sysDescr</code> rules come first so a device that identifies itself still wins over a banner guess:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rules</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="nt">platform_rules</span><span class="p">:</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Cisco</span><span class="nv"> </span><span class="s">IOS</span><span class="nv"> </span><span class="s">Software.*Version</span><span class="nv"> </span><span class="s">(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;cisco_ios&quot;</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Cisco</span><span class="nv"> </span><span class="s">IOS</span><span class="nv"> </span><span class="s">XR.*Version</span><span class="nv"> </span><span class="s">(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;cisco_ios_xr&quot;</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Cisco</span><span class="nv"> </span><span class="s">NX-OS.*Version</span><span class="nv"> </span><span class="s">(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;cisco_nxos&quot;</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Juniper</span><span class="nv"> </span><span class="s">Networks,</span><span class="nv"> </span><span class="s">Inc\\..*JUNOS</span><span class="nv"> </span><span class="s">(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;junos&quot;</span>
+</span><span id="__span-2-19"><a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-20"><a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-2-21"><a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Arista</span><span class="nv"> </span><span class="s">Networks</span><span class="nv"> </span><span class="s">EOS</span><span class="nv"> </span><span class="s">version</span><span class="nv"> </span><span class="s">(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-22"><a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;arista_eos&quot;</span>
+</span><span id="__span-2-23"><a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-24"><a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-2-25"><a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^SRLinux-v(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-26"><a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;nokia_srlinux&quot;</span>
+</span><span id="__span-2-27"><a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-28"><a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-2-29"><a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Linux\\s+\\S+\\s+(?P&lt;version&gt;[\\d\\.]+)-&quot;</span>
+</span><span id="__span-2-30"><a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linux&quot;</span>
+</span><span id="__span-2-31"><a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-32"><a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ssh_banner</span>
+</span><span id="__span-2-33"><a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^SSH-2\\.0-(?P&lt;sshv&gt;OpenSSH_[\\d\\.p]+)\\s+(?P&lt;osv&gt;Ubuntu)&quot;</span>
+</span><span id="__span-2-34"><a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linux&quot;</span>
+</span><span id="__span-2-35"><a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;osv&quot;</span>
+</span><span id="__span-2-36"><a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a><span class="w">      </span><span class="nt">ssh_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;sshv&quot;</span>
+</span><span id="__span-2-37"><a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ssh_banner</span>
+</span><span id="__span-2-38"><a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^SSH-2\\.0-(?P&lt;sshv&gt;OpenSSH_[\\d\\.p]+)\\s+(?P&lt;osv&gt;Debian)&quot;</span>
+</span><span id="__span-2-39"><a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linux&quot;</span>
+</span><span id="__span-2-40"><a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;osv&quot;</span>
+</span><span id="__span-2-41"><a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a><span class="w">      </span><span class="nt">ssh_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;sshv&quot;</span>
+</span><span id="__span-2-42"><a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ssh_banner</span>
+</span><span id="__span-2-43"><a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^SSH-2\\.0-(?P&lt;sshv&gt;OpenSSH_[\\d\\.p]+)\\s+(?P&lt;osv&gt;FreeBSD)&quot;</span>
+</span><span id="__span-2-44"><a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;freebsd&quot;</span>
+</span><span id="__span-2-45"><a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;osv&quot;</span>
+</span><span id="__span-2-46"><a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a><span class="w">      </span><span class="nt">ssh_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;sshv&quot;</span>
+</span><span id="__span-2-47"><a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http_banner</span>
+</span><span id="__span-2-48"><a id="__codelineno-2-48" name="__codelineno-2-48" href="#__codelineno-2-48"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^(?P&lt;server&gt;nginx)/(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-49"><a id="__codelineno-2-49" name="__codelineno-2-49" href="#__codelineno-2-49"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linux&quot;</span>
+</span><span id="__span-2-50"><a id="__codelineno-2-50" name="__codelineno-2-50" href="#__codelineno-2-50"></a><span class="w">      </span><span class="nt">http_server_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;server&quot;</span>
+</span><span id="__span-2-51"><a id="__codelineno-2-51" name="__codelineno-2-51" href="#__codelineno-2-51"></a><span class="w">      </span><span class="nt">http_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-2-52"><a id="__codelineno-2-52" name="__codelineno-2-52" href="#__codelineno-2-52"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http_banner</span>
+</span><span id="__span-2-53"><a id="__codelineno-2-53" name="__codelineno-2-53" href="#__codelineno-2-53"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^(?P&lt;server&gt;Apache)/(?P&lt;version&gt;[\\d\\.]+)&quot;</span>
+</span><span id="__span-2-54"><a id="__codelineno-2-54" name="__codelineno-2-54" href="#__codelineno-2-54"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linux&quot;</span>
+</span><span id="__span-2-55"><a id="__codelineno-2-55" name="__codelineno-2-55" href="#__codelineno-2-55"></a><span class="w">      </span><span class="nt">http_server_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;server&quot;</span>
+</span><span id="__span-2-56"><a id="__codelineno-2-56" name="__codelineno-2-56" href="#__codelineno-2-56"></a><span class="w">      </span><span class="nt">http_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span></code></pre></div>
+<p>Rust callers get the same ordered list from <code>rastreo_core::classifier::platform_rules::baked_platform_rules_with_banner_heuristics()</code>.</p>
+<p>If every device in range is a server with no <abbr title="Simple Network Management Protocol">SNMP</abbr> agent, the short form is enough — prepend just the banner rules. Only do this when no device in scope publishes a <code>sysDescr</code>, because <code>extend</code> puts your rules ahead of the baked table and a banner guess would then beat a device's own self-description.</p>
+<div class="admonition info">
+<p class="admonition-title">What the baked-in table does not cover</p>
+<p>The default rules target the platforms most common in enterprise network and lab environments. They intentionally leave gaps that would benefit from richer probes than a single banner:</p>
+<ul>
+<li>No Windows detection — the <abbr title="Hypertext Transfer Protocol">HTTP</abbr> prober does not distinguish IIS versions reliably, and no SMB / RPC prober ships today.</li>
+<li>No container-runtime detection — Docker, containerd, and Kubernetes ingress do not expose stable identifiers in <abbr title="Hypertext Transfer Protocol">HTTP</abbr> <code>Server</code> headers.</li>
+<li>No load-balancer, proxy, or <abbr title="Content Delivery Network">CDN</abbr> detection — HAProxy, Envoy, Traefik, Cloudflare, and similar are not matched.</li>
+<li>No firewall or SD-<abbr title="Wide Area Network">WAN</abbr> detection — Palo Alto, Fortinet, Check Point, and similar require <abbr title="Simple Network Management Protocol">SNMP</abbr> <abbr title="Object Identifier">OID</abbr> or vendor-specific probes not yet implemented.</li>
+<li><abbr title="Simple Network Management Protocol">SNMP</abbr> <code>sysName</code> and <code>sysObjectID</code> rules ship no defaults — both signal kinds are available to platform rules, but only user rules use them today.</li>
+<li>The three <code>ssh_banner</code> rules read <code>ssh_version</code> only off an OpenSSH banner carrying an Ubuntu, Debian, or FreeBSD token. A bare <code>SSH-2.0-OpenSSH_9.6</code> or a vendor banner like <code>SSH-2.0-Cisco-1.25</code> leaves <code>ssh_version</code> null.</li>
+</ul>
+<p>Add your own rules under <code>platform_rules</code> to cover any of these — see <a href="#extending-the-rule-set">Extending the rule set</a>.</p>
+</div>
+<h2 id="baked-in-role-rules">Baked-in role rules<a class="headerlink" href="#baked-in-role-rules" title="Permanent link">&para;</a></h2>
+<p>The role phase runs after the platform phase. The baked-in table ships only <code>ports_open</code> rules — each matches when every port in the list is present as an <code>OpenPort</code> signal on the record. Rules are evaluated in the order shown below; first match wins.</p>
+<p>Two rules run by default. Both need several ports open together, which is what makes them evidence rather than a guess:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Match</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>[22, 179]</code> (<abbr title="Secure Shell">SSH</abbr> + <abbr title="Border Gateway Protocol">BGP</abbr>)</td>
+<td><code>router</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>[22, 443, 830]</code> (<abbr title="Secure Shell">SSH</abbr> + HTTPS + NETCONF)</td>
+<td><code>router</code></td>
+</tr>
+</tbody>
+</table>
+<p>A record that matches neither keeps <code>role: null</code>. A <code>/24</code> swept with <code>--port 443</code> produces no roles at all, which is the intended outcome: HTTPS on a management interface is not evidence of a web server, and a reconciler that wrote <code>web_server</code> over your curated <code>access-switch</code> role would be wrong on every switch, firewall, and router in the range.</p>
+<h3 id="port-heuristics-opt-in">Port heuristics (opt-in)<a class="headerlink" href="#port-heuristics-opt-in" title="Permanent link">&para;</a></h3>
+<p>Three single-port heuristics ship but are not applied unless you ask for them. They are useful on a server estate where a lone open port really does identify the machine, and wrong on network gear where every device answers on 22 and 443:</p>
+<table>
+<thead>
+<tr>
+<th>Match</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[443]</code></td>
+<td><code>web_server</code></td>
+</tr>
+<tr>
+<td><code>[80]</code></td>
+<td><code>web_server</code></td>
+</tr>
+<tr>
+<td><code>[22]</code> (<abbr title="Secure Shell">SSH</abbr>-only host)</td>
+<td><code>host</code></td>
+</tr>
+</tbody>
+</table>
+<p>Turn them on by listing them under <code>role_rules</code>. Order matters — the multi-port rules must come first, or a router with <abbr title="Secure Shell">SSH</abbr> open matches <code>[22]</code> and classifies as <code>host</code>:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rules</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">role_rules</span><span class="p">:</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ports_open</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">      </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">22</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">179</span><span class="p p-Indicator">]</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;router&quot;</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ports_open</span>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">      </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">22</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">443</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">830</span><span class="p p-Indicator">]</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;router&quot;</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ports_open</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">      </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">443</span><span class="p p-Indicator">]</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;web_server&quot;</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ports_open</span>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="w">      </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">80</span><span class="p p-Indicator">]</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;web_server&quot;</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ports_open</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="w">      </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">22</span><span class="p p-Indicator">]</span>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;host&quot;</span>
+</span></code></pre></div>
+<p>The first two entries repeat the defaults so they keep their precedence; the baked-in copies that <code>merge_mode: extend</code> appends afterwards never get reached. Rust callers get the same ordered list from <code>rastreo_core::classifier::role_rules::baked_role_rules_with_port_heuristics()</code>.</p>
+<div class="admonition info">
+<p class="admonition-title">Why no baked-in <abbr title="Simple Network Management Protocol">SNMP</abbr> <code>sysObjectID</code> rules</p>
+<p><code>sys_object_id_prefix</code> is a first-class role-rule kind — a user can supply their own list under <code>role_rules</code> and it will be evaluated before the baked-in port rules. rastreo ships no baked defaults for it because no public vendor <abbr title="Management Information Base">MIB</abbr> tree cleanly maps sub-prefixes to device roles at a level rastreo could ship a defensible default for: the common vendor product subtrees commingle routers, switches, firewalls, and management gear inside the same prefix, so any curated default would misclassify as often as it helps. Users supply their own <code>sys_object_id_prefix</code> rules against their fleet's actual OIDs.</p>
+<p>To classify by <code>sysObjectID</code> today, add rules that match the <abbr title="Object Identifier">OID</abbr> subtrees present on your devices. Read the values off the devices themselves (<code>snmpget -v2c -c &lt;community&gt; &lt;host&gt; sysObjectID.0</code>) rather than out of a <abbr title="Management Information Base">MIB</abbr> browser's tree: a device reports a product <abbr title="Object Identifier">OID</abbr>, and vendors put those in their own product subtree — Cisco's is <code>ciscoProducts</code>, <code>1.3.6.1.4.1.9.1</code>, not the <code>ciscoMgmt</code> <abbr title="Management Information Base">MIB</abbr>-module tree at <code>1.3.6.1.4.1.9.9</code>.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rules</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="nt">role_rules</span><span class="p">:</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sys_object_id_prefix</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">      </span><span class="nt">prefix</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1.3.6.1.4.1.9.1.2050&quot;</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;router&quot;</span>
+</span></code></pre></div>
+</div>
+<div class="admonition info">
+<p class="admonition-title">What the baked-in role table does not cover</p>
+<p>The defaults target the roles that show up cleanly in signals shipped by the current probers. They intentionally leave gaps that would benefit from probes not yet available:</p>
+<ul>
+<li>No <code>firewall</code> heuristic — Palo Alto, Fortinet, and Check Point require <abbr title="Simple Network Management Protocol">SNMP</abbr> <abbr title="Object Identifier">OID</abbr> or vendor-specific probes not yet implemented.</li>
+<li>No <code>load_balancer</code> heuristic — F5, Citrix ADC, HAProxy, and Envoy do not expose a stable role signature via <abbr title="Transmission Control Protocol">TCP</abbr> or <abbr title="Hypertext Transfer Protocol">HTTP</abbr> banner probes.</li>
+<li>No <code>printer</code>, <code>voip_phone</code>, or <code>access_point</code> heuristic — these require <abbr title="Simple Network Management Protocol">SNMP</abbr> <code>sysObjectID</code> mapping tables that are not shipped.</li>
+<li>No <code>hypervisor</code> or <code>container_host</code> heuristic.</li>
+</ul>
+<p>Add your own rules under <code>role_rules</code> to cover any of these — see <a href="#extending-the-rule-set">Extending the rule set</a>.</p>
+</div>
+<h2 id="sys_object_id_prefix-matching"><code>sys_object_id_prefix</code> matching<a class="headerlink" href="#sys_object_id_prefix-matching" title="Permanent link">&para;</a></h2>
+<p>A <code>sys_object_id_prefix</code> rule matches when the record carries an <code>SnmpSysObjectId</code> signal that either equals <code>prefix</code> or sits inside its subtree. Comparison is on whole <abbr title="Object Identifier">OID</abbr> arcs, so a prefix never matches across a subtree boundary:</p>
+<table>
+<thead>
+<tr>
+<th><code>prefix</code></th>
+<th><code>sysObjectID</code> on the record</th>
+<th>Matches</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1.3.6.1.4.1.9.1</code></td>
+<td><code>1.3.6.1.4.1.9.1</code></td>
+<td>yes — exact</td>
+</tr>
+<tr>
+<td><code>1.3.6.1.4.1.9.1</code></td>
+<td><code>1.3.6.1.4.1.9.1.2050</code></td>
+<td>yes — inside the subtree</td>
+</tr>
+<tr>
+<td><code>1.3.6.1.4.1.9.1</code></td>
+<td><code>1.3.6.1.4.1.9.15.2</code></td>
+<td>no — <code>15</code> is a different arc from <code>1</code></td>
+</tr>
+<tr>
+<td><code>1.3.6.1.4.1.9.1</code></td>
+<td><code>1.3.6.1.4.1.9</code></td>
+<td>no — shorter than the prefix</td>
+</tr>
+</tbody>
+</table>
+<p><code>prefix</code> must be dotted-decimal: two or more digit arcs joined by <code>.</code>, with no leading dot and no whitespace. A <abbr title="Management Information Base">MIB</abbr> browser will often print the leading-dot form <code>.1.3.6.1.4.1.9.1</code> — strip it. rastreo rejects anything else when the classifier is built, because a prefix in another form would review fine and then match nothing for the life of the scan.</p>
+<h2 id="signal_match-matching"><code>signal_match</code> matching<a class="headerlink" href="#signal_match-matching" title="Permanent link">&para;</a></h2>
+<p>A <code>signal_match</code> role rule applies a regex to the text of every signal of one kind on the record and assigns <code>role</code> on the first signal that matches. It is the role-phase counterpart to a platform rule: same <code>signal</code> vocabulary, same regex engine, same first-match-wins ordering.</p>
+<p>Use it where the evidence is textual rather than a clean <abbr title="Object Identifier">OID</abbr> subtree — a hostname convention, or a vendor string in <code>sysDescr</code>:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rules</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="nt">role_rules</span><span class="p">:</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">signal_match</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">      </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_name</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;-spine\\d+$&quot;</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;spine&quot;</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">signal_match</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">      </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Firewall&quot;</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;firewall&quot;</span>
+</span></code></pre></div>
+<p>The pattern is a <a href="https://docs.rs/regex">Rust <code>regex</code></a> pattern and is unanchored — it matches anywhere in the signal text unless you anchor it with <code>^</code> or <code>$</code>. Capture groups are allowed but ignored; only platform rules read captures.</p>
+<p>Prefer <code>sys_object_id_prefix</code> when the <abbr title="Object Identifier">OID</abbr> subtree distinguishes the role cleanly. A <code>sysObjectID</code> is assigned by the vendor and cannot be edited on the device; a hostname can be, and frequently is.</p>
+<h2 id="ports_open-matching"><code>ports_open</code> matching<a class="headerlink" href="#ports_open-matching" title="Permanent link">&para;</a></h2>
+<p><code>ports_open</code> rules match when <strong>every</strong> port in the <code>ports</code> list appears as an <code>OpenPort</code> signal on the record. Extra open ports on the device do not cause a mismatch: <code>ports: [22, 179]</code> matches a record that also has <code>OpenPort(443)</code>, but does not match a record that only has <code>OpenPort(22)</code>.</p>
+<p>Every prober that opens a <abbr title="Transmission Control Protocol">TCP</abbr> connection to a target port emits an <code>OpenPort</code> signal alongside its protocol-specific signals. <code>tcp_connect</code>, <code>http</code>, <code>ssh</code>, and <code>tls</code> all satisfy this contract today. A <code>ports_open</code> rule matching <code>[80]</code> fires against a record produced by any of them.</p>
+<p>Because rule evaluation is first-match-wins, ordering matters for role rules with overlapping port sets. A <code>[22, 179]</code> rule for <code>router</code> must be listed before a <code>[22]</code> rule for <code>host</code>, otherwise every router with <abbr title="Secure Shell">SSH</abbr> open would classify as <code>host</code>. Keep more specific port sets ahead of less specific ones — and remember that <code>merge_mode: extend</code> puts <em>your</em> whole list ahead of the baked-in defaults, so a single-port rule you add without repeating the defaults first will shadow them. Within your list, rules run in the order you wrote them: rastreo does not reorder by rule kind or evidence strength, so put <code>sys_object_id_prefix</code> and <code>signal_match</code> rules ahead of your own <code>ports_open</code> rules if you want the stronger fingerprint to win.</p>
+<h2 id="extending-the-rule-set">Extending the rule set<a class="headerlink" href="#extending-the-rule-set" title="Permanent link">&para;</a></h2>
+<p>The <code>merge_mode</code> field controls how user-supplied rules combine with the baked-in defaults. It applies uniformly to both <code>platform_rules</code> and <code>role_rules</code>:</p>
+<ul>
+<li><code>extend</code> (the default) — user rules are checked first, then the baked-in defaults. Use this when the defaults cover your baseline and you want to add narrower or extra rules on top.</li>
+<li><code>replace</code> — only user rules run; the baked-in defaults are ignored. Use this when you want full control over what <code>platform</code> and <code>role</code> are assigned.</li>
+</ul>
+<p>Each user <code>PlatformRule</code> has two required fields — <code>signal</code> (which signal kind to match, one of the values in <a href="#signal-kinds">Signal kinds</a>) and <code>pattern</code> (the regex to compile) — plus <code>platform</code> (the OS label to assign on match) and four optional named-capture-group fields that populate the paired fields on the record: <code>os_version_capture</code> → <code>os_version</code>, <code>ssh_version_capture</code> → <code>ssh_version</code> (meaningful only with <code>signal: ssh_banner</code>), <code>http_server_capture</code> → <code>http_server</code>, and <code>http_version_capture</code> → <code>http_version</code> (both meaningful only with <code>signal: http_banner</code>). Any capture-group field that is absent, or that names a group not present in the actual match, leaves the paired record field <code>null</code>.</p>
+<p>Omit <code>platform</code> for a rule that reads a service banner for its software fields without claiming the device's OS — that is how the baked-in <code>ssh_banner</code> and <code>http_banner</code> rules are written. Two of the capture fields are paired to what they version and are rejected when the classifier is built rather than silently never firing: <code>os_version_capture</code> requires <code>platform</code>, and <code>http_version_capture</code> requires <code>http_server_capture</code>. A version belongs to the thing it versions, so splitting the pair across two rules would let a record report one server's version under another server's name.</p>
+<p>Each user <code>RoleRule</code> is a tagged object. Three variants exist. A <code>sys_object_id_prefix</code> rule carries <code>prefix</code> (a dotted-decimal <abbr title="Simple Network Management Protocol">SNMP</abbr> <code>sysObjectID</code> subtree) and <code>role</code> (the label to assign on match). A <code>signal_match</code> rule carries <code>signal</code>, <code>pattern</code>, and <code>role</code>. A <code>ports_open</code> rule carries <code>ports</code> (a non-empty list of ports that must all be present) and <code>role</code>.</p>
+<p>Extending: prepending narrower rules to the baked-in lists.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rules</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span><span class="nt">merge_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">extend</span><span class="w">     </span><span class="c1"># default; may be omitted</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span><span class="nt">platform_rules</span><span class="p">:</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_descr</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^Cisco</span><span class="nv"> </span><span class="s">IOS</span><span class="nv"> </span><span class="s">Software.*Version</span><span class="nv"> </span><span class="s">(?P&lt;version&gt;15\\.\\d+)&quot;</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;cisco_ios_15&quot;</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">      </span><span class="nt">os_version_capture</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;version&quot;</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">  </span><span class="nt">role_rules</span><span class="p">:</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sys_object_id_prefix</span>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="w">      </span><span class="nt">prefix</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;1.3.6.1.4.1.9.12&quot;</span>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;wireless_controller&quot;</span>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">signal_match</span>
+</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="w">      </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snmp_sys_name</span>
+</span><span id="__span-6-15"><a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;-spine\\d+$&quot;</span>
+</span><span id="__span-6-16"><a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;spine&quot;</span>
+</span><span id="__span-6-17"><a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ports_open</span>
+</span><span id="__span-6-18"><a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a><span class="w">      </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">22</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">8443</span><span class="p p-Indicator">]</span>
+</span><span id="__span-6-19"><a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;management_appliance&quot;</span>
+</span></code></pre></div>
+<p>The user platform rule runs before the baked-in <code>cisco_ios</code> rule, so IOS 15.x devices get the more specific <code>cisco_ios_15</code> label while IOS 12.x devices fall through to <code>cisco_ios</code>. The user role rules run before the baked-in table, so a device matching the wireless-controller <abbr title="Object Identifier">OID</abbr>, the spine hostname convention, or the management-appliance port set gets those roles first.</p>
+<p>Replacing: running only user rules.</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nt">classifier</span><span class="p">:</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rules</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">  </span><span class="nt">merge_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">replace</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">  </span><span class="nt">platform_rules</span><span class="p">:</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ssh_banner</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^SSH-2\\.0-OpenSSH_.*Ubuntu&quot;</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;linux&quot;</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">signal</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">http_banner</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">      </span><span class="nt">pattern</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;^HAProxy&quot;</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">      </span><span class="nt">platform</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;haproxy&quot;</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">  </span><span class="nt">role_rules</span><span class="p">:</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ports_open</span>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">      </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">22</span><span class="p p-Indicator">]</span>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;host&quot;</span>
+</span></code></pre></div>
+<p>With <code>replace</code>, only the user rules above run. A Cisco IOS device with an <code>SnmpSysDescr</code> signal and a matching <code>sysObjectID</code> matches nothing in either phase and leaves the pipeline with <code>platform: null</code> and <code>role: null</code>.</p>
+<h2 id="precedence">Precedence<a class="headerlink" href="#precedence" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Platform rules run before role rules. Both phases evaluate rules in list order.</li>
+<li>The platform phase fills three independent slots — <code>platform</code> (with its paired <code>os_version</code>), <code>ssh_version</code>, and <code>http_server</code> (with its paired <code>http_version</code>). Each slot goes to the first rule in list order that both matches a signal on the record and claims that slot. A rule winning one slot does not stop a later rule from winning another, so a <code>sysDescr</code> rule taking <code>platform</code> still leaves <code>ssh_version</code> to the <abbr title="Secure Shell">SSH</abbr> banner rule below it. A paired field is only ever written by the rule that won its slot, and only alongside the field it versions — so <code>1.24.0</code> can never be read off an <code>Apache/2.4.58</code> banner onto an <code>http_server</code> of <code>nginx</code>, and a rule that wins the <code>http_server</code> slot without capturing a server writes no <code>http_version</code> either.</li>
+<li>The role phase is single-slot: first matching rule wins and the phase stops.</li>
+<li>Under <code>merge_mode: extend</code>, user rules are checked before the baked-in defaults for both phases. Under <code>merge_mode: replace</code>, only user rules run.</li>
+<li>Any field already set on the record — by an upstream custom pipeline, say — is left alone, and its slot is not contested, so a record arriving with <code>platform</code> already set never receives <code>os_version</code> from the classifier either. A record arriving with <code>platform</code> set still gets <code>ssh_version</code> from a banner rule. The classifier never overwrites existing values.</li>
+<li>Invalid rules are rejected when the classifier is built, before any record is classified. A pattern that fails to compile — in a platform rule or a <code>signal_match</code> role rule — a platform rule capturing <code>os_version</code> without claiming a <code>platform</code> or <code>http_version</code> without capturing an <code>http_server</code>, a <code>ports_open</code> rule with an empty <code>ports</code> list, and a <code>sys_object_id_prefix</code> that is not dotted-decimal all surface as construction errors.</li>
+<li>When a winning rule names a capture group that does not appear in the actual match — an absent group, or an optional one that did not participate — the slot is spent and the paired field stays <code>null</code>.</li>
+</ul>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="../identity/">Identity</a> — how records are merged before classification runs.</li>
+<li><a href="../../reference/scenario/#classifier">Scenario reference</a> — the full configuration surface for <code>classifier.type: rules</code>.</li>
+<li><a href="../../integrate/source-of-truth/">Source of truth reconciliation</a> — how downstream consumers pick up <code>platform</code>, <code>os_version</code>, <code>ssh_version</code>, <code>http_server</code>, and <code>http_version</code>.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../identity/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Identity">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Identity
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../topology/" class="md-footer__link md-footer__link--next" aria-label="Next: Topology">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Topology
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 David Flores · Built with Material for MkDocs
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/davidban77/rastreo" target="_blank" rel="noopener" title="rastreo on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.tracking", "navigation.instant", "navigation.footer", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.code.annotate", "content.tabs.link", "content.tooltips", "content.action.edit", "content.action.view", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,1814 @@
+{
+  "$defs": {
+    "BaseProbeConfig": {
+      "properties": {
+        "classifier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClassifierConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "encoder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EncoderConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fuser": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FuserConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_concurrent": {
+          "description": "Maximum probes in flight at once.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "probe_rate": {
+          "description": "Maximum probes started per second; unset means no rate limit.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retries": {
+          "description": "Retransmit attempts for connectionless probers that lack native retransmission (UDP, SNMP, DNS); 0 (default) issues a single request within the same total timeout.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SinkConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ClassifierConfig": {
+      "description": "Rules that assign `platform` and `role` to a record.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "noop",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "merge_mode": {
+              "$ref": "#/$defs/MergeMode",
+              "default": "extend"
+            },
+            "platform_rules": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlatformRule"
+              },
+              "type": "array"
+            },
+            "role_rules": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/RoleRule"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "rules",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Community": {
+      "description": "SNMP community string written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
+      "type": "string"
+    },
+    "DeadLetterConfig": {
+      "description": "Quarantine topic configuration for records the primary Kafka produce refused.",
+      "properties": {
+        "include_error_metadata": {
+          "default": true,
+          "type": "boolean"
+        },
+        "topic": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic"
+      ],
+      "type": "object"
+    },
+    "DiscoverScenarioConfig": {
+      "description": "A single discovery scenario: the targets to probe, the probers to run, and any per-scenario\noverrides of the shared defaults.",
+      "properties": {
+        "classifier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClassifierConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "encoder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EncoderConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fuser": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FuserConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_concurrent": {
+          "description": "Maximum probes in flight at once.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "probe_rate": {
+          "description": "Maximum probes started per second; unset means no rate limit.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "probers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProberConfig"
+          },
+          "type": "array"
+        },
+        "retries": {
+          "description": "Retransmit attempts for connectionless probers that lack native retransmission (UDP, SNMP, DNS); 0 (default) issues a single request within the same total timeout.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SinkConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/Target"
+          },
+          "type": "array"
+        },
+        "timeout_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "targets"
+      ],
+      "type": "object"
+    },
+    "DnsQueryType": {
+      "enum": [
+        "a",
+        "aaaa",
+        "mx",
+        "txt",
+        "ptr",
+        "ns",
+        "cname"
+      ],
+      "type": "string"
+    },
+    "DnsTransport": {
+      "enum": [
+        "udp",
+        "tcp"
+      ],
+      "type": "string"
+    },
+    "EncoderConfig": {
+      "description": "The output wire format for records.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "ndjson",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Aligned fixed-width text for reading a scan directly; links and collection profiles are not rendered.",
+          "properties": {
+            "type": {
+              "const": "table",
+              "type": "string"
+            },
+            "width": {
+              "default": 100,
+              "description": "Total line width the columns are laid out within, clamped to 55–153.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FuserConfig": {
+      "description": "How probe signals are merged into device records.",
+      "oneOf": [
+        {
+          "properties": {
+            "confidence_baseline": {
+              "default": null,
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "confidence_per_signal": {
+              "default": null,
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "include_unreachable": {
+              "default": null,
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "identity_hints": {
+              "$ref": "#/$defs/IdentityHints",
+              "default": {
+                "max_correlation_bucket": 256,
+                "vrrp_groups": []
+              }
+            },
+            "inner": {
+              "$ref": "#/$defs/FuserConfig"
+            },
+            "type": {
+              "const": "identity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "inner"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HttpScheme": {
+      "enum": [
+        "auto",
+        "http",
+        "https"
+      ],
+      "type": "string"
+    },
+    "IdentityHints": {
+      "properties": {
+        "max_correlation_bucket": {
+          "default": 256,
+          "description": "Cap on how many records may share one correlation value (MAC, sysName, SSH host key, TLS subject/SAN, reverse-DNS) before it is treated as a shared/default value and skipped rather than merged; raise it only when a genuine device answers on more IPs that share a real signal (default 256).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vrrp_groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VrrpGroup"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "IpNet": {
+      "description": "An IPv4 or IPv6 address with prefix length",
+      "examples": [
+        "192.168.0.0/24",
+        "fd00::/32"
+      ],
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Ipv4Net"
+        },
+        {
+          "$ref": "#/$defs/Ipv6Net"
+        }
+      ],
+      "title": "IP network"
+    },
+    "Ipv4Net": {
+      "description": "An IPv4 address with prefix length",
+      "examples": [
+        "0.0.0.0/0",
+        "192.168.0.0/24"
+      ],
+      "maxLength": 18,
+      "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\/(?:3[0-2]|[1-2][0-9]|[0-9])$",
+      "title": "IPv4 network",
+      "type": "string"
+    },
+    "Ipv6Net": {
+      "description": "An IPv6 address with prefix length",
+      "examples": [
+        "::/0",
+        "fd00::/32"
+      ],
+      "maxLength": 43,
+      "pattern": "^[0-9A-Fa-f:\\.]+\\/(?:[0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$",
+      "title": "IPv6 network",
+      "type": "string"
+    },
+    "KafkaFlushMode": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "per_record",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threshold_bytes": {
+              "default": 65536,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "batched",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "KafkaSasl": {
+      "description": "SASL credentials for the Kafka producer; composes independently with `KafkaTls`.",
+      "properties": {
+        "mechanism": {
+          "$ref": "#/$defs/SaslMechanism"
+        },
+        "password": {
+          "$ref": "#/$defs/Password"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mechanism",
+        "username",
+        "password"
+      ],
+      "type": "object"
+    },
+    "KafkaTls": {
+      "description": "TLS for the Kafka producer; `verify` defaults to `false` (accept any certificate), mirroring the probers' permissive default.",
+      "properties": {
+        "ca_cert": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verify": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "MergeMode": {
+      "description": "How user-supplied rules combine with the baked-in default rules.",
+      "oneOf": [
+        {
+          "const": "extend",
+          "description": "User rules PREPEND the baked-in list. First-match wins across the combined list.",
+          "type": "string"
+        },
+        {
+          "const": "replace",
+          "description": "Only user rules run; baked-in rules are ignored.",
+          "type": "string"
+        }
+      ]
+    },
+    "NatsCredentials": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "anonymous",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "password": {
+              "$ref": "#/$defs/Password"
+            },
+            "type": {
+              "const": "user_pass",
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "username",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/Password"
+            },
+            "type": {
+              "const": "token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "creds_file": {
+              "type": "string"
+            },
+            "type": {
+              "const": "creds",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "creds_file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NatsDeadLetterConfig": {
+      "description": "Quarantine JetStream target for records the primary NATS publish or ack rejected.",
+      "properties": {
+        "include_error_metadata": {
+          "default": true,
+          "type": "boolean"
+        },
+        "stream": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "stream",
+        "subject"
+      ],
+      "type": "object"
+    },
+    "NatsFlushMode": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "per_record",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "threshold_bytes": {
+              "default": 65536,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "batched",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Password": {
+      "description": "Credential value written verbatim in YAML; serialized as `<redacted:HHHHHHHH>` to keep the plaintext out of logs and NDJSON output.",
+      "type": "string"
+    },
+    "PlatformRule": {
+      "description": "A single regex-based platform-detection rule.",
+      "properties": {
+        "http_server_capture": {
+          "description": "Named regex capture group whose matched text populates the record's `http_server`. Only meaningful for `signal: http_banner`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "http_version_capture": {
+          "description": "Named regex capture group whose matched text populates the record's `http_version`. Requires `http_server_capture`, and the scenario is rejected without it. Only meaningful for `signal: http_banner`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "os_version_capture": {
+          "description": "Named regex capture group (e.g. `version` for `(?P<version>\\d+\\.\\d+)`) whose matched text populates the record's `os_version`. Requires `platform`, and the scenario is rejected without it. When absent, or when the group is not present in the actual match, `os_version` stays null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "platform": {
+          "description": "Platform label assigned on match. Omit it for a rule that only extracts `ssh_version`, `http_server`, or `http_version` from a service banner.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signal": {
+          "$ref": "#/$defs/SignalKind"
+        },
+        "ssh_version_capture": {
+          "description": "Named regex capture group whose matched text populates the record's `ssh_version`. Only meaningful for `signal: ssh_banner`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "signal",
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "ProberConfig": {
+      "oneOf": [
+        {
+          "properties": {
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "tcp_connect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "ports"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "default": "/",
+              "type": "string"
+            },
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "scheme": {
+              "$ref": "#/$defs/HttpScheme",
+              "default": "auto"
+            },
+            "tls_verify": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "const": "http",
+              "type": "string"
+            },
+            "user_agent": {
+              "default": "rastreo/<version>",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "ports"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "default": [
+                53
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "query_names": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "query_type": {
+              "$ref": "#/$defs/DnsQueryType",
+              "default": "a"
+            },
+            "recursion_desired": {
+              "default": true,
+              "type": "boolean"
+            },
+            "transport": {
+              "$ref": "#/$defs/DnsTransport",
+              "default": "udp"
+            },
+            "type": {
+              "const": "dns",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "query_names"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "protocol": {
+              "$ref": "#/$defs/UdpProtocol"
+            },
+            "type": {
+              "const": "udp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "ports",
+            "protocol"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "community": {
+              "$ref": "#/$defs/Community",
+              "default": "public"
+            },
+            "credentials": {
+              "$ref": "#/$defs/UsmCredentials",
+              "default": {
+                "auth": {
+                  "algorithm": "none"
+                },
+                "privacy": {
+                  "algorithm": "none"
+                },
+                "username": ""
+              }
+            },
+            "ports": {
+              "default": [
+                161
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "snmp",
+              "type": "string"
+            },
+            "version": {
+              "$ref": "#/$defs/SnmpVersion",
+              "default": "v2c"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "community": {
+              "$ref": "#/$defs/Community",
+              "default": "public"
+            },
+            "credentials": {
+              "$ref": "#/$defs/UsmCredentials",
+              "default": {
+                "auth": {
+                  "algorithm": "none"
+                },
+                "privacy": {
+                  "algorithm": "none"
+                },
+                "username": ""
+              }
+            },
+            "max_rows": {
+              "default": 4096,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ports": {
+              "default": [
+                161
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "lldp",
+              "type": "string"
+            },
+            "version": {
+              "$ref": "#/$defs/SnmpVersion",
+              "default": "v2c"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "interface": {
+              "default": "",
+              "type": "string"
+            },
+            "type": {
+              "const": "arp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "interface": {
+              "default": "",
+              "type": "string"
+            },
+            "type": {
+              "const": "ndp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "default": [
+                22
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "ssh",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "count": {
+              "default": 3,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "interval_ms": {
+              "default": 200,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "icmp",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "ports": {
+              "default": [
+                443
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "tls",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "get_paths": {
+              "default": [
+                "/system/state/hostname",
+                "/system/state/software-version"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "lldp": {
+              "default": false,
+              "type": "boolean"
+            },
+            "password": {
+              "$ref": "#/$defs/Password",
+              "default": ""
+            },
+            "plaintext": {
+              "default": false,
+              "type": "boolean"
+            },
+            "ports": {
+              "default": [
+                57400
+              ],
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "gnmi",
+              "type": "string"
+            },
+            "username": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "resolvers": {
+              "default": [],
+              "items": {
+                "format": "ip",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "reverse_dns",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RoleRule": {
+      "description": "A single role-detection rule. Three match strategies are supported: OID-subtree containment on the device's SNMP `sysObjectID`, a regex over any signal kind, and an all-of check over the device's open ports.",
+      "oneOf": [
+        {
+          "description": "Matches when the device's `SnmpSysObjectId` signal equals `prefix` or sits inside its subtree. Whole arcs are compared, so `1.3.6.1.4.1.9.1` does not match `1.3.6.1.4.1.9.15`. `prefix` must be dotted-decimal with no leading dot, and the scenario is rejected otherwise.",
+          "properties": {
+            "prefix": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "type": {
+              "const": "sys_object_id_prefix",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "prefix",
+            "role"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Matches when `pattern` matches the text of any `signal`-kind signal on the record.",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "signal": {
+              "$ref": "#/$defs/SignalKind"
+            },
+            "type": {
+              "const": "signal_match",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "signal",
+            "pattern",
+            "role"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Matches when the device carries an `OpenPort` signal for every port in `ports`. An empty `ports` list is rejected.",
+          "properties": {
+            "ports": {
+              "items": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "role": {
+              "type": "string"
+            },
+            "type": {
+              "const": "ports_open",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "ports",
+            "role"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SaslMechanism": {
+      "enum": [
+        "plain",
+        "scram_sha_256",
+        "scram_sha_512"
+      ],
+      "type": "string"
+    },
+    "ScenarioEntry": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DiscoverScenarioConfig",
+          "properties": {
+            "signal_type": {
+              "const": "discover",
+              "type": "string"
+            }
+          },
+          "required": [
+            "signal_type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ScenarioKind": {
+      "enum": [
+        "discovery"
+      ],
+      "type": "string"
+    },
+    "SignalKind": {
+      "description": "Which probe-emitted signal a classifier rule matches against. Named by every `platform_rules` entry, and by a `role_rules` entry of `type: signal_match`.",
+      "enum": [
+        "snmp_sys_descr",
+        "ssh_banner",
+        "http_banner",
+        "snmp_sys_name",
+        "snmp_sys_object_id"
+      ],
+      "type": "string"
+    },
+    "SinkConfig": {
+      "description": "Where discovered records are sent (stdout, file, Kafka, NATS).",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "stdout",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "memory",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "brokers": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dead_letter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeadLetterConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "flush_mode": {
+              "$ref": "#/$defs/KafkaFlushMode",
+              "default": {
+                "threshold_bytes": 65536,
+                "type": "batched"
+              }
+            },
+            "links_topic": {
+              "description": "Topic the link record stream is produced to; defaults to `rastreo.discovery.links.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "profiles_topic": {
+              "description": "Topic the collection-profile stream is produced to; defaults to `rastreo.discovery.profiles.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "retry": {
+              "$ref": "#/$defs/SinkRetry",
+              "default": {
+                "backoff_initial_ms": 100,
+                "backoff_max_ms": 2000,
+                "max_attempts": 3
+              }
+            },
+            "sasl": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/KafkaSasl"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tls": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/KafkaTls"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "topic": {
+              "type": "string"
+            },
+            "type": {
+              "const": "kafka",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "brokers",
+            "topic"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "credentials": {
+              "$ref": "#/$defs/NatsCredentials",
+              "default": {
+                "type": "anonymous"
+              }
+            },
+            "dead_letter": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NatsDeadLetterConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "flush_mode": {
+              "$ref": "#/$defs/NatsFlushMode",
+              "default": {
+                "type": "per_record"
+              }
+            },
+            "links_subject": {
+              "description": "Subject the link record stream is published to; defaults to `rastreo.discovery.links.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "profiles_subject": {
+              "description": "Subject the collection-profile stream is published to; defaults to `rastreo.discovery.profiles.v1`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "retry": {
+              "$ref": "#/$defs/SinkRetry",
+              "default": {
+                "backoff_initial_ms": 100,
+                "backoff_max_ms": 2000,
+                "max_attempts": 3
+              }
+            },
+            "servers": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "stream": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "type": {
+              "const": "nats",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "servers",
+            "subject",
+            "stream"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SinkRetry": {
+      "description": "Bounded exponential-backoff retry policy for a sink's primary delivery.\n\n`max_attempts` counts total primary attempts: `1` disables retry and dead-letters immediately, `3` (the default) is the initial attempt plus two retries.",
+      "properties": {
+        "backoff_initial_ms": {
+          "default": 100,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "backoff_max_ms": {
+          "default": 2000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SnmpVersion": {
+      "enum": [
+        "v1",
+        "v2c",
+        "v3"
+      ],
+      "type": "string"
+    },
+    "Target": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Ip": {
+              "format": "ip",
+              "type": "string"
+            }
+          },
+          "required": [
+            "Ip"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Cidr": {
+              "$ref": "#/$defs/IpNet"
+            }
+          },
+          "required": [
+            "Cidr"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Range": {
+              "properties": {
+                "end": {
+                  "format": "ip",
+                  "type": "string"
+                },
+                "start": {
+                  "format": "ip",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "DnsName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "DnsName"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "UdpProtocol": {
+      "enum": [
+        "ntp",
+        "sip_options",
+        "memcached_stats",
+        "stun_binding"
+      ],
+      "type": "string"
+    },
+    "UsmAuth": {
+      "oneOf": [
+        {
+          "properties": {
+            "algorithm": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "algorithm"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "md5",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "sha1",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "sha224",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "sha256",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "sha384",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "sha512",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "UsmCredentials": {
+      "properties": {
+        "auth": {
+          "$ref": "#/$defs/UsmAuth",
+          "default": {
+            "algorithm": "none"
+          }
+        },
+        "privacy": {
+          "$ref": "#/$defs/UsmPrivacy",
+          "default": {
+            "algorithm": "none"
+          }
+        },
+        "username": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UsmPrivacy": {
+      "oneOf": [
+        {
+          "properties": {
+            "algorithm": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "algorithm"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "des",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "aes128",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "aes192",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "algorithm": {
+              "const": "aes256",
+              "type": "string"
+            },
+            "password": {
+              "$ref": "#/$defs/Password"
+            }
+          },
+          "required": [
+            "algorithm",
+            "password"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "VrrpGroup": {
+      "properties": {
+        "members": {
+          "default": [],
+          "items": {
+            "format": "ip",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "virtual_ip": {
+          "format": "ip",
+          "type": "string"
+        },
+        "virtual_mac": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "virtual_ip",
+        "virtual_mac"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://davidban77.github.io/rastreo/schemas/scenario-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The YAML scenario file rastreo accepts via `rastreo discover --file`. Declares the shared\ndefaults and the list of discovery scenarios to run.",
+  "properties": {
+    "defaults": {
+      "$ref": "#/$defs/BaseProbeConfig",
+      "default": {
+        "classifier": null,
+        "encoder": null,
+        "fuser": null,
+        "max_concurrent": null,
+        "name": null,
+        "probe_rate": null,
+        "retries": null,
+        "sink": null,
+        "timeout_ms": null
+      },
+      "description": "Defaults applied to every scenario unless the scenario overrides them."
+    },
+    "kind": {
+      "$ref": "#/$defs/ScenarioKind"
+    },
+    "scenarios": {
+      "items": {
+        "$ref": "#/$defs/ScenarioEntry"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Scenario file format version.",
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "kind",
+    "scenarios"
+  ],
+  "title": "ScenarioFile",
+  "type": "object"
+}
