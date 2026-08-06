@@ -1,5 +1,6 @@
-//! The plan a dry-run reports and the scan it rehearses read one resolution, so the counts they
-//! publish are checkable against each other rather than maintained in parallel.
+//! The plan a dry-run reports and the scan it rehearses read one resolution, so what they publish —
+//! the counts, and the addresses behind them — is checkable against each other rather than
+//! maintained in parallel.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -7,9 +8,10 @@ use std::time::SystemTime;
 
 use rastreo_core::config::{BaseProbeConfig, DiscoverScenarioConfig};
 use rastreo_core::{
-    resolve_scenario, run_discovery, DiscoveryPlan, DiscoverySummary, FuserConfig, HickoryResolver,
-    MemorySink, MemorySinkHandle, PlanKnobs, ProberConfig, RastreoError, ResolvedTarget, Resolver,
-    RunOptions, Sink, SinkConfig, SinkType, Target, TargetResolution,
+    resolve_scenario, run_discovery, DeviceRecord, DiscoveryPlan, DiscoverySummary, FuserConfig,
+    HickoryResolver, MemorySink, MemorySinkHandle, PlanKnobs, ProberConfig, RastreoError,
+    ResolvedTarget, Resolver, RunOptions, Sink, SinkConfig, SinkType, Target, TargetResolution,
+    SAMPLED_ADDRESSES,
 };
 
 const CLOSED_PORT: u16 = 9;
@@ -51,6 +53,17 @@ fn knobs() -> PlanKnobs {
     }
 }
 
+// A closed port is still a record to emit, so every address the scan reached is nameable from the sink.
+fn emitting_scenario(targets: Vec<Target>) -> DiscoverScenarioConfig {
+    let mut scenario = scenario(targets);
+    scenario.base.fuser = Some(FuserConfig::Direct {
+        include_unreachable: Some(true),
+        confidence_baseline: None,
+        confidence_per_signal: None,
+    });
+    scenario
+}
+
 async fn rehearse_then_scan(
     resolver: Arc<dyn Resolver>,
     targets: Vec<Target>,
@@ -59,7 +72,17 @@ async fn rehearse_then_scan(
     Result<DiscoverySummary, RastreoError>,
     MemorySinkHandle,
 ) {
-    let scenario = scenario(targets);
+    rehearse_then_scan_with(resolver, scenario(targets)).await
+}
+
+async fn rehearse_then_scan_with(
+    resolver: Arc<dyn Resolver>,
+    scenario: DiscoverScenarioConfig,
+) -> (
+    DiscoveryPlan,
+    Result<DiscoverySummary, RastreoError>,
+    MemorySinkHandle,
+) {
     let resolution = resolve_scenario(resolver.as_ref(), &scenario.targets).await;
     let sink = MemorySink::new();
     let handle = sink.handle();
@@ -83,30 +106,50 @@ fn system_resolver(limit: Option<usize>) -> Arc<dyn Resolver> {
     })
 }
 
+type Answers = Vec<(Target, Vec<IpAddr>)>;
+
 // The rehearsal and the run resolve independently, so a live name would make this family flaky here.
-struct StaleNames {
-    stale: Vec<Target>,
+struct ScriptedNames {
+    answers: Answers,
 }
 
 #[async_trait::async_trait]
-impl Resolver for StaleNames {
+impl Resolver for ScriptedNames {
     async fn resolve(&self, target: &Target) -> Result<Vec<ResolvedTarget>, RastreoError> {
-        if self.stale.contains(target) {
-            return Ok(Vec::new());
-        }
-        let Target::Ip(addr) = target else {
-            panic!("this fixture answers single addresses and stale names only: {target:?}");
+        let ips = match self.answers.iter().find(|(scripted, _)| scripted == target) {
+            Some((scripted, ips)) => {
+                assert!(
+                    matches!(scripted, Target::DnsName(_)),
+                    "this fixture scripts names only; a block form would be answered as a point set, \
+                     which is a shape no resolver produces for it: {scripted:?}"
+                );
+                ips.clone()
+            }
+            None => match target {
+                Target::Ip(addr) => vec![*addr],
+                _ => panic!(
+                    "this fixture answers scripted names and single addresses only: {target:?}"
+                ),
+            },
         };
-        Ok(vec![ResolvedTarget {
-            ip: *addr,
-            original: target.clone(),
-            resolved_at: SystemTime::now(),
-        }])
+        let resolved_at = SystemTime::now();
+        Ok(ips
+            .into_iter()
+            .map(|ip| ResolvedTarget {
+                ip,
+                original: target.clone(),
+                resolved_at,
+            })
+            .collect())
     }
 }
 
+fn scripted_resolver(answers: Answers) -> Arc<dyn Resolver> {
+    Arc::new(ScriptedNames { answers })
+}
+
 fn stale_name_resolver(stale: Vec<Target>) -> Arc<dyn Resolver> {
-    Arc::new(StaleNames { stale })
+    scripted_resolver(stale.into_iter().map(|name| (name, Vec::new())).collect())
 }
 
 fn dns(name: &str) -> Target {
@@ -168,6 +211,149 @@ async fn a_scan_whose_every_target_has_no_addresses_completes_having_probed_noth
         vec!["stale.lab".to_string(), "gone.lab".to_string()]
     );
     assert!(handle.bytes().is_empty());
+}
+
+#[tokio::test]
+async fn the_plan_counts_the_probes_the_scan_performs_for_names_that_resolve() {
+    let cases: Vec<(Answers, Vec<Target>, usize)> = vec![
+        (
+            vec![(
+                dns("three.lab"),
+                vec![ip(127, 0, 0, 1), ip(127, 0, 0, 2), ip(127, 0, 0, 3)],
+            )],
+            vec![dns("three.lab")],
+            3,
+        ),
+        (
+            vec![(dns("one.lab"), vec![ip(127, 0, 0, 4)])],
+            vec![dns("one.lab"), Target::Ip(ip(127, 0, 0, 5))],
+            2,
+        ),
+        (
+            vec![(dns("shared.lab"), vec![ip(127, 0, 0, 6)])],
+            vec![dns("shared.lab"), Target::Ip(ip(127, 0, 0, 6))],
+            2,
+        ),
+        (
+            vec![
+                (dns("first.lab"), vec![ip(127, 0, 0, 7)]),
+                (dns("second.lab"), vec![ip(127, 0, 0, 7)]),
+            ],
+            vec![dns("first.lab"), dns("second.lab")],
+            2,
+        ),
+        // A caller's own resolver may repeat an address; `HickoryResolver` never does.
+        (
+            vec![(dns("twice.lab"), vec![ip(127, 0, 0, 8), ip(127, 0, 0, 8)])],
+            vec![dns("twice.lab")],
+            2,
+        ),
+        (
+            vec![
+                (dns("live.lab"), vec![ip(127, 0, 0, 9)]),
+                (dns("gone.lab"), Vec::new()),
+            ],
+            vec![dns("live.lab"), dns("gone.lab")],
+            1,
+        ),
+    ];
+    for (answers, targets, addresses) in cases {
+        let (plan, summary, _) =
+            rehearse_then_scan(scripted_resolver(answers), targets.clone()).await;
+        let summary = summary.expect("a scripted name does not abandon the scan");
+        assert_eq!(
+            summary.targets_resolved, addresses,
+            "{targets:?}: the plan counted the addresses the names answered with"
+        );
+        assert_eq!(
+            plan.total_probes,
+            addresses * 2,
+            "{targets:?}: 2 prober passes per address"
+        );
+        assert_eq!(
+            plan.total_probes, summary.probe_attempts,
+            "{targets:?}: the plan promised {} probes and the scan performed {}",
+            plan.total_probes, summary.probe_attempts
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_name_with_more_addresses_than_the_plan_samples_is_counted_in_full() {
+    let name = dns("fleet.lab");
+    let addresses: Vec<IpAddr> = (1..=8).map(|last| ip(127, 0, 1, last)).collect();
+    let (plan, summary, _) = rehearse_then_scan(
+        scripted_resolver(vec![(name.clone(), addresses.clone())]),
+        vec![name],
+    )
+    .await;
+    let summary = summary.expect("the name resolves, so the scan runs");
+
+    let TargetResolution::Resolved(attributed) = &plan.targets[0].resolution else {
+        panic!("the name resolves: {:?}", plan.targets[0].resolution);
+    };
+    assert_eq!(attributed.total, addresses.len());
+    assert_eq!(attributed.sample, addresses[..SAMPLED_ADDRESSES]);
+    assert_eq!(summary.targets_resolved, addresses.len());
+    assert_eq!(
+        plan.total_probes, summary.probe_attempts,
+        "the sample the plan renders is not the count it promises"
+    );
+}
+
+#[tokio::test]
+async fn the_addresses_the_plan_names_for_a_resolving_name_are_the_ones_the_scan_probes() {
+    let name = dns("router.lab");
+    let addresses = vec![ip(127, 0, 2, 1), ip(127, 0, 2, 2), ip(127, 0, 2, 3)];
+    let (plan, summary, handle) = rehearse_then_scan_with(
+        scripted_resolver(vec![(name.clone(), addresses.clone())]),
+        emitting_scenario(vec![name]),
+    )
+    .await;
+    summary.expect("the name resolves, so the scan runs");
+
+    let TargetResolution::Resolved(attributed) = &plan.targets[0].resolution else {
+        panic!("the name resolves: {:?}", plan.targets[0].resolution);
+    };
+    let probed: Vec<IpAddr> = handle
+        .ndjson_lines()
+        .iter()
+        .map(|line| {
+            serde_json::from_str::<DeviceRecord>(line)
+                .expect("a device record")
+                .mgmt_ip
+                .expect("a record the scan probed by address")
+        })
+        .collect();
+    assert_eq!(
+        probed, attributed.sample,
+        "a plan that names addresses the scan never reaches is a plan that lies"
+    );
+}
+
+#[tokio::test]
+async fn a_name_that_resolves_is_not_named_among_the_targets_with_no_addresses() {
+    let live = dns("live.lab");
+    let gone = dns("gone.lab");
+    let (plan, summary, _) = rehearse_then_scan(
+        scripted_resolver(vec![
+            (live.clone(), vec![ip(127, 0, 3, 1)]),
+            (gone.clone(), Vec::new()),
+        ]),
+        vec![live, gone],
+    )
+    .await;
+    let summary = summary.expect("one nameless target does not abandon the scan");
+
+    assert_eq!(summary.unresolvable_targets, vec!["gone.lab".to_string()]);
+    assert!(matches!(
+        plan.targets[0].resolution,
+        TargetResolution::Resolved(_)
+    ));
+    assert!(matches!(
+        plan.targets[1].resolution,
+        TargetResolution::Unresolvable
+    ));
 }
 
 #[tokio::test]
