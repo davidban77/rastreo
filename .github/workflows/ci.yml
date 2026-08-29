@@ -160,7 +160,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-hack
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.86.8
         with:
           tool: cargo-hack
 
@@ -271,7 +271,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Install cargo-hack
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.86.8
         with:
           tool: cargo-hack
 
